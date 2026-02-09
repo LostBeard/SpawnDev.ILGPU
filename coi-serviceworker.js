@@ -12,48 +12,61 @@
 
 if (typeof window !== 'undefined') {
     // --- Running as a regular script in the page context ---
-    const reloadedByCOI = window.sessionStorage.getItem("coiReloadedByCOI");
-    window.sessionStorage.removeItem("coiReloadedByCOI");
 
     if (window.crossOriginIsolated) {
         // Already cross-origin isolated — nothing to do
-        console.log("[COI] Already cross-origin isolated.");
+        console.log("[COI] Cross-origin isolated ✓");
     } else if ("serviceWorker" in navigator) {
-        navigator.serviceWorker
-            .register(new URL("coi-serviceworker.js", window.location.href).href)
-            .then(
-                (registration) => {
-                    console.log("[COI] Service worker registered.", registration.scope);
+        if (navigator.serviceWorker.controller) {
+            // SW is controlling the page but we're not isolated.
+            // This can happen if the SW was just updated or headers aren't applied yet.
+            // Reload to pick up the headers from the active SW.
+            console.warn("[COI] Controlled by SW but not isolated. Reloading...");
+            window.location.reload();
+        } else {
+            // No controller — register (or re-register) the SW, then reload
+            // once it's active and claiming clients.
+            console.log("[COI] Registering service worker...");
+            navigator.serviceWorker
+                .register(window.document.currentScript.src)
+                .then(function (reg) {
+                    console.log("[COI] Service worker registered:", reg.scope);
 
-                    registration.addEventListener("updatefound", () => {
-                        const newWorker = registration.installing;
-                        newWorker.addEventListener("statechange", () => {
-                            if (newWorker.state === "activated") {
-                                console.log("[COI] New service worker activated, reloading.");
-                                window.sessionStorage.setItem("coiReloadedByCOI", "true");
+                    function waitForActivation(worker) {
+                        worker.addEventListener("statechange", function () {
+                            if (worker.state === "activated") {
+                                console.log("[COI] Worker activated — reloading.");
                                 window.location.reload();
                             }
                         });
-                    });
-
-                    // If already active, reload once to apply headers
-                    if (registration.active && !reloadedByCOI) {
-                        console.log("[COI] Service worker active, reloading to apply headers.");
-                        window.sessionStorage.setItem("coiReloadedByCOI", "true");
-                        window.location.reload();
                     }
-                },
-                (err) => {
+
+                    if (reg.installing) {
+                        // SW is installing — wait for it to activate
+                        waitForActivation(reg.installing);
+                    } else if (reg.waiting) {
+                        // SW installed but waiting — wait for activation
+                        waitForActivation(reg.waiting);
+                    } else if (reg.active) {
+                        // SW is active but not controlling this page yet.
+                        // clients.claim() in the SW will trigger "controllerchange".
+                        navigator.serviceWorker.addEventListener("controllerchange", function () {
+                            console.log("[COI] Controller changed — reloading.");
+                            window.location.reload();
+                        });
+                    }
+                })
+                .catch(function (err) {
                     console.error("[COI] Service worker registration failed:", err);
-                }
-            );
+                });
+        }
     } else {
         console.warn("[COI] Service workers are not supported.");
     }
 } else {
     // --- Running as a Service Worker ---
-    self.addEventListener("install", () => self.skipWaiting());
-    self.addEventListener("activate", (event) => event.waitUntil(self.clients.claim()));
+    self.addEventListener("install", function () { self.skipWaiting(); });
+    self.addEventListener("activate", function (event) { event.waitUntil(self.clients.claim()); });
 
     self.addEventListener("fetch", function (event) {
         // Skip requests the SW can't meaningfully intercept
@@ -63,15 +76,15 @@ if (typeof window !== 'undefined') {
 
         // Don't intercept cross-origin requests — we can't add useful
         // headers to them and they are the main source of "Failed to fetch" errors
-        const url = new URL(event.request.url);
+        var url = new URL(event.request.url);
         if (url.origin !== self.location.origin) {
             return; // Let the browser handle it natively
         }
 
         event.respondWith(
             fetch(event.request)
-                .then((response) => {
-                    const newHeaders = new Headers(response.headers);
+                .then(function (response) {
+                    var newHeaders = new Headers(response.headers);
                     newHeaders.set("Cross-Origin-Embedder-Policy", "credentialless");
                     newHeaders.set("Cross-Origin-Opener-Policy", "same-origin");
 
@@ -81,9 +94,7 @@ if (typeof window !== 'undefined') {
                         headers: newHeaders,
                     });
                 })
-                .catch((e) => {
-                    // Return a proper error Response instead of undefined
-                    // (returning undefined causes "Failed to convert value to 'Response'")
+                .catch(function (e) {
                     console.warn("[COI] Fetch failed for:", event.request.url, e.message);
                     return new Response("Service Worker fetch failed", {
                         status: 502,

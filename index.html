@@ -27,7 +27,19 @@
         <span class="dismiss">🗙</span>
     </div>
     <script src="coi-serviceworker.js"></script>
-    <script src="_framework/blazor.webassembly.js"></script>
+    <script>
+        // Only load Blazor after cross-origin isolation is confirmed.
+        // The coi-serviceworker.js script handles registration and reload if needed.
+        if (window.crossOriginIsolated || !("serviceWorker" in navigator)) {
+            var s = document.createElement("script");
+            s.src = "_framework/blazor.webassembly.js";
+            document.body.appendChild(s);
+        } else {
+            // SW is registering / activating — page will reload automatically.
+            var el = document.querySelector(".loading-progress-text");
+            if (el) el.textContent = "Enabling cross-origin isolation...";
+        }
+    </script>
 </body>
 
 </html>
