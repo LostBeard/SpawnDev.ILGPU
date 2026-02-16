@@ -239,6 +239,22 @@ function dispatchKernel(msg) {
             const hiLoc = getUniformLoc(cached, 'u_param' + p.paramIndex + '_hi');
             if (loLoc !== null) gl.uniform1ui(loLoc, p.lo >>> 0);
             if (hiLoc !== null) gl.uniform1ui(hiLoc, p.hi >>> 0);
+        } else if (p.kind === 'struct') {
+            // Struct uniform: set each leaf field individually via u_paramN.field_N
+            // The GLSL type generator flattens nested structs into a single-level struct
+            // with sequential field_N naming, so paths are always flat (field_0, field_1, etc.)
+            for (const f of p.fields) {
+                const fieldLoc = getUniformLoc(cached, 'u_param' + p.paramIndex + '.' + f.path);
+                if (fieldLoc !== null) {
+                    if (f.scalarType === 'int' || f.scalarType === 'bool') {
+                        gl.uniform1i(fieldLoc, f.value | 0);
+                    } else if (f.scalarType === 'uint') {
+                        gl.uniform1ui(fieldLoc, f.value >>> 0);
+                    } else {
+                        gl.uniform1f(fieldLoc, f.value);
+                    }
+                }
+            }
         }
     }
 
