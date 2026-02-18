@@ -212,6 +212,18 @@ function dispatchKernel(msg) {
                 // Tile width uniform
                 const tileWLoc = getUniformLoc(cached, 'u_param' + p.paramIndex + '_tileW');
                 if (tileWLoc) gl.uniform1i(tileWLoc, tileWidth);
+
+                // Element count uniform for GetViewLength support
+                if (p.elementCount !== undefined) {
+                    const lenLoc = getUniformLoc(cached, 'u_param' + p.paramIndex + '_length');
+                    if (lenLoc !== null) gl.uniform1i(lenLoc, p.elementCount | 0);
+                }
+            } else {
+                // Output-only buffer (no sampler) — still set the length uniform for GetViewLength
+                if (p.elementCount !== undefined) {
+                    const lenLoc = getUniformLoc(cached, 'u_param' + p.paramIndex + '_length');
+                    if (lenLoc !== null) gl.uniform1i(lenLoc, p.elementCount | 0);
+                }
             }
 
             // Stride uniforms for ArrayView2D/3D
