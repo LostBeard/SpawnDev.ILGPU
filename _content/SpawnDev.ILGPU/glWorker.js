@@ -395,11 +395,15 @@ function dispatchKernel(msg) {
                     }
                 }
             } else if (out.fieldIndex < 0) {
-                // Standard single-slot TF readback
-                const elemCount = Math.min(totalVertices, Math.floor(out.writeLengthBytes / 4));
+                // Standard TF readback (handles both single-store and multi-store)
+                const storeCount = out.storeCount || 1;
+                const storeSlot = out.storeSlot >= 0 ? out.storeSlot : 0;
+                const bytesPerVertex = storeCount * 4;
+                const elemCount = Math.min(totalVertices, Math.floor(out.writeLengthBytes / bytesPerVertex));
+
                 for (let v = 0; v < elemCount; v++) {
                     const srcOff = v * strideBytes + out.outputIndex * 4;
-                    const dstOff = writeOffset + v * 4;
+                    const dstOff = writeOffset + v * bytesPerVertex + storeSlot * 4;
                     if (srcOff + 4 <= readbackBytes.length) {
                         destView[dstOff] = readbackBytes[srcOff];
                         destView[dstOff + 1] = readbackBytes[srcOff + 1];

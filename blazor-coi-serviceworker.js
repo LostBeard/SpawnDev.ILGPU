@@ -54,6 +54,12 @@ if (typeof window !== 'undefined') {
             });
     }
 } else {
+    // Set to true to enable verbose logging of service worker registration and activation flow. Useful for debugging but can be noisy in normal use.
+    var verbose = false;
+    function consoleLog(...args) {
+        if (!verbose) return;
+        console.log("[COI]", ...args);
+    }
     // --- Running as a Service Worker ---
     self.addEventListener("install", function () { self.skipWaiting(); });
     self.addEventListener("activate", function (event) { event.waitUntil(self.clients.claim()); });
