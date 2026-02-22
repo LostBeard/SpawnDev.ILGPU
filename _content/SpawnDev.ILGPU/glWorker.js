@@ -3,6 +3,10 @@ let gl = null;
 let canvas = null;
 const programCache = {};
 
+// ---- GPU-resident buffer registry ----
+// Maps bufferId → { texture, width, height, glslType, byteSize, data: Uint8Array }
+const bufferRegistry = {};
+
 // ---- Cached GL objects (reused across dispatches) ----
 let cachedTFBuffer = null;
 let cachedTFBufferSize = 0;
@@ -10,12 +14,6 @@ let cachedTFObject = null;
 let cachedDummyVBO = null;
 let cachedDummyVBOSize = 0;
 let cachedDummyVAO = null;
-let cachedPaddedBuffer = null;
-let cachedPaddedBufferSize = 0;
-const textureCache = {};
-
-// NOTE: GL constants are accessed from gl.* context directly (not hardcoded)
-// to ensure compatibility with OffscreenCanvas WebGL2 in Worker contexts.
 
 self.onmessage = function (e) {
     const msg = e.data;
@@ -30,7 +28,22 @@ self.onmessage = function (e) {
             if (!gl) {
                 console.error('[GLWorker] INIT FAILED: Could not create WebGL2 context');
             }
-            // NOTE: No postMessage for init — avoids interfering with dispatch handlers
+            break;
+
+        case 'allocBuffer':
+            handleAllocBuffer(msg);
+            break;
+
+        case 'uploadBuffer':
+            handleUploadBuffer(msg);
+            break;
+
+        case 'readbackBuffer':
+            handleReadbackBuffer(msg);
+            break;
+
+        case 'freeBuffer':
+            handleFreeBuffer(msg);
             break;
 
         case 'dispatch':
@@ -39,22 +52,105 @@ self.onmessage = function (e) {
                 self.postMessage(result.message, result.transferList);
             } catch (err) {
                 console.error('[GLWorker] dispatch error:', err.message, err.stack);
-                // CRITICAL: Always transfer ArrayBuffers back even on error
-                const transferList = [];
-                const buffers = [];
-                if (msg.params) {
-                    for (const p of msg.params) {
-                        if (p.kind === 'buffer' && p.buffer && p.buffer.byteLength > 0) {
-                            buffers.push({ index: p.argIndex, buffer: p.buffer });
-                            transferList.push(p.buffer);
-                        }
-                    }
-                }
-                self.postMessage({ done: false, dispatchId: msg.dispatchId, error: err.message + '\n' + err.stack, buffers }, transferList);
+                self.postMessage({
+                    done: false, dispatchId: msg.dispatchId,
+                    error: err.message + '\n' + err.stack
+                });
             }
             break;
     }
 };
+
+// ---- Buffer Registry Operations ----
+
+function computeTiling(byteSize) {
+    const texelCount = Math.ceil(byteSize / 4);
+    const maxTexSize = 16384;
+    let width, height;
+    if (texelCount > maxTexSize) {
+        width = maxTexSize;
+        height = Math.ceil(texelCount / width);
+    } else {
+        width = texelCount;
+        height = 1;
+    }
+    return { width, height, totalTexels: width * height };
+}
+
+function createTextureForEntry(entry) {
+    const tex = gl.createTexture();
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    uploadTextureData(tex, entry);
+    return tex;
+}
+
+function uploadTextureData(tex, entry) {
+    gl.bindTexture(gl.TEXTURE_2D, tex);
+    const totalTexels = entry.width * entry.height;
+    if (entry.glslType === 'int') {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32I, entry.width, entry.height, 0,
+            gl.RED_INTEGER, gl.INT, new Int32Array(entry.data.buffer, 0, totalTexels));
+    } else if (entry.glslType === 'uint') {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32UI, entry.width, entry.height, 0,
+            gl.RED_INTEGER, gl.UNSIGNED_INT, new Uint32Array(entry.data.buffer, 0, totalTexels));
+    } else {
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, entry.width, entry.height, 0,
+            gl.RED, gl.FLOAT, new Float32Array(entry.data.buffer, 0, totalTexels));
+    }
+}
+
+function handleAllocBuffer(msg) {
+    const { bufferId, byteSize, glslType } = msg;
+    const { width, height, totalTexels } = computeTiling(byteSize);
+    const data = new Uint8Array(totalTexels * 4); // zero-filled
+    const entry = { texture: null, width, height, glslType: glslType || 'float', byteSize, data };
+    entry.texture = createTextureForEntry(entry);
+    bufferRegistry[bufferId] = entry;
+}
+
+function handleUploadBuffer(msg) {
+    const { bufferId, buffer, byteOffset, byteLength } = msg;
+    const entry = bufferRegistry[bufferId];
+    if (!entry) {
+        console.error('[GLWorker] uploadBuffer: unknown bufferId', bufferId);
+        return;
+    }
+    const srcData = new Uint8Array(buffer, byteOffset || 0, byteLength || buffer.byteLength);
+    entry.data.set(srcData);
+    // Zero-fill padding
+    if (srcData.length < entry.data.length) {
+        entry.data.fill(0, srcData.length);
+    }
+    uploadTextureData(entry.texture, entry);
+}
+
+function handleReadbackBuffer(msg) {
+    const { bufferId, requestId } = msg;
+    const entry = bufferRegistry[bufferId];
+    if (!entry) {
+        self.postMessage({ type: 'readbackResult', requestId, bufferId, error: 'unknown bufferId' });
+        return;
+    }
+    // Create a copy of the data to transfer back
+    const copy = new ArrayBuffer(entry.byteSize);
+    new Uint8Array(copy).set(new Uint8Array(entry.data.buffer, 0, entry.byteSize));
+    self.postMessage({ type: 'readbackResult', requestId, bufferId, buffer: copy }, [copy]);
+}
+
+function handleFreeBuffer(msg) {
+    const { bufferId } = msg;
+    const entry = bufferRegistry[bufferId];
+    if (entry) {
+        if (entry.texture) gl.deleteTexture(entry.texture);
+        delete bufferRegistry[bufferId];
+    }
+}
+
+// ---- Shader Compilation ----
 
 function getOrCompileProgram(programId, source, varyingNames) {
     if (programCache[programId] && !programCache[programId].disposed) {
@@ -110,27 +206,20 @@ function getUniformLoc(cached, name) {
     return loc;
 }
 
+// ---- Kernel Dispatch ----
+
 function dispatchKernel(msg) {
     const { dispatchId, programId, source, varyingNames, totalVertices, dimX, dimY, dimZ, strides, outputs } = msg;
     const kernelParams = msg.params;
-    const diag = [];  // Diagnostic log lines
-    diag.push('gl=' + (gl ? 'OK' : 'NULL'));
-    diag.push('canvas=' + (canvas ? 'OK' : 'NULL'));
-    diag.push('paramsReceived=' + (kernelParams ? kernelParams.length : 'null/undefined'));
 
     // Flush any pre-existing GL errors
     while (gl.getError() !== 0) { }
-
-    function checkErr(step) {
-        const e = gl.getError();
-        if (e !== 0) diag.push('ERR@' + step + '=' + e);
-    }
 
     // ---- Step 1: Get or compile program ----
     const cached = getOrCompileProgram(programId, source, varyingNames || []);
     gl.useProgram(cached.program);
 
-    // ---- ANGLE f64 workaround: set u_one = 1.0 (opaque to compiler) ----
+    // ---- ANGLE f64 workaround: set u_one = 1.0 ----
     const uOneLoc = getUniformLoc(cached, 'u_one');
     if (uOneLoc !== null) gl.uniform1f(uOneLoc, 1.0);
 
@@ -142,88 +231,32 @@ function dispatchKernel(msg) {
 
     // ---- Step 3: Bind parameters ----
     let textureUnit = 0;
-    const bufferInfos = [];  // Track buffer params for transfer back
+    const bufferParamMap = [];  // Track which params map to which bufferIds
 
     for (const p of kernelParams) {
-        if (p.kind === 'buffer') {
-            bufferInfos.push(p);
+        if (p.kind === 'buffer_ref') {
+            // GPU-resident buffer — bind existing texture from registry
+            const entry = bufferRegistry[p.bufferId];
+            if (!entry) throw new Error('Unknown bufferId: ' + p.bufferId);
+
             const texUnit = textureUnit++;
             const uniformName = 'u_param' + p.paramIndex;
             const uniformLoc = getUniformLoc(cached, uniformName);
 
             if (uniformLoc !== null) {
-                // Create Uint8Array view into the transferred ArrayBuffer
-                const srcData = new Uint8Array(p.buffer, p.byteOffset, p.byteLength);
-                const elementSize = 4;  // All buffer types are 4 bytes in GLSL (int/uint/float)
-                const texelCount = Math.ceil(p.byteLength / 4);
-
-                // 2D tiling for large buffers
-                const maxTexSize = 16384;
-                let tileWidth, tileHeight;
-                if (texelCount > maxTexSize) {
-                    tileWidth = maxTexSize;
-                    tileHeight = Math.ceil(texelCount / tileWidth);
-                } else {
-                    tileWidth = texelCount;
-                    tileHeight = 1;
-                }
-
-                const totalTexels = tileWidth * tileHeight;
-                const paddedByteSize = totalTexels * 4;
-
-                // Reuse cached padded buffer
-                if (!cachedPaddedBuffer || cachedPaddedBufferSize < paddedByteSize) {
-                    cachedPaddedBuffer = new ArrayBuffer(paddedByteSize);
-                    cachedPaddedBufferSize = paddedByteSize;
-                }
-                const paddedView = new Uint8Array(cachedPaddedBuffer, 0, paddedByteSize);
-                paddedView.set(srcData);
-                // Zero-fill padding
-                if (paddedByteSize > p.byteLength) {
-                    paddedView.fill(0, p.byteLength, paddedByteSize);
-                }
-
-                // Get or create cached GL texture for this slot
                 gl.activeTexture(gl.TEXTURE0 + texUnit);
-                let texEntry = textureCache[texUnit];
-                if (!texEntry || texEntry.width !== tileWidth || texEntry.height !== tileHeight) {
-                    if (texEntry && texEntry.texture) gl.deleteTexture(texEntry.texture);
-                    const tex = gl.createTexture();
-                    gl.bindTexture(gl.TEXTURE_2D, tex);
-                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
-                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
-                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-                    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-                    textureCache[texUnit] = { texture: tex, width: tileWidth, height: tileHeight };
-                } else {
-                    gl.bindTexture(gl.TEXTURE_2D, texEntry.texture);
-                }
-
-                // Upload via texImage2D
-                if (p.glslType === 'int') {
-                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32I, tileWidth, tileHeight, 0, gl.RED_INTEGER, gl.INT, new Int32Array(cachedPaddedBuffer, 0, totalTexels));
-                } else if (p.glslType === 'uint') {
-                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32UI, tileWidth, tileHeight, 0, gl.RED_INTEGER, gl.UNSIGNED_INT, new Uint32Array(cachedPaddedBuffer, 0, totalTexels));
-                } else {
-                    gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, tileWidth, tileHeight, 0, gl.RED, gl.FLOAT, new Float32Array(cachedPaddedBuffer, 0, totalTexels));
-                }
+                gl.bindTexture(gl.TEXTURE_2D, entry.texture);
                 gl.uniform1i(uniformLoc, texUnit);
 
                 // Tile width uniform
                 const tileWLoc = getUniformLoc(cached, 'u_param' + p.paramIndex + '_tileW');
-                if (tileWLoc) gl.uniform1i(tileWLoc, tileWidth);
+                if (tileWLoc) gl.uniform1i(tileWLoc, entry.width);
+            }
 
-                // Element count uniform for GetViewLength support
-                if (p.elementCount !== undefined) {
-                    const lenLoc = getUniformLoc(cached, 'u_param' + p.paramIndex + '_length');
-                    if (lenLoc !== null) gl.uniform1i(lenLoc, p.elementCount | 0);
-                }
-            } else {
-                // Output-only buffer (no sampler) — still set the length uniform for GetViewLength
-                if (p.elementCount !== undefined) {
-                    const lenLoc = getUniformLoc(cached, 'u_param' + p.paramIndex + '_length');
-                    if (lenLoc !== null) gl.uniform1i(lenLoc, p.elementCount | 0);
-                }
+            // Element count uniform for GetViewLength support
+            if (p.elementCount !== undefined) {
+                const lenLoc = getUniformLoc(cached, 'u_param' + p.paramIndex + '_length');
+                if (lenLoc !== null) gl.uniform1i(lenLoc, p.elementCount | 0);
             }
 
             // Stride uniforms for ArrayView2D/3D
@@ -234,6 +267,9 @@ function dispatchKernel(msg) {
                     gl.uniform1iv(strideLoc, new Int32Array(dims));
                 }
             }
+
+            bufferParamMap.push({ bufferId: p.bufferId, paramIndex: p.paramIndex });
+
         } else if (p.kind === 'scalar') {
             const uniformName = 'u_param' + p.paramIndex;
             const loc = getUniformLoc(cached, uniformName);
@@ -252,9 +288,6 @@ function dispatchKernel(msg) {
             if (loLoc !== null) gl.uniform1ui(loLoc, p.lo >>> 0);
             if (hiLoc !== null) gl.uniform1ui(hiLoc, p.hi >>> 0);
         } else if (p.kind === 'struct') {
-            // Struct uniform: set each leaf field individually via u_paramN.field_N
-            // The GLSL type generator flattens nested structs into a single-level struct
-            // with sequential field_N naming, so paths are always flat (field_0, field_1, etc.)
             for (const f of p.fields) {
                 const fieldLoc = getUniformLoc(cached, 'u_param' + p.paramIndex + '.' + f.path);
                 if (fieldLoc !== null) {
@@ -279,7 +312,6 @@ function dispatchKernel(msg) {
         const tfFloatCount = totalVertices * vNames.length;
         const tfByteSize = tfFloatCount * 4;
 
-        // Reuse cached TF buffer
         if (!cachedTFBuffer || cachedTFBufferSize < tfByteSize) {
             if (cachedTFBuffer) gl.deleteBuffer(cachedTFBuffer);
             cachedTFBuffer = gl.createBuffer();
@@ -291,7 +323,6 @@ function dispatchKernel(msg) {
         }
         tfBuffer = cachedTFBuffer;
 
-        // Reuse cached TF object
         if (!cachedTFObject) {
             cachedTFObject = gl.createTransformFeedback();
         }
@@ -323,59 +354,64 @@ function dispatchKernel(msg) {
     gl.drawArrays(gl.POINTS, 0, totalVertices);
     if (transformFeedback) gl.endTransformFeedback();
     gl.disable(gl.RASTERIZER_DISCARD);
-    checkErr('draw');
 
-    // ---- Step 6: TF Readback ----
+    // Unbind TF before readback (WebGL2 spec requirement)
+    if (transformFeedback) {
+        gl.bindBufferBase(gl.TRANSFORM_FEEDBACK_BUFFER, 0, null);
+        gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
+    }
+
+    // ---- Step 6: TF Readback → update GPU-resident buffers ----
     if (tfBuffer && vNames.length > 0 && outputs && outputs.length > 0) {
+        // gl.finish() blocks until all submitted GL commands (including TF) complete.
+        // Note: ANGLE emits a cosmetic "READ-usage buffer" warning here because it
+        // doesn't track gl.finish() as a fence. This warning is harmless — the GPU
+        // has completed all writes before we read. Using async fenceSync would
+        // eliminate the warning but adds unacceptable scheduling overhead for
+        // real-time rendering (~4-50ms per dispatch).
+        gl.finish();
+
         gl.bindBuffer(gl.TRANSFORM_FEEDBACK_BUFFER, tfBuffer);
         const tfFloatCount = totalVertices * vNames.length;
-        const tfByteSize = tfFloatCount * 4;
-
-        // Read TF data
         const readbackFloat = new Float32Array(tfFloatCount);
         gl.getBufferSubData(gl.TRANSFORM_FEEDBACK_BUFFER, 0, readbackFloat);
-        checkErr('readback');
 
         const readbackBytes = new Uint8Array(readbackFloat.buffer);
-
         const varyingCount = vNames.length;
         const strideBytes = varyingCount * 4;
 
-        // Process each output varying
+        // Set of bufferIds that were modified (need texture re-upload)
+        const modifiedBufferIds = new Set();
+
         for (let oi = 0; oi < outputs.length; oi++) {
             const out = outputs[oi];
 
             // Skip 'hi' emulated varyings (read with their 'lo' counterpart)
             if (out.isEmulated && out.emulatedSuffix === 'hi') continue;
 
-            // Find the matching buffer param to write back to
-            const bufParam = bufferInfos.find(b => b.argIndex === out.argIndex);
-            if (!bufParam || !bufParam.buffer) continue;
-
-            const destView = new Uint8Array(bufParam.buffer);
+            // Find the registry entry for this output
+            const entry = bufferRegistry[out.bufferId];
+            if (!entry) continue;
+            const destView = entry.data;
             const writeOffset = out.writeByteOffset;
 
             if (out.isEmulated && out.emulatedSuffix === 'lo') {
-                // Emulated 64-bit: interleave lo and hi into 8-byte pairs
                 const hiOutIdx = out.outputIndex + 1;
                 const elemCount = Math.min(totalVertices, Math.floor(out.writeLengthBytes / 8));
                 for (let v = 0; v < elemCount; v++) {
                     const loSrc = v * strideBytes + out.outputIndex * 4;
                     const hiSrc = v * strideBytes + hiOutIdx * 4;
                     const dst = writeOffset + v * 8;
-                    // Copy lo (4 bytes)
                     destView[dst] = readbackBytes[loSrc];
                     destView[dst + 1] = readbackBytes[loSrc + 1];
                     destView[dst + 2] = readbackBytes[loSrc + 2];
                     destView[dst + 3] = readbackBytes[loSrc + 3];
-                    // Copy hi (4 bytes)
                     destView[dst + 4] = readbackBytes[hiSrc];
                     destView[dst + 5] = readbackBytes[hiSrc + 1];
                     destView[dst + 6] = readbackBytes[hiSrc + 2];
                     destView[dst + 7] = readbackBytes[hiSrc + 3];
                 }
             } else if (out.fieldIndex >= 0 && out.fieldIndex === 0) {
-                // Struct buffer: gather all field varyings for this param
                 const structFields = outputs.filter(o => o.paramIndex === out.paramIndex && o.fieldIndex >= 0)
                     .sort((a, b) => a.fieldIndex - b.fieldIndex);
                 const fieldCount = structFields.length;
@@ -395,12 +431,10 @@ function dispatchKernel(msg) {
                     }
                 }
             } else if (out.fieldIndex < 0) {
-                // Standard TF readback (handles both single-store and multi-store)
                 const storeCount = out.storeCount || 1;
                 const storeSlot = out.storeSlot >= 0 ? out.storeSlot : 0;
                 const bytesPerVertex = storeCount * 4;
                 const elemCount = Math.min(totalVertices, Math.floor(out.writeLengthBytes / bytesPerVertex));
-
                 for (let v = 0; v < elemCount; v++) {
                     const srcOff = v * strideBytes + out.outputIndex * 4;
                     const dstOff = writeOffset + v * bytesPerVertex + storeSlot * 4;
@@ -412,27 +446,24 @@ function dispatchKernel(msg) {
                     }
                 }
             }
+
+            modifiedBufferIds.add(out.bufferId);
+        }
+
+        // Re-upload modified buffers to their GPU textures (GPU-resident update)
+        for (const bid of modifiedBufferIds) {
+            const entry = bufferRegistry[bid];
+            if (entry) {
+                uploadTextureData(entry.texture, entry);
+            }
         }
     }
 
-    // Unbind TF
-    if (transformFeedback) {
-        gl.bindTransformFeedback(gl.TRANSFORM_FEEDBACK, null);
-    }
     gl.useProgram(null);
 
-    // ---- Transfer ArrayBuffers back to main thread ----
-    const transferList = [];
-    const returnBuffers = [];
-    for (const bi of bufferInfos) {
-        if (bi.buffer && bi.buffer.byteLength > 0) {
-            returnBuffers.push({ index: bi.argIndex, buffer: bi.buffer });
-            transferList.push(bi.buffer);
-        }
-    }
-
+    // No ArrayBuffer transfers — data stays GPU-resident in the worker
     return {
-        message: { done: true, dispatchId, buffers: returnBuffers, diag: diag.join('|') },
-        transferList
+        message: { done: true, dispatchId },
+        transferList: []
     };
 }
