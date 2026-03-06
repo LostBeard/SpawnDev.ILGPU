@@ -58,6 +58,10 @@ self.onmessage = function (e) {
                 });
             }
             break;
+
+        case 'blitBuffer':
+            handleBlitBuffer(msg);
+            break;
     }
 };
 
@@ -466,4 +470,25 @@ function dispatchKernel(msg) {
         message: { done: true, dispatchId },
         transferList: []
     };
+}
+
+// ---- ImageBitmap blit ----
+// Creates an ImageBitmap from an RGBA pixel buffer and transfers it to the main thread.
+// The browser compositor manages the bitmap as a GPU texture — no pixel copy on transfer.
+function handleBlitBuffer(msg) {
+    const { bufferId, width, height, requestId } = msg;
+    const entry = bufferRegistry[bufferId];
+    if (!entry) {
+        self.postMessage({ type: 'blitResult', requestId, error: 'unknown bufferId' });
+        return;
+    }
+    // entry.data is always current after dispatch (TF readback keeps it in sync).
+    // Wrap as Uint8ClampedArray for ImageData — no copy, just a typed view.
+    const rgba = new Uint8ClampedArray(entry.data.buffer, 0, width * height * 4);
+    const imageData = new ImageData(rgba, width, height);
+    createImageBitmap(imageData).then(function(bitmap) {
+        self.postMessage({ type: 'blitResult', requestId, bitmap }, [bitmap]);
+    }).catch(function(err) {
+        self.postMessage({ type: 'blitResult', requestId, error: err.message });
+    });
 }
