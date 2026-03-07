@@ -390,6 +390,27 @@ function dispatchKernel(msg) {
         for (let oi = 0; oi < outputs.length; oi++) {
             const out = outputs[oi];
 
+            // Atomic vote: each thread emitted its increment amount; sum all and add to buffer[element].
+            // This emulates Atomic.Add without true GPU atomics (WebGL2 vertex shader limitation).
+            if (out.isAtomicVote) {
+                const entry = bufferRegistry[out.bufferId];
+                if (!entry) continue;
+                const destView = entry.data;
+                const writeOffset = out.writeByteOffset;
+                // Sum all per-vertex vote values (stored as int in the TF buffer)
+                const int32TF = new Int32Array(readbackFloat.buffer);
+                let sum = 0;
+                for (let v = 0; v < totalVertices; v++) {
+                    sum += int32TF[(v * strideBytes + out.outputIndex * 4) >> 2];
+                }
+                // Accumulate (not replace) the target buffer element using Int32 arithmetic
+                const destInt32 = new Int32Array(destView.buffer);
+                const destIdx = writeOffset >> 2;
+                destInt32[destIdx] = destInt32[destIdx] + sum;
+                modifiedBufferIds.add(out.bufferId);
+                continue;
+            }
+
             // Skip 'hi' emulated varyings (read with their 'lo' counterpart)
             if (out.isEmulated && out.emulatedSuffix === 'hi') continue;
 
