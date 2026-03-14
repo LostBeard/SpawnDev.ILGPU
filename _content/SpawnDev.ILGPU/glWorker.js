@@ -28,6 +28,15 @@ self.onmessage = function (e) {
             if (!gl) {
                 console.error('[GLWorker] INIT FAILED: Could not create WebGL2 context');
             }
+            // Monitor context loss/restoration
+            canvas.addEventListener('webglcontextlost', function (ev) {
+                ev.preventDefault(); // allows potential context restoration
+                self.postMessage({ type: 'contextlost' });
+            });
+            canvas.addEventListener('webglcontextrestored', function () {
+                gl = canvas.getContext('webgl2');
+                self.postMessage({ type: 'contextrestored' });
+            });
             break;
 
         case 'allocBuffer':
