@@ -242,6 +242,14 @@ function dispatchKernel(msg) {
     const dimHLoc = getUniformLoc(cached, 'u_dimHeight');
     if (dimHLoc) gl.uniform1i(dimHLoc, dimY);
 
+    // Grid/group dimension uniforms (for Grid.IdxX/Y, Group.IdxX, Group.DimX)
+    const groupDimXLoc = getUniformLoc(cached, 'u_groupDimX');
+    if (groupDimXLoc) gl.uniform1i(groupDimXLoc, msg.groupDimX || 1);
+    const gridDimXLoc = getUniformLoc(cached, 'u_gridDimX');
+    if (gridDimXLoc) gl.uniform1i(gridDimXLoc, msg.gridDimX || 1);
+    const gridDimYLoc = getUniformLoc(cached, 'u_gridDimY');
+    if (gridDimYLoc) gl.uniform1i(gridDimYLoc, msg.gridDimY || 1);
+
     // ---- Step 3: Bind parameters ----
     let textureUnit = 0;
     const bufferParamMap = [];  // Track which params map to which bufferIds
