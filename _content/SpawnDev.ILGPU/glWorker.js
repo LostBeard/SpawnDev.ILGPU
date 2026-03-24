@@ -280,6 +280,12 @@ function dispatchKernel(msg) {
                 if (lenLoc !== null) gl.uniform1i(lenLoc, p.elementCount | 0);
             }
 
+            // SubView element offset — added to texelFetch indices when buffer is a SubView
+            if (p.elementOffset !== undefined && p.elementOffset !== 0) {
+                const offsetLoc = getUniformLoc(cached, 'u_param' + p.paramIndex + '_offset');
+                if (offsetLoc !== null) gl.uniform1i(offsetLoc, p.elementOffset | 0);
+            }
+
             // Stride uniforms for ArrayView2D/3D
             if (strides && strides[p.paramIndex]) {
                 const dims = strides[p.paramIndex];
@@ -499,6 +505,7 @@ function dispatchKernel(msg) {
                 uploadTextureData(entry.texture, entry);
             }
         }
+
     }
 
     gl.useProgram(null);
