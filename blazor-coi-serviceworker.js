@@ -8,59 +8,102 @@
  * cannot set server response headers.
  *
  * Registration: Add <script src="blazor-coi-serviceworker.js"></script> to index.html
+ *
+ * Two modes:
+ *   1. If index.html has a static <script src="_framework/blazor.webassembly.js"> tag,
+ *      Blazor always loads and COI is purely additive (SharedArrayBuffer support).
+ *   2. If no static tag exists, this script dynamically loads Blazor after COI is confirmed,
+ *      with a fallback to load without COI after timeout/max retries.
  */
 
 if (typeof window !== 'undefined') {
     // --- Running as a regular script in the page context ---
 
-    // Set to true to enable verbose logging of service worker registration and activation flow. Useful for debugging but can be noisy in normal use.
     var verbose = false;
     function consoleLog(...args) {
         if (!verbose) return;
         console.log("[COI]", ...args);
     }
 
-    // Helper to check if Blazor script is loaded
-    function isBlazorRunning() {
-        return !!document.querySelector('script[src*="blazor.webassembly.js"]');
+    // Helper to check if Blazor script tag exists in the HTML
+    function hasBlazorScript() {
+        return !!document.querySelector('script[src*="blazor.webassembly"]');
     }
 
-    // Start Blazor immediately if we're already cross-origin isolated.
-    if (window.crossOriginIsolated && !isBlazorRunning()) {
-        // Already cross-origin isolated — nothing to do
-        consoleLog("[COI] Cross-origin isolated ✓");
+    // Load Blazor dynamically (only needed when no static script tag in HTML)
+    function loadBlazor() {
+        if (hasBlazorScript()) return;
         var s = document.createElement("script");
         s.src = "_framework/blazor.webassembly.js";
         document.body.appendChild(s);
-    } else {
-        navigator.serviceWorker.ready.then((registration) => {
-            consoleLog(`A service worker is active: ${registration.active}`);
-            window.location.reload();
-        });
     }
 
-    // Register the service worker if supported. The SW will add the necessary headers to enable
-    if ("serviceWorker" in navigator) {
-        // Register the service worker, which will add the necessary headers to enable
-        // cross-origin isolation. The SW will reload the page once activated to apply the headers.
-        consoleLog("[COI] Registering service worker...");
-        navigator.serviceWorker
-            .register(window.document.currentScript.src)
-            .then(function (reg) {
-                consoleLog("[COI] Service worker registered:", reg.scope);
-            })
-            .catch(function (err) {
-                console.error("[COI] Service worker registration failed:", err);
-            });
+    if (window.crossOriginIsolated) {
+        // Already cross-origin isolated — SharedArrayBuffer available
+        consoleLog("[COI] Cross-origin isolated ✓");
+        sessionStorage.removeItem("coi-reload-count");
+        loadBlazor();
+    } else if ("serviceWorker" in navigator) {
+        // Not yet isolated — register/activate the SW, then reload ONCE to apply headers.
+        // Use sessionStorage to prevent infinite reload loops: if COI still fails after
+        // reloading, stop retrying and load Blazor without SharedArrayBuffer.
+        var reloadKey = "coi-reload-count";
+        var reloadCount = parseInt(sessionStorage.getItem(reloadKey) || "0", 10);
+
+        if (reloadCount < 2) {
+            // Register the SW (idempotent if already registered)
+            navigator.serviceWorker
+                .register(window.document.currentScript.src)
+                .then(function (reg) {
+                    consoleLog("[COI] Service worker registered:", reg.scope);
+                })
+                .catch(function (err) {
+                    console.error("[COI] Service worker registration failed:", err);
+                    // Registration failed — load Blazor without COI
+                    loadBlazor();
+                });
+
+            // Wait for SW to be ready, then reload to pick up COI headers.
+            // Timeout after 5s — if the SW doesn't activate in time, load Blazor anyway.
+            var reloaded = false;
+            var doReload = function () {
+                if (reloaded) return;
+                reloaded = true;
+                sessionStorage.setItem(reloadKey, String(reloadCount + 1));
+                consoleLog("[COI] Reloading to apply COI headers (attempt " + (reloadCount + 1) + ")");
+                window.location.reload();
+            };
+
+            navigator.serviceWorker.ready.then(doReload);
+            setTimeout(function () {
+                if (!reloaded && navigator.serviceWorker.controller) {
+                    // SW is controlling but ready didn't fire — force reload
+                    doReload();
+                } else if (!reloaded) {
+                    consoleLog("[COI] Service worker not ready after 5s — loading without COI");
+                    loadBlazor();
+                }
+            }, 5000);
+        } else {
+            // Already tried reloading — COI isn't working, proceed without it.
+            // Clear the counter so next fresh navigation can try again.
+            console.warn("[COI] Cross-origin isolation failed after " + reloadCount +
+                " reload(s) — SharedArrayBuffer unavailable. Wasm limited to 1 worker.");
+            sessionStorage.removeItem(reloadKey);
+            loadBlazor();
+        }
+    } else {
+        consoleLog("[COI] Service workers not supported — SharedArrayBuffer unavailable");
+        loadBlazor();
     }
 } else {
-    // Set to true to enable verbose logging of service worker registration and activation flow. Useful for debugging but can be noisy in normal use.
+    // --- Running as a Service Worker ---
     var verbose = false;
     function consoleLog(...args) {
         if (!verbose) return;
         console.log("[COI]", ...args);
     }
-    // --- Running as a Service Worker ---
+
     self.addEventListener("install", function () { self.skipWaiting(); });
     self.addEventListener("activate", function (event) { event.waitUntil(self.clients.claim()); });
 
