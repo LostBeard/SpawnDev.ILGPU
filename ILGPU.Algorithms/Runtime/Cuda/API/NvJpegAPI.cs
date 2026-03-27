@@ -159,6 +159,248 @@ namespace ILGPU.Runtime.Cuda.API
                 destination,
                 null);
 
+        /// <summary>
+        /// Performs single image encode to YUV.
+        /// </summary>
+        /// <param name="libHandle">The NvJPEG library handle.</param>
+        /// <param name="stateHandle">The NvJPEG state handle.</param>
+        /// <param name="encoderParamsHandle">The NvJPEG encoder parameters handle.</param>
+        /// <param name="source">The source image buffer.</param>
+        /// <param name="subsampling">The chroma subsampling.</param>
+        /// <param name="width">The image width.</param>
+        /// <param name="height">The image height.</param>
+        /// <param name="stream">The accelerator stream.</param>
+        /// <returns>The error code.</returns>
+        public unsafe NvJpegStatus EncodeYUV(
+            IntPtr libHandle,
+            IntPtr stateHandle,
+            IntPtr encoderParamsHandle,
+            in NvJpegImage source,
+            NvJpegChromaSubsampling subsampling,
+            uint width,
+            uint height,
+            CudaStream? stream)
+        {
+            var imageInterop = source.ToInterop();
+
+            NvJpegImage_Interop* sourceInterop = &imageInterop;
+            return EncodeYUV(
+                libHandle,
+                stateHandle,
+                encoderParamsHandle,
+                sourceInterop,
+                subsampling,
+                width,
+                height,
+                stream?.StreamPtr ?? IntPtr.Zero);
+        }
+
+        /// <inheritdoc cref="EncodeYUV(
+        ///     IntPtr,
+        ///     IntPtr,
+        ///     IntPtr,
+        ///     in NvJpegImage,
+        ///     NvJpegChromaSubsampling,
+        ///     uint,
+        ///     uint,
+        ///     CudaStream)"/>
+        public NvJpegStatus EncodeYUV(
+            IntPtr libHandle,
+            IntPtr stateHandle,
+            IntPtr encoderParamsHandle,
+            in NvJpegImage source,
+            NvJpegChromaSubsampling subsampling,
+            uint width,
+            uint height) =>
+            EncodeYUV(
+                libHandle,
+                stateHandle,
+                encoderParamsHandle,
+                source,
+                subsampling,
+                width,
+                height,
+                null);
+
+        /// <summary>
+        /// Performs single image encode.
+        /// </summary>
+        /// <param name="libHandle">The NvJPEG library handle.</param>
+        /// <param name="stateHandle">The NvJPEG state handle.</param>
+        /// <param name="encoderParamsHandle">The NvJPEG encoder parameters handle.</param>
+        /// <param name="source">The source image buffer.</param>
+        /// <param name="inputFormat">The input format.</param>
+        /// <param name="width">The image width.</param>
+        /// <param name="height">The image height.</param>
+        /// <param name="stream">The accelerator stream.</param>
+        /// <returns>The error code.</returns>
+        public unsafe NvJpegStatus EncodeImage(
+            IntPtr libHandle,
+            IntPtr stateHandle,
+            IntPtr encoderParamsHandle,
+            in NvJpegImage source,
+            NvJpegInputFormat inputFormat,
+            uint width,
+            uint height,
+            CudaStream? stream)
+        {
+            var imageInterop = source.ToInterop();
+
+            NvJpegImage_Interop* sourceInterop = &imageInterop;
+            return EncodeImage(
+                libHandle,
+                stateHandle,
+                encoderParamsHandle,
+                sourceInterop,
+                inputFormat,
+                width,
+                height,
+                stream?.StreamPtr ?? IntPtr.Zero);
+        }
+
+        /// <inheritdoc cref="EncodeImage(
+        ///     IntPtr,
+        ///     IntPtr,
+        ///     IntPtr,
+        ///     in NvJpegImage,
+        ///     NvJpegInputFormat,
+        ///     uint,
+        ///     uint,
+        ///     CudaStream)"/>
+        public NvJpegStatus EncodeImage(
+            IntPtr libHandle,
+            IntPtr stateHandle,
+            IntPtr encoderParamsHandle,
+            in NvJpegImage source,
+            NvJpegInputFormat inputFormat,
+            uint width,
+            uint height) =>
+            EncodeImage(
+                libHandle,
+                stateHandle,
+                encoderParamsHandle,
+                source,
+                inputFormat,
+                width,
+                height,
+                null);
+
+        /// <summary>
+        /// Creates encoder parameters.
+        /// </summary>
+        /// <param name="libHandle">The NvJPEG library handle.</param>
+        /// <param name="encoderParamsHandle">The created encoder parameters handle.</param>
+        /// <param name="stream">The accelerator stream.</param>
+        /// <returns>The error code.</returns>
+        public NvJpegStatus EncoderParamsCreate(
+            IntPtr libHandle,
+            out IntPtr encoderParamsHandle,
+            CudaStream? stream) =>
+            EncoderParamsCreate(
+                libHandle,
+                out encoderParamsHandle,
+                stream?.StreamPtr ?? IntPtr.Zero);
+
+        /// <inheritdoc cref="EncoderParamsCreate(IntPtr, out IntPtr, CudaStream)"/>
+        public NvJpegStatus EncoderParamsCreate(
+            IntPtr libHandle,
+            out IntPtr encoderParamsHandle) =>
+            EncoderParamsCreate(
+                libHandle,
+                out encoderParamsHandle,
+                null);
+
+        /// <summary>
+        /// Sets the encoder quality.
+        /// </summary>
+        /// <param name="encoderParamsHandle">The encoder params handle.</param>
+        /// <param name="quality">The quality value.</param>
+        /// <param name="stream">The accelerator stream.</param>
+        /// <returns>The error code.</returns>
+        public NvJpegStatus EncoderParamsSetQuality(
+            IntPtr encoderParamsHandle,
+            int quality,
+            CudaStream? stream) =>
+            EncoderParamsSetQuality(
+                encoderParamsHandle,
+                quality,
+                stream?.StreamPtr ?? IntPtr.Zero);
+
+        /// <inheritdoc cref="EncoderParamsSetQuality(IntPtr, int, CudaStream)"/>
+        public NvJpegStatus EncoderParamsSetQuality(
+            IntPtr encoderParamsHandle,
+            int quality) =>
+            EncoderParamsSetQuality(
+                encoderParamsHandle,
+                quality,
+                null);
+
+        /// <summary>
+        /// Sets encoder chroma subsampling factors.
+        /// </summary>
+        /// <param name="encoderParamsHandle">The encoder params handle.</param>
+        /// <param name="subsampling">The chroma subsampling.</param>
+        /// <param name="stream">The accelerator stream.</param>
+        /// <returns>The error code.</returns>
+        public NvJpegStatus EncoderParamsSetSamplingFactors(
+            IntPtr encoderParamsHandle,
+            NvJpegChromaSubsampling subsampling,
+            CudaStream? stream) =>
+            EncoderParamsSetSamplingFactors(
+                encoderParamsHandle,
+                subsampling,
+                stream?.StreamPtr ?? IntPtr.Zero);
+
+        /// <inheritdoc cref="EncoderParamsSetSamplingFactors(IntPtr, NvJpegChromaSubsampling, CudaStream)"/>
+        public NvJpegStatus EncoderParamsSetSamplingFactors(
+            IntPtr encoderParamsHandle,
+            NvJpegChromaSubsampling subsampling) =>
+            EncoderParamsSetSamplingFactors(
+                encoderParamsHandle,
+                subsampling,
+                null);
+
+        /// <summary>
+        /// Retrieves encoded JPEG bitstream.
+        /// </summary>
+        /// <param name="libHandle">The NvJPEG library handle.</param>
+        /// <param name="stateHandle">The NvJPEG state handle.</param>
+        /// <param name="data">Destination data buffer.</param>
+        /// <param name="length">Length of the destination data buffer.</param>
+        /// <param name="stream">The accelerator stream.</param>
+        /// <returns>The error code.</returns>
+        public unsafe NvJpegStatus EncodeRetrieveBitstream(
+            IntPtr libHandle,
+            IntPtr stateHandle,
+            Span<byte> data,
+            out ulong length,
+            CudaStream? stream)
+        {
+            fixed (byte* dataPtr = data)
+            {
+                length = (ulong)data.Length;
+                return EncodeRetrieveBitstream(
+                    libHandle,
+                    stateHandle,
+                    dataPtr,
+                    ref length,
+                    stream?.StreamPtr ?? IntPtr.Zero);
+            }
+        }
+
+        /// <inheritdoc cref="EncodeRetrieveBitstream(IntPtr, IntPtr, Span{byte}, out ulong, CudaStream)"/>
+        public NvJpegStatus EncodeRetrieveBitstream(
+            IntPtr libHandle,
+            IntPtr stateHandle,
+            Span<byte> data,
+            out ulong length) =>
+            EncodeRetrieveBitstream(
+                libHandle,
+                stateHandle,
+                data,
+                out length,
+                null);
+
         #endregion
     }
 }

@@ -27,6 +27,14 @@
         <Import Name="nvjpegJpegStateDestroy">
             <Parameter Name="stateHandle" Type="IntPtr" />
         </Import>
+        <Import Name="nvjpegEncoderStateCreate">
+            <Parameter Name="libHandle" Type="IntPtr" />
+            <Parameter Name="stateHandle" Type="IntPtr" Flags="Out" />
+            <Parameter Name="cudaStreamHandle" Type="IntPtr" />
+        </Import>
+        <Import Name="nvjpegEncoderStateDestroy">
+            <Parameter Name="stateHandle" Type="IntPtr" />
+        </Import>
     </Region>
 
     <Region Name="Retrieve Encoded Image Information">
@@ -51,6 +59,57 @@
             <Parameter Name="length" Type="ulong" />
             <Parameter Name="outputFormat" Type="NvJpegOutputFormat" />
             <Parameter Name="destination" Type="NvJpegImage_Interop*" />
+            <Parameter Name="cudaStreamHandle" Type="IntPtr" />
+        </Import>
+    </Region>
+
+    <Region Name="Encode">
+        <Import Name="nvjpegEncodeYUV"
+                Unsafe="true">
+            <Parameter Name="libHandle" Type="IntPtr" />
+            <Parameter Name="stateHandle" Type="IntPtr" />
+            <Parameter Name="encoderParamsHandle" Type="IntPtr" />
+            <Parameter Name="source" Type="NvJpegImage_Interop*" />
+            <Parameter Name="subsampling" Type="NvJpegChromaSubsampling" />
+            <Parameter Name="width" Type="uint" />
+            <Parameter Name="height" Type="uint" />
+            <Parameter Name="cudaStreamHandle" Type="IntPtr" />
+        </Import>
+        <Import Name="nvjpegEncodeImage"
+                Unsafe="true">
+            <Parameter Name="libHandle" Type="IntPtr" />
+            <Parameter Name="stateHandle" Type="IntPtr" />
+            <Parameter Name="encoderParamsHandle" Type="IntPtr" />
+            <Parameter Name="source" Type="NvJpegImage_Interop*" />
+            <Parameter Name="inputFormat" Type="NvJpegInputFormat" />
+            <Parameter Name="width" Type="uint" />
+            <Parameter Name="height" Type="uint" />
+            <Parameter Name="cudaStreamHandle" Type="IntPtr" />
+        </Import>
+        <Import Name="nvjpegEncoderParamsCreate">
+            <Parameter Name="libHandle" Type="IntPtr" />
+            <Parameter Name="encoderParamsHandle" Type="IntPtr" Flags="Out" />
+            <Parameter Name="cudaStreamHandle" Type="IntPtr" />
+        </Import>
+        <Import Name="nvjpegEncoderParamsDestroy">
+            <Parameter Name="encoderParamsHandle" Type="IntPtr" />
+        </Import>
+        <Import Name="nvjpegEncoderParamsSetQuality">
+            <Parameter Name="encoderParamsHandle" Type="IntPtr" />
+            <Parameter Name="quality" Type="int" />
+            <Parameter Name="cudaStreamHandle" Type="IntPtr" />
+        </Import>
+        <Import Name="nvjpegEncoderParamsSetSamplingFactors">
+            <Parameter Name="encoderParamsHandle" Type="IntPtr" />
+            <Parameter Name="subsampling" Type="NvJpegChromaSubsampling" />
+            <Parameter Name="cudaStreamHandle" Type="IntPtr" />
+        </Import>
+        <Import Name="nvjpegEncodeRetrieveBitstream"
+                Unsafe="true">
+            <Parameter Name="libHandle" Type="IntPtr" />
+            <Parameter Name="stateHandle" Type="IntPtr" />
+            <Parameter Name="data" Type="byte*" />
+            <Parameter Name="length" Type="ulong" DllFlags="InOut" Flags="Ref" />
             <Parameter Name="cudaStreamHandle" Type="IntPtr" />
         </Import>
     </Region>

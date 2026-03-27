@@ -113,6 +113,14 @@ namespace ILGPU.Runtime.Cuda.API
         public abstract NvJpegStatus JpegStateDestroy(
             [In] IntPtr stateHandle);
 
+        public abstract NvJpegStatus EncoderStateCreate(
+            [In] IntPtr libHandle,
+            [Out] out IntPtr stateHandle,
+            [In] IntPtr cudaStreamHandle);
+
+        public abstract NvJpegStatus EncoderStateDestroy(
+            [In] IntPtr stateHandle);
+
         #endregion
 
         #region Retrieve Encoded Image Information
@@ -137,6 +145,55 @@ namespace ILGPU.Runtime.Cuda.API
             [In] ulong length,
             [In] NvJpegOutputFormat outputFormat,
             [In] NvJpegImage_Interop* destination,
+            [In] IntPtr cudaStreamHandle);
+
+        #endregion
+
+        #region Encode
+
+        public unsafe abstract NvJpegStatus EncodeYUV(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegImage_Interop* source,
+            [In] NvJpegChromaSubsampling subsampling,
+            [In] uint width,
+            [In] uint height,
+            [In] IntPtr cudaStreamHandle);
+
+        public unsafe abstract NvJpegStatus EncodeImage(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegImage_Interop* source,
+            [In] NvJpegInputFormat inputFormat,
+            [In] uint width,
+            [In] uint height,
+            [In] IntPtr cudaStreamHandle);
+
+        public abstract NvJpegStatus EncoderParamsCreate(
+            [In] IntPtr libHandle,
+            [Out] out IntPtr encoderParamsHandle,
+            [In] IntPtr cudaStreamHandle);
+
+        public abstract NvJpegStatus EncoderParamsDestroy(
+            [In] IntPtr encoderParamsHandle);
+
+        public abstract NvJpegStatus EncoderParamsSetQuality(
+            [In] IntPtr encoderParamsHandle,
+            [In] int quality,
+            [In] IntPtr cudaStreamHandle);
+
+        public abstract NvJpegStatus EncoderParamsSetSamplingFactors(
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegChromaSubsampling subsampling,
+            [In] IntPtr cudaStreamHandle);
+
+        public unsafe abstract NvJpegStatus EncodeRetrieveBitstream(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] byte* data,
+            [In, Out] ref ulong length,
             [In] IntPtr cudaStreamHandle);
 
         #endregion
@@ -268,6 +325,62 @@ namespace ILGPU.Runtime.Cuda.API
             nvjpegJpegStateDestroy(
                 stateHandle);
 
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderStateCreate"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderStateCreate(
+             IntPtr libHandle,
+             out IntPtr stateHandle,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderStateCreate"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderStateCreate(
+            [In] IntPtr libHandle,
+            [Out] out IntPtr stateHandle,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderStateCreate(
+            [In] IntPtr libHandle,
+            [Out] out IntPtr stateHandle,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncoderStateCreate(
+                libHandle,
+                out stateHandle,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderStateDestroy"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderStateDestroy(
+             IntPtr stateHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderStateDestroy"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderStateDestroy(
+            [In] IntPtr stateHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderStateDestroy(
+            [In] IntPtr stateHandle) =>
+            nvjpegEncoderStateDestroy(
+                stateHandle);
+
         #endregion
 
         #region Retrieve Encoded Image Information
@@ -370,6 +483,274 @@ namespace ILGPU.Runtime.Cuda.API
                 length,
                 outputFormat,
                 destination,
+                cudaStreamHandle);
+
+        #endregion
+
+        #region Encode
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncodeYUV"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static partial
+         NvJpegStatus nvjpegEncodeYUV(
+             IntPtr libHandle,
+             IntPtr stateHandle,
+             IntPtr encoderParamsHandle,
+             NvJpegImage_Interop* source,
+             NvJpegChromaSubsampling subsampling,
+             uint width,
+             uint height,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncodeYUV"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static extern
+         NvJpegStatus nvjpegEncodeYUV(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegImage_Interop* source,
+            [In] NvJpegChromaSubsampling subsampling,
+            [In] uint width,
+            [In] uint height,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public unsafe sealed override NvJpegStatus EncodeYUV(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegImage_Interop* source,
+            [In] NvJpegChromaSubsampling subsampling,
+            [In] uint width,
+            [In] uint height,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncodeYUV(
+                libHandle,
+                stateHandle,
+                encoderParamsHandle,
+                source,
+                subsampling,
+                width,
+                height,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncodeImage"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static partial
+         NvJpegStatus nvjpegEncodeImage(
+             IntPtr libHandle,
+             IntPtr stateHandle,
+             IntPtr encoderParamsHandle,
+             NvJpegImage_Interop* source,
+             NvJpegInputFormat inputFormat,
+             uint width,
+             uint height,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncodeImage"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static extern
+         NvJpegStatus nvjpegEncodeImage(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegImage_Interop* source,
+            [In] NvJpegInputFormat inputFormat,
+            [In] uint width,
+            [In] uint height,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public unsafe sealed override NvJpegStatus EncodeImage(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegImage_Interop* source,
+            [In] NvJpegInputFormat inputFormat,
+            [In] uint width,
+            [In] uint height,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncodeImage(
+                libHandle,
+                stateHandle,
+                encoderParamsHandle,
+                source,
+                inputFormat,
+                width,
+                height,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsCreate"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderParamsCreate(
+             IntPtr libHandle,
+             out IntPtr encoderParamsHandle,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsCreate"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderParamsCreate(
+            [In] IntPtr libHandle,
+            [Out] out IntPtr encoderParamsHandle,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderParamsCreate(
+            [In] IntPtr libHandle,
+            [Out] out IntPtr encoderParamsHandle,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncoderParamsCreate(
+                libHandle,
+                out encoderParamsHandle,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsDestroy"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderParamsDestroy(
+             IntPtr encoderParamsHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsDestroy"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderParamsDestroy(
+            [In] IntPtr encoderParamsHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderParamsDestroy(
+            [In] IntPtr encoderParamsHandle) =>
+            nvjpegEncoderParamsDestroy(
+                encoderParamsHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsSetQuality"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderParamsSetQuality(
+             IntPtr encoderParamsHandle,
+             int quality,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsSetQuality"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderParamsSetQuality(
+            [In] IntPtr encoderParamsHandle,
+            [In] int quality,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderParamsSetQuality(
+            [In] IntPtr encoderParamsHandle,
+            [In] int quality,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncoderParamsSetQuality(
+                encoderParamsHandle,
+                quality,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsSetSamplingFactors"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderParamsSetSamplingFactors(
+             IntPtr encoderParamsHandle,
+             NvJpegChromaSubsampling subsampling,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsSetSamplingFactors"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderParamsSetSamplingFactors(
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegChromaSubsampling subsampling,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderParamsSetSamplingFactors(
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegChromaSubsampling subsampling,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncoderParamsSetSamplingFactors(
+                encoderParamsHandle,
+                subsampling,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncodeRetrieveBitstream"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static partial
+         NvJpegStatus nvjpegEncodeRetrieveBitstream(
+             IntPtr libHandle,
+             IntPtr stateHandle,
+             byte* data,
+             ref ulong length,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncodeRetrieveBitstream"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static extern
+         NvJpegStatus nvjpegEncodeRetrieveBitstream(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] byte* data,
+            [In, Out] ref ulong length,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public unsafe sealed override NvJpegStatus EncodeRetrieveBitstream(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] byte* data,
+            [In, Out] ref ulong length,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncodeRetrieveBitstream(
+                libHandle,
+                stateHandle,
+                data,
+                ref length,
                 cudaStreamHandle);
 
         #endregion
@@ -549,6 +930,62 @@ namespace ILGPU.Runtime.Cuda.API
             nvjpegJpegStateDestroy(
                 stateHandle);
 
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderStateCreate"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderStateCreate(
+             IntPtr libHandle,
+             out IntPtr stateHandle,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderStateCreate"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderStateCreate(
+            [In] IntPtr libHandle,
+            [Out] out IntPtr stateHandle,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderStateCreate(
+            [In] IntPtr libHandle,
+            [Out] out IntPtr stateHandle,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncoderStateCreate(
+                libHandle,
+                out stateHandle,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderStateDestroy"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderStateDestroy(
+             IntPtr stateHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderStateDestroy"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderStateDestroy(
+            [In] IntPtr stateHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderStateDestroy(
+            [In] IntPtr stateHandle) =>
+            nvjpegEncoderStateDestroy(
+                stateHandle);
+
         #endregion
 
         #region Retrieve Encoded Image Information
@@ -651,6 +1088,274 @@ namespace ILGPU.Runtime.Cuda.API
                 length,
                 outputFormat,
                 destination,
+                cudaStreamHandle);
+
+        #endregion
+
+        #region Encode
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncodeYUV"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static partial
+         NvJpegStatus nvjpegEncodeYUV(
+             IntPtr libHandle,
+             IntPtr stateHandle,
+             IntPtr encoderParamsHandle,
+             NvJpegImage_Interop* source,
+             NvJpegChromaSubsampling subsampling,
+             uint width,
+             uint height,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncodeYUV"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static extern
+         NvJpegStatus nvjpegEncodeYUV(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegImage_Interop* source,
+            [In] NvJpegChromaSubsampling subsampling,
+            [In] uint width,
+            [In] uint height,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public unsafe sealed override NvJpegStatus EncodeYUV(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegImage_Interop* source,
+            [In] NvJpegChromaSubsampling subsampling,
+            [In] uint width,
+            [In] uint height,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncodeYUV(
+                libHandle,
+                stateHandle,
+                encoderParamsHandle,
+                source,
+                subsampling,
+                width,
+                height,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncodeImage"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static partial
+         NvJpegStatus nvjpegEncodeImage(
+             IntPtr libHandle,
+             IntPtr stateHandle,
+             IntPtr encoderParamsHandle,
+             NvJpegImage_Interop* source,
+             NvJpegInputFormat inputFormat,
+             uint width,
+             uint height,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncodeImage"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static extern
+         NvJpegStatus nvjpegEncodeImage(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegImage_Interop* source,
+            [In] NvJpegInputFormat inputFormat,
+            [In] uint width,
+            [In] uint height,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public unsafe sealed override NvJpegStatus EncodeImage(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegImage_Interop* source,
+            [In] NvJpegInputFormat inputFormat,
+            [In] uint width,
+            [In] uint height,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncodeImage(
+                libHandle,
+                stateHandle,
+                encoderParamsHandle,
+                source,
+                inputFormat,
+                width,
+                height,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsCreate"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderParamsCreate(
+             IntPtr libHandle,
+             out IntPtr encoderParamsHandle,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsCreate"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderParamsCreate(
+            [In] IntPtr libHandle,
+            [Out] out IntPtr encoderParamsHandle,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderParamsCreate(
+            [In] IntPtr libHandle,
+            [Out] out IntPtr encoderParamsHandle,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncoderParamsCreate(
+                libHandle,
+                out encoderParamsHandle,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsDestroy"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderParamsDestroy(
+             IntPtr encoderParamsHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsDestroy"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderParamsDestroy(
+            [In] IntPtr encoderParamsHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderParamsDestroy(
+            [In] IntPtr encoderParamsHandle) =>
+            nvjpegEncoderParamsDestroy(
+                encoderParamsHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsSetQuality"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderParamsSetQuality(
+             IntPtr encoderParamsHandle,
+             int quality,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsSetQuality"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderParamsSetQuality(
+            [In] IntPtr encoderParamsHandle,
+            [In] int quality,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderParamsSetQuality(
+            [In] IntPtr encoderParamsHandle,
+            [In] int quality,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncoderParamsSetQuality(
+                encoderParamsHandle,
+                quality,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsSetSamplingFactors"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderParamsSetSamplingFactors(
+             IntPtr encoderParamsHandle,
+             NvJpegChromaSubsampling subsampling,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsSetSamplingFactors"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderParamsSetSamplingFactors(
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegChromaSubsampling subsampling,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderParamsSetSamplingFactors(
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegChromaSubsampling subsampling,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncoderParamsSetSamplingFactors(
+                encoderParamsHandle,
+                subsampling,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncodeRetrieveBitstream"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static partial
+         NvJpegStatus nvjpegEncodeRetrieveBitstream(
+             IntPtr libHandle,
+             IntPtr stateHandle,
+             byte* data,
+             ref ulong length,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncodeRetrieveBitstream"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static extern
+         NvJpegStatus nvjpegEncodeRetrieveBitstream(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] byte* data,
+            [In, Out] ref ulong length,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public unsafe sealed override NvJpegStatus EncodeRetrieveBitstream(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] byte* data,
+            [In, Out] ref ulong length,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncodeRetrieveBitstream(
+                libHandle,
+                stateHandle,
+                data,
+                ref length,
                 cudaStreamHandle);
 
         #endregion
@@ -830,6 +1535,62 @@ namespace ILGPU.Runtime.Cuda.API
             nvjpegJpegStateDestroy(
                 stateHandle);
 
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderStateCreate"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderStateCreate(
+             IntPtr libHandle,
+             out IntPtr stateHandle,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderStateCreate"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderStateCreate(
+            [In] IntPtr libHandle,
+            [Out] out IntPtr stateHandle,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderStateCreate(
+            [In] IntPtr libHandle,
+            [Out] out IntPtr stateHandle,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncoderStateCreate(
+                libHandle,
+                out stateHandle,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderStateDestroy"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderStateDestroy(
+             IntPtr stateHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderStateDestroy"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderStateDestroy(
+            [In] IntPtr stateHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderStateDestroy(
+            [In] IntPtr stateHandle) =>
+            nvjpegEncoderStateDestroy(
+                stateHandle);
+
         #endregion
 
         #region Retrieve Encoded Image Information
@@ -932,6 +1693,274 @@ namespace ILGPU.Runtime.Cuda.API
                 length,
                 outputFormat,
                 destination,
+                cudaStreamHandle);
+
+        #endregion
+
+        #region Encode
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncodeYUV"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static partial
+         NvJpegStatus nvjpegEncodeYUV(
+             IntPtr libHandle,
+             IntPtr stateHandle,
+             IntPtr encoderParamsHandle,
+             NvJpegImage_Interop* source,
+             NvJpegChromaSubsampling subsampling,
+             uint width,
+             uint height,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncodeYUV"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static extern
+         NvJpegStatus nvjpegEncodeYUV(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegImage_Interop* source,
+            [In] NvJpegChromaSubsampling subsampling,
+            [In] uint width,
+            [In] uint height,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public unsafe sealed override NvJpegStatus EncodeYUV(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegImage_Interop* source,
+            [In] NvJpegChromaSubsampling subsampling,
+            [In] uint width,
+            [In] uint height,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncodeYUV(
+                libHandle,
+                stateHandle,
+                encoderParamsHandle,
+                source,
+                subsampling,
+                width,
+                height,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncodeImage"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static partial
+         NvJpegStatus nvjpegEncodeImage(
+             IntPtr libHandle,
+             IntPtr stateHandle,
+             IntPtr encoderParamsHandle,
+             NvJpegImage_Interop* source,
+             NvJpegInputFormat inputFormat,
+             uint width,
+             uint height,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncodeImage"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static extern
+         NvJpegStatus nvjpegEncodeImage(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegImage_Interop* source,
+            [In] NvJpegInputFormat inputFormat,
+            [In] uint width,
+            [In] uint height,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public unsafe sealed override NvJpegStatus EncodeImage(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegImage_Interop* source,
+            [In] NvJpegInputFormat inputFormat,
+            [In] uint width,
+            [In] uint height,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncodeImage(
+                libHandle,
+                stateHandle,
+                encoderParamsHandle,
+                source,
+                inputFormat,
+                width,
+                height,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsCreate"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderParamsCreate(
+             IntPtr libHandle,
+             out IntPtr encoderParamsHandle,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsCreate"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderParamsCreate(
+            [In] IntPtr libHandle,
+            [Out] out IntPtr encoderParamsHandle,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderParamsCreate(
+            [In] IntPtr libHandle,
+            [Out] out IntPtr encoderParamsHandle,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncoderParamsCreate(
+                libHandle,
+                out encoderParamsHandle,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsDestroy"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderParamsDestroy(
+             IntPtr encoderParamsHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsDestroy"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderParamsDestroy(
+            [In] IntPtr encoderParamsHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderParamsDestroy(
+            [In] IntPtr encoderParamsHandle) =>
+            nvjpegEncoderParamsDestroy(
+                encoderParamsHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsSetQuality"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderParamsSetQuality(
+             IntPtr encoderParamsHandle,
+             int quality,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsSetQuality"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderParamsSetQuality(
+            [In] IntPtr encoderParamsHandle,
+            [In] int quality,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderParamsSetQuality(
+            [In] IntPtr encoderParamsHandle,
+            [In] int quality,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncoderParamsSetQuality(
+                encoderParamsHandle,
+                quality,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsSetSamplingFactors"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderParamsSetSamplingFactors(
+             IntPtr encoderParamsHandle,
+             NvJpegChromaSubsampling subsampling,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsSetSamplingFactors"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderParamsSetSamplingFactors(
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegChromaSubsampling subsampling,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderParamsSetSamplingFactors(
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegChromaSubsampling subsampling,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncoderParamsSetSamplingFactors(
+                encoderParamsHandle,
+                subsampling,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncodeRetrieveBitstream"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static partial
+         NvJpegStatus nvjpegEncodeRetrieveBitstream(
+             IntPtr libHandle,
+             IntPtr stateHandle,
+             byte* data,
+             ref ulong length,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncodeRetrieveBitstream"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static extern
+         NvJpegStatus nvjpegEncodeRetrieveBitstream(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] byte* data,
+            [In, Out] ref ulong length,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public unsafe sealed override NvJpegStatus EncodeRetrieveBitstream(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] byte* data,
+            [In, Out] ref ulong length,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncodeRetrieveBitstream(
+                libHandle,
+                stateHandle,
+                data,
+                ref length,
                 cudaStreamHandle);
 
         #endregion
@@ -1111,6 +2140,62 @@ namespace ILGPU.Runtime.Cuda.API
             nvjpegJpegStateDestroy(
                 stateHandle);
 
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderStateCreate"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderStateCreate(
+             IntPtr libHandle,
+             out IntPtr stateHandle,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderStateCreate"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderStateCreate(
+            [In] IntPtr libHandle,
+            [Out] out IntPtr stateHandle,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderStateCreate(
+            [In] IntPtr libHandle,
+            [Out] out IntPtr stateHandle,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncoderStateCreate(
+                libHandle,
+                out stateHandle,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderStateDestroy"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderStateDestroy(
+             IntPtr stateHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderStateDestroy"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderStateDestroy(
+            [In] IntPtr stateHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderStateDestroy(
+            [In] IntPtr stateHandle) =>
+            nvjpegEncoderStateDestroy(
+                stateHandle);
+
         #endregion
 
         #region Retrieve Encoded Image Information
@@ -1213,6 +2298,274 @@ namespace ILGPU.Runtime.Cuda.API
                 length,
                 outputFormat,
                 destination,
+                cudaStreamHandle);
+
+        #endregion
+
+        #region Encode
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncodeYUV"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static partial
+         NvJpegStatus nvjpegEncodeYUV(
+             IntPtr libHandle,
+             IntPtr stateHandle,
+             IntPtr encoderParamsHandle,
+             NvJpegImage_Interop* source,
+             NvJpegChromaSubsampling subsampling,
+             uint width,
+             uint height,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncodeYUV"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static extern
+         NvJpegStatus nvjpegEncodeYUV(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegImage_Interop* source,
+            [In] NvJpegChromaSubsampling subsampling,
+            [In] uint width,
+            [In] uint height,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public unsafe sealed override NvJpegStatus EncodeYUV(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegImage_Interop* source,
+            [In] NvJpegChromaSubsampling subsampling,
+            [In] uint width,
+            [In] uint height,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncodeYUV(
+                libHandle,
+                stateHandle,
+                encoderParamsHandle,
+                source,
+                subsampling,
+                width,
+                height,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncodeImage"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static partial
+         NvJpegStatus nvjpegEncodeImage(
+             IntPtr libHandle,
+             IntPtr stateHandle,
+             IntPtr encoderParamsHandle,
+             NvJpegImage_Interop* source,
+             NvJpegInputFormat inputFormat,
+             uint width,
+             uint height,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncodeImage"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static extern
+         NvJpegStatus nvjpegEncodeImage(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegImage_Interop* source,
+            [In] NvJpegInputFormat inputFormat,
+            [In] uint width,
+            [In] uint height,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public unsafe sealed override NvJpegStatus EncodeImage(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegImage_Interop* source,
+            [In] NvJpegInputFormat inputFormat,
+            [In] uint width,
+            [In] uint height,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncodeImage(
+                libHandle,
+                stateHandle,
+                encoderParamsHandle,
+                source,
+                inputFormat,
+                width,
+                height,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsCreate"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderParamsCreate(
+             IntPtr libHandle,
+             out IntPtr encoderParamsHandle,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsCreate"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderParamsCreate(
+            [In] IntPtr libHandle,
+            [Out] out IntPtr encoderParamsHandle,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderParamsCreate(
+            [In] IntPtr libHandle,
+            [Out] out IntPtr encoderParamsHandle,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncoderParamsCreate(
+                libHandle,
+                out encoderParamsHandle,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsDestroy"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderParamsDestroy(
+             IntPtr encoderParamsHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsDestroy"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderParamsDestroy(
+            [In] IntPtr encoderParamsHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderParamsDestroy(
+            [In] IntPtr encoderParamsHandle) =>
+            nvjpegEncoderParamsDestroy(
+                encoderParamsHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsSetQuality"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderParamsSetQuality(
+             IntPtr encoderParamsHandle,
+             int quality,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsSetQuality"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderParamsSetQuality(
+            [In] IntPtr encoderParamsHandle,
+            [In] int quality,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderParamsSetQuality(
+            [In] IntPtr encoderParamsHandle,
+            [In] int quality,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncoderParamsSetQuality(
+                encoderParamsHandle,
+                quality,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsSetSamplingFactors"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static partial
+         NvJpegStatus nvjpegEncoderParamsSetSamplingFactors(
+             IntPtr encoderParamsHandle,
+             NvJpegChromaSubsampling subsampling,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncoderParamsSetSamplingFactors"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal static extern
+         NvJpegStatus nvjpegEncoderParamsSetSamplingFactors(
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegChromaSubsampling subsampling,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public sealed override NvJpegStatus EncoderParamsSetSamplingFactors(
+            [In] IntPtr encoderParamsHandle,
+            [In] NvJpegChromaSubsampling subsampling,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncoderParamsSetSamplingFactors(
+                encoderParamsHandle,
+                subsampling,
+                cudaStreamHandle);
+
+        #if NET7_0_OR_GREATER
+        [LibraryImport(LibName,
+            EntryPoint = "nvjpegEncodeRetrieveBitstream"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static partial
+         NvJpegStatus nvjpegEncodeRetrieveBitstream(
+             IntPtr libHandle,
+             IntPtr stateHandle,
+             byte* data,
+             ref ulong length,
+             IntPtr cudaStreamHandle);
+
+        #else
+        [DllImport(LibName,
+            EntryPoint = "nvjpegEncodeRetrieveBitstream"
+            )]
+        [DefaultDllImportSearchPaths(DllImportSearchPath.LegacyBehavior)]
+        internal unsafe static extern
+         NvJpegStatus nvjpegEncodeRetrieveBitstream(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] byte* data,
+            [In, Out] ref ulong length,
+            [In] IntPtr cudaStreamHandle);
+
+        #endif
+        public unsafe sealed override NvJpegStatus EncodeRetrieveBitstream(
+            [In] IntPtr libHandle,
+            [In] IntPtr stateHandle,
+            [In] byte* data,
+            [In, Out] ref ulong length,
+            [In] IntPtr cudaStreamHandle) =>
+            nvjpegEncodeRetrieveBitstream(
+                libHandle,
+                stateHandle,
+                data,
+                ref length,
                 cudaStreamHandle);
 
         #endregion
