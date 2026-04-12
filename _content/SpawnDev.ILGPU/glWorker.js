@@ -301,12 +301,16 @@ function dispatchKernel(msg) {
             const uniformName = 'u_param' + p.paramIndex;
             const loc = getUniformLoc(cached, uniformName);
             if (loc !== null) {
-                if (p.scalarType === 'int' || p.scalarType === 'bool' || p.scalarType === 'byte') {
+                if (p.scalarType === 'int' || p.scalarType === 'bool' || p.scalarType === 'byte'
+                    || p.scalarType === 'sbyte' || p.scalarType === 'short' || p.scalarType === 'ushort'
+                    || p.scalarType === 'long') {
                     gl.uniform1i(loc, p.value | 0);
-                } else if (p.scalarType === 'uint') {
+                } else if (p.scalarType === 'uint' || p.scalarType === 'ulong') {
                     gl.uniform1ui(loc, p.value >>> 0);
                 } else if (p.scalarType === 'float' || p.scalarType === 'double') {
                     gl.uniform1f(loc, p.value);
+                } else {
+                    console.warn('[GLWorker] Unknown scalar type:', p.scalarType, 'param:', p.paramIndex);
                 }
             }
         } else if (p.kind === 'scalar_emu64') {

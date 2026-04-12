@@ -42,63 +42,87 @@ if (typeof window !== 'undefined') {
         document.body.appendChild(s);
     }
 
-    if (window.crossOriginIsolated) {
-        // Already cross-origin isolated — SharedArrayBuffer available
-        consoleLog("[COI] Cross-origin isolated ✓");
-        sessionStorage.removeItem("coi-reload-count");
-        loadBlazor();
-    } else if ("serviceWorker" in navigator) {
-        // Not yet isolated — register/activate the SW, then reload ONCE to apply headers.
-        // Use sessionStorage to prevent infinite reload loops: if COI still fails after
-        // reloading, stop retrying and load Blazor without SharedArrayBuffer.
-        var reloadKey = "coi-reload-count";
-        var reloadCount = parseInt(sessionStorage.getItem(reloadKey) || "0", 10);
-
-        if (reloadCount < 2) {
-            // Register the SW (idempotent if already registered)
-            navigator.serviceWorker
-                .register(window.document.currentScript.src)
-                .then(function (reg) {
-                    consoleLog("[COI] Service worker registered:", reg.scope);
-                })
-                .catch(function (err) {
-                    console.error("[COI] Service worker registration failed:", err);
-                    // Registration failed — load Blazor without COI
-                    loadBlazor();
-                });
-
-            // Wait for SW to be ready, then reload to pick up COI headers.
-            // Timeout after 5s — if the SW doesn't activate in time, load Blazor anyway.
-            var reloaded = false;
-            var doReload = function () {
-                if (reloaded) return;
-                reloaded = true;
-                sessionStorage.setItem(reloadKey, String(reloadCount + 1));
-                consoleLog("[COI] Reloading to apply COI headers (attempt " + (reloadCount + 1) + ")");
-                window.location.reload();
-            };
-
-            navigator.serviceWorker.ready.then(doReload);
-            setTimeout(function () {
-                if (!reloaded && navigator.serviceWorker.controller) {
-                    // SW is controlling but ready didn't fire — force reload
-                    doReload();
-                } else if (!reloaded) {
-                    consoleLog("[COI] Service worker not ready after 5s — loading without COI");
-                    loadBlazor();
-                }
-            }, 5000);
-        } else {
-            // Already tried reloading — COI isn't working, proceed without it.
-            // Clear the counter so next fresh navigation can try again.
-            console.warn("[COI] Cross-origin isolation failed after " + reloadCount +
-                " reload(s) — SharedArrayBuffer unavailable. Wasm limited to 1 worker.");
-            sessionStorage.removeItem(reloadKey);
-            loadBlazor();
-        }
-    } else {
+    if (!("serviceWorker" in navigator)) {
+        // No service worker support — load Blazor directly, no COI or streaming
         consoleLog("[COI] Service workers not supported — SharedArrayBuffer unavailable");
         loadBlazor();
+    } else {
+        // Always register the SW — it provides both COI headers AND torrent streaming.
+        // Registration is idempotent (browser no-ops if the script hasn't changed).
+        var swRegistered = false;
+        navigator.serviceWorker
+            .register(window.document.currentScript.src)
+            .then(function (reg) {
+                swRegistered = true;
+                consoleLog("[COI] Service worker registered:", reg.scope);
+            })
+            .catch(function (err) {
+                console.error("[COI] Service worker registration failed:", err);
+            });
+
+        if (window.crossOriginIsolated && navigator.serviceWorker.controller) {
+            // COI active AND SW already controlling — best case, load immediately.
+            consoleLog("[COI] Cross-origin isolated ✓, SW controlling ✓");
+            sessionStorage.removeItem("coi-reload-count");
+            loadBlazor();
+        } else if (window.crossOriginIsolated && !navigator.serviceWorker.controller) {
+            // COI active (server headers) but SW not controlling yet.
+            // Wait for SW to activate and claim, then reload once so it intercepts requests.
+            var reloadKey = "coi-sw-reload";
+            var reloadCount = parseInt(sessionStorage.getItem(reloadKey) || "0", 10);
+            if (reloadCount < 1) {
+                navigator.serviceWorker.ready.then(function () {
+                    sessionStorage.setItem(reloadKey, "1");
+                    consoleLog("[COI] SW active — reloading for control");
+                    window.location.reload();
+                });
+                // Fallback: if SW never activates, load anyway
+                setTimeout(function () {
+                    consoleLog("[COI] SW not ready after 5s — loading Blazor without streaming");
+                    sessionStorage.removeItem(reloadKey);
+                    loadBlazor();
+                }, 5000);
+            } else {
+                // Already reloaded once — SW should be controlling now, but if not, proceed
+                consoleLog("[COI] Post-reload — loading Blazor");
+                sessionStorage.removeItem(reloadKey);
+                loadBlazor();
+            }
+        } else {
+            // Not yet isolated — wait for SW to activate, then reload to apply COI headers.
+            // Use sessionStorage to prevent infinite reload loops.
+            var reloadKey = "coi-reload-count";
+            var reloadCount = parseInt(sessionStorage.getItem(reloadKey) || "0", 10);
+
+            if (reloadCount < 2) {
+                var reloaded = false;
+                var doReload = function () {
+                    if (reloaded) return;
+                    reloaded = true;
+                    sessionStorage.setItem(reloadKey, String(reloadCount + 1));
+                    consoleLog("[COI] Reloading to apply COI headers (attempt " + (reloadCount + 1) + ")");
+                    window.location.reload();
+                };
+
+                navigator.serviceWorker.ready.then(doReload);
+                setTimeout(function () {
+                    if (!reloaded && navigator.serviceWorker.controller) {
+                        // SW is controlling but ready didn't fire — force reload
+                        doReload();
+                    } else if (!reloaded) {
+                        consoleLog("[COI] Service worker not ready after 5s — loading without COI");
+                        loadBlazor();
+                    }
+                }, 5000);
+            } else {
+                // Already tried reloading — COI isn't working, proceed without it.
+                // Clear the counter so next fresh navigation can try again.
+                console.warn("[COI] Cross-origin isolation failed after " + reloadCount +
+                    " reload(s) — SharedArrayBuffer unavailable. Wasm limited to 1 worker.");
+                sessionStorage.removeItem(reloadKey);
+                loadBlazor();
+            }
+        }
     }
 
 } else {
