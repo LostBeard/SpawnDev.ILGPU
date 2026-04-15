@@ -486,15 +486,37 @@ function dispatchKernel(msg) {
                 const storeCount = out.storeCount || 1;
                 const storeSlot = out.storeSlot >= 0 ? out.storeSlot : 0;
                 const bytesPerVertex = storeCount * 4;
-                const elemCount = Math.min(totalVertices, Math.floor(out.writeLengthBytes / bytesPerVertex));
-                for (let v = 0; v < elemCount; v++) {
-                    const srcOff = v * strideBytes + out.outputIndex * 4;
-                    const dstOff = writeOffset + v * bytesPerVertex + storeSlot * 4;
-                    if (srcOff + 4 <= readbackBytes.length) {
-                        destView[dstOff] = readbackBytes[srcOff];
-                        destView[dstOff + 1] = readbackBytes[srcOff + 1];
-                        destView[dstOff + 2] = readbackBytes[srcOff + 2];
-                        destView[dstOff + 3] = readbackBytes[srcOff + 3];
+
+                // Sub-word packing: TF outputs one i32 per element, but the destination
+                // buffer stores packed sub-word values (e.g. 2 shorts per i32).
+                // Pack by reading each TF i32 and writing only the sub-word portion.
+                if (out.subWordElementSize && out.subWordElementSize < 4) {
+                    const swSize = out.subWordElementSize;
+                    const elemCount = Math.min(totalVertices, Math.floor(out.writeLengthBytes / swSize));
+                    const int32TF = new Int32Array(readbackFloat.buffer);
+                    for (let v = 0; v < elemCount; v++) {
+                        const srcIdx = (v * strideBytes + out.outputIndex * 4) >> 2;
+                        const val = int32TF[srcIdx];
+                        const dstOff = writeOffset + v * swSize;
+                        if (swSize === 2) {
+                            // Pack as 16-bit (little-endian)
+                            destView[dstOff] = val & 0xFF;
+                            destView[dstOff + 1] = (val >> 8) & 0xFF;
+                        } else if (swSize === 1) {
+                            destView[dstOff] = val & 0xFF;
+                        }
+                    }
+                } else {
+                    const elemCount = Math.min(totalVertices, Math.floor(out.writeLengthBytes / bytesPerVertex));
+                    for (let v = 0; v < elemCount; v++) {
+                        const srcOff = v * strideBytes + out.outputIndex * 4;
+                        const dstOff = writeOffset + v * bytesPerVertex + storeSlot * 4;
+                        if (srcOff + 4 <= readbackBytes.length) {
+                            destView[dstOff] = readbackBytes[srcOff];
+                            destView[dstOff + 1] = readbackBytes[srcOff + 1];
+                            destView[dstOff + 2] = readbackBytes[srcOff + 2];
+                            destView[dstOff + 3] = readbackBytes[srcOff + 3];
+                        }
                     }
                 }
             }
