@@ -254,6 +254,20 @@ function dispatchKernel(msg) {
     let textureUnit = 0;
     const bufferParamMap = [];  // Track which params map to which bufferIds
 
+    // Resolve a param index to its uniform-name prefix.
+    // Direct param: paramIndex < 1000 -> "u_param{N}".
+    // Body-struct synthetic field: paramIndex >= 1000 -> "u_param{realN}_f{fi}"
+    // where realN = floor(paramIndex/1000)-1 and fi = paramIndex % 1000. Matches
+    // GLSLKernelFunctionGenerator.GetParamBindingName.
+    function resolveParamPrefix(paramIndex) {
+        if (paramIndex >= 1000) {
+            const realN = Math.floor(paramIndex / 1000) - 1;
+            const fi = paramIndex % 1000;
+            return 'u_param' + realN + '_f' + fi;
+        }
+        return 'u_param' + paramIndex;
+    }
+
     for (const p of kernelParams) {
         if (p.kind === 'buffer_ref') {
             // GPU-resident buffer — bind existing texture from registry
@@ -261,8 +275,8 @@ function dispatchKernel(msg) {
             if (!entry) throw new Error('Unknown bufferId: ' + p.bufferId);
 
             const texUnit = textureUnit++;
-            const uniformName = 'u_param' + p.paramIndex;
-            const uniformLoc = getUniformLoc(cached, uniformName);
+            const uniformPrefix = resolveParamPrefix(p.paramIndex);
+            const uniformLoc = getUniformLoc(cached, uniformPrefix);
 
             if (uniformLoc !== null) {
                 gl.activeTexture(gl.TEXTURE0 + texUnit);
@@ -270,26 +284,33 @@ function dispatchKernel(msg) {
                 gl.uniform1i(uniformLoc, texUnit);
 
                 // Tile width uniform
-                const tileWLoc = getUniformLoc(cached, 'u_param' + p.paramIndex + '_tileW');
+                const tileWLoc = getUniformLoc(cached, uniformPrefix + '_tileW');
                 if (tileWLoc) gl.uniform1i(tileWLoc, entry.width);
             }
 
             // Element count uniform for GetViewLength support
             if (p.elementCount !== undefined) {
-                const lenLoc = getUniformLoc(cached, 'u_param' + p.paramIndex + '_length');
+                const lenLoc = getUniformLoc(cached, uniformPrefix + '_length');
                 if (lenLoc !== null) gl.uniform1i(lenLoc, p.elementCount | 0);
             }
 
-            // SubView element offset — added to texelFetch indices when buffer is a SubView
-            if (p.elementOffset !== undefined && p.elementOffset !== 0) {
-                const offsetLoc = getUniformLoc(cached, 'u_param' + p.paramIndex + '_offset');
-                if (offsetLoc !== null) gl.uniform1i(offsetLoc, p.elementOffset | 0);
-            }
+            // SubView element offset — added to texelFetch indices when buffer is a SubView.
+            // Always set the uniform (including 0) so a prior dispatch's non-zero value
+            // doesn't leak across dispatches. WebGL uniforms persist on the program object
+            // across draw calls; if the previous dispatch with the same kernel had
+            // elementOffset=N (non-zero), the next dispatch with elementOffset=0 would
+            // read at offset N. Surfaced 2026-05-04 by Data's StyleMosaic Gather
+            // first-divergent-node trace where node 55 Gather output was 0 on WebGL while
+            // matching WebGPU exactly through node 54 (which read SubView(0, ...) and
+            // set the offset uniform to 0 implicitly via default; subsequent ops that
+            // read SubView(non-zero, ...) leaked their offset back into Gather's read).
+            const offsetLoc = getUniformLoc(cached, uniformPrefix + '_offset');
+            if (offsetLoc !== null) gl.uniform1i(offsetLoc, (p.elementOffset | 0));
 
             // Stride uniforms for ArrayView2D/3D
             if (strides && strides[p.paramIndex]) {
                 const dims = strides[p.paramIndex];
-                const strideLoc = getUniformLoc(cached, 'u_param' + p.paramIndex + '_stride[0]');
+                const strideLoc = getUniformLoc(cached, uniformPrefix + '_stride[0]');
                 if (strideLoc !== null) {
                     gl.uniform1iv(strideLoc, new Int32Array(dims));
                 }
@@ -298,7 +319,7 @@ function dispatchKernel(msg) {
             bufferParamMap.push({ bufferId: p.bufferId, paramIndex: p.paramIndex });
 
         } else if (p.kind === 'scalar') {
-            const uniformName = 'u_param' + p.paramIndex;
+            const uniformName = resolveParamPrefix(p.paramIndex);
             const loc = getUniformLoc(cached, uniformName);
             if (loc !== null) {
                 if (p.scalarType === 'int' || p.scalarType === 'bool' || p.scalarType === 'byte'
@@ -314,8 +335,9 @@ function dispatchKernel(msg) {
                 }
             }
         } else if (p.kind === 'scalar_emu64') {
-            const loLoc = getUniformLoc(cached, 'u_param' + p.paramIndex + '_lo');
-            const hiLoc = getUniformLoc(cached, 'u_param' + p.paramIndex + '_hi');
+            const emuPrefix = resolveParamPrefix(p.paramIndex);
+            const loLoc = getUniformLoc(cached, emuPrefix + '_lo');
+            const hiLoc = getUniformLoc(cached, emuPrefix + '_hi');
             if (loLoc !== null) gl.uniform1ui(loLoc, p.lo >>> 0);
             if (hiLoc !== null) gl.uniform1ui(hiLoc, p.hi >>> 0);
         } else if (p.kind === 'struct') {
@@ -403,11 +425,16 @@ function dispatchKernel(msg) {
         gl.finish();
 
         gl.bindBuffer(gl.TRANSFORM_FEEDBACK_BUFFER, tfBuffer);
-        const tfFloatCount = totalVertices * vNames.length;
-        const readbackFloat = new Float32Array(tfFloatCount);
-        gl.getBufferSubData(gl.TRANSFORM_FEEDBACK_BUFFER, 0, readbackFloat);
-
-        const readbackBytes = new Uint8Array(readbackFloat.buffer);
+        const tfElemCount = totalVertices * vNames.length;
+        // Read as raw bytes via Uint8Array — passing Float32Array as the destination
+        // makes Chrome canonicalize specific bit patterns through the float view
+        // (observed 2026-05-04: writing 0x80000000u via TF reads back as 0x80000001
+        // when getBufferSubData destination is Float32Array; Uint8Array preserves
+        // the bit pattern exactly). Tests23_BareUintShift / NormalizeShape_BareCondition
+        // surfaced this — see _DevComms/SpawnDev.ILGPU.
+        const readbackBytes = new Uint8Array(tfElemCount * 4);
+        gl.getBufferSubData(gl.TRANSFORM_FEEDBACK_BUFFER, 0, readbackBytes);
+        const readbackFloat = new Float32Array(readbackBytes.buffer);
         const varyingCount = vNames.length;
         const strideBytes = varyingCount * 4;
 
