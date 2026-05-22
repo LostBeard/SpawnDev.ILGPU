@@ -9,9 +9,13 @@ Write parallel compute code in C# and let the library pick the best available ba
 
 ## Recent Highlights
 
-**4.9.3 (current):** New `ArrayView<T>.CopyToHostAsync()` extension - real per-backend partial readback for sub-views. One device buffer can be split into per-channel / per-plane host arrays without the host iterating over the full buffer. WebGPU `Half` NaN/Inf bit-pattern codegen fix (multi-compare paths now route f16 through `bitcast<u32>(vec2<f16>(x, 0.0h))` instead of the invalid `bitcast<u32>(f16)`). See [`Docs/memory-and-buffers.md` — Partial Readback](Docs/memory-and-buffers.md#arrayviewtcopytohostasync--partial-readback-493).
+**4.9.5 (current):** WebGPU direct-param coalesce - kernels with more than 9 `ArrayView` parameters no longer hit Chrome's 10-binding limit (i32/u32/f32 and sub-word types coalesced into a shared `array<atomic<u32>>` binding). IR Inliner cumulative-IL budget - kernels with deep call graphs (VP9 entropy walker, large codec helpers) no longer produce 50K+ local Wasm functions that crash V8/Naga. WebGL multi-view body-struct decomposition and WGSL/WebGL codegen correctness fixes for `[NoInlining]` helpers with 64-bit indices, sub-word ArrayViews, and cross-block pointer LEAs. GroupDimX extent clamp. Zero real test failures across all 6 backends.
 
-**4.9.2:** OpenCL phi-binding-per-target codegen fix (Tuvok's `Av1RangeDecoderGpu.DecodeCdfQ15` round-trip green); rolls up the rc.7-rc.30 series (signed `Div by pow2` correctness, NaN/Inf codegen across WGSL/GLSL/Wasm/OpenCL, Wasm wait/notify-free + worker-headroom default, helper fn-definition emission for compile-cliff avoidance, `AcceleratorRequirements` capability gating, T4-drift + four-package version-sync CI guards).
+**4.9.4:** Wasm `CopyToHostAsync` partial readback + WebGPU `Half` NaN/Inf bitcast fix.
+
+**4.9.3:** `ArrayView<T>.CopyToHostAsync()` per-backend partial readback extension.
+
+**4.9.2:** `[NoInlining]` helper fn-definition emission (compile-cliff fix), `AcceleratorRequirements` capability gating, OpenCL phi-binding codegen fix, NaN/Inf codegen across all backends.
 
 **4.9.0:** Complete sub-word data type support (`Int8`, `UInt8`, `Int16`, `UInt16`, `Float16`) across all 6 GPU backends + `CopyFromJS` zero-copy JS->GPU transfer.
 
