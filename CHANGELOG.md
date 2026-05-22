@@ -2,7 +2,7 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
-## 4.9.6 (pending) — PTX vector memory intrinsics + CUDA register fix
+## 4.9.6 (2026-05-22) — PTX vector memory intrinsics + CUDA register fix
 
 ### PTX vector memory intrinsics (ILGPU.Algorithms.PTX)
 
