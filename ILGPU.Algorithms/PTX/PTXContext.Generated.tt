@@ -160,6 +160,9 @@ namespace ILGPU.Algorithms.PTX
                 PTXWarpExtensionsType,
                 "<#= name #>");
 <# } #>
+
+            // Register PTX-only explicit vector memory intrinsics.
+            RegisterMemoryIntrinsics(manager);
         }
     }
 }

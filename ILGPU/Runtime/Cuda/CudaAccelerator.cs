@@ -38,16 +38,16 @@ namespace ILGPU.Runtime.Cuda
         /// <summary>
         /// Per-thread register cap forwarded to ptxas via
         /// <c>CU_JIT_MAX_REGISTERS</c> when loading PTX modules. Default 255 — the
-        /// hardware per-thread cap on every sm_50+ device. Capping at the device
-        /// limit prevents register-heavy kernels (deeply unrolled loops, many
-        /// live ArrayView pointers, body structs with 10+ ArrayView fields) from
-        /// JITing to a static requirement that triggers
-        /// <c>CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES</c> at launch even with
-        /// <c>blockDim=1</c>. Set to 0 to disable the cap (pre-rc.24 behavior).
-        /// Set to a smaller value (e.g. 64, 128) to trade per-thread spilling
-        /// for more occupancy on simple kernels.
+        /// hardware per-thread cap on every sm_50+ device. Set to a positive
+        /// value (e.g. 64, 128, 255) to cap register use per thread; ptxas will
+        /// spill instead of using more registers. Capping at 255 prevents
+        /// register-heavy kernels (deeply unrolled loops with 16+ live variables)
+        /// from JITing to an un-launchable kernel on some hardware configurations.
+        /// Default 0 = let ptxas decide (pre-rc.24 behavior, best average
+        /// occupancy). Set to 255 if you hit
+        /// <c>CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES</c> on register-heavy kernels.
         /// </summary>
-        public static int DefaultMaxRegistersPerThread { get; set; } = 255;
+        public static int DefaultMaxRegistersPerThread { get; set; } = 0;
 
         /// <summary>
         /// When true, ptxas info log output (register count, spilling, occupancy)

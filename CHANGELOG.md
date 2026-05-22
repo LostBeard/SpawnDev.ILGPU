@@ -2,6 +2,37 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.6 (pending) — PTX vector memory intrinsics + CUDA register fix
+
+### PTX vector memory intrinsics (ILGPU.Algorithms.PTX)
+
+New `PTXMemory` class in `ILGPU.Algorithms.PTX` namespace exposes explicit PTX vector memory operations for CUDA kernels. These generate the NVIDIA PTX instructions `ld.v2.f32`, `ld.v4.f32`, `st.v2.f32`, `st.v4.f32` directly, enabling peak-bandwidth coalesced memory access on all Ampere/Turing/Volta and newer GPUs.
+
+- `PTXMemory.LoadF32x2(ref float)` / `LoadF32x4(ref float)` - vectorized load returning `Float2` / `Float4`
+- `PTXMemory.StoreF32x2(ref float, Float2)` / `StoreF32x4(ref float, Float4)` - vectorized store from struct
+- `PTXMemory.StoreF32x2(ref float, float, float)` / `StoreF32x4(ref float, float, float, float, float)` - scalar-argument forms
+- `ArrayView<float>` convenience overloads for all of the above (index-based instead of ref)
+- New `Float2` and `Float4` readonly structs (`StructLayout.Sequential`)
+
+These are CUDA-only; calling them on non-PTX backends throws `NotImplementedException`. Contributed by `ilehtoranta` (PR #4).
+
+### ArrayView vectorized load/store helpers
+
+New extension methods in `ILGPU.Runtime.ArrayViewExtensions`:
+
+- `ArrayView<T>.LoadVectorized<T, TVector>(long elementIndex, int alignmentInBytes)` - loads a struct `TVector` at the given element index with explicit alignment hint (uses `AsAligned` + `Cast`)
+- `ArrayView<T>.StoreVectorized<T, TVector>(long elementIndex, TVector value, int alignmentInBytes)` - stores a struct at the given element index with alignment hint
+- `ArrayView<T>.CastAligned<T, TOther>(int alignmentInBytes)` - aligned cast convenience wrapper
+- `ArrayView1D<T,Dense>` overloads for all of the above delegating to `BaseView`
+
+### CUDA: DefaultMaxRegistersPerThread reverted to 0 (Discussion #5)
+
+`CudaAccelerator.DefaultMaxRegistersPerThread` changed from `255` back to `0` (pre-rc.24 behavior). With `255`, ptxas treated the limit as a permissive ceiling and chose higher-register code paths on normal kernels (e.g., 94 registers instead of 42), cutting occupancy in half and degrading throughput. Default `0` lets ptxas apply its occupancy heuristics as designed. Set to `255` explicitly only if a kernel overflows with `CUDA_ERROR_LAUNCH_OUT_OF_RESOURCES`. Reported by `ilehtoranta` (Discussion #5).
+
+### System.Numerics.BitOperations: hardware GPU intrinsics
+
+`RemappedIntrinsics.RegisterBitOperationsRemappings()` now maps `System.Numerics.BitOperations.LeadingZeroCount`, `PopCount`, and `TrailingZeroCount` to the hardware-backed `IntrinsicMath` methods (annotated with `[MathIntrinsic(CLZ/PopC/CTZ)]`) instead of the software `IntrinsicMath.BitOperations` fallbacks. On all hardware-capable backends these now lower to native GPU instructions.
+
 ## 4.9.5 (2026-05-22) — Stable release
 
 Stable promotion of rc.25 through rc.28 plus local.17 and PMT infrastructure fixes. All 6 backends (WebGPU, WebGL, Wasm, CUDA, OpenCL, CPU) pass the full test sweep with zero real failures.

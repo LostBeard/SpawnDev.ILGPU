@@ -309,7 +309,7 @@ namespace ILGPU.Frontend.Intrinsic
         private static void RegisterBitOperationsRemappings()
         {
             var sourceType = typeof(System.Numerics.BitOperations);
-            var targetType = typeof(IntrinsicMath.BitOperations);
+            var targetType = typeof(IntrinsicMath);
 
             AddRemapping(
                 sourceType,

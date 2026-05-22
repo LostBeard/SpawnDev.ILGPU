@@ -4,8 +4,8 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.5</Version>
-		<PackageReleaseNotes>v4.9.5: Stable release. WebGPU direct-param coalesce (11+ ArrayView params no longer hit Chrome binding limit), WGSL/WebGL codegen fixes for NoInlining helpers with i64/sub-word ArrayViews, IR Inliner cumulative-IL budget (prevents browser compiler crashes on deep call graphs), WebGL body-struct decomposition, GroupDimX extent clamp. All 6 backends pass full test sweep. See CHANGELOG.md for details.</PackageReleaseNotes>
+		<Version>4.9.6-local.1</Version>
+		<PackageReleaseNotes>v4.9.6: PTX vector memory intrinsics (ld.v2.f32/ld.v4.f32/st.v2.f32/st.v4.f32), ArrayView LoadVectorized/StoreVectorized helpers, CUDA DefaultMaxRegistersPerThread default reverted to 0 (restores occupancy on normal kernels), System.Numerics.BitOperations remapped to hardware GPU intrinsics. See CHANGELOG.md for details.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -59,8 +59,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.6" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.6" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.7" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.7" />
 	</ItemGroup>
 
 	<ItemGroup>

@@ -140,6 +140,162 @@ namespace ILGPU.Runtime
             view.BaseView.AsAligned(alignmentInBytes);
 
         /// <summary>
+        /// Ensures the array view is aligned to the specified byte boundary and casts
+        /// it to another element type.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static ArrayView<TOther> CastAligned<T, TOther>(
+            this ArrayView<T> view,
+            int alignmentInBytes)
+            where T : unmanaged
+            where TOther : unmanaged =>
+            view.AsAligned(alignmentInBytes).Cast<TOther>();
+
+        /// <summary>
+        /// Ensures the array view is aligned to the target element's natural size and
+        /// casts it to that element type.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static ArrayView<TOther> CastAligned<T, TOther>(
+            this ArrayView<T> view)
+            where T : unmanaged
+            where TOther : unmanaged =>
+            view.CastAligned<T, TOther>(ArrayView<TOther>.ElementSize);
+
+        /// <summary>
+        /// Ensures the dense 1D view is aligned to the specified byte boundary and
+        /// casts it to another element type.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static ArrayView1D<TOther, Stride1D.Dense> CastAligned<T, TOther>(
+            this ArrayView1D<T, Stride1D.Dense> view,
+            int alignmentInBytes)
+            where T : unmanaged
+            where TOther : unmanaged =>
+            view.BaseView.CastAligned<T, TOther>(alignmentInBytes);
+
+        /// <summary>
+        /// Ensures the dense 1D view is aligned to the target element's natural size
+        /// and casts it to that element type.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static ArrayView1D<TOther, Stride1D.Dense> CastAligned<T, TOther>(
+            this ArrayView1D<T, Stride1D.Dense> view)
+            where T : unmanaged
+            where TOther : unmanaged =>
+            view.BaseView.CastAligned<T, TOther>(ArrayView<TOther>.ElementSize);
+
+        /// <summary>
+        /// Loads a vectorized value at the given source-element index, asserting the
+        /// requested alignment so the backend can emit vector memory instructions.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static TVector LoadVectorized<T, TVector>(
+            this ArrayView<T> view,
+            long elementIndex,
+            int alignmentInBytes)
+            where T : unmanaged
+            where TVector : unmanaged =>
+            view.SubView(elementIndex)
+                .CastAligned<T, TVector>(alignmentInBytes)[0];
+
+        /// <summary>
+        /// Loads a vectorized value at the given source-element index using the vector
+        /// type's natural size as the required alignment.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static TVector LoadVectorized<T, TVector>(
+            this ArrayView<T> view,
+            long elementIndex)
+            where T : unmanaged
+            where TVector : unmanaged =>
+            view.LoadVectorized<T, TVector>(elementIndex, ArrayView<TVector>.ElementSize);
+
+        /// <summary>
+        /// Stores a vectorized value at the given target-element index, asserting the
+        /// requested alignment so the backend can emit vector memory instructions.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static void StoreVectorized<T, TVector>(
+            this ArrayView<T> view,
+            long elementIndex,
+            TVector value,
+            int alignmentInBytes)
+            where T : unmanaged
+            where TVector : unmanaged =>
+            view.SubView(elementIndex)
+                .CastAligned<T, TVector>(alignmentInBytes)[0] = value;
+
+        /// <summary>
+        /// Stores a vectorized value at the given target-element index using the vector
+        /// type's natural size as the required alignment.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static void StoreVectorized<T, TVector>(
+            this ArrayView<T> view,
+            long elementIndex,
+            TVector value)
+            where T : unmanaged
+            where TVector : unmanaged =>
+            view.StoreVectorized<T, TVector>(
+                elementIndex, value, ArrayView<TVector>.ElementSize);
+
+        /// <summary>
+        /// Loads a vectorized value from a dense 1D view at the given source-element
+        /// index, asserting the requested alignment.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static TVector LoadVectorized<T, TVector>(
+            this ArrayView1D<T, Stride1D.Dense> view,
+            long elementIndex,
+            int alignmentInBytes)
+            where T : unmanaged
+            where TVector : unmanaged =>
+            view.BaseView.LoadVectorized<T, TVector>(elementIndex, alignmentInBytes);
+
+        /// <summary>
+        /// Loads a vectorized value from a dense 1D view using the vector type's
+        /// natural size as the required alignment.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static TVector LoadVectorized<T, TVector>(
+            this ArrayView1D<T, Stride1D.Dense> view,
+            long elementIndex)
+            where T : unmanaged
+            where TVector : unmanaged =>
+            view.BaseView.LoadVectorized<T, TVector>(
+                elementIndex, ArrayView<TVector>.ElementSize);
+
+        /// <summary>
+        /// Stores a vectorized value into a dense 1D view at the given target-element
+        /// index, asserting the requested alignment.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static void StoreVectorized<T, TVector>(
+            this ArrayView1D<T, Stride1D.Dense> view,
+            long elementIndex,
+            TVector value,
+            int alignmentInBytes)
+            where T : unmanaged
+            where TVector : unmanaged =>
+            view.BaseView.StoreVectorized<T, TVector>(
+                elementIndex, value, alignmentInBytes);
+
+        /// <summary>
+        /// Stores a vectorized value into a dense 1D view using the vector type's
+        /// natural size as the required alignment.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static void StoreVectorized<T, TVector>(
+            this ArrayView1D<T, Stride1D.Dense> view,
+            long elementIndex,
+            TVector value)
+            where T : unmanaged
+            where TVector : unmanaged =>
+            view.BaseView.StoreVectorized<T, TVector>(
+                elementIndex, value, ArrayView<TVector>.ElementSize);
+
+        /// <summary>
         /// Returns a variable view to the given element.
         /// </summary>
         /// <typeparam name="T">The element type.</typeparam>

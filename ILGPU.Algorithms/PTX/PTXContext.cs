@@ -29,6 +29,11 @@ namespace ILGPU.Algorithms.PTX
         private static readonly Type PTXMathType = typeof(PTXMath);
 
         /// <summary>
+        /// The <see cref="PTXMemory"/> type.
+        /// </summary>
+        private static readonly Type PTXMemoryType = typeof(PTXMemory);
+
+        /// <summary>
         /// Represents the <see cref="PTXMath.GenerateMathIntrinsic(PTXBackend,
         /// PTXCodeGenerator, IR.Value)"/>
         /// methods.
@@ -115,6 +120,78 @@ namespace ILGPU.Algorithms.PTX
             manager.RegisterMethod(
                 sourceMethod,
                 new PTXIntrinsic(targetType, name, IntrinsicImplementationMode.Redirect));
+        }
+
+        /// <summary>
+        /// Registers PTX-only explicit vector memory intrinsics.
+        /// </summary>
+        private static void RegisterMemoryIntrinsics(
+            IntrinsicImplementationManager manager)
+        {
+            Type floatRefType = typeof(float).MakeByRefType();
+
+            RegisterMemoryIntrinsic(
+                manager,
+                nameof(PTXMemory.LoadF32x2),
+                nameof(PTXMemory.GenerateLoadF32x2),
+                floatRefType);
+            RegisterMemoryIntrinsic(
+                manager,
+                nameof(PTXMemory.LoadF32x4),
+                nameof(PTXMemory.GenerateLoadF32x4),
+                floatRefType);
+            RegisterMemoryIntrinsic(
+                manager,
+                nameof(PTXMemory.StoreF32x2),
+                nameof(PTXMemory.GenerateStoreF32x2),
+                floatRefType,
+                typeof(Float2));
+            RegisterMemoryIntrinsic(
+                manager,
+                nameof(PTXMemory.StoreF32x4),
+                nameof(PTXMemory.GenerateStoreF32x4),
+                floatRefType,
+                typeof(Float4));
+            RegisterMemoryIntrinsic(
+                manager,
+                nameof(PTXMemory.StoreF32x2),
+                nameof(PTXMemory.GenerateStoreF32x2Scalars),
+                floatRefType,
+                typeof(float),
+                typeof(float));
+            RegisterMemoryIntrinsic(
+                manager,
+                nameof(PTXMemory.StoreF32x4),
+                nameof(PTXMemory.GenerateStoreF32x4Scalars),
+                floatRefType,
+                typeof(float),
+                typeof(float),
+                typeof(float),
+                typeof(float));
+        }
+
+        /// <summary>
+        /// Registers a single PTX vector memory intrinsic.
+        /// </summary>
+        private static void RegisterMemoryIntrinsic(
+            IntrinsicImplementationManager manager,
+            string sourceName,
+            string generatorName,
+            params Type[] parameterTypes)
+        {
+            var sourceMethod = PTXMemoryType.GetMethod(
+                sourceName,
+                AlgorithmContext.IntrinsicBindingFlags,
+                null,
+                parameterTypes,
+                null)
+                .ThrowIfNull();
+            manager.RegisterMethod(
+                sourceMethod,
+                new PTXIntrinsic(
+                    PTXMemoryType,
+                    generatorName,
+                    IntrinsicImplementationMode.GenerateCode));
         }
 
         /// <summary>

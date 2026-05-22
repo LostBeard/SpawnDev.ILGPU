@@ -375,6 +375,9 @@ namespace ILGPU.Algorithms.PTX
                 AlgorithmContext.WarpExtensionsType,
                 PTXWarpExtensionsType,
                 "InclusiveScan");
+
+            // Register PTX-only explicit vector memory intrinsics.
+            RegisterMemoryIntrinsics(manager);
         }
     }
 }
