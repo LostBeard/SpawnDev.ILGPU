@@ -5729,13 +5729,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
 
             // Standard (non-emulated) path
-            if (value.Kind == BinaryArithmeticKind.Min || value.Kind == BinaryArithmeticKind.Max || value.Kind == BinaryArithmeticKind.PowF || value.Kind == BinaryArithmeticKind.Atan2F)
+            if (value.Kind == BinaryArithmeticKind.PowF)
+            {
+                // WGSL pow(x, y) is undefined for x < 0 and returns NaN.
+                // Runtime-safe guard: always use pow(abs(x), y), then apply sign
+                // correction for odd integer exponents. Uses abs(y) % 2.0 instead of
+                // y % 2.0 because WGSL % is IEEE remainder (can be negative for neg y)
+                // while we need the "is odd" test to work for negative exponents too.
+                // Matches the WebGL GLSLCodeGenerator fix (rc.21, mod(y,2.0)>=1 path).
+                AppendLine($"{prefix}{target} = pow(abs({left}), {right}) * select(1.0, -1.0, ({left} < 0.0) && ((abs({right}) % 2.0) >= 1.0));");
+                return;
+            }
+            if (value.Kind == BinaryArithmeticKind.Min || value.Kind == BinaryArithmeticKind.Max || value.Kind == BinaryArithmeticKind.Atan2F)
             {
                 string func = value.Kind switch
                 {
                     BinaryArithmeticKind.Min => "min",
                     BinaryArithmeticKind.Max => "max",
-                    BinaryArithmeticKind.PowF => "pow",
                     BinaryArithmeticKind.Atan2F => "atan2",
                     _ => "min"
                 };

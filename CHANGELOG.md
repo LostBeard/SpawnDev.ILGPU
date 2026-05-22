@@ -2,6 +2,22 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.7 (2026-05-22) — WebGPU pow negative-base fix
+
+### WebGPU: pow(negative_base, runtime_exponent) now returns correct result (not NaN)
+
+WGSL's `pow(x, y)` is undefined for `x < 0` and returns NaN. The rc.21 WebGL fix applied a runtime-safe guard (static constant exponents get expanded to multiplications; runtime exponents get a branch), but the WGSL paths in `WGSLKernelFunctionGenerator.cs` and `WGSLCodeGenerator.cs` were still emitting raw `pow(left, right)`.
+
+The guard is now applied to all three WGSL pow emission sites:
+
+```wgsl
+pow(abs(base), exp) * select(1.0, -1.0, (base < 0.0) && ((abs(exp) % 2.0) >= 1.0))
+```
+
+Note: uses `abs(exp) % 2.0` instead of `exp % 2.0` because WGSL `%` is the IEEE remainder (can be negative for negative `exp`), while the even/odd test requires a non-negative result. Matches GLSL's `mod(exp, 2.0)` behavior for all real-world ONNX exponent values.
+
+Surfaced by `Tests23_PowNegativeBase_ExponentFromBuffer_NoNaN` (`pow(-0.037, exp_from_buffer=2)` → NaN on WebGPU). Both WebGPU pow tests pass.
+
 ## 4.9.6 (2026-05-22) — PTX vector memory intrinsics + CUDA register fix
 
 ### PTX vector memory intrinsics (ILGPU.Algorithms.PTX)

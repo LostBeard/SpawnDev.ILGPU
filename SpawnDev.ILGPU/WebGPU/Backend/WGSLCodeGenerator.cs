@@ -1350,7 +1350,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
             else if (op == "pow_func")
             {
-                AppendLine($"{target} = pow({left}, {right});");
+                // WGSL pow(x,y) is undefined for x<0; same negative-base guard as
+                // WGSLKernelFunctionGenerator and GLSLCodeGenerator (rc.21 fix).
+                AppendLine($"{target} = pow(abs({left}), {right}) * select(1.0, -1.0, ({left} < 0.0) && ((abs({right}) % 2.0) >= 1.0));");
             }
             else if (op == "atan2_func")
             {
@@ -3480,7 +3482,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 var b = codeGenerator.LoadIntrinsicValue(methodCall[0].Resolve());
                 var e = codeGenerator.LoadIntrinsicValue(methodCall[1].Resolve());
                 codeGenerator.Declare(target);
-                codeGenerator.AppendLine($"{target} = pow({b}, {e});");
+                // Same negative-base guard as the kernel BinaryArithmetic PowF path.
+                codeGenerator.AppendLine($"{target} = pow(abs({b}), {e}) * select(1.0, -1.0, ({b} < 0.0) && ((abs({e}) % 2.0) >= 1.0));");
             }
         }
 

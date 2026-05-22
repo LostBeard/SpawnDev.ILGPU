@@ -4,8 +4,8 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.6</Version>
-		<PackageReleaseNotes>v4.9.6: PTX vector memory intrinsics (ld.v2.f32/ld.v4.f32/st.v2.f32/st.v4.f32) + Float2/Float4 structs, ArrayView LoadVectorized/StoreVectorized/CastAligned helpers, CUDA DefaultMaxRegistersPerThread default reverted to 0 (restores occupancy on normal kernels), System.Numerics.BitOperations remapped to hardware GPU intrinsics (CLZ/PopC/CTZ) on all backends. See CHANGELOG.md for details.</PackageReleaseNotes>
+		<Version>4.9.7</Version>
+		<PackageReleaseNotes>v4.9.7: WebGPU pow(negative_base, runtime_exponent) NaN fix - runtime-safe guard now applied when exponent is loaded from a buffer (not just compile-time constants). See CHANGELOG.md for details.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
