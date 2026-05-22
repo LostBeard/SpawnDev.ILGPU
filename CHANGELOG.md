@@ -2,6 +2,115 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.5 (2026-05-22) — Stable release
+
+Stable promotion of rc.25 through rc.28 plus local.17 and PMT infrastructure fixes. All 6 backends (WebGPU, WebGL, Wasm, CUDA, OpenCL, CPU) pass the full test sweep with zero real failures.
+
+### What's new since 4.9.4
+
+- WebGPU direct-param coalesce: kernels with >9 `ArrayView` parameters no longer hit Chrome's 10-binding limit
+- WGSL/WebGL codegen correctness for `[NoInlining]` helpers with 64-bit indices, sub-word ArrayViews, and cross-block pointer LEAs
+- WebGL multi-view body-struct kernel parameter decomposition (rc.25-26)
+- WebGPU body-struct output field exclusion from coalesce (rc.27)
+- IR Inliner cumulative-IL budget: kernels with deep call graphs (VP9 entropy walker, etc.) no longer produce 50K+ local Wasm/WGSL functions that crash browser compilers
+- PMT test discovery parser fix: prevents initialization console output from becoming phantom test names
+
+See rc.25, rc.26, rc.27, rc.28 and local.5-17 entries below for per-fix details.
+
+## 4.9.5-rc.28 (2026-05-05) — WebGPU/WebGL codegen correctness + IR Inliner cumulative budget
+
+Nuget.org build bundling local.5 through local.16. Zero real test failures across all 6 backends (269 pass / 4 skip / 0 fail).
+
+### WebGPU: direct-param coalesce (local.5-6)
+
+Kernels with more than 9 `ArrayView` parameters previously hit Chrome's 10-binding limit at dispatch time. Direct-param coalesce groups same-typed input-only `ArrayView` kernel parameters into a single shared storage buffer binding when the raw count would exceed the limit. v1 covers `i32`/`u32`/`f32`; v2 adds sub-word types (`Int8`/`UInt8`/`Int16`/`UInt16`/`Float16`) packed via `array<atomic<u32>>` with element-count offsets. Closes Tuvok's "11 storage buffer bindings, device max 10" on the AV1 walker.
+
+### WGSL: i64 offset and shift codegen in helper functions (local.7-9)
+
+Three sequential fixes closing WGSL compilation errors in kernels that use `[NoInlining]` helpers with 64-bit array indices:
+
+- **LEA i64 wrap** (`local.7`) - `WGSLFunctionGenerator.GenerateCode(LoadElementAddress)` now mirrors the kernel-side wrap at `WGSLKernelFunctionGenerator:4445`; detects `Int64` offset and wraps with `i64_to_i32(...)`. Closes `var v_X : i32 = vec2<u32>` Naga error from long `cdfBase` offsets.
+- **i64 shift dispatch** (`local.8`) - `WGSLCodeGenerator.GenerateBinOp` shift branch routes emu_i64/emu_u64 LHS through `i64_shl`/`i64_shr`/`u64_shr` instead of raw `>>`. Closes `vec2<u32> >> u32` Naga error.
+- **Sub-word LEA cross-block hoist** (`local.9`) - sub-word LEA `var v_X : i32` was block-scoped; cross-block uses failed Naga with "unresolved value". Fix: hoist to function scope via deferred-decl list when LEA is in `_crossBlockPointers`. Also adds defensive base `BinaryArithmetic` emu_i64 dispatch so helper-side `long a + long b` routes through library helpers instead of emitting component-wise `vec2<u32>`.
+
+### WGSL: helper-side monomorphization + cross-case substitution (local.10-11)
+
+- **Bug D phase 7 - helper signature monomorphization** (`local.10`) - `NoInlining` helpers that take `ArrayView` parameters from shared or local address spaces now get a separate WGSL binding per address space. Kernel scans `MethodCall` sites, records `(param, addressSpace)` pairs into a shared dict; helper signature emit reads from the dict. Closes `ptr<workgroup>` vs `ptr<storage>` Naga rejection at call sites.
+- **Cross-case substitution** (`local.11`) - second-pass post-process in `WGSLCodeGenerator` text-substitutes `*v_X` with the full deref expression for complex pointer LEAs that span switch-case blocks in the helper state machine. Closes "unresolved value" errors on multi-block helpers with pointer arithmetic.
+
+### WebGPU/WebGL: GroupDimX clamp + explicit-launch param offset (local.12)
+
+- **Group.DimX clamp** - `GroupDimensionValue` X-dim emit overridden to `i32(min(workgroup_size.x, _ilgpu_user_dim))` so auto-grouped kernels with fewer elements than workgroup size don't read out-of-bounds. Closes `Tests23_GroupDimX_Clamps_To_Extent_OnUnitDispatch` on WebGPU/WebGPUNoSubgroups.
+- **WebGL explicit-launch param offset** - `KernelParamOffset` dynamic detection mirrors WGSL; `WebGLAccelerator.MarshalArguments` glslParamOffset alignment fixed. Closes `Tests23_RegisterHeavyBody_ExplicitOneByOne` on WebGL.
+
+### WGSL: helper-side emu-64 ArrayView raw u32 storage (local.13)
+
+Helper function signatures for `ArrayView<long>`/`<ulong>`/`<double>` parameters now emit `array<u32>` matching the kernel's raw-bits binding. LEA/Load/Store in helpers mirror the kernel's stride=2 raw u32 access pattern. Closes Tuvok walker L44452 fn-def call-site type mismatch ("expected `array<u32>`, got `array<i64>`").
+
+### WebGL: i64 shift dispatch + emulation library forward declarations (local.14)
+
+- **i64 shift dispatch** - `GLSLCodeGenerator.GenerateBinOp` now routes `uvec2` LHS with `Int64` BasicValueType through `i64_shl`/`i64_shr`/`u64_shr` GLSL helpers instead of raw component-wise `uvec2 >> int`. Closes silent-wrong-output on kernels with 64-bit shift in helpers.
+- **Helper emulation library forward declarations** - ~30 prototype forward declarations emitted at the top of the helper builder so `i64_shr` and friends resolve before the library definition appears later in the merged output. Closes "no matching overloaded function found" linker error.
+
+### IR Inliner: cumulative IL budget (local.16-17)
+
+ILGPU's `Inliner.SetupInliningAttributes` in Aggressive mode (the default) previously inlined every method regardless of size. For kernels with deep call graphs (e.g. Tuvok's VP9 `EncodeFrameKernel` - recursive partition tree + bool-coder helper graph), this produced a single Wasm function with 52,012 locals and 750 KB of instruction bytes. V8's TurboFan and Naga both reject beyond ~50K locals; the result was a compile-time crash inside the browser, not a runtime error.
+
+- **local.16** - Per-function cap: `MaxNumILInstructionsAggressiveCap = 1024`. Methods over the cap get `MethodFlags.FunctionDefinition` (emitted as a WGSL `fn` / Wasm function call, not inlined). `[AggressiveInlining]` and ILGPU-internal helpers bypass the cap via `MethodFlags.ForceInline`.
+- **local.17** - Cumulative budget: `cumulativeInlinedIL` seeds from the kernel's own IL count; non-`ForceInline` calls that would push the running total past 16384 are left as fn-defs. This handles the VP9 fan-out case (4-deep partition tree, 50K+ IL when fully inlined) where every individual helper was under the per-function cap but the total exploded. Regression test `Tests23_DeepInlineTree_BudgetDoesNotBreakCorrectness` locks down correctness under the budget.
+
+## 4.9.5-local.17 (2026-05-05) — IR Inliner cumulative-IL budget (closes Tuvok codecs Wasm)
+
+Local-feed-only build. See rc.28 entry above for full description of the inliner cumulative budget mechanism.
+
+## 4.9.5-local.16 (2026-05-05) — IR Inliner aggressive-mode IL instruction count cap
+
+Local-feed-only build. See rc.28 entry above for description.
+
+## 4.9.5-local.15 (2026-05-05) — version bump + release notes
+
+Local-feed-only bump. No code changes beyond version metadata.
+
+## 4.9.5-local.14 (2026-05-05) — WebGL i64 shift dispatch + helper emulation-library forward decls
+
+Local-feed-only build. See rc.28 entry above for full description.
+
+## 4.9.5-local.13 (2026-05-05) — WGSL helper-side emu-64 ArrayView raw u32 storage
+
+Local-feed-only build. See rc.28 entry above for full description. Closes Tuvok walker L44452.
+
+## 4.9.5-local.12 (2026-05-05) — WebGPU GroupDim X-clamp + WebGL explicit-launch param offset
+
+Local-feed-only build. See rc.28 entry above for full description.
+
+## 4.9.5-local.11 (2026-05-05) — WGSL helper-side cross-case substitution for complex pointer LEAs
+
+Local-feed-only build. See rc.28 entry above for full description.
+
+## 4.9.5-local.10 (2026-05-05) — Bug D phase 7 helper-side cross-block hoist + monomorphization
+
+Local-feed-only build. See rc.28 entry above for full description.
+
+## 4.9.5-local.9 (2026-05-05) — WGSL sub-word LEA cross-block hoist + defensive emu_i64 BinaryArithmetic
+
+Local-feed-only build. See rc.28 entry above for full description.
+
+## 4.9.5-local.8 (2026-05-05) — WGSL i64 emulation library shift dispatch
+
+Local-feed-only build. See rc.28 entry above for full description.
+
+## 4.9.5-local.7 (2026-05-05) — WGSL helper-side LEA i64 offset wrap
+
+Local-feed-only build. See rc.28 entry above for full description.
+
+## 4.9.5-local.6 (2026-05-05) — WebGPU direct-param coalesce v2 (sub-word)
+
+Local-feed-only build. See rc.28 entry above for full description.
+
+## 4.9.5-local.5 (2026-05-05) — WebGPU direct-param coalesce v1 (i32/u32/f32)
+
+Local-feed-only build. See rc.28 entry above for full description.
+
 ## 4.9.5-local.4 (2026-05-05) — Wasm: explicit-launch body-struct kernel implicit-index detection + safer struct serialization
 
 Local-feed-only build. Closes `WasmTests.Tests23_RegisterHeavyBody_ExplicitOneByOne_NoLaunchFailure`

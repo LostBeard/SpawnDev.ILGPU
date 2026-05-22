@@ -11,10 +11,14 @@ try
     var sp = services.BuildServiceProvider();
     var runner = new UnitTestRunner(sp, true);
 
+    // NOTE: LocalTrackerFixture disabled by TJ on 2026-05-21 11-14 due to the massive perforamnce hit
+    // tests take and it should cleanly fallback to the live hub.spawndev.com tracker
+    // anyways. When it was enabled it started every single test causign a full test run to take ~3 hours.
+    // 
     // Start the local P2P tracker once before any tests run. Tests that don't need it
-    // are unaffected; real-WebRTC tests use LocalTrackerFixture.GetTrackerUrl() which
+    // are unaffected; real - WebRTC tests use LocalTrackerFixture.GetTrackerUrl() which
     // falls back to hub.spawndev.com when the local tracker isn't available.
-    await LocalTrackerFixture.InitAsync();
+    //await LocalTrackerFixture.InitAsync();
 
     await ConsoleRunner.Run(args, runner);
 }

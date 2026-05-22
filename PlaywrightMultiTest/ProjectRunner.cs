@@ -339,8 +339,12 @@ namespace PlaywrightMultiTest
                         // get test type name
                         var typeName = test.Split(".")[0];
 
-                        // get test method name
-                        var methodName = test.Split(".")[1];
+                        // get test method name — skip lines where the method part is empty (e.g.
+                        // console output from initialization code like "[LocalTracker] foo..." that
+                        // ends with a dot but has no real method name after it)
+                        var parts = test.Split(".");
+                        var methodName = parts.Length >= 2 ? parts[1] : "";
+                        if (string.IsNullOrWhiteSpace(methodName)) continue;
 
                         var rowTest = new ProjectTest(testableProject, typeName!, methodName!);
                         if (filter != null)

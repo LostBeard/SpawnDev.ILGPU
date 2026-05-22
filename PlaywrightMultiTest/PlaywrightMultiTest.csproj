@@ -9,6 +9,14 @@
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
 	</PropertyGroup>
 
+	<PropertyGroup>
+		<!-- Generates a safe timestamp string (e.g., 2026-05-21_183412) -->
+		<TestTimestamp>$([System.DateTime]::Now.ToString("yyyy-MM-dd_HHmmss"))</TestTimestamp>
+
+		<!-- Automatically appends the logger and dynamic filename to every dotnet test run -->
+		<VSTestArgs>$(VSTestArgs) --logger "trx;LogFileName=results_$(TestTimestamp).trx"</VSTestArgs>
+	</PropertyGroup>
+
 	<ItemGroup>
 	  <Content Include="assets\testcert.pfx">
 	    <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>

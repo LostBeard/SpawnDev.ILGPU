@@ -319,6 +319,8 @@ public class RealWebRtcPipelineTests
     [TestMethod(Timeout = 600000, RetryCount = 1, Category = "Stress")]
     public async Task LargeBuffer_100MB_DispatchedOverRealWebRtc_BitExact()
     {
+        if (!LocalTrackerFixture.IsAvailable)
+            throw new UnsupportedTestException("Requires local tracker (InitAsync) - wss peer discovery overhead pushes 100MB transfer past 10min PMT budget without localhost tracker");
         EnsureAllowlist();
         // Diagnostic mode: enable VerboseLogging so wire.OnClose path + UnregisterPeer
         // path emit Console.WriteLine traces. Captures the actual mid-dispatch
