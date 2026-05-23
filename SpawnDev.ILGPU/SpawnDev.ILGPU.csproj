@@ -4,8 +4,8 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.7</Version>
-		<PackageReleaseNotes>v4.9.7: WebGPU pow(negative_base, runtime_exponent) NaN fix - runtime-safe guard now applied when exponent is loaded from a buffer (not just compile-time constants). See CHANGELOG.md for details.</PackageReleaseNotes>
+		<Version>4.9.8</Version>
+		<PackageReleaseNotes>v4.9.8: WebGLDevice no longer leaks an OffscreenCanvas + WebGL2 context per device registration. The probe context is now explicitly destroyed via WEBGL_lose_context.loseContext() at the end of the constructor (capabilities cached in fields). .NET-side Dispose alone only releases the IJSInProcessObjectReference — the underlying JS WebGL context would otherwise survive until JS GC. Fixes "too many WebGL contexts" warning in browser when an app registers WebGL devices across many pages even without selecting the WebGL backend.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>

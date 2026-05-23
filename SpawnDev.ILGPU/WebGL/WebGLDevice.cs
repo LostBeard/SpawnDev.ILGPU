@@ -78,8 +78,6 @@ namespace SpawnDev.ILGPU.WebGL
 
         #region Instance
 
-        private OffscreenCanvas? _canvas;
-        private WebGL2RenderingContext? _gl;
         private readonly int _deviceIndex;
         private bool _disposed;
 
@@ -87,39 +85,65 @@ namespace SpawnDev.ILGPU.WebGL
         {
             _deviceIndex = deviceIndex;
 
-            // Create a small offscreen canvas for the WebGL2 context
-            _canvas = new OffscreenCanvas(1, 1);
-            _gl = _canvas.GetWebGL2Context();
+            // Create a short-lived OffscreenCanvas + WebGL2 context to probe capabilities,
+            // then explicitly destroy the WebGL context before returning.
+            //
+            // Why explicit destruction: .NET `using` / `Dispose` on a SpawnDev.BlazorJS
+            // JSObject only releases the .NET-side IJSInProcessObjectReference. The
+            // underlying JS OffscreenCanvas and its WebGL2 context survive until JS GC,
+            // which on a long-lived SPA can take many page navigations. Browsers throttle
+            // past ~16 live WebGL contexts per page; an app that registers WebGL devices
+            // across many pages (e.g. via AllAcceleratorsAsync at every demo page mount)
+            // hits the throttle warning even when WebGL is never the selected backend.
+            //
+            // The fix: call WEBGL_lose_context.loseContext() to force the browser to
+            // release the GL resources synchronously. Capability values stay cached on
+            // the device. Real accelerator contexts are still minted on-demand by
+            // CreateContext() when WebGL is actually selected.
+            using var canvas = new OffscreenCanvas(1, 1);
+            using var gl = canvas.GetWebGL2Context()
+                ?? throw new InvalidOperationException("WebGL2 is not supported in this browser.");
 
-            if (_gl == null)
-                throw new InvalidOperationException("WebGL2 is not supported in this browser.");
+            Name = GetRendererString(gl) ?? "WebGL2 Device";
+            Vendor = GetVendorString(gl) ?? "Unknown";
 
-            // Probe device capabilities
-            Name = GetRendererString() ?? "WebGL2 Device";
-            Vendor = GetVendorString() ?? "Unknown";
-
-            // Get limits via MAX parameters
-            MaxTextureSize = _gl.GetParameter<int>(GL.MAX_TEXTURE_SIZE);
-            MaxUniformBlockSize = _gl.GetParameter<int>(GL.MAX_UNIFORM_BLOCK_SIZE);
-            MaxTransformFeedbackSeparateComponents = _gl.GetParameter<int>(GL.MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS);
-            MaxTransformFeedbackInterleavedComponents = _gl.GetParameter<int>(GL.MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS);
+            MaxTextureSize = gl.GetParameter<int>(GL.MAX_TEXTURE_SIZE);
+            MaxUniformBlockSize = gl.GetParameter<int>(GL.MAX_UNIFORM_BLOCK_SIZE);
+            MaxTransformFeedbackSeparateComponents = gl.GetParameter<int>(GL.MAX_TRANSFORM_FEEDBACK_SEPARATE_COMPONENTS);
+            MaxTransformFeedbackInterleavedComponents = gl.GetParameter<int>(GL.MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS);
 
             // Estimate max vertex count for GPGPU dispatch
             // WebGL2 guarantees at least 2^24 − 1 vertices
             MaxVertexCount = 16777215; // 2^24 - 1
+
+            // Explicitly destroy the probe WebGL context. WEBGL_lose_context is universally
+            // available in WebGL2; the extension call is best-effort — if it fails for any
+            // reason the .NET dispose still releases the IJSInProcessObjectReference.
+            try
+            {
+                using var loseExt = gl.GetExtension("WEBGL_lose_context");
+                if (loseExt is not null)
+                {
+                    loseExt.JSRef!.CallVoid("loseContext");
+                }
+            }
+            catch
+            {
+                // Best-effort — capability probe still succeeded.
+            }
         }
 
-        private string? GetRendererString()
+        private static string? GetRendererString(WebGL2RenderingContext gl)
         {
             try
             {
                 // Try WEBGL_debug_renderer_info for unmasked renderer
-                var ext = _gl!.GetExtension("WEBGL_debug_renderer_info");
+                var ext = gl.GetExtension("WEBGL_debug_renderer_info");
                 if (ext != null)
                 {
-                    return _gl.GetParameter<string>(GL.UNMASKED_RENDERER_WEBGL);
+                    return gl.GetParameter<string>(GL.UNMASKED_RENDERER_WEBGL);
                 }
-                return _gl.GetParameter<string>(GL.RENDERER);
+                return gl.GetParameter<string>(GL.RENDERER);
             }
             catch
             {
@@ -127,16 +151,16 @@ namespace SpawnDev.ILGPU.WebGL
             }
         }
 
-        private string? GetVendorString()
+        private static string? GetVendorString(WebGL2RenderingContext gl)
         {
             try
             {
-                var ext = _gl!.GetExtension("WEBGL_debug_renderer_info");
+                var ext = gl.GetExtension("WEBGL_debug_renderer_info");
                 if (ext != null)
                 {
-                    return _gl.GetParameter<string>(GL.UNMASKED_VENDOR_WEBGL);
+                    return gl.GetParameter<string>(GL.UNMASKED_VENDOR_WEBGL);
                 }
-                return _gl.GetParameter<string>(GL.VENDOR);
+                return gl.GetParameter<string>(GL.VENDOR);
             }
             catch
             {
@@ -231,10 +255,10 @@ namespace SpawnDev.ILGPU.WebGL
         {
             if (_disposed) return;
             _disposed = true;
-            _gl?.Dispose();
-            _gl = null;
-            _canvas?.Dispose();
-            _canvas = null;
+            // No long-lived OffscreenCanvas/WebGL2RenderingContext is held by the device
+            // itself — the constructor's probe context is disposed at the end of the
+            // constructor. Per-accelerator contexts are owned by their respective
+            // WebGLAccelerator instances and disposed when those accelerators dispose.
         }
 
         #endregion

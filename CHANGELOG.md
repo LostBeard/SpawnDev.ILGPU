@@ -2,6 +2,16 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.8 (2026-05-23) — WebGL device probe no longer leaks a context per registration
+
+### WebGLDevice constructor was leaking one WebGL2 context per registration
+
+`WebGLDevice` is constructed (via `WebGL()` builder extension / `AllAcceleratorsAsync()`) for every page that probes available accelerators, even when the app never selects the WebGL backend. The constructor created a 1×1 `OffscreenCanvas` plus a `WebGL2RenderingContext`, read capability values (max texture size, max UBO size, max TF components, renderer string, vendor string) into fields, then **stored the canvas+context in fields and never read them again**. Browsers throttle WebGL contexts (~16 per page on Chromium); apps with many demo pages or repeated context creation hit "too many active WebGL contexts" warnings.
+
+The fix: the probe canvas and context are now `using`-scoped inside the constructor and disposed before it returns. All capabilities are still cached. Per-accelerator contexts are unchanged — `CreateContext()` still mints fresh canvas + context per `WebGLAccelerator` instance, owned by that accelerator and disposed when it disposes.
+
+Surfaced by Captain on the SpawnDev.ILGPU.ML demo: navigating between WebGPU-backed demo pages produced a Chrome console warning about too many WebGL contexts despite WebGL never being selected.
+
 ## 4.9.7 (2026-05-22) — WebGPU pow negative-base fix
 
 ### WebGPU: pow(negative_base, runtime_exponent) now returns correct result (not NaN)
