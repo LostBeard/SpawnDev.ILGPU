@@ -4313,8 +4313,33 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 if (param.Index < paramOffset) continue;
 
-                // Skip body struct params — they're handled separately in _bodyStructParams
-                if (_bodyStructParams.ContainsKey(param.Index)) continue;
+                // Body struct params: their user-scalar fields CONSUME packed-scalar slots
+                // (ScanBodyStructParams assigned fieldInfo.ScalarSlot for each). If we just
+                // `continue` here we leave scalarSlotOffset stale and any TRAILING packed
+                // scalar gets the WRONG slot index in its `_scalar_params[N]` emit — the
+                // emitted index falls in the body struct's slot range, reading D0/D1/etc
+                // values instead of the actual scalar input. Repro:
+                // TensorViewStructParam_HelperPattern_1DOutput_Indexes_Correctly (two
+                // TensorView-shaped body structs followed by float/float/int trailing
+                // scalars - scaleA/scaleB/mode all read body-struct dim slots and
+                // produced garbage on WebGPU + WebGL).
+                //
+                // Advance scalarSlotOffset by the body struct's user-scalar consumption
+                // (skipping view + view-metadata fields) so the trailing-scalar slot math
+                // matches GenerateHeader.
+                if (_bodyStructParams.TryGetValue(param.Index, out var bsFields))
+                {
+                    foreach (var bf in bsFields)
+                    {
+                        if (bf.IsView || bf.IsViewMetadata) continue;
+                        var bsScalarElemType = GetBufferElementType(bf.FieldType);
+                        var bsWgslType = TypeGenerator[bsScalarElemType];
+                        bool bsIsEmuF64 = Backend.EnableF64Emulation && bsWgslType == "emu_f64";
+                        bool bsIsEmuI64 = Backend.EnableI64Emulation && (bsWgslType == "emu_i64" || bsWgslType == "emu_u64");
+                        scalarSlotOffset += (bsIsEmuF64 || bsIsEmuI64) ? 2 : 1;
+                    }
+                    continue;
+                }
 
                 IsMultiDim(param.ParameterType, out var isMultiDim, out var isView, out var is1DView, out var is2DView, out var is3DView);
                 bool isStruct = param.ParameterType is global::ILGPU.IR.Types.StructureType && !isView;

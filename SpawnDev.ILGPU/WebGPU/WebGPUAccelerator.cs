@@ -1140,7 +1140,16 @@ namespace SpawnDev.ILGPU.WebGPU
                             // scalar fill to try to serialize the underlying ArrayView arg as a struct
                             // (CopyStructToBytes fails: ArrayView has pointer fields).
                             if (entry.IsViewOffset || entry.IsViewCount || entry.IsCoalesceFieldOffset) continue;
-                            int effectiveArgsIdx = entry.ParamIndex - kernelParamOffset;
+                            // Use argsToEffectiveOffset to map past body-struct expansion. Each body
+                            // struct param consumes its IR slot (1 args index) but its FIELDS occupy
+                            // multiple expandedArgs slots. So a trailing scalar at args[N] is actually
+                            // at expandedArgs[argsToEffectiveOffset[N]], not at expandedArgs[N].
+                            // Without this lookup, scaleA in a kernel like
+                            //   (Index1D, BodyStructF, BodyStructI, float scaleA, float scaleB, int mode)
+                            // reads from inside the first body struct's expanded user-scalar fields.
+                            int argsIdx = entry.ParamIndex - kernelParamOffset;
+                            if (argsIdx < 0 || argsIdx >= argsToEffectiveOffset.Length) continue;
+                            int effectiveArgsIdx = argsToEffectiveOffset[argsIdx];
                             if (effectiveArgsIdx >= 0 && effectiveArgsIdx < effectiveArgsCount)
                                 packedScalarLookup[effectiveArgsIdx] = entry;
                         }

@@ -1,0 +1,439 @@
+using ILGPU;
+using ILGPU.Runtime;
+using SpawnDev.UnitTesting;
+
+namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
+{
+    // Part 24: TensorView-shaped struct-param regression tests.
+    //
+    // SpawnDev.ILGPU.ML.Tensors.TensorView<T> is a readonly struct that wraps
+    // ArrayView1D<T, Stride1D.Dense> Data + five int fields (D0..D3, Rank). It's
+    // the canonical "single-view + scalar metadata" struct - blittable, kernel-passable.
+    //
+    // On 2026-05-24 the ML depth demo went flat-blue after migrating
+    // DepthToColormapPalette to a TensorView overload. The diff surfaced two
+    // distinct SpawnDev.ILGPU codegen bugs (captured by ML regression test
+    // Postprocess_DepthToColormapPalette_TensorView_Matches_Legacy, commit 99e7a17):
+    //
+    //   (a) WebGPU: in a kernel with TWO TensorView struct params, reading
+    //       firstStruct.Data[idx] returns Data[0] for every idx. Writes through the
+    //       second struct's Data field at idx work correctly.
+    //   (b) Wasm + WebGL: writes to MemoryBuffer2D<int>.View.BaseView silently
+    //       zero out even via a plain ArrayView1D kernel (no struct wrapper at all).
+    //
+    // These tests are scoped to SpawnDev.ILGPU - no dependency on the ML library.
+    // The struct shape (one ArrayView1D + 5 ints) mirrors TensorView<T> exactly.
+    public abstract partial class BackendTestBase
+    {
+        #region TensorView-shaped Struct-Param Regression
+
+        /// <summary>Mirrors SpawnDev.ILGPU.ML.Tensors.TensorView&lt;float&gt; field layout.</summary>
+        public readonly struct ViewStructF
+        {
+            public readonly ArrayView1D<float, Stride1D.Dense> Data;
+            public readonly int D0, D1, D2, D3, Rank;
+            public ViewStructF(ArrayView1D<float, Stride1D.Dense> data, int d0, int d1, int d2, int d3, int rank)
+            { Data = data; D0 = d0; D1 = d1; D2 = d2; D3 = d3; Rank = rank; }
+        }
+
+        /// <summary>Mirrors SpawnDev.ILGPU.ML.Tensors.TensorView&lt;int&gt; field layout.</summary>
+        public readonly struct ViewStructI
+        {
+            public readonly ArrayView1D<int, Stride1D.Dense> Data;
+            public readonly int D0, D1, D2, D3, Rank;
+            public ViewStructI(ArrayView1D<int, Stride1D.Dense> data, int d0, int d1, int d2, int d3, int rank)
+            { Data = data; D0 = d0; D1 = d1; D2 = d2; D3 = d3; Rank = rank; }
+        }
+
+        // Kernel pattern: read from first TensorView-shaped struct, write to second.
+        // Mirrors DepthToColormapPaletteTensorViewImpl exactly: idx -> in.Data[idx] -> compute -> out.Data[idx].
+        static void TwoViewStruct_ReadFirst_WriteSecond_Kernel(Index1D idx, ViewStructF src, ViewStructI dst)
+        {
+            // If src.Data[idx] reads src.Data[0] for all idx (WebGPU bug signature),
+            // every output element will be the same value. CPU reference reads idx,
+            // so the per-index output should be 100 + idx*2.
+            float v = src.Data[idx];
+            dst.Data[idx] = 100 + (int)(v * 2f);
+        }
+
+        // Mirrors the ML DepthToColormapPalette pattern *exactly*: the kernel
+        // function unwraps each struct's Data field and forwards both ArrayViews
+        // (plus scalar params) into a helper that does the actual indexing.
+        // The ML kernel also has trailing scalar params (float, float, int) and
+        // branchy logic in the helper; both modelled below to keep the codegen
+        // shape as close as possible.
+        static void TwoViewStruct_HelperPattern_Kernel(Index1D idx, ViewStructF src, ViewStructI dst,
+            float scaleA, float scaleB, int mode)
+        {
+            TwoViewStruct_HelperPattern_Impl(idx, src.Data, dst.Data, scaleA, scaleB, mode);
+        }
+
+        static void TwoViewStruct_HelperPattern_Impl(Index1D idx,
+            ArrayView1D<float, Stride1D.Dense> src,
+            ArrayView1D<int, Stride1D.Dense> dst,
+            float scaleA, float scaleB, int mode)
+        {
+            float v = src[idx];
+            float t = (v - scaleA) / (scaleB - scaleA);
+            // Branchy logic so the helper isn't trivially inlined.
+            int result;
+            if (mode == 0)
+                result = (int)(t * 255f);
+            else if (mode == 1)
+                result = (int)((1f - t) * 255f);
+            else
+                result = (int)(t * 128f) + 64;
+            dst[idx] = 1000 + result;
+        }
+
+        /// <summary>
+        /// WGSL-capture variant: same as HelperPattern_1DOutput but also installs
+        /// a WebGPUBackend.OnShaderCompiled hook to capture the generated WGSL.
+        /// The captured shader is embedded in the failure message so we can see
+        /// exactly what's wrong with the scalar-slot layout. Skipped on non-WebGPU
+        /// backends since the bug is WebGPU-specific.
+        /// </summary>
+        [TestMethod]
+        public async Task TensorViewStructParam_HelperPattern_1DOutput_DumpsWGSL() => await RunTest(async accelerator =>
+        {
+            if (accelerator.AcceleratorType != AcceleratorType.WebGPU)
+                throw new UnsupportedTestException("WebGPU-only WGSL capture diagnostic");
+
+            const int N = 16;
+            var src = new float[N];
+            for (int i = 0; i < N; i++) src[i] = i;
+
+            using var srcBuf = accelerator.Allocate1D(src);
+            using var dstBuf = accelerator.Allocate1D<int>(N);
+
+            var srcView = new ViewStructF(srcBuf.View, N, 1, 1, 1, 1);
+            var dstView = new ViewStructI(dstBuf.View, N, 1, 1, 1, 1);
+
+            // Install WGSL capture hook before kernel load.
+            string? capturedWgsl = null;
+            string? capturedHelperWgsl = null;
+            Action<string, string, global::SpawnDev.ILGPU.WebGPU.Backend.WGSLEntry>? handler = (name, wgsl, info) =>
+            {
+                if (name.Contains("HelperPattern_Kernel")) capturedWgsl = wgsl;
+                else if (name.Contains("HelperPattern_Impl")) capturedHelperWgsl = wgsl;
+            };
+            global::SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.OnShaderCompiled += handler;
+            try
+            {
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ViewStructF, ViewStructI, float, float, int>(
+                    TwoViewStruct_HelperPattern_Kernel);
+                kernel((Index1D)N, srcView, dstView, 0f, 15f, 0);
+                await accelerator.SynchronizeAsync();
+            }
+            finally
+            {
+                global::SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.OnShaderCompiled -= handler;
+            }
+
+            var actual = await dstBuf.CopyToHostAsync<int>(0, N);
+            int diffs = 0;
+            for (int i = 0; i < N; i++)
+            {
+                float t = (i - 0f) / (15f - 0f);
+                int expected = 1000 + (int)(t * 255f);
+                if (actual[i] != expected) diffs++;
+            }
+            if (diffs > 0)
+            {
+                // Strip i64/f64 emulation library prelude; we only need bindings + kernel body.
+                // The dump captures everything from `Kernel:` header to end. Cut to the
+                // "@group" first occurrence (binding decls start here in GenerateHeader).
+                static string TrimPrelude(string? wgsl)
+                {
+                    if (string.IsNullOrEmpty(wgsl)) return "(not captured)";
+                    var idx = wgsl.IndexOf("@group", StringComparison.Ordinal);
+                    if (idx < 0)
+                    {
+                        // Fall back to last 2500 chars
+                        return wgsl.Length > 2500 ? "...EARLY OMITTED...\n" + wgsl.Substring(wgsl.Length - 2500) : wgsl;
+                    }
+                    // Back up to start of comment block before the @group line
+                    int lineStart = wgsl.LastIndexOf("// Param", idx, StringComparison.Ordinal);
+                    if (lineStart < 0) lineStart = idx;
+                    var trimmed = wgsl.Substring(lineStart);
+                    if (trimmed.Length > 8000) trimmed = trimmed.Substring(0, 8000) + "\n... TRUNCATED ...";
+                    return trimmed;
+                }
+                throw new Exception(
+                    $"{diffs}/{N} mismatches. actual[0..3]={actual[0]},{actual[1]},{actual[2]},{actual[3]} " +
+                    $"expected[0..3]=1000,1017,1034,1051\n" +
+                    $"=== KERNEL WGSL (post-prelude) ===\n{TrimPrelude(capturedWgsl)}\n" +
+                    $"=== HELPER WGSL (post-prelude) ===\n{TrimPrelude(capturedHelperWgsl)}");
+            }
+        });
+
+        /// <summary>
+        /// Bisect variant A: same helper-pattern kernel as the failing test,
+        /// but output buffer is Allocate1D instead of Allocate2DDenseX. Isolates
+        /// the 2D-buffer-output factor from the struct-param + helper factors.
+        /// </summary>
+        [TestMethod]
+        public async Task TensorViewStructParam_HelperPattern_1DOutput_Indexes_Correctly() => await RunTest(async accelerator =>
+        {
+            const int N = 16;
+            var src = new float[N];
+            for (int i = 0; i < N; i++) src[i] = i;
+
+            using var srcBuf = accelerator.Allocate1D(src);
+            using var dstBuf = accelerator.Allocate1D<int>(N);
+
+            var srcView = new ViewStructF(srcBuf.View, N, 1, 1, 1, 1);
+            var dstView = new ViewStructI(dstBuf.View, N, 1, 1, 1, 1);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ViewStructF, ViewStructI, float, float, int>(
+                TwoViewStruct_HelperPattern_Kernel);
+            kernel((Index1D)N, srcView, dstView, 0f, 15f, 0);
+            await accelerator.SynchronizeAsync();
+
+            var actual = await dstBuf.CopyToHostAsync<int>(0, N);
+
+            int diffs = 0;
+            var msg = new System.Text.StringBuilder();
+            for (int i = 0; i < N; i++)
+            {
+                float t = (i - 0f) / (15f - 0f);
+                int expected = 1000 + (int)(t * 255f);
+                if (actual[i] != expected)
+                {
+                    diffs++;
+                    if (diffs <= 4) msg.Append($"[{i}] got={actual[i]} expected={expected} ");
+                }
+            }
+            if (diffs > 0)
+                throw new Exception($"{diffs}/{N} mismatches. First: {msg}");
+        });
+
+        /// <summary>
+        /// Bisect variant B: 2D-buffer output AND helper pattern, but source is
+        /// Allocate1D-backed (the failing test had this combo). If this passes
+        /// while the original fails, the bug requires both source and dest in
+        /// specific configurations.
+        /// </summary>
+        [TestMethod]
+        public async Task TensorViewStructParam_HelperPattern_Inline_Indexes_Correctly() => await RunTest(async accelerator =>
+        {
+            // Same kernel as TwoViewStruct_HelperPattern_Kernel but inlined - no helper call.
+            // If this passes while the helper-call test fails, the bug is triggered by the
+            // ILGPU IR pattern produced when struct.Data is forwarded to a helper.
+            const int N = 16;
+            var src = new float[N];
+            for (int i = 0; i < N; i++) src[i] = i;
+
+            using var srcBuf = accelerator.Allocate1D(src);
+            using var dstBuf2D = accelerator.Allocate2DDenseX<int>(new Index2D(N, 1));
+
+            var srcView = new ViewStructF(srcBuf.View, N, 1, 1, 1, 1);
+            var dstView = new ViewStructI(dstBuf2D.View.BaseView, N, 1, 1, 1, 1);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ViewStructF, ViewStructI, float, float, int>(
+                static (Index1D idx, ViewStructF src, ViewStructI dst, float scaleA, float scaleB, int mode) =>
+                {
+                    float v = src.Data[idx];
+                    float t = (v - scaleA) / (scaleB - scaleA);
+                    int result;
+                    if (mode == 0) result = (int)(t * 255f);
+                    else if (mode == 1) result = (int)((1f - t) * 255f);
+                    else result = (int)(t * 128f) + 64;
+                    dst.Data[idx] = 1000 + result;
+                });
+            kernel((Index1D)N, srcView, dstView, 0f, 15f, 0);
+            await accelerator.SynchronizeAsync();
+
+            using var stage = accelerator.Allocate1D<int>(N);
+            stage.View.CopyFrom(dstBuf2D.View.BaseView);
+            await accelerator.SynchronizeAsync();
+            var actual = await stage.CopyToHostAsync<int>(0, N);
+
+            int diffs = 0;
+            var msg = new System.Text.StringBuilder();
+            for (int i = 0; i < N; i++)
+            {
+                float t = (i - 0f) / (15f - 0f);
+                int expected = 1000 + (int)(t * 255f);
+                if (actual[i] != expected)
+                {
+                    diffs++;
+                    if (diffs <= 4) msg.Append($"[{i}] got={actual[i]} expected={expected} ");
+                }
+            }
+            if (diffs > 0)
+                throw new Exception($"{diffs}/{N} mismatches. First: {msg}");
+        });
+
+        /// <summary>
+        /// ML-pattern repro: kernel unwraps struct.Data into a helper function with
+        /// trailing scalar params + branches. This mirrors the actual depth kernel
+        /// shape and is the candidate for triggering the "Data[idx] reads Data[0]"
+        /// WebGPU regression that the ML cross-backend test caught.
+        /// </summary>
+        [TestMethod]
+        public async Task TensorViewStructParam_HelperPattern_Indexes_Correctly() => await RunTest(async accelerator =>
+        {
+            const int N = 16;
+            var src = new float[N];
+            for (int i = 0; i < N; i++) src[i] = i;
+
+            using var srcBuf = accelerator.Allocate1D(src);
+            // Source allocated as 2D MemoryBuffer<int> to mirror the ML depth
+            // pipeline exactly - this is what fails on WebGPU+TensorView.
+            using var dstBuf2D = accelerator.Allocate2DDenseX<int>(new Index2D(N, 1));
+
+            var srcView = new ViewStructF(srcBuf.View, N, 1, 1, 1, 1);
+            var dstView = new ViewStructI(dstBuf2D.View.BaseView, N, 1, 1, 1, 1);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ViewStructF, ViewStructI, float, float, int>(
+                TwoViewStruct_HelperPattern_Kernel);
+            kernel((Index1D)N, srcView, dstView, 0f, 15f, 0);
+            await accelerator.SynchronizeAsync();
+
+            using var stage = accelerator.Allocate1D<int>(N);
+            stage.View.CopyFrom(dstBuf2D.View.BaseView);
+            await accelerator.SynchronizeAsync();
+            var actual = await stage.CopyToHostAsync<int>(0, N);
+
+            int diffs = 0;
+            var msg = new System.Text.StringBuilder();
+            for (int i = 0; i < N; i++)
+            {
+                float t = (i - 0f) / (15f - 0f);
+                int expected = 1000 + (int)(t * 255f);
+                if (actual[i] != expected)
+                {
+                    diffs++;
+                    if (diffs <= 4) msg.Append($"[{i}] got={actual[i]} expected={expected} ");
+                }
+            }
+            if (diffs > 0)
+                throw new Exception($"{diffs}/{N} mismatches. First: {msg}");
+        });
+
+        /// <summary>
+        /// Two TensorView-shaped struct params, kernel reads from the first's ArrayView
+        /// and writes to the second's ArrayView - the exact pattern that broke depth
+        /// demo on WebGPU. CPU/CUDA/OpenCL must pass (the bug only surfaces on WebGPU).
+        /// </summary>
+        [TestMethod]
+        public async Task TensorViewStructParam_ReadFirst_WriteSecond_Indexes_Correctly() => await RunTest(async accelerator =>
+        {
+            const int N = 16;
+            var src = new float[N];
+            for (int i = 0; i < N; i++) src[i] = i;
+
+            using var srcBuf = accelerator.Allocate1D(src);
+            using var dstBuf = accelerator.Allocate1D<int>(N);
+
+            var srcView = new ViewStructF(srcBuf.View, N, 1, 1, 1, 1);
+            var dstView = new ViewStructI(dstBuf.View, N, 1, 1, 1, 1);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ViewStructF, ViewStructI>(
+                TwoViewStruct_ReadFirst_WriteSecond_Kernel);
+            kernel((Index1D)N, srcView, dstView);
+            await accelerator.SynchronizeAsync();
+
+            var actual = await dstBuf.CopyToHostAsync<int>(0, N);
+            int diffs = 0;
+            var msg = new System.Text.StringBuilder();
+            for (int i = 0; i < N; i++)
+            {
+                int expected = 100 + i * 2;
+                if (actual[i] != expected)
+                {
+                    diffs++;
+                    if (diffs <= 4)
+                        msg.Append($"[{i}] got={actual[i]} expected={expected} ");
+                }
+            }
+            if (diffs > 0)
+                throw new Exception($"{diffs}/{N} mismatches. First mismatches: {msg}");
+        });
+
+        // Source buffer is a MemoryBuffer2D<int>'s BaseView. Mirrors the ML depth
+        // pipeline's resultBuf.View.BaseView usage.
+        static void Write1DKernel(Index1D idx, ArrayView1D<int, Stride1D.Dense> dst)
+        {
+            dst[idx] = 1000 + idx;
+        }
+
+        /// <summary>
+        /// Wasm + WebGL silently-zero bug. Allocate a MemoryBuffer2D&lt;int&gt;,
+        /// dispatch a plain ArrayView1D-output kernel against its BaseView, read back.
+        /// CPU/CUDA/OpenCL must pass. On Wasm + WebGL the readback is currently all-zero.
+        /// </summary>
+        [TestMethod]
+        public async Task MemoryBuffer2D_Int_BaseView_Writes_Are_Visible() => await RunTest(async accelerator =>
+        {
+            const int W = 4, H = 4, N = W * H;
+            using var buf2D = accelerator.Allocate2DDenseX<int>(new Index2D(W, H));
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>>(
+                Write1DKernel);
+            kernel((Index1D)N, buf2D.View.BaseView);
+            await accelerator.SynchronizeAsync();
+
+            // Stage to 1D for readback (CopyToHostAsync is on MemoryBuffer1D).
+            using var stage = accelerator.Allocate1D<int>(N);
+            stage.View.CopyFrom(buf2D.View.BaseView);
+            await accelerator.SynchronizeAsync();
+            var actual = await stage.CopyToHostAsync<int>(0, N);
+
+            int zeros = 0;
+            for (int i = 0; i < N; i++) if (actual[i] == 0) zeros++;
+            if (zeros == N)
+                throw new Exception("MemoryBuffer2D<int>.BaseView writes silently zeroed - kernel didn't materialise.");
+
+            int diffs = 0;
+            var msg = new System.Text.StringBuilder();
+            for (int i = 0; i < N; i++)
+            {
+                int expected = 1000 + i;
+                if (actual[i] != expected)
+                {
+                    diffs++;
+                    if (diffs <= 4) msg.Append($"[{i}] got={actual[i]} expected={expected} ");
+                }
+            }
+            if (diffs > 0)
+                throw new Exception($"{diffs}/{N} mismatches. First: {msg}");
+        });
+
+        /// <summary>
+        /// Float sibling — does the bug care about element type? If MemoryBuffer2D&lt;float&gt;.BaseView
+        /// passes everywhere while int fails on Wasm/WebGL, the bug is dtype-specific (sub-word vs
+        /// 4-byte int are both 4 bytes, so it's likely not byte-size but type-routing in codegen).
+        /// </summary>
+        [TestMethod]
+        public async Task MemoryBuffer2D_Float_BaseView_Writes_Are_Visible() => await RunTest(async accelerator =>
+        {
+            const int W = 4, H = 4, N = W * H;
+            using var buf2D = accelerator.Allocate2DDenseX<float>(new Index2D(W, H));
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>>(
+                static (Index1D idx, ArrayView1D<float, Stride1D.Dense> dst) => dst[idx] = 1000f + idx);
+            kernel((Index1D)N, buf2D.View.BaseView);
+            await accelerator.SynchronizeAsync();
+
+            using var stage = accelerator.Allocate1D<float>(N);
+            stage.View.CopyFrom(buf2D.View.BaseView);
+            await accelerator.SynchronizeAsync();
+            var actual = await stage.CopyToHostAsync<float>(0, N);
+
+            int zeros = 0;
+            for (int i = 0; i < N; i++) if (actual[i] == 0f) zeros++;
+            if (zeros == N)
+                throw new Exception("MemoryBuffer2D<float>.BaseView writes silently zeroed - kernel didn't materialise.");
+
+            int diffs = 0;
+            for (int i = 0; i < N; i++)
+                if (MathF.Abs(actual[i] - (1000f + i)) > 1e-4f) diffs++;
+            if (diffs > 0)
+                throw new Exception($"{diffs}/{N} float mismatches.");
+        });
+
+        #endregion
+    }
+}
