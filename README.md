@@ -9,7 +9,11 @@ Write parallel compute code in C# and let the library pick the best available ba
 
 ## Recent Highlights
 
-**4.9.5 (current):** WebGPU direct-param coalesce - kernels with more than 9 `ArrayView` parameters no longer hit Chrome's 10-binding limit (i32/u32/f32 and sub-word types coalesced into a shared `array<atomic<u32>>` binding). IR Inliner cumulative-IL budget - kernels with deep call graphs (VP9 entropy walker, large codec helpers) no longer produce 50K+ local Wasm functions that crash V8/Naga. WebGL multi-view body-struct decomposition and WGSL/WebGL codegen correctness fixes for `[NoInlining]` helpers with 64-bit indices, sub-word ArrayViews, and cross-block pointer LEAs. GroupDimX extent clamp. Zero real test failures across all 6 backends.
+**4.9.9 (current):** New backend-agnostic `CopyFromAsync` extension (`ArrayView<T>` / `ArrayView1D<T,TStride>` / `MemoryBuffer1D<T,TStride>`) - the async mirror of `CopyFrom`, draining pending Wasm worker dispatches before the copy (no-op on other backends). WebGPU scalar-slot drift fix for kernels with body-struct + trailing-scalar params (unblocks ML TensorView migration). WebGL GPU→GPU `CopyTo`/`CopyFrom` stale-CPU-side fix. Wasm `wait32`/`notify` barriers re-confirmed to race on V8 - pure-spin stays, gated default-off re-test harness retained.
+
+**4.9.6-4.9.8:** PTX vector memory intrinsics (`ld.v2/v4.f32`) + `ArrayView.LoadVectorized`/`StoreVectorized`, `System.Numerics.BitOperations` mapped to hardware GPU intrinsics, CUDA `DefaultMaxRegistersPerThread` occupancy fix, WebGPU `pow(negative_base, runtime_exp)` NaN fix, WebGLDevice probe-context leak fix.
+
+**4.9.5:** WebGPU direct-param coalesce - kernels with more than 9 `ArrayView` parameters no longer hit Chrome's 10-binding limit (i32/u32/f32 and sub-word types coalesced into a shared `array<atomic<u32>>` binding). IR Inliner cumulative-IL budget - kernels with deep call graphs (VP9 entropy walker, large codec helpers) no longer produce 50K+ local Wasm functions that crash V8/Naga. WebGL multi-view body-struct decomposition and WGSL/WebGL codegen correctness fixes for `[NoInlining]` helpers with 64-bit indices, sub-word ArrayViews, and cross-block pointer LEAs. GroupDimX extent clamp. Zero real test failures across all 6 backends.
 
 **4.9.4:** Wasm `CopyToHostAsync` partial readback + WebGPU `Half` NaN/Inf bitcast fix.
 
@@ -161,7 +165,7 @@ SpawnDev.ILGPU bundles ILGPU's native backends, so the same NuGet package works 
 - **Higher-order kernels** - `DelegateSpecialization<Func<T,R>>` lets you pass operations as kernel parameters. The delegate is resolved and inlined at compile time - one kernel, many behaviors
 - **Cross-platform** - Same kernel code runs in browser (WebGPU, WebGL, Wasm) and desktop (Cuda, OpenCL, CPU) from one NuGet package
 - **Automatic backend selection** - `CreatePreferredAcceleratorAsync()` picks the best backend on any platform (browser or desktop)
-- **Unified async API** - `SynchronizeAsync()` and `CopyToHostAsync()` work everywhere, falling back to synchronous calls on desktop
+- **Unified async API** - `SynchronizeAsync()`, `CopyToHostAsync()`, and `CopyFromAsync()` work everywhere, falling back to synchronous calls on desktop
 - **ILGPU-compatible** - Use familiar APIs (`ArrayView`, `Index1D/2D/3D`, math intrinsics, etc.)
 - **WGSL transpilation** - C# kernels automatically compiled to WebGPU Shading Language
 - **GLSL transpilation** - C# kernels compiled to GLSL ES 3.0 vertex shaders with Transform Feedback for GPU compute
@@ -471,9 +475,15 @@ await accelerator.SynchronizeAsync();
 
 // CopyToHostAsync() - the ONLY way to read GPU data back to CPU
 var results = await buffer.CopyToHostAsync<float>();
+
+// CopyFromAsync() - GPU->GPU copy that is safe to call right after an
+// unawaited kernel dispatch (drains pending Wasm worker writes first).
+// Use this instead of the sync CopyFrom in async code; no-op drain on
+// WebGPU/WebGL/CUDA/OpenCL/CPU (those already serialize the copy).
+await dstBuffer.View.CopyFromAsync(srcView);
 ```
 
-> **Note:** `Synchronize()` does **not** block in Blazor WASM - it flushes commands without waiting. `SynchronizeAsync()` flushes and waits for completion. Neither transfers data; use `CopyToHostAsync()` for GPU->CPU readback.
+> **Note:** `Synchronize()` does **not** block in Blazor WASM - it flushes commands without waiting. `SynchronizeAsync()` flushes and waits for completion. Neither transfers data; use `CopyToHostAsync()` for GPU->CPU readback. For GPU->GPU copies in async code following an unawaited dispatch, use `CopyFromAsync()` - the sync `CopyFrom` has no ordering guarantee against in-flight Wasm worker kernels (the main thread cannot block-wait), so it can read `SharedArrayBuffer` mid-write.
 
 ## Verbose Logging
 

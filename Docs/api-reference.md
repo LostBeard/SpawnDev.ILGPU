@@ -24,6 +24,7 @@ using SpawnDev.ILGPU;
 | `context.CreatePreferredAcceleratorAsync()` | `Task<Accelerator>` | Creates the best available accelerator (browser: WebGPU > WebGL > Wasm; desktop: CUDA > OpenCL > CPU) |
 | `accelerator.SynchronizeAsync()` | `Task` | Async wait for all GPU work to complete |
 | `buffer.CopyToHostAsync<T>()` | `Task<T[]>` | Copies buffer data to a new array (works with all backends) |
+| `view.CopyFromAsync(source)` | `Task` | Backend-agnostic async mirror of sync `CopyFrom` (on `ArrayView<T>`, `ArrayView1D<T,TStride>`, `MemoryBuffer1D<T,TStride>`). Drains pending Wasm worker dispatches before the copy so GPU→GPU copies after an unawaited kernel dispatch don't read `SharedArrayBuffer` mid-write; no-op drain on WebGPU/WebGL/CUDA/OpenCL/CPU |
 | `context.GetWebGPUDevices()` | `List<WebGPUILGPUDevice>` | Lists registered WebGPU devices |
 | `context.GetWebGLDevices()` | `List<WebGLILGPUDevice>` | Lists registered WebGL devices |
 
