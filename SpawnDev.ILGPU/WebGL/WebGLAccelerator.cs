@@ -372,6 +372,44 @@ namespace SpawnDev.ILGPU.WebGL
         }
 
         /// <summary>
+        /// Worker-side GPU→GPU copy. The worker's <c>entry.data</c> is the canonical
+        /// post-kernel state for any buffer that was a kernel output — the CPU-side
+        /// <c>_backingArray</c> is NEVER refreshed by a Transform Feedback write, only
+        /// by an explicit <see cref="ReadbackAndGetUint8ArrayAsync"/>. Routing GPU→GPU
+        /// CopyTo/CopyFrom through the main thread reads stale zeros from _backingArray
+        /// and silently produces a destination of zeros.
+        ///
+        /// This method bypasses the main thread entirely: it ensures both buffers are
+        /// allocated in the worker (uploading any CPU-dirty data first via
+        /// <see cref="EnsureBufferInWorker"/>) and posts a <c>copyBuffer</c> message that
+        /// the worker handles in-order with prior dispatches. The destination texture is
+        /// re-uploaded inside the worker so subsequent dispatches see the new bytes.
+        ///
+        /// After this call the destination's worker entry.data is correct; the
+        /// destination's CPU _backingArray is left stale (a subsequent
+        /// <see cref="ReadbackAndGetUint8ArrayAsync"/> will refresh it).
+        /// </summary>
+        internal void WorkerCopyBuffer(
+            WebGLMemoryBuffer source, long srcByteOffset,
+            WebGLMemoryBuffer destination, long dstByteOffset,
+            long byteLength)
+        {
+            if (_glWorker == null)
+                throw new InvalidOperationException("GL worker not initialized");
+            EnsureBufferInWorker(source, source.GlslType);
+            EnsureBufferInWorker(destination, destination.GlslType);
+            _glWorker.PostMessage(new
+            {
+                type = "copyBuffer",
+                srcBufferId = source.WorkerBufferId,
+                srcByteOffset = (int)srcByteOffset,
+                dstBufferId = destination.WorkerBufferId,
+                dstByteOffset = (int)dstByteOffset,
+                byteLength = (int)byteLength
+            });
+        }
+
+        /// <summary>
         /// Requests readback of a specific buffer from the GL worker and returns a Uint8Array view.
         /// This is the only path for GPU→CPU data transfer.
         /// </summary>

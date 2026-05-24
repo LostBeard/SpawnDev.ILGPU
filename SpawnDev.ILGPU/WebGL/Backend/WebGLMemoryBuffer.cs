@@ -117,16 +117,23 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
             else if (source.GetAcceleratorType() == AcceleratorType.WebGL)
             {
-                // GPU→GPU copy: WebGL buffers always have a CPU-side backing array.
-                // Read from the source buffer's backing array and write to ours.
+                // GPU→GPU copy. Route through the worker — the worker's entry.data is the
+                // canonical post-kernel state. Reading from the CPU-side _backingArray
+                // gives stale zeros after a kernel Transform Feedback write (the TF readback
+                // updates worker entry.data only). See WebGLAccelerator.WorkerCopyBuffer.
                 var sourceContiguous = (IContiguousArrayView)source;
                 var sourceMemBuf = (WebGLMemoryBuffer)sourceContiguous.Buffer;
                 var destContiguous = (IContiguousArrayView)destination;
                 var length = (int)source.Length;
-
-                var byteArray = sourceMemBuf._backingArray!.Read<byte>((int)sourceContiguous.Index, length);
-                _backingArray!.Write(byteArray, (int)destContiguous.Index);
-                NeedsUpload = true;
+                var accel = (WebGLAccelerator)Accelerator;
+                accel.WorkerCopyBuffer(
+                    sourceMemBuf, (int)sourceContiguous.Index,
+                    this, (int)destContiguous.Index,
+                    length);
+                // Worker now has correct data in our entry.data; CPU _backingArray is stale
+                // (refreshed by next CopyToHostAsync). No upload pending — the worker is
+                // already in sync.
+                NeedsUpload = false;
             }
             else
             {
@@ -152,15 +159,21 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
             else if (destination.GetAcceleratorType() == AcceleratorType.WebGL)
             {
-                // GPU→GPU copy: read from our backing array, write to destination's.
+                // GPU→GPU copy. Route through the worker — see the matching branch in
+                // CopyFrom above and WebGLAccelerator.WorkerCopyBuffer for rationale.
+                // Reading from this buffer's CPU-side _backingArray gives stale zeros
+                // if a kernel TF write was the most recent producer of our bytes.
                 var sourceContiguous = (IContiguousArrayView)source;
                 var destContiguous = (IContiguousArrayView)destination;
                 var destMemBuf = (WebGLMemoryBuffer)destContiguous.Buffer;
                 var length = (int)source.Length;
-
-                var byteArray = _backingArray!.Read<byte>((int)sourceContiguous.Index, length);
-                destMemBuf._backingArray!.Write(byteArray, (int)destContiguous.Index);
-                destMemBuf.NeedsUpload = true;
+                var accel = (WebGLAccelerator)Accelerator;
+                accel.WorkerCopyBuffer(
+                    this, (int)sourceContiguous.Index,
+                    destMemBuf, (int)destContiguous.Index,
+                    length);
+                // dest's worker entry.data is now correct; dest CPU _backingArray is stale.
+                destMemBuf.NeedsUpload = false;
             }
             else
             {

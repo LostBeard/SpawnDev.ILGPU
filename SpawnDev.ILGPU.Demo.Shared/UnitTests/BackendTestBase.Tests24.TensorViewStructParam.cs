@@ -402,6 +402,46 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         });
 
         /// <summary>
+        /// 1D-only sibling of the failing 2D test. Allocates a plain Allocate1D&lt;int&gt;
+        /// output buffer, kernel-writes to it, then reads back via CopyFrom→1D-stage→host.
+        /// If THIS fails on WebGL, the bug is NOT specific to MemoryBuffer2D — it's that
+        /// WebGL's CopyFrom (GPU→GPU) reads from the CPU-side `_backingArray` which is
+        /// never synced after a kernel TF write. The 2D-buffer angle would just be a
+        /// red herring forced by the need to stage MemoryBuffer2D through a 1D buffer
+        /// for CopyToHostAsync (which is MemoryBuffer1D-only).
+        /// </summary>
+        [TestMethod]
+        public async Task CopyFrom_After_KernelWrite_Sees_Kernel_Output() => await RunTest(async accelerator =>
+        {
+            const int N = 16;
+            using var dst = accelerator.Allocate1D<int>(N);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>>(
+                Write1DKernel);
+            kernel((Index1D)N, dst.View);
+            await accelerator.SynchronizeAsync();
+
+            using var stage = accelerator.Allocate1D<int>(N);
+            stage.View.CopyFrom(dst.View);
+            await accelerator.SynchronizeAsync();
+            var actual = await stage.CopyToHostAsync<int>(0, N);
+
+            int diffs = 0;
+            var msg = new System.Text.StringBuilder();
+            for (int i = 0; i < N; i++)
+            {
+                int expected = 1000 + i;
+                if (actual[i] != expected)
+                {
+                    diffs++;
+                    if (diffs <= 4) msg.Append($"[{i}] got={actual[i]} expected={expected} ");
+                }
+            }
+            if (diffs > 0)
+                throw new Exception($"{diffs}/{N} mismatches after CopyFrom-from-kernel-output. First: {msg}");
+        });
+
+        /// <summary>
         /// Diagnostic: distinguish whether the WebGL "MemoryBuffer2D.BaseView writes are zero"
         /// failure is on the WRITE path (kernel output not reaching the buffer) or the READ
         /// path (CopyFrom from 2D-buffer-BaseView to 1D-stage missing the data). This test
