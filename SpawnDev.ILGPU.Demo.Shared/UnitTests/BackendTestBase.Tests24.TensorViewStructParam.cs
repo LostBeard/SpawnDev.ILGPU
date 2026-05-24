@@ -401,6 +401,71 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new Exception($"{diffs}/{N} mismatches. First: {msg}");
         });
 
+        // Mirrors the ML DepthToColormapPalette legacy signature: (Index1D, ArrayView<float> src,
+        // ArrayView<int> dst, int count, float minVal, float maxVal, int palette). The trailing
+        // scalars don't involve body structs (no TensorView wrapping), but Wasm's ML repro fails
+        // with "legacy kernel produced all-zero output" for the 2D-allocated output buffer.
+        static void LegacySignatureKernel(Index1D idx,
+            ArrayView1D<float, Stride1D.Dense> src,
+            ArrayView1D<int, Stride1D.Dense> dst,
+            int count, float minVal, float maxVal, int palette)
+        {
+            // Stop guard mirrors the ML kernel's "if idx >= count" gate.
+            if (idx >= count) return;
+            float v = src[idx];
+            float t = (v - minVal) / (maxVal - minVal);
+            int result;
+            if (palette == 0) result = (int)(t * 255f);
+            else if (palette == 1) result = (int)((1f - t) * 255f);
+            else result = (int)(t * 128f) + 64;
+            dst[idx] = 2000 + result;
+        }
+
+        /// <summary>
+        /// Wasm-specific repro of the ML "legacy kernel produced all-zero output" on
+        /// 2D-allocated output buffers. Same call shape as ML's
+        /// DepthToColormapPalette (no body struct, just trailing scalars). If this fails
+        /// on Wasm but passes on every other backend, the bug is in Wasm-side dispatch
+        /// of kernels with trailing scalars when the output target is a 2D-allocated
+        /// buffer's BaseView.
+        /// </summary>
+        [TestMethod]
+        public async Task LegacySignature_2DOutput_TrailingScalars_Indexes_Correctly() => await RunTest(async accelerator =>
+        {
+            const int W = 4, H = 4, N = W * H;
+            var src = new float[N];
+            for (int i = 0; i < N; i++) src[i] = i;
+
+            using var srcBuf = accelerator.Allocate1D(src);
+            using var dstBuf2D = accelerator.Allocate2DDenseX<int>(new Index2D(W, H));
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D,
+                ArrayView1D<float, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
+                int, float, float, int>(LegacySignatureKernel);
+            kernel((Index1D)N, srcBuf.View, dstBuf2D.View.BaseView, N, 0f, 15f, 0);
+            await accelerator.SynchronizeAsync();
+
+            using var stage = accelerator.Allocate1D<int>(N);
+            stage.View.CopyFrom(dstBuf2D.View.BaseView);
+            await accelerator.SynchronizeAsync();
+            var actual = await stage.CopyToHostAsync<int>(0, N);
+
+            int diffs = 0;
+            var msg = new System.Text.StringBuilder();
+            for (int i = 0; i < N; i++)
+            {
+                float t = (i - 0f) / (15f - 0f);
+                int expected = 2000 + (int)(t * 255f);
+                if (actual[i] != expected)
+                {
+                    diffs++;
+                    if (diffs <= 4) msg.Append($"[{i}] got={actual[i]} expected={expected} ");
+                }
+            }
+            if (diffs > 0)
+                throw new Exception($"{diffs}/{N} mismatches. First: {msg}");
+        });
+
         /// <summary>
         /// 1D-only sibling of the failing 2D test. Allocates a plain Allocate1D&lt;int&gt;
         /// output buffer, kernel-writes to it, then reads back via CopyFrom→1D-stage→host.
@@ -439,6 +504,52 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
             if (diffs > 0)
                 throw new Exception($"{diffs}/{N} mismatches after CopyFrom-from-kernel-output. First: {msg}");
+        });
+
+        /// <summary>
+        /// Locks in the contract for <c>CopyFromAsync</c> (v4.9.9-local.3+): the async
+        /// API auto-drains pending kernel work on Wasm before the GPU-to-GPU copy, so
+        /// callers can write <c>kernel(...); await stage.View.CopyFromAsync(src);</c>
+        /// without an explicit <c>await accelerator.SynchronizeAsync();</c> in between.
+        ///
+        /// Why this test matters: the sync <c>CopyFrom</c> sibling above MUST keep its
+        /// explicit <c>SynchronizeAsync</c> on Wasm because Blazor WASM single-threaded
+        /// main thread cannot block. <c>CopyFromAsync</c> moves the drain inside the
+        /// library so async consumer code is backend-agnostic. If anyone weakens the
+        /// Wasm drain, this test fires with stale/zero bytes from the still-pending
+        /// kernel write.
+        /// </summary>
+        [TestMethod]
+        public async Task CopyFromAsync_After_KernelWrite_NoExplicitSync() => await RunTest(async accelerator =>
+        {
+            const int N = 16;
+            using var dst = accelerator.Allocate1D<int>(N);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<int, Stride1D.Dense>>(
+                Write1DKernel);
+            kernel((Index1D)N, dst.View);
+            // Deliberately NO explicit SynchronizeAsync here - the contract is that
+            // CopyFromAsync drains pending work itself on backends that need it (Wasm).
+
+            using var stage = accelerator.Allocate1D<int>(N);
+            await stage.View.CopyFromAsync(dst.View);
+            var actual = await stage.CopyToHostAsync<int>(0, N);
+
+            int diffs = 0;
+            var msg = new System.Text.StringBuilder();
+            for (int i = 0; i < N; i++)
+            {
+                int expected = 1000 + i;
+                if (actual[i] != expected)
+                {
+                    diffs++;
+                    if (diffs <= 4) msg.Append($"[{i}] got={actual[i]} expected={expected} ");
+                }
+            }
+            if (diffs > 0)
+                throw new Exception(
+                    $"{diffs}/{N} mismatches after CopyFromAsync-from-kernel-output without " +
+                    $"explicit Synchronize. CopyFromAsync's auto-drain is broken. First: {msg}");
         });
 
         /// <summary>

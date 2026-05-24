@@ -475,6 +475,95 @@ namespace SpawnDev.ILGPU
 
         #endregion
 
+        #region Unified GPU-to-GPU Copy (async)
+
+        /// <summary>
+        /// Asynchronously copies the contents of the <paramref name="source"/> view into
+        /// the <paramref name="target"/> view. Backend-agnostic async mirror of the sync
+        /// <c>ArrayView.CopyFrom</c> extension that ALSO waits for any in-flight kernel
+        /// work on Wasm before the copy is issued. Use this for GPU->GPU copies that
+        /// follow an unawaited kernel dispatch in async code.
+        ///
+        /// <para><b>Why this exists.</b> Blazor WASM is single-threaded — the main thread
+        /// cannot block-wait. <see cref="WasmAccelerator"/> dispatches kernels to worker
+        /// threads and returns immediately; <c>WasmAccelerator.Synchronize()</c> is a
+        /// no-op (it can't block). The sync <c>CopyFrom</c> code path reads the source
+        /// <c>SharedArrayBuffer</c> on the main thread synchronously — if pending worker
+        /// kernels are still writing the source buffer, the copy races and reads
+        /// stale/partial bytes. This async variant awaits
+        /// <see cref="SynchronizeAsync(global::ILGPU.Runtime.Accelerator)"/> on the
+        /// source's (and destination's, if different) Wasm accelerator first, draining
+        /// pending dispatches before the copy executes.</para>
+        ///
+        /// <para>On other backends the implicit wait is unnecessary and is skipped:
+        /// WebGPU enqueues the copy onto the same command encoder as the kernel;
+        /// WebGL routes the copy through the GL worker which processes messages in
+        /// order; CUDA/OpenCL serialize via the accelerator stream; CPU is sync.</para>
+        ///
+        /// <para>Mirrors <c>CopyToHostAsync</c>'s implicit-sync contract so that async
+        /// consumer code is backend-agnostic.</para>
+        /// </summary>
+        /// <typeparam name="T">The element type.</typeparam>
+        /// <param name="target">The destination view that receives the bytes.</param>
+        /// <param name="source">The source view providing the bytes.</param>
+        public static async Task CopyFromAsync<T>(this ArrayView<T> target, ArrayView<T> source)
+            where T : unmanaged
+        {
+            var srcContig = (IContiguousArrayView)source;
+            var dstContig = (IContiguousArrayView)target;
+            var srcAcc = srcContig.Buffer?.Accelerator;
+            var dstAcc = dstContig.Buffer?.Accelerator;
+
+            // Only Wasm needs the explicit drain - see XML doc above for why.
+            if (srcAcc is WasmAccelerator srcWasm)
+                await srcWasm.SynchronizeAsync();
+            if (dstAcc is WasmAccelerator dstWasm
+                && !ReferenceEquals(dstAcc, srcAcc))
+            {
+                await dstWasm.SynchronizeAsync();
+            }
+
+            target.CopyFrom(source);
+        }
+
+        /// <summary>
+        /// <see cref="ArrayView1D{T,TStride}"/> overload of
+        /// <see cref="CopyFromAsync{T}(ArrayView{T}, ArrayView{T})"/>.
+        /// Forwards through <see cref="ArrayView1D{T,TStride}.BaseView"/> so callers can
+        /// write <c>buf.View.CopyFromAsync(otherView)</c> without manual <c>.BaseView</c>
+        /// dereferences (mirrors the sync <c>CopyFrom</c> upstream extension).
+        /// </summary>
+        public static Task CopyFromAsync<T, TStride>(
+            this ArrayView1D<T, TStride> target,
+            ArrayView<T> source)
+            where T : unmanaged
+            where TStride : struct, IStride1D
+            => target.BaseView.CopyFromAsync(source);
+
+        /// <summary>
+        /// <see cref="ArrayView1D{T,TStride}"/>-to-<see cref="ArrayView1D{T,TStride}"/>
+        /// overload of <see cref="CopyFromAsync{T}(ArrayView{T}, ArrayView{T})"/>.
+        /// </summary>
+        public static Task CopyFromAsync<T, TStride>(
+            this ArrayView1D<T, TStride> target,
+            ArrayView1D<T, TStride> source)
+            where T : unmanaged
+            where TStride : struct, IStride1D
+            => target.BaseView.CopyFromAsync(source.BaseView);
+
+        /// <summary>
+        /// Convenience overload that copies the entire source
+        /// <see cref="MemoryBuffer1D{T,TStride}"/>'s view into the target buffer's view.
+        /// </summary>
+        public static Task CopyFromAsync<T, TStride>(
+            this MemoryBuffer1D<T, TStride> target,
+            MemoryBuffer1D<T, TStride> source)
+            where T : unmanaged
+            where TStride : struct, IStride1D
+            => target.View.CopyFromAsync(source.View);
+
+        #endregion
+
         #region Unified Synchronization
 
         /// <summary>
