@@ -45,6 +45,38 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public static bool VerboseLogging { get; set; } = false;
 
         /// <summary>
+        /// DIAGNOSTIC RE-TEST HARNESS (default false — leave it false in production).
+        /// When true, the DISPATCHER phase barrier and group barrier (in
+        /// <see cref="GeneratePhaseDispatcher"/>) emit <c>memory.atomic.notify</c>
+        /// (last worker, <c>int.MaxValue</c> = wake all) + <c>memory.atomic.wait32</c>
+        /// (waiters, 1ms self-healing timeout + spurious-wakeup defense) so workers
+        /// SLEEP instead of spin-waiting on the generation counter. Default false =
+        /// pure spin-wait.
+        ///
+        /// VERDICT (2026-05-24, Tuvok — re-validating the rc.27 spin fallback):
+        /// wait/notify STILL races on current Chrome + current backend. With this ON,
+        /// large multi-group RadixSorts fail with sort-order violations / value
+        /// duplicates (1.4M: 1067 violations, 500K: 187 violations, 1M: duplicate
+        /// keys); small single-group sorts pass. The failures are memory-VISIBILITY
+        /// failures (a woken worker proceeds on an advanced generation but does not
+        /// see the writes that happened-before the gen bump), NOT a timeout-logic bug
+        /// — our codegen is seq_cst-correct (fence before the gen store; seq_cst load
+        /// of the gen in the waiter synchronizes-with it). This is a V8 linear-memory
+        /// wait/notify ordering bug (chromium#490434403 family).
+        ///
+        /// The April "wait32 spills ~275 kernel locals" hypothesis is DISPROVEN: the
+        /// barrier lives in the dispatcher function, which has only ~38 locals, and it
+        /// still races. So reducing local count cannot dodge it — this is purely a V8
+        /// platform bug, not fixable in our codegen. Pure spin (atomic.load loop)
+        /// sidesteps the buggy futex path entirely and is correct.
+        ///
+        /// Kept as a gated re-test harness: flip ON and run the WasmTests RadixSort
+        /// canaries to re-validate when a future Chrome/V8 ships a FutexEmulation fix.
+        /// Full investigation: Plans/wasm-waitnotify-still-races-2026-05-24.md.
+        /// </summary>
+        public static bool UseWaitNotifyBarriers { get; set; } = false;
+
+        /// <summary>
         /// When set, dumps generated Wasm binaries to this directory. Desktop only.
         /// </summary>
         public static string? WasmDumpPath { get; set; }
@@ -940,13 +972,21 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.AtomicFence);
             code.Add(0x00);
 
-            // PURE SPIN PHASE BARRIER (v4.8.0 baseline, 4/4 PASS in our 2026-04-26 testing).
-            // Wait/notify variants all race in V8/Mono context — every combination tested
-            // (rmw.add+notify, atomic.store+notify, +/- intervening fence, +/- spin-loop fence,
-            // 100us / -1 timeout) produced violations. Pure spin is the only correct option
-            // we have today. CPU cost is bounded: cross-worker wait window per phase is <1ms
-            // typical. See Plans note for the full investigation log + V8 follow-up.
-            // Last worker: bump gen via atomic.store, no notify.
+            // PURE SPIN PHASE BARRIER (v4.8.0 baseline). This is the barrier that
+            // actually serializes phase-mode kernels like RadixSort (the in-kernel
+            // EmitBarrier path is bypassed in phase mode). Wait/notify variants race
+            // in the V8 wasm context — re-confirmed 2026-05-24 on current Chrome +
+            // current backend: with WasmBackend.UseWaitNotifyBarriers ON, large sorts
+            // fail with sort-order violations / duplicate values (1.4M: 1067, 500K:
+            // 187) while small sorts pass. It's a V8 linear-memory wait/notify ordering
+            // bug (chromium#490434403 family), reproduced even though this dispatcher
+            // has only ~38 locals — so it is NOT the April "275-local spill" theory and
+            // is NOT fixable in our codegen. Pure spin avoids the buggy futex path and
+            // is correct. CPU cost is bounded: cross-worker wait window per phase is
+            // <1ms typical. The wait/notify branch below stays behind the (default-off)
+            // flag as a re-test harness. Full log: Plans/wasm-waitnotify-still-races-2026-05-24.md.
+            //
+            // Last worker: bump gen via atomic.store.
             WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
             WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
             WasmModuleBuilder.EmitI32Const(code, 1);
@@ -955,7 +995,56 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicStore);
             code.Add(0x02); code.Add(0x04); // offset=4 (generation)
 
+            if (UseWaitNotifyBarriers)
+            {
+                // notify(fenceBase+4, int.MaxValue) — wake all phase-barrier sleepers.
+                WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
+                WasmModuleBuilder.EmitI32Const(code, int.MaxValue);
+                code.Add(WasmOpCodes.AtomicPrefix);
+                WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.MemoryAtomicNotify);
+                code.Add(0x02); code.Add(0x04); // align=2, offset=4 (generation)
+                code.Add(WasmOpCodes.Drop); // discard woken-count
+            }
+
             code.Add(WasmOpCodes.Else);
+
+            if (UseWaitNotifyBarriers)
+            {
+                // === WAIT/NOTIFY phase waiter: sleep until gen advances ===
+                // Block $exit { Loop $spin {
+                //   if (load(gen) != savedGen) br $exit
+                //   wait32(gen, savedGen, 1ms)   // self-heals if a notify is missed
+                //   drop; br $spin } }
+                // No yield-to-JS: wait32 OS-parks the worker, so spin-starvation can't occur.
+                code.Add(WasmOpCodes.Block);
+                code.Add(WasmOpCodes.Void);
+                code.Add(WasmOpCodes.Loop);
+                code.Add(WasmOpCodes.Void);
+                // if (load(gen) != savedGen) br $exit (depth 1)
+                WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
+                code.Add(WasmOpCodes.AtomicPrefix);
+                WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicLoad);
+                code.Add(0x02); code.Add(0x04); // offset=4 (generation)
+                WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
+                code.Add(WasmOpCodes.I32Ne);
+                code.Add(WasmOpCodes.BrIf);
+                WasmModuleBuilder.EmitU32Leb128(code, 1); // → $exit
+                // wait32(fenceBase+4, savedGen, 1_000_000 ns = 1ms)
+                WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
+                WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
+                WasmModuleBuilder.EmitI64Const(code, 1_000_000);
+                code.Add(WasmOpCodes.AtomicPrefix);
+                WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.MemoryAtomicWait32);
+                code.Add(0x02); code.Add(0x04); // align=2, offset=4
+                code.Add(WasmOpCodes.Drop); // discard wait result
+                code.Add(WasmOpCodes.Br);
+                WasmModuleBuilder.EmitU32Leb128(code, 0); // → $spin (re-check)
+                code.Add(WasmOpCodes.End); // end loop $spin
+                code.Add(WasmOpCodes.End); // end block $exit
+                code.Add(WasmOpCodes.End); // end if (arrived == workerCount)
+            }
+            else
+            {
 
             // Other workers: spin-wait with yield-to-JS after threshold.
             // Pure spin (atomic.load only) avoids V8's broken wasm wait/notify path entirely
@@ -1026,6 +1115,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             code.Add(WasmOpCodes.End); // end block $spin_exit
 
             code.Add(WasmOpCodes.End); // end if (arrived == workerCount)
+            } // end else (pure-spin phase waiter)
 
             // Past the barrier: clear pResumed so subsequent phase iterations of THIS dispatch
             // take the FRESH FLOW (need to do their own arrival++, gen-load, etc.).
@@ -1142,7 +1232,49 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicStore);
             code.Add(0x02); code.Add(0x14); // offset=20
 
+            if (UseWaitNotifyBarriers)
+            {
+                // notify(fenceBase+20, int.MaxValue) — wake all group-barrier sleepers.
+                WasmModuleBuilder.EmitLocalGet(code, 13);
+                WasmModuleBuilder.EmitI32Const(code, int.MaxValue);
+                code.Add(WasmOpCodes.AtomicPrefix);
+                WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.MemoryAtomicNotify);
+                code.Add(0x02); code.Add(0x14); // align=2, offset=20 (group gen)
+                code.Add(WasmOpCodes.Drop);
+            }
+
             code.Add(WasmOpCodes.Else);
+            if (UseWaitNotifyBarriers)
+            {
+                // === WAIT/NOTIFY group waiter: sleep until group gen advances ===
+                code.Add(WasmOpCodes.Block);
+                code.Add(WasmOpCodes.Void);
+                code.Add(WasmOpCodes.Loop);
+                code.Add(WasmOpCodes.Void);
+                WasmModuleBuilder.EmitLocalGet(code, 13);
+                code.Add(WasmOpCodes.AtomicPrefix);
+                WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicLoad);
+                code.Add(0x02); code.Add(0x14); // offset=20
+                WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
+                code.Add(WasmOpCodes.I32Ne);
+                code.Add(WasmOpCodes.BrIf);
+                WasmModuleBuilder.EmitU32Leb128(code, 1); // → $exit (gen changed)
+                // wait32(fenceBase+20, savedGen, 1ms)
+                WasmModuleBuilder.EmitLocalGet(code, 13);
+                WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
+                WasmModuleBuilder.EmitI64Const(code, 1_000_000);
+                code.Add(WasmOpCodes.AtomicPrefix);
+                WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.MemoryAtomicWait32);
+                code.Add(0x02); code.Add(0x14); // align=2, offset=20
+                code.Add(WasmOpCodes.Drop);
+                code.Add(WasmOpCodes.Br);
+                WasmModuleBuilder.EmitU32Leb128(code, 0); // → $spin (re-check)
+                code.Add(WasmOpCodes.End); // end loop
+                code.Add(WasmOpCodes.End); // end block
+                code.Add(WasmOpCodes.End); // end if (group barrier)
+            }
+            else
+            {
             // Other workers: pure spin-wait for group generation to advance.
             code.Add(WasmOpCodes.Block);
             code.Add(WasmOpCodes.Void);
@@ -1161,6 +1293,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             code.Add(WasmOpCodes.End); // end loop
             code.Add(WasmOpCodes.End); // end block
             code.Add(WasmOpCodes.End); // end if (group barrier)
+            } // end else (pure-spin group waiter)
 
             // After group barrier: ALL workers fence + reset phase state for next group.
             // atomic.fence ensures visibility of the last worker's exit flag reset.

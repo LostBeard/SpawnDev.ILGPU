@@ -4022,9 +4022,17 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             // === NOT LAST: pure spin-wait until generation advances ===
             // No memory.atomic.wait32: V8 14.7+ FutexEmulation race makes the
-            // wasm-side wait/notify path unreliable. Pure spin works correctly
-            // across all engines. Outer dispatcher's spin-yield + JS Atomics.wait
-            // mechanism handles OS-level descheduling under CPU oversubscription.
+            // wasm-side wait/notify path unreliable (reproduced 2026-05-24 — see
+            // Plans/wasm-waitnotify-still-races-2026-05-24.md). Pure spin works
+            // correctly across all engines. Outer dispatcher's spin-yield + JS
+            // Atomics.wait mechanism handles OS-level descheduling under CPU
+            // oversubscription.
+            //
+            // NOTE: WasmBackend.UseWaitNotifyBarriers only re-enables wait/notify on
+            // the DISPATCHER phase/group barriers (WasmBackend.cs), which is the path
+            // phase-mode kernels (RadixSort/Scan/Reduce) actually take. This in-kernel
+            // EmitBarrier path is bypassed in phase mode, so it stays pure-spin
+            // regardless of the flag.
             Code.Add(WasmOpCodes.Loop);
             Code.Add(WasmOpCodes.Void);
 

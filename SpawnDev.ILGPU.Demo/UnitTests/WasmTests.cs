@@ -33,6 +33,28 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         }
 
         // ═══════════════════════════════════════════════════════════════
+        // INVARIANT GUARD: wait/notify dispatcher barriers must ship OFF.
+        // memory.atomic.wait32/notify races on V8 (chromium#490434403 family):
+        // large multi-group RadixSorts corrupt (1.4M: 1067 sort-order violations,
+        // 500K: 187, 1M: duplicate keys) while small sorts pass. Re-confirmed
+        // 2026-05-24 — see Plans/wasm-waitnotify-still-races-2026-05-24.md. Pure
+        // spin is the correct path. If this test fails, someone flipped the default
+        // to the known-broken wait/notify barrier; the RadixSort canaries below are
+        // the behavioral detectors. The flag stays only as a one-flip re-test harness.
+        // ═══════════════════════════════════════════════════════════════
+        [TestMethod]
+        public Task WasmWaitNotifyBarriersDefaultOffTest()
+        {
+            if (WasmBackend.UseWaitNotifyBarriers)
+                throw new Exception(
+                    "WasmBackend.UseWaitNotifyBarriers must default to false. wait/notify " +
+                    "dispatcher barriers race on V8 (large sorts corrupt) — see " +
+                    "Plans/wasm-waitnotify-still-races-2026-05-24.md. Pure-spin barriers are " +
+                    "the correct shipping path; the flag is a default-off re-test harness only.");
+            return Task.CompletedTask;
+        }
+
+        // ═══════════════════════════════════════════════════════════════
         // DIAGNOSTIC: Struct shuffle (mimics RadixSort pre-sort)
         // ═══════════════════════════════════════════════════════════════
 

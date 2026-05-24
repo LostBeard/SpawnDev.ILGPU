@@ -30,7 +30,7 @@ Compiles ILGPU IR → WebAssembly binary. Dispatches via Web Workers with Shared
 - **AddressSpaceType views** (ArrayView): field 1 = **Index/Offset** → return 0
 
 This was hardcoded to 0 for ALL views, which broke `view.Length` for ArrayView1D params.
-The fix checks `param.Type is StructureType`. Current: 249 pass / 0 fail / 3 skip (v4.6.0). Full `hardwareConcurrency` multi-worker barrier dispatch with wait/notify barriers (memory.atomic.wait32/notify with spurious wakeup defense loop). In-Wasm phase dispatcher eliminates JS-Wasm boundary crossings between phases.
+The fix checks `param.Type is StructureType`. Current: 249 pass / 0 fail / 3 skip (v4.6.0). Full `hardwareConcurrency` multi-worker barrier dispatch with pure-spin generation barriers (wait/notify races on V8 — see the "Barriers are PURE SPIN" note below). In-Wasm phase dispatcher eliminates JS-Wasm boundary crossings between phases.
 
 **TRACE RULE**: Both `GetViewLength` and `GetField` must trace the view source back to
 the kernel Parameter through GetField/NewView/AddressSpaceCast chains (via `TraceToParameter()`).
@@ -45,7 +45,7 @@ ArrayView1D's BaseView access creates a GetField indirection that breaks direct 
 - **Fiber refactor (March 2026):** Kernels with barriers are compiled into a phase-based dispatch model. Each barrier becomes a yield point — the kernel saves its state (locals + phase counter) to scratch memory and returns. A **Wasm-native phase dispatcher** handles the entire thread/phase/group loop inside WebAssembly, eliminating JS-Wasm boundary crossings between phases.
 - **Dynamic block splitting:** Barrier-separated code blocks are split into phases automatically. Helper function calls (scan, sort) each get their own phase with yield points before and after.
 - **Completion state persist:** The kernel saves its exit state to scratch so the worker knows when all phases for a group are done before advancing to the next group.
-- **Wait/notify barriers (April 2026):** `atomic.fence` + `i32.atomic.rmw.add` + `memory.atomic.wait32`/`memory.atomic.notify` with spurious wakeup defense loop. Previously used pure spin barriers due to a misdiagnosed "V8 visibility bug" - the real cause was missing a `while` loop around `wait32` (standard spurious wakeup defense). Workers now sleep instead of spinning. Pattern: `while (load(gen) == savedGen) { wait32(gen, savedGen, -1); }` with `notify(gen, INT_MAX)` after gen bump.
+- **Barriers are PURE SPIN — wait/notify races on V8 (verdict re-confirmed 2026-05-24).** The dispatcher phase barrier and group barrier (`GeneratePhaseDispatcher` in `WasmBackend.cs`) use a pure `i32.atomic.load` spin loop on a generation counter, with a yield-to-JS escape after a spin threshold (phase barrier) to survive CPU oversubscription. The in-kernel `EmitBarrier` path is also pure-spin (and bypassed entirely in phase mode). **Do NOT switch to `memory.atomic.wait32`/`notify`.** History: April 2026 briefly shipped wait/notify ("fixed spurious-wakeup with a `while` loop") but it was reverted to spin in rc.25/rc.27 because large sorts produced non-deterministic corruption. Re-tested 2026-05-24 behind the default-off `WasmBackend.UseWaitNotifyBarriers` flag on current Chrome + current backend: **wait/notify STILL races** — large multi-group RadixSorts fail with sort-order violations / value duplicates (1.4M: 1067 violations, 500K: 187, 1M: duplicate keys); small single-group sorts pass. Our codegen is seq_cst-correct (fence before gen store; seq_cst gen load in waiter synchronizes-with it), so this is a V8 linear-memory wait/notify ordering bug (chromium#490434403 family). The April "275-local spill" theory is disproven — the barrier is in the ~38-local dispatcher and still races, so reducing locals can't dodge it. The flag stays only as a one-flip re-test harness for when a future V8 ships a fix. Full log: `Plans/wasm-waitnotify-still-races-2026-05-24.md`.
 
 ## Tribal Knowledge: GridIndex vs BucketIndex Bug (March 2026)
 
@@ -73,7 +73,7 @@ If this test produces duplicates or non-deterministic results, the post-helper b
 
 **Test results: 249 pass / 0 fail / 3 skip** (up from 49/10/17 pre-refactor). All RadixSort (including SpawnSceneSimulation 1.4M multi-frame), scan, barrier, sort, and large sort (260K-4M) tests pass on the Wasm backend at full `hardwareConcurrency`.
 
-**Multi-worker:** Full `hardwareConcurrency` barrier dispatch with wait/notify barriers (`memory.atomic.wait32`/`notify` with spurious wakeup defense loop), `atomic.fence` at 3 sync points, float atomic stores via reinterpret, broadcast atomic store/load. In-Wasm phase dispatcher eliminates JS-Wasm boundary crossings. `hardwareConcurrency` workers for both barrier and non-barrier kernels.
+**Multi-worker:** Full `hardwareConcurrency` barrier dispatch with pure-spin generation barriers (wait/notify races on V8 — see the "Barriers are PURE SPIN" note above), `atomic.fence` at 3 sync points, float atomic stores via reinterpret, broadcast atomic store/load. In-Wasm phase dispatcher eliminates JS-Wasm boundary crossings. `hardwareConcurrency` workers for both barrier and non-barrier kernels.
 
 The fiber refactor resolved the multi-group barrier dispatch limitation. 20+ bugs were fixed collaboratively:
 
@@ -86,7 +86,7 @@ The fiber refactor resolved the multi-group barrier dispatch limitation. 20+ bug
 7. **Sync yield after helper done** — prevent shared memory stomping between sequential helper calls
 8. **Scratch zeroing** — zero from scratchBase (not 0) to prevent stale data between dispatches
 9. **Struct/scratch overlap** — struct body params placed AFTER per-thread scratch
-10. **Wait/notify barrier** — original wait32 without loop had spurious wakeup bug; fixed with while-loop defense (April 2026), interim pure spin replaced
+10. **Generation barrier** — landed pure spin; April 2026 wait/notify attempt (wait32 + while-loop spurious-wakeup defense) reverted to spin in rc.25/rc.27, race re-confirmed on V8 2026-05-24 (see "Barriers are PURE SPIN" note)
 11. **Shared memory alloca overlap** — same-size allocas deduped to same offset; fixed with distinct sizes
 12. **IR address space aliasing** — InferAddressSpaces guards for phi/predicate/general values with Shared sources
 13. **Zero region race** — between-group zeroing loop excluded fence slots to prevent deadlock
