@@ -402,6 +402,37 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         });
 
         /// <summary>
+        /// Diagnostic: distinguish whether the WebGL "MemoryBuffer2D.BaseView writes are zero"
+        /// failure is on the WRITE path (kernel output not reaching the buffer) or the READ
+        /// path (CopyFrom from 2D-buffer-BaseView to 1D-stage missing the data). This test
+        /// uploads a CPU-known pattern via CopyFromCPU (bypassing the kernel write entirely),
+        /// then reads back via CopyFrom→stage→host. If THIS passes, the bug is in WebGL's
+        /// Transform Feedback wiring for 2D-buffer BaseView outputs. If THIS fails, the bug
+        /// is in CopyFrom from a 2D buffer's BaseView source.
+        /// </summary>
+        [TestMethod]
+        public async Task MemoryBuffer2D_Int_BaseView_CpuUpload_Readback_Works() => await RunTest(async accelerator =>
+        {
+            const int W = 4, H = 4, N = W * H;
+            using var buf2D = accelerator.Allocate2DDenseX<int>(new Index2D(W, H));
+
+            var seed = new int[N];
+            for (int i = 0; i < N; i++) seed[i] = 1000 + i;
+            buf2D.View.BaseView.CopyFromCPU(seed);
+            await accelerator.SynchronizeAsync();
+
+            using var stage = accelerator.Allocate1D<int>(N);
+            stage.View.CopyFrom(buf2D.View.BaseView);
+            await accelerator.SynchronizeAsync();
+            var actual = await stage.CopyToHostAsync<int>(0, N);
+
+            int diffs = 0;
+            for (int i = 0; i < N; i++) if (actual[i] != seed[i]) diffs++;
+            if (diffs > 0)
+                throw new Exception($"{diffs}/{N} mismatches. actual[0..3]={actual[0]},{actual[1]},{actual[2]},{actual[3]} expected={seed[0]},{seed[1]},{seed[2]},{seed[3]}");
+        });
+
+        /// <summary>
         /// Float sibling — does the bug care about element type? If MemoryBuffer2D&lt;float&gt;.BaseView
         /// passes everywhere while int fails on Wasm/WebGL, the bug is dtype-specific (sub-word vs
         /// 4-byte int are both 4 bytes, so it's likely not byte-size but type-routing in codegen).
