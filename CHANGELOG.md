@@ -2,6 +2,33 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.9 (2026-05-24) — WebGPU scalar-slot drift fix, WebGL GPU→GPU copy fix, new `CopyFromAsync`, Wasm barrier verdict
+
+Batches the three browser-backend fixes published locally as `4.9.9-local.1/2/3` plus the Wasm wait/notify barrier re-validation. Forks unchanged (`SpawnDev.ILGPU.Fork` / `SpawnDev.ILGPU.Algorithms.Fork` stay `2.0.7`) — these are pure SpawnDev.ILGPU codegen/runtime changes.
+
+### WebGPU: scalar-slot drift for trailing scalars after body-struct params (ML TensorView unblock)
+
+Kernels whose signature placed plain scalar params (`float`, `float`, `int`, …) **after** one or more body-struct params (e.g. two `TensorView<>`-shaped structs) emitted those trailing scalars at the wrong `_scalar_params` indices. Two sides disagreed:
+
+- `WGSLKernelFunctionGenerator.SetupParameterBindings` `continue`d on body-struct params without advancing `scalarSlotOffset`, so the trailing scalars landed at `_scalar_params[0..2]`.
+- `GenerateHeader` correctly assigned them slots 10/11/12.
+
+Both sides now advance the scalar-slot counter identically per param, and `WebGPUAccelerator`'s runtime arg lookup accounts for body-struct params expanding into N `FlattenStructFields` slots. This was the root cause of the ML Phase 2 TensorView `/depth` flat-blue regression that had been papered over with a revert. WebGPU full sweep after the fix: **606 pass / 0 fail / 7 skip**. Repro tests in `BackendTestBase.Tests24.TensorViewStructParam.cs`. GitHub commits `d5154c6` + `4d8db3a`.
+
+### WebGL: GPU→GPU `CopyTo`/`CopyFrom` read stale CPU-side data
+
+WebGL→WebGL copies read from the main-thread `_backingArray`, which is **never refreshed** after a kernel Transform Feedback write — only the worker's `entry.data` (in the OffscreenCanvas worker) holds the canonical post-kernel bytes. So `dstBuf.View.CopyFrom(kernelOutputView)` returned all zeros. This surfaced as the "`MemoryBuffer2D<T>.BaseView` kernel-write silently zeros" symptom blocking the ML TensorView migration on WebGL — but the 2D angle was a red herring; the same bug fired on `Allocate1D<T>` outputs staged through `CopyFrom`. Fix: route WebGL→WebGL copies through a new worker-side `copyBuffer` message that copies between worker `entry.data` arrays and re-uploads the destination texture; the stale `_backingArray` is no longer touched. WebGL full sweep: **484 pass / 0 fail / 144 skip**. GitHub commit `bb26aa6`.
+
+### New: backend-agnostic `CopyFromAsync` extension
+
+New `CopyFromAsync` on `ArrayView<T>`, `ArrayView1D<T,TStride>`, and `MemoryBuffer1D<T,TStride>` — the async mirror of the sync `CopyFrom`, available on all 6 backends. On Wasm it awaits the source/destination accelerator's pending kernel dispatches (`SynchronizeAsync`) before issuing the copy; on WebGPU/WebGL/CUDA/OpenCL/CPU the drain is a no-op since their command encoder / GL worker queue / accelerator stream already serialize the copy after pending work.
+
+This closes a Blazor-WASM-only race: the single-threaded main thread cannot block, so `WasmAccelerator.SynchronizeInternal()` is intentionally a no-op, leaving the sync void `CopyFrom` with no ordering guarantee against in-flight worker dispatches (it read `SharedArrayBuffer` mid-write → stale/partial bytes). Use `CopyFromAsync` for GPU→GPU copies that follow an unawaited kernel dispatch in async code, mirroring `CopyToHostAsync`'s implicit-sync contract. **14/14** across all 7 backend test classes (`CopyFromAsync_After_KernelWrite_NoExplicitSync` + sync sibling). GitHub commit `575237f`.
+
+### Wasm: wait/notify dispatcher barriers re-confirmed to race on V8 (spin-wait stays)
+
+Re-validated the rc.25/rc.27 fallback from `memory.atomic.wait32`/`notify` dispatcher barriers to pure spin. With the new default-off `WasmBackend.UseWaitNotifyBarriers` flag ON (dispatcher phase + group barriers converted to `notify(INT_MAX)` + `wait32(1ms, spurious-wakeup defense)`), large multi-group RadixSorts corrupt on current Chrome (1.4M: 1067 sort-order violations, 500K: 187, 1M: duplicate keys) while small single-group sorts pass. This is a memory-visibility failure, not timeout logic — our codegen is seq_cst-correct — so it's a V8 linear-memory wait/notify ordering bug (chromium#490434403 family). The April "275-local spill" theory is disproven: the barrier lives in the ~38-local dispatcher and still races. Pure spin avoids the buggy futex path and remains correct. The flag is retained, **default false**, purely as a one-flip re-test harness for when a future V8 ships a FutexEmulation fix. Guard test: `WasmTests.WasmWaitNotifyBarriersDefaultOffTest`. Full investigation: `Plans/wasm-waitnotify-still-races-2026-05-24.md`. GitHub commit `cd163d3`.
+
 ## 4.9.8 (2026-05-23) — WebGL device probe no longer leaks a context per registration
 
 ### WebGLDevice constructor was leaking one WebGL2 context per registration
