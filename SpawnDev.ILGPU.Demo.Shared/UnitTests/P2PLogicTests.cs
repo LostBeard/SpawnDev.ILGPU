@@ -1,16 +1,72 @@
 using System.Text.Json;
+using ILGPU;
 using ILGPU.Runtime;
+using ILGPU.Runtime.CPU;
+using SpawnDev.BlazorJS.Cryptography;
 using SpawnDev.ILGPU.P2P;
 using SpawnDev.UnitTesting;
 
 namespace SpawnDev.ILGPU.Demo.Shared.UnitTests;
 
 /// <summary>
-/// P2P accelerator unit tests — peer management, dispatch, fault tolerance.
-/// Pure logic tests with mock peers — no network needed.
+/// P2P accelerator / coordinator / dispatch unit tests — peer management, fault
+/// tolerance, kernel serialization, buffer transfer.
+///
+/// Backend-agnostic: every test runs identically regardless of the GPU backend, so
+/// this is a single standalone class registered ONCE (it used to be inherited by every
+/// backend class, running ~7× redundantly). Most tests use mock peers and create their
+/// own CPU/P2P accelerator; the handful of *_RealBackend / *_Integration tests drive the
+/// P2P worker's compile+dispatch pipeline against a real accelerator via <see cref="RunTest"/>
+/// — a CPU accelerator suffices, since the P2P layer is backend-agnostic and per-backend
+/// kernel codegen is already covered by the regular backend test classes.
+///
+/// The P2P backend is on hold while the core 6 backends are stabilized; gate every P2P
+/// test off by commenting out the single P2PLogicTests registration in the Demo and
+/// DemoConsole Program.cs (registration-only discovery makes that the on/off switch).
 /// </summary>
-public abstract partial class BackendTestBase
+public class P2PLogicTests : IDisposable
 {
+    protected IPortableCrypto Crypto { get; }
+    protected SpawnDev.WebTorrent.WebTorrentClient WebTorrentClient { get; }
+
+    public P2PLogicTests(IPortableCrypto crypto, SpawnDev.WebTorrent.WebTorrentClient webTorrentClient)
+    {
+        Crypto = crypto;
+        WebTorrentClient = webTorrentClient;
+    }
+
+    protected async Task<SpawnDev.WebTorrent.Ed25519Signer> CreateEd25519Signer()
+    {
+        var signer = new SpawnDev.WebTorrent.Ed25519Signer(Crypto);
+        await signer.GenerateKeyAsync();
+        return signer;
+    }
+
+    // The *_RealBackend / *_Integration tests need a real accelerator to exercise the
+    // P2P worker compile+dispatch pipeline. The P2P layer is backend-agnostic, so a CPU
+    // accelerator (always available on browser + desktop) is sufficient. Cached for the
+    // lifetime of the test instance and disposed in Dispose.
+    private Context? _runTestContext;
+    private Accelerator? _runTestAccelerator;
+
+    protected async Task RunTest(Func<Accelerator, Task> testBody)
+    {
+        if (_runTestAccelerator == null)
+        {
+            _runTestContext = Context.Create(builder => builder.CPU().EnableAlgorithms());
+            _runTestAccelerator = _runTestContext.GetCPUDevice(0).CreateCPUAccelerator(_runTestContext);
+        }
+        await testBody(_runTestAccelerator);
+    }
+
+    public void Dispose()
+    {
+        _runTestAccelerator?.Dispose();
+        _runTestAccelerator = null;
+        _runTestContext?.Dispose();
+        _runTestContext = null;
+    }
+
     // ═══════════════════════════════════════════════════════════
     //  P2P Device & Accelerator — Creation
     // ═══════════════════════════════════════════════════════════
@@ -1217,7 +1273,7 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_KernelSerializer_CreateDispatch()
     {
-        var method = typeof(BackendTestBase).GetMethod(nameof(TestVectorAdd),
+        var method = typeof(P2PLogicTests).GetMethod(nameof(TestVectorAdd),
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
 
         var dispatch = P2PKernelSerializer.CreateDispatch(method, gridDimX: 1024);
@@ -1233,9 +1289,9 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_KernelSerializer_ResolveKernel()
     {
-        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+        P2PKernelSerializer.RegisterKernelType(typeof(P2PLogicTests));
 
-        var method = typeof(BackendTestBase).GetMethod(nameof(TestVectorAdd),
+        var method = typeof(P2PLogicTests).GetMethod(nameof(TestVectorAdd),
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
 
         var dispatch = P2PKernelSerializer.CreateDispatch(method, gridDimX: 512);
@@ -1251,9 +1307,9 @@ public abstract partial class BackendTestBase
     [TestMethod]
     public async Task P2P_KernelSerializer_CanExecute()
     {
-        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+        P2PKernelSerializer.RegisterKernelType(typeof(P2PLogicTests));
 
-        var method = typeof(BackendTestBase).GetMethod(nameof(TestVectorAdd),
+        var method = typeof(P2PLogicTests).GetMethod(nameof(TestVectorAdd),
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
 
         var dispatch = P2PKernelSerializer.CreateDispatch(method, gridDimX: 256);
@@ -1298,7 +1354,7 @@ public abstract partial class BackendTestBase
         worker.ReceiveBuffer("buf-result", new byte[4096]);
 
         // Create dispatch
-        var method = typeof(BackendTestBase).GetMethod(nameof(TestVectorAdd),
+        var method = typeof(P2PLogicTests).GetMethod(nameof(TestVectorAdd),
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
         var request = P2PKernelSerializer.CreateDispatch(method, gridDimX: 1024);
         request.Buffers = new[]
@@ -1346,7 +1402,7 @@ public abstract partial class BackendTestBase
         await using var worker = new P2PWorker(transport);
         worker.Initialize(ctx, cpuAccel);
 
-        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+        P2PKernelSerializer.RegisterKernelType(typeof(P2PLogicTests));
 
         // Track worker events
         string? startedId = null;
@@ -1360,7 +1416,7 @@ public abstract partial class BackendTestBase
         };
 
         // Create dispatch with real kernel reference
-        var method = typeof(BackendTestBase).GetMethod(nameof(TestVectorAdd),
+        var method = typeof(P2PLogicTests).GetMethod(nameof(TestVectorAdd),
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
         var request = P2PKernelSerializer.CreateDispatch(method, gridDimX: 512);
         request.Buffers = new[]
@@ -1432,7 +1488,7 @@ public abstract partial class BackendTestBase
         worker.Initialize(accelerator.Context, accelerator);
 
         // Pre-compile the test kernel on the real backend
-        var method = typeof(BackendTestBase).GetMethod(nameof(TestVectorAdd),
+        var method = typeof(P2PLogicTests).GetMethod(nameof(TestVectorAdd),
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
         var compiled = worker.PreCompileKernel(method);
 
@@ -1462,7 +1518,7 @@ public abstract partial class BackendTestBase
         // Real backend
         worker.Initialize(accelerator.Context, accelerator);
 
-        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+        P2PKernelSerializer.RegisterKernelType(typeof(P2PLogicTests));
 
         string? compiledKernel = null;
         bool? dispatchSuccess = null;
@@ -1470,7 +1526,7 @@ public abstract partial class BackendTestBase
         worker.OnKernelCompleted += (id, success, ms) => dispatchSuccess = success;
 
         // Dispatch with real kernel method
-        var method = typeof(BackendTestBase).GetMethod(nameof(TestVectorAdd),
+        var method = typeof(P2PLogicTests).GetMethod(nameof(TestVectorAdd),
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
         var request = P2PKernelSerializer.CreateDispatch(method, gridDimX: 64);
         request.Buffers = new[]
@@ -1861,7 +1917,7 @@ public abstract partial class BackendTestBase
         // Worker uses the REAL backend (CPU/CUDA/WebGPU — whatever this test class runs)
         worker.Initialize(accelerator.Context, accelerator);
 
-        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+        P2PKernelSerializer.RegisterKernelType(typeof(P2PLogicTests));
 
         // === Wire mock transport: bidirectional ===
         // Fire-and-forget matches real WebRTC semantics: SendAsync returns once the
@@ -1901,7 +1957,7 @@ public abstract partial class BackendTestBase
         worker.ReceiveBuffer("result", new byte[4096]);
 
         // === Dispatch kernel ===
-        var method = typeof(BackendTestBase).GetMethod(nameof(TestVectorAdd),
+        var method = typeof(P2PLogicTests).GetMethod(nameof(TestVectorAdd),
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
         var request = P2PKernelSerializer.CreateDispatch(method, gridDimX: 1024);
         request.Buffers = new[]
@@ -1950,7 +2006,7 @@ public abstract partial class BackendTestBase
     public async Task P2P_Security_AllowlistBlocksUnauthorized()
     {
         // Register only our test kernel type
-        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+        P2PKernelSerializer.RegisterKernelType(typeof(P2PLogicTests));
 
         try
         {
@@ -1965,7 +2021,7 @@ public abstract partial class BackendTestBase
 
             // Our registered type should work
             var legitimate = P2PKernelSerializer.CreateDispatch(
-                typeof(BackendTestBase).GetMethod(nameof(TestVectorAdd),
+                typeof(P2PLogicTests).GetMethod(nameof(TestVectorAdd),
                     System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!,
                 gridDimX: 64);
             if (!P2PKernelSerializer.CanExecute(legitimate))
@@ -2388,7 +2444,7 @@ public abstract partial class BackendTestBase
         using var accelerator = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
         var launcher = new P2PKernelLauncher(accelerator);
 
-        var method = typeof(BackendTestBase).GetMethod(
+        var method = typeof(P2PLogicTests).GetMethod(
             nameof(KernelMultiplyBy2),
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
 
@@ -2412,7 +2468,7 @@ public abstract partial class BackendTestBase
         using var accelerator = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
         var launcher = new P2PKernelLauncher(accelerator);
 
-        var method = typeof(BackendTestBase).GetMethod(
+        var method = typeof(P2PLogicTests).GetMethod(
             nameof(KernelMultiplyBy2),
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
 
@@ -2451,7 +2507,7 @@ public abstract partial class BackendTestBase
         using var accelerator = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
         var launcher = new P2PKernelLauncher(accelerator);
 
-        var method = typeof(BackendTestBase).GetMethod(
+        var method = typeof(P2PLogicTests).GetMethod(
             nameof(KernelAddArrays),
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
 
@@ -2500,7 +2556,7 @@ public abstract partial class BackendTestBase
         using var accelerator = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
         var launcher = new P2PKernelLauncher(accelerator);
 
-        var method = typeof(BackendTestBase).GetMethod(
+        var method = typeof(P2PLogicTests).GetMethod(
             nameof(KernelFillConstant),
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
 
@@ -2531,7 +2587,7 @@ public abstract partial class BackendTestBase
         using var accelerator = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
         var launcher = new P2PKernelLauncher(accelerator);
 
-        var method = typeof(BackendTestBase).GetMethod(
+        var method = typeof(P2PLogicTests).GetMethod(
             nameof(KernelMultiplyBy2),
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
 
@@ -2582,10 +2638,10 @@ public abstract partial class BackendTestBase
         transport.SetWorker(worker);
 
         // Register our test kernel type
-        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+        P2PKernelSerializer.RegisterKernelType(typeof(P2PLogicTests));
 
         // Build dispatch request
-        var method = typeof(BackendTestBase).GetMethod(
+        var method = typeof(P2PLogicTests).GetMethod(
             nameof(KernelMultiplyBy2),
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
 
@@ -2655,9 +2711,9 @@ public abstract partial class BackendTestBase
         worker.Initialize(context, accelerator);
         transport.SetWorker(worker);
 
-        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+        P2PKernelSerializer.RegisterKernelType(typeof(P2PLogicTests));
 
-        var method = typeof(BackendTestBase).GetMethod(
+        var method = typeof(P2PLogicTests).GetMethod(
             nameof(KernelAddArrays),
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
 
@@ -2730,7 +2786,7 @@ public abstract partial class BackendTestBase
 
         var request = new KernelDispatchRequest
         {
-            KernelType = typeof(BackendTestBase).AssemblyQualifiedName!,
+            KernelType = typeof(P2PLogicTests).AssemblyQualifiedName!,
             KernelMethod = nameof(KernelMultiplyBy2),
             GridDimX = 4,
             Buffers = new[]
@@ -2760,7 +2816,7 @@ public abstract partial class BackendTestBase
         using var accelerator = global::ILGPU.Runtime.CPU.CPUDevice.Default.CreateAccelerator(context);
         var launcher = new P2PKernelLauncher(accelerator);
 
-        var method = typeof(BackendTestBase).GetMethod(
+        var method = typeof(P2PLogicTests).GetMethod(
             nameof(KernelMultiplyBy2),
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
 
@@ -2848,7 +2904,7 @@ public abstract partial class BackendTestBase
         });
 
         // Register kernel type
-        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+        P2PKernelSerializer.RegisterKernelType(typeof(P2PLogicTests));
 
         // Prepare input data
         var inputFloats = new float[] { 5.0f, 10.0f, 15.0f, 20.0f };
@@ -2858,7 +2914,7 @@ public abstract partial class BackendTestBase
 
         // Coordinator dispatches to swarm and awaits completion via TaskCompletionSource
         var dispatchResult = await p2pAccel.DispatchAsync(
-            typeof(BackendTestBase).GetMethod(nameof(KernelMultiplyBy2),
+            typeof(P2PLogicTests).GetMethod(nameof(KernelMultiplyBy2),
                 System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!,
             4,
             ("data", inputBytes, 4));
@@ -2895,10 +2951,10 @@ public abstract partial class BackendTestBase
         p2pAccel.Dispatcher = new P2PDispatcher(p2pAccel);
 
         // CreateDispatcher should find the method
-        var helper = p2pAccel.CreateDispatcher(typeof(BackendTestBase), "KernelMultiplyBy2");
+        var helper = p2pAccel.CreateDispatcher(typeof(P2PLogicTests), "KernelMultiplyBy2");
         if (helper.MethodName != "KernelMultiplyBy2")
             throw new Exception($"Method name: {helper.MethodName}");
-        if (helper.TypeName != "BackendTestBase")
+        if (helper.TypeName != "P2PLogicTests")
             throw new Exception($"Type name: {helper.TypeName}");
 
         Console.WriteLine("[P2P] CreateDispatcher helper: OK ✓");
@@ -3000,7 +3056,7 @@ public abstract partial class BackendTestBase
             _ = coordTransport.SendMessageAsync(peerId, msg);
         };
 
-        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+        P2PKernelSerializer.RegisterKernelType(typeof(P2PLogicTests));
 
         // Create 3 workers with different TFLOPS
         var (w1, t1, a1) = CreateWorkerNode(context, coordinator, coordTransport, p2pAccel, "worker-1", 10.0);
@@ -3011,7 +3067,7 @@ public abstract partial class BackendTestBase
             throw new Exception($"Expected 3 peers, got {p2pAccel.Peers.Count}");
 
         // Dispatch 6 kernels — should distribute across workers based on scoring
-        var method = typeof(BackendTestBase).GetMethod(nameof(KernelFillConstant),
+        var method = typeof(P2PLogicTests).GetMethod(nameof(KernelFillConstant),
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
 
         int dispatched = 0;
@@ -3063,7 +3119,7 @@ public abstract partial class BackendTestBase
         var coordTransport = new P2PTransport(client, coordinator, p2pAccel.Dispatcher);
         coordTransport.SetCrypto(crypto);
 
-        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+        P2PKernelSerializer.RegisterKernelType(typeof(P2PLogicTests));
 
         // Worker-1: registered as peer but transport is a black hole (simulates unreachable)
         coordinator.HandlePeerConnected("worker-1", new PeerCapabilities
@@ -3136,7 +3192,7 @@ public abstract partial class BackendTestBase
         };
 
         // Dispatch — worker-1 gets it first (higher TFLOPS), but won't respond
-        var method = typeof(BackendTestBase).GetMethod(nameof(KernelFillConstant),
+        var method = typeof(P2PLogicTests).GetMethod(nameof(KernelFillConstant),
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
         var request = P2PKernelSerializer.CreateDispatch(method, gridDimX: 4);
         request.Buffers = new[]
@@ -3201,7 +3257,7 @@ public abstract partial class BackendTestBase
             _ = coordTransport.SendMessageAsync(peerId, msg);
         };
 
-        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+        P2PKernelSerializer.RegisterKernelType(typeof(P2PLogicTests));
 
         // Worker-1: black hole (dispatch stays pending)
         coordinator.HandlePeerConnected("worker-1", new PeerCapabilities
@@ -3224,7 +3280,7 @@ public abstract partial class BackendTestBase
         coordTransport.RegisterPeer("worker-2", async (data) => await Task.CompletedTask);
 
         // Dispatch to worker-1 (black hole — stays pending)
-        var method = typeof(BackendTestBase).GetMethod(nameof(KernelFillConstant),
+        var method = typeof(P2PLogicTests).GetMethod(nameof(KernelFillConstant),
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
         var request = P2PKernelSerializer.CreateDispatch(method, gridDimX: 4);
         request.Buffers = new[]
@@ -3333,7 +3389,7 @@ public abstract partial class BackendTestBase
             _ = coordTransport.SendMessageAsync(peerId, msg);
         };
 
-        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+        P2PKernelSerializer.RegisterKernelType(typeof(P2PLogicTests));
 
         // 2 black hole workers
         for (int i = 1; i <= 2; i++)
@@ -3349,7 +3405,7 @@ public abstract partial class BackendTestBase
             coordTransport.RegisterPeer(wId, async (data) => await Task.CompletedTask);
         }
 
-        var method = typeof(BackendTestBase).GetMethod(nameof(KernelFillConstant),
+        var method = typeof(P2PLogicTests).GetMethod(nameof(KernelFillConstant),
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
         var request = P2PKernelSerializer.CreateDispatch(method, gridDimX: 4);
         request.Buffers = new[]
@@ -3735,13 +3791,13 @@ public abstract partial class BackendTestBase
         worker.Initialize(context, cpuAccel);
         transport.SetWorker(worker);
 
-        P2PKernelSerializer.RegisterKernelType(typeof(BackendTestBase));
+        P2PKernelSerializer.RegisterKernelType(typeof(P2PLogicTests));
         worker.ReceiveBuffer("data", new byte[16]);
 
         // Register the coordinator as a known peer so the transport accepts its messages
         transport.RegisterPeer("coordinator", _ => Task.CompletedTask);
 
-        var method = typeof(BackendTestBase).GetMethod(nameof(KernelFillConstant),
+        var method = typeof(P2PLogicTests).GetMethod(nameof(KernelFillConstant),
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!;
         var request = P2PKernelSerializer.CreateDispatch(method, gridDimX: 4);
         request.Buffers = new[]

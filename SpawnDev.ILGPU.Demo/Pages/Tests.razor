@@ -34,7 +34,10 @@
 </div>
 <hr />
 
-<UnitTestsView TypeInstanceResolver="TestTypeResolver" TestAssemblies="Assemblies" TestTypes="Types" ResultsDirectory="_shaderDebug.DebugDirectory"></UnitTestsView>
+@* Registration-only discovery: pass explicit Types (registered test-class services)
+   and NOT TestAssemblies — assembly scanning would re-discover P2P classes regardless
+   of registration, defeating the comment-out-to-gate model. *@
+<UnitTestsView TypeInstanceResolver="TestTypeResolver" TestTypes="Types" ResultsDirectory="_shaderDebug.DebugDirectory"></UnitTestsView>
 
 @* 
 @if (_dumpStatus != null) { <span style="color:green;">@_dumpStatus</span> }

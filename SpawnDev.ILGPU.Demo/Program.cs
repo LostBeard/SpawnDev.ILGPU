@@ -46,7 +46,12 @@ builder.Services.AddSingleton<WebGPUNoSubgroupsTests>();
 builder.Services.AddSingleton<WasmTests>();
 builder.Services.AddSingleton<WebGLTests>();
 builder.Services.AddSingleton<DefaultTests>();
-builder.Services.AddSingleton<WasmP2PBrowserTests>();
+
+// ─── P2P backend ON HOLD (core-6 focus). Uncomment to re-enable the P2P tests.
+//     Discovery is registration-only (the /tests page no longer scans the assembly),
+//     so commenting these out removes them from the browser test run. ───────────────
+// builder.Services.AddSingleton<SpawnDev.ILGPU.Demo.Shared.UnitTests.P2PLogicTests>();  // 169 P2P logic/dispatch tests
+// builder.Services.AddSingleton<WasmP2PBrowserTests>();                                  // 180s real-WebRTC two-popup tests
 
 
 builder.Services.AddScoped(sp => new HttpClient { BaseAddress = new Uri(builder.HostEnvironment.BaseAddress) });

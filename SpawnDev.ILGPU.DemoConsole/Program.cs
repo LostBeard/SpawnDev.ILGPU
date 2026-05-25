@@ -1,6 +1,7 @@
 using Microsoft.Extensions.DependencyInjection;
 using SpawnDev.BlazorJS.Cryptography;
-using SpawnDev.ILGPU.DemoConsole.P2PTests;
+using SpawnDev.ILGPU.Demo.Shared.UnitTests;   // P2PLogicTests (re-enable block below)
+using SpawnDev.ILGPU.DemoConsole.P2PTests;     // console P2P folder (re-enable block below)
 using SpawnDev.UnitTesting;
 
 try
@@ -9,7 +10,34 @@ try
     services.AddPlatformCrypto();
     services.AddSingleton<SpawnDev.WebTorrent.WebTorrentClient>();
     var sp = services.BuildServiceProvider();
-    var runner = new UnitTestRunner(sp, true);
+
+    // Registration-only test discovery. Replaces the old `findAll` reflection scan,
+    // which was load-order fragile (it silently missed standalone Demo.Shared test
+    // classes like P2PLogicTests). Every desktop test class is listed explicitly here;
+    // to gate a class off, comment its line out.
+    var runner = new UnitTestRunner(sp);
+    runner.SetTestTypes(new[]
+    {
+        typeof(CPUTests),
+        typeof(CudaTests),
+        typeof(OpenCLTests),
+        typeof(AcceleratorRequirementsTests),
+        typeof(CuRandTests),
+        typeof(NvJpegTests),
+        typeof(UnsupportedKernelFeatureExceptionTests),
+
+        // ─── P2P backend ON HOLD (core-6 focus). Uncomment this block to re-enable
+        //     every P2P unit test in one place. ───────────────────────────────────
+        // typeof(P2PLogicTests),               // 169 backend-agnostic P2P logic/dispatch tests
+        // typeof(CorePipelineTests),
+        // typeof(MultiPeerTests),
+        // typeof(P2PBinaryFrameTests),
+        // typeof(SecurityTests),
+        // typeof(StressTests),
+        // typeof(Bep46PropagationTests),
+        // typeof(RealWebRtcPipelineTests),
+        // typeof(StrictFloat64WireTests),
+    });
 
     // NOTE: LocalTrackerFixture disabled by TJ on 2026-05-21 11-14 due to the massive perforamnce hit
     // tests take and it should cleanly fallback to the live hub.spawndev.com tracker
