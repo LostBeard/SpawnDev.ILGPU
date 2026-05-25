@@ -1224,6 +1224,18 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             code.Add(WasmOpCodes.AtomicPrefix);
             WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicStore);
             code.Add(0x02); code.Add(0x0C); // offset=12 (exit flag)
+            // Release fence before bumping the group generation: ensure ALL of the
+            // last group's writes (non-atomic kernel data writes + shared-memory zeroing
+            // + the exit-flag/arrival resets above) are visible to waking workers BEFORE
+            // they observe the advanced group gen. This mirrors the phase-barrier producer's
+            // fence at the gen store (see "Fence before notify" above, ~line 970). Without
+            // it, V8's wasm linear-memory ordering (chromium#490434403 family) lets a waiter
+            // see the bumped group gen via seq_cst load yet read stale group data — the source
+            // of intermittent sort-order violations on large multi-group RadixSorts. The phase
+            // barrier had this fence; the group barrier was missing it (asymmetry fixed 2026-05-25).
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.AtomicFence);
+            code.Add(0x00);
             WasmModuleBuilder.EmitLocalGet(code, 13);
             WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
             WasmModuleBuilder.EmitI32Const(code, 1);
