@@ -19,6 +19,18 @@ namespace PlaywrightMultiTest
         [Test, TestCaseSource(nameof(TestCases))]
         public async Task RunTest(ProjectTest test)
         {
+            // Parallel path: the lane scheduler already ran this test in StartUp and
+            // cached its outcome. Report it (keeps the NUnit trx + results JSON correct)
+            // without re-running. Tests not in the cache (e.g. PMT-level integration
+            // tests, or PMT_PARALLEL=off) fall through to the live path below.
+            if (ProjectRunner.Instance.TryGetOutcome(test.Name, out var outcome))
+            {
+                TestResultsWriter.RecordResult(test.Name, outcome.Status, outcome.Message, outcome.DurationMs);
+                if (outcome.Status == "Skip") Assert.Ignore(outcome.Message ?? "Skipped");
+                if (outcome.Status == "Fail") Assert.Fail(outcome.Message ?? "Failed");
+                return; // Pass
+            }
+
             var sw = Stopwatch.StartNew();
             try
             {

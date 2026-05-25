@@ -109,6 +109,14 @@ namespace PlaywrightMultiTest
                     }
                 }
             }
+            // `dotnet test --filter` is consumed by the NUnit adapter, NOT passed to this
+            // testhost as a process arg — so PMT enumerates the FULL set and NUnit selects
+            // cases afterwards. That was fine when RunTest executed per case, but the parallel
+            // scheduler runs the enumerated set up-front in StartUp, so an unscoped enumeration
+            // would run everything. PMT_FILTER (substring match, this testhost CAN read it) lets
+            // dev runs scope the scheduled set: e.g. `PMT_FILTER=VectorAddTest dotnet test ...`.
+            filter ??= Environment.GetEnvironmentVariable("PMT_FILTER");
+            if (!string.IsNullOrEmpty(filter)) LogStatus($"Test filter active: '{filter}' (substring match)");
 
 
             LogStatus("Discovering projects...");
@@ -285,12 +293,9 @@ namespace PlaywrightMultiTest
                             var methodName = row.GetProperty("methodName").GetString() ?? "";
                             var rowTest = new ProjectTest(testableProject, typeName, methodName, testPageUrl);
 
-                            if (filter != null)
+                            if (filter != null && !MatchesFilter(filter, rowTest))
                             {
-                                if (rowTest.Name != filter && rowTest.TestTypeName != filter && rowTest.TestMethodName != filter)
-                                {
-                                    continue;
-                                }
+                                continue;
                             }
 
                             testableProject.Tests.Add(rowTest);
@@ -347,12 +352,9 @@ namespace PlaywrightMultiTest
                         if (string.IsNullOrWhiteSpace(methodName)) continue;
 
                         var rowTest = new ProjectTest(testableProject, typeName!, methodName!);
-                        if (filter != null)
+                        if (filter != null && !MatchesFilter(filter, rowTest))
                         {
-                            if (rowTest.Name != filter && rowTest.TestTypeName != filter && rowTest.TestMethodName != filter)
-                            {
-                                continue;
-                            }
+                            continue;
                         }
                         testableProject.Tests.Add(rowTest);
 
@@ -443,28 +445,32 @@ namespace PlaywrightMultiTest
                 }
             }
             var nmt = true;
-            // Playwright-level integration tests (multi-tab, real browser)
-            foreach (var testableProject in TestableProjects)
-            {
-                if (testableProject is TestableBlazorWasm)
-                {
-                    var proj = testableProject;
-                    yield return new TestCaseData(new ProjectTest(proj, "P2PSwarm", "TwoTab_PeerDiscovery")
-                    {
-                        TestFunc = async (page) => await P2PSwarmTwoTabTest(page, (TestableBlazorWasm)proj),
-                    }).SetName("P2PSwarm.TwoTab_PeerDiscovery").SetCategory("P2PSwarm");
-
-                    yield return new TestCaseData(new ProjectTest(proj, "P2PSwarm", "PeerStability_NoCascadeAfterHandshake")
-                    {
-                        TestFunc = async (page) => await P2PSwarmStabilityTest(page, (TestableBlazorWasm)proj),
-                    }).SetName("P2PSwarm.PeerStability_NoCascadeAfterHandshake").SetCategory("P2PSwarm");
-
-                    yield return new TestCaseData(new ProjectTest(proj, "P2PSwarm", "RenderMandelbrot_PaintsCanvas")
-                    {
-                        TestFunc = async (page) => await P2PSwarmRenderMandelbrotTest(page, (TestableBlazorWasm)proj),
-                    }).SetName("P2PSwarm.RenderMandelbrot_PaintsCanvas").SetCategory("P2PSwarm");
-                }
-            }
+            // Playwright-level P2P integration tests (multi-tab real-WebRTC, ~120s timeouts).
+            // GATED OFF — P2P backend is on hold (core-6 focus), consistent with the P2P unit
+            // tests gated out of the Demo/DemoConsole registrations. Uncomment to re-enable
+            // alongside the P2PLogicTests registration blocks in the Program.cs files.
+            // The P2PSwarm* helper methods below are retained for that re-enable.
+            // foreach (var testableProject in TestableProjects)
+            // {
+            //     if (testableProject is TestableBlazorWasm)
+            //     {
+            //         var proj = testableProject;
+            //         yield return new TestCaseData(new ProjectTest(proj, "P2PSwarm", "TwoTab_PeerDiscovery")
+            //         {
+            //             TestFunc = async (page) => await P2PSwarmTwoTabTest(page, (TestableBlazorWasm)proj),
+            //         }).SetName("P2PSwarm.TwoTab_PeerDiscovery").SetCategory("P2PSwarm");
+            //
+            //         yield return new TestCaseData(new ProjectTest(proj, "P2PSwarm", "PeerStability_NoCascadeAfterHandshake")
+            //         {
+            //             TestFunc = async (page) => await P2PSwarmStabilityTest(page, (TestableBlazorWasm)proj),
+            //         }).SetName("P2PSwarm.PeerStability_NoCascadeAfterHandshake").SetCategory("P2PSwarm");
+            //
+            //         yield return new TestCaseData(new ProjectTest(proj, "P2PSwarm", "RenderMandelbrot_PaintsCanvas")
+            //         {
+            //             TestFunc = async (page) => await P2PSwarmRenderMandelbrotTest(page, (TestableBlazorWasm)proj),
+            //         }).SetName("P2PSwarm.RenderMandelbrot_PaintsCanvas").SetCategory("P2PSwarm");
+            //     }
+            // }
         }
 
         /// <summary>
@@ -967,13 +973,158 @@ namespace PlaywrightMultiTest
             _ => null,
         };
 
+        // ───────────────────────── Parallel lane scheduler ─────────────────────────
+        // The full sweep used to run strictly sequentially: NUnit's [Parallelizable
+        // (ParallelScope.Self)] runs the TestCaseSource cases one at a time, and every
+        // browser test clicked rows on a single shared Chromium page. This scheduler
+        // moves execution into OneTimeSetUp (StartUp) and runs backend "lanes" in
+        // parallel, then NUnit's RunTest just reports the cached per-test outcome.
+        //
+        // Lane model (v1):
+        //   Phase A (parallel): browser non-Wasm rows (sequential on the one page) ‖
+        //     CPU subprocesses (cap N) ‖ CUDA subprocesses (cap 1, GPU) ‖
+        //     OpenCL subprocesses (cap 1, GPU).
+        //   Phase B (isolated): Wasm rows alone — Wasm sort kernels spawn
+        //     hardwareConcurrency pure-spin barrier workers that STARVE under CPU
+        //     oversubscription, so Wasm never overlaps any other CPU-heavy lane.
+        // Set PMT_PARALLEL=off to fall back to the original sequential per-case path.
+
+        public sealed record ScheduledOutcome(string Status, string? Message, double DurationMs);
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, ScheduledOutcome> _outcomes = new();
+        public bool ParallelEnabled { get; private set; }
+        public bool TryGetOutcome(string name, out ScheduledOutcome outcome) => _outcomes.TryGetValue(name, out outcome!);
+
+        private static int EnvInt(string name, int dflt)
+            => int.TryParse(Environment.GetEnvironmentVariable(name), out var v) && v > 0 ? v : dflt;
+
+        // Per-lane concurrency caps (env-overridable). GPU-bound lanes default to 1 to
+        // avoid OOM/contention with the browser WebGPU lane sharing the same card.
+        private static int CapFor(string lane) => lane switch
+        {
+            "cpu" => EnvInt("PMT_CPU_PARALLELISM", 4),
+            "cuda" => EnvInt("PMT_CUDA_PARALLELISM", 1),
+            "opencl" => EnvInt("PMT_OPENCL_PARALLELISM", 1),
+            _ => EnvInt("PMT_DESKTOP_PARALLELISM", 4),
+        };
+
+        private static bool IsWasm(ProjectTest t) => (t.TestTypeName ?? "").Contains("Wasm", StringComparison.OrdinalIgnoreCase);
+
+        // Substring, case-insensitive match against a test's full name / type / method.
+        private static bool MatchesFilter(string filter, ProjectTest t) =>
+            (t.Name?.Contains(filter, StringComparison.OrdinalIgnoreCase) ?? false)
+            || (t.TestTypeName?.Contains(filter, StringComparison.OrdinalIgnoreCase) ?? false)
+            || (t.TestMethodName?.Contains(filter, StringComparison.OrdinalIgnoreCase) ?? false);
+
+        private static string DesktopLaneOf(string? typeName) => (typeName ?? "") switch
+        {
+            "CudaTests" or "CuRandTests" or "NvJpegTests" => "cuda",
+            "OpenCLTests" => "opencl",
+            _ => "cpu", // CPUTests + capability/logic test classes (fast, CPU-bound)
+        };
+
         /// <summary>
-        /// This is called after tests have been enumerated bu before they are run. You can use this to start up any services or infrastructure needed for the tests.
+        /// Called after tests are enumerated, before NUnit runs the cases. When parallel
+        /// scheduling is enabled this runs the entire sweep in lanes and caches outcomes;
+        /// RunTest then reports them. With PMT_PARALLEL=off this is a no-op and RunTest
+        /// executes each test live (original sequential behaviour).
         /// </summary>
-        /// <returns></returns>
         public async Task StartUp()
         {
             Debug.WriteLine("StartUp()");
+            ParallelEnabled = !string.Equals(Environment.GetEnvironmentVariable("PMT_PARALLEL"), "off", StringComparison.OrdinalIgnoreCase);
+            if (!ParallelEnabled)
+            {
+                LogStatus("Parallel scheduler DISABLED (PMT_PARALLEL=off) — NUnit runs cases sequentially.");
+                return;
+            }
+            await RunScheduledAsync().ConfigureAwait(false);
+        }
+
+        private async Task RunScheduledAsync()
+        {
+            var swAll = Stopwatch.StartNew();
+            var blazor = TestableProjects.OfType<TestableBlazorWasm>().FirstOrDefault();
+
+            // Trivial/build tests (no TestTypeName) — record their preset result instantly.
+            foreach (var proj in TestableProjects)
+                foreach (var t in proj.Tests.Where(t => t.TestTypeName == null))
+                    await ExecuteAndCaptureAsync(t, null).ConfigureAwait(false);
+
+            // ── Phase A: non-Wasm browser lane ‖ desktop lanes ──────────────────────
+            var phaseA = new List<Task>();
+
+            foreach (var console in TestableProjects.OfType<TestableConsole>())
+            {
+                foreach (var laneGroup in console.Tests
+                             .Where(t => t.TestTypeName != null)
+                             .GroupBy(t => DesktopLaneOf(t.TestTypeName)))
+                {
+                    var tests = laneGroup.ToList();
+                    var cap = CapFor(laneGroup.Key);
+                    LogStatus($"Phase A desktop lane '{laneGroup.Key}': {tests.Count} tests, cap={cap}");
+                    phaseA.Add(RunLaneConcurrentAsync(tests, cap, null));
+                }
+            }
+
+            if (blazor?.Page != null)
+            {
+                var nonWasm = blazor.Tests.Where(t => t.TestTypeName != null && !IsWasm(t)).ToList();
+                LogStatus($"Phase A browser non-Wasm lane: {nonWasm.Count} tests (sequential on shared page)");
+                phaseA.Add(RunLaneSequentialAsync(nonWasm, blazor.Page));
+            }
+
+            await Task.WhenAll(phaseA).ConfigureAwait(false);
+            LogStatus($"Phase A complete in {swAll.Elapsed:hh\\:mm\\:ss}. Starting Phase B (Wasm, isolated)...");
+
+            // ── Phase B: Wasm lane alone (no other CPU-heavy lane running) ──────────
+            if (blazor?.Page != null)
+            {
+                var wasm = blazor.Tests.Where(t => t.TestTypeName != null && IsWasm(t)).ToList();
+                LogStatus($"Phase B Wasm lane: {wasm.Count} tests (isolated, sequential)");
+                await RunLaneSequentialAsync(wasm, blazor.Page).ConfigureAwait(false);
+            }
+
+            LogStatus($"All scheduled tests complete in {swAll.Elapsed:hh\\:mm\\:ss} ({_outcomes.Count} outcomes cached).");
+        }
+
+        private async Task RunLaneSequentialAsync(List<ProjectTest> tests, IPage page)
+        {
+            foreach (var t in tests)
+                await ExecuteAndCaptureAsync(t, page).ConfigureAwait(false);
+        }
+
+        private async Task RunLaneConcurrentAsync(List<ProjectTest> tests, int cap, IPage? page)
+        {
+            using var sem = new SemaphoreSlim(cap, cap);
+            var tasks = tests.Select(async t =>
+            {
+                await sem.WaitAsync().ConfigureAwait(false);
+                try { await ExecuteAndCaptureAsync(t, page!).ConfigureAwait(false); }
+                finally { sem.Release(); }
+            });
+            await Task.WhenAll(tasks).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Runs one test via its existing TestFunc (browser = click row on the given page;
+        /// desktop = spawn subprocess) and records the outcome. Mirrors the verdict logic
+        /// in UnitTest1.RunTest so cached + live paths agree.
+        /// </summary>
+        private async Task ExecuteAndCaptureAsync(ProjectTest test, IPage? page)
+        {
+            var sw = Stopwatch.StartNew();
+            try
+            {
+                await test.TestFunc(page!).ConfigureAwait(false);
+                sw.Stop();
+                var status = test.Result == TestResult.Unsupported ? "Skip" : "Pass";
+                _outcomes[test.Name] = new ScheduledOutcome(status, test.ResultMessage, sw.Elapsed.TotalMilliseconds);
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                _outcomes[test.Name] = new ScheduledOutcome("Fail", ex.Message, sw.Elapsed.TotalMilliseconds);
+            }
         }
 
         /// <summary>
