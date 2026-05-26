@@ -77,6 +77,39 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public static bool UseWaitNotifyBarriers { get; set; } = false;
 
         /// <summary>
+        /// DIAGNOSTIC (Tuvok 2026-05-26) — SharedArrayBuffer-growth-lag hypothesis test
+        /// for the residual large-multi-group Wasm sort corruption. When set, the
+        /// accelerator forces a real 1-page <c>WebAssembly.Memory.grow</c> (plus the full
+        /// production re-get-buffer + worker re-instantiation path) on EVERY dispatch,
+        /// instead of only when a bigger kernel arrives. This exercises the grow path
+        /// ~16-40x per sort versus ~1x naturally, so if grow/re-instantiation visibility
+        /// is the trigger, a WARM sort loop (otherwise clean, ~0/60 baseline) will corrupt.
+        /// Capped at <c>MaxLinearMemoryPages</c> so it degrades to a no-op near the budget.
+        /// RETAINED as default-off investigation tooling (2026-05-26): the grow/SAB-resize
+        /// hypothesis is DISFAVORED (this amplify run was 0/750 on the localized kernel) but
+        /// was NOT definitively killed. If the heavy-dup ±1 residual recurs after the monotonic
+        /// kernelId fix (`WasmAccelerator._nextKernelId`), use this + <see cref="PreGrowPages"/>
+        /// to re-test grow without rebuilding the harness. Default OFF — zero production impact.
+        /// </summary>
+        public static bool ForceGrowEachDispatch { get; set; } = false;
+
+        /// <summary>
+        /// DIAGNOSTIC (Tuvok 2026-05-26) — the INVERSE of <see cref="ForceGrowEachDispatch"/>,
+        /// and the decisive test of the SharedArrayBuffer-growth-lag hypothesis. When &gt; 0,
+        /// the accelerator allocates its shared <c>WebAssembly.Memory</c> with this many
+        /// initial pages on first creation, so that no dispatch in a normal run ever needs to
+        /// call <c>memory.grow</c> (and never triggers worker re-instantiation). Set it large
+        /// enough to cover the biggest kernel in the run (e.g. 8192 = 512 MiB covers the 4M
+        /// sort) and run a full WasmTests sweep: if the residual large-sort corruption STILL
+        /// fires with ZERO grows, grow/re-instantiation is definitively NOT the cause — one
+        /// failure suffices to rule it out. If many sweeps go clean, grow is implicated.
+        /// Capped at <c>MaxLinearMemoryPages</c>. RETAINED as default-off investigation tooling
+        /// (2026-05-26): grow hypothesis disfavored but NOT definitively killed — keep this ready
+        /// to re-test if the residual recurs after the monotonic kernelId fix. Default 0 — off.
+        /// </summary>
+        public static int PreGrowPages { get; set; } = 0;
+
+        /// <summary>
         /// When set, dumps generated Wasm binaries to this directory. Desktop only.
         /// </summary>
         public static string? WasmDumpPath { get; set; }

@@ -101,7 +101,32 @@ namespace SpawnDev.ILGPU.Wasm
         /// re-sends and full module re-compiles. Each compile of a non-trivial kernel
         /// takes 50-100ms; product = 4-8 minutes of Wasm-side compile work alone.
         /// </summary>
-        private readonly Dictionary<byte[], HashSet<Worker>> _initializedWorkersByKernel = new();
+        private readonly Dictionary<byte[], KernelCacheEntry> _initializedWorkersByKernel = new();
+
+        /// <summary>
+        /// Monotonic source for the worker-side kernel-cache id (<see cref="KernelCacheEntry.KernelId"/>).
+        /// MUST be unique-and-stable, NOT <c>RuntimeHelpers.GetHashCode(wasmBytes)</c>: an identity hash
+        /// is a heuristic that RECYCLES under Mono/Wasm GC, so two distinct LIVE kernels can collide on a
+        /// single id and stomp each other's worker-side module slot (<c>_modulesById[kid]</c>, WorkerPool.cs)
+        /// — a worker then runs the WRONG cached module, producing silent sort corruption that only surfaces
+        /// under full-sweep kernel churn. <see cref="Interlocked.Increment(ref int)"/> is collision-proof by
+        /// construction. See Wasm/CLAUDE.md "kernelId MUST be a monotonic unique id".
+        /// </summary>
+        private static int _nextKernelId = 0;
+
+        /// <summary>
+        /// Worker-init tracking for one distinct kernel (keyed by its <c>wasmBytes</c> reference in
+        /// <see cref="_initializedWorkersByKernel"/>). Carries a stable, unique <see cref="KernelId"/>
+        /// (the worker-side <c>_modulesById</c> key) plus the set of workers that have already received
+        /// and compiled this kernel's bytes (so they aren't re-sent).
+        /// </summary>
+        private sealed class KernelCacheEntry
+        {
+            /// <summary>Stable, process-unique id for this kernel's worker-side module cache slot.</summary>
+            public int KernelId;
+            /// <summary>Workers that already hold this kernel's compiled module.</summary>
+            public readonly HashSet<Worker> Workers = new();
+        }
 
         /// <summary>
         /// Per-worker dispatch state for persistent handlers (Hypothesis #1, 2026-04-26).
@@ -823,6 +848,23 @@ namespace SpawnDev.ILGPU.Wasm
                 int wasmPages = wasmPagesExact + 1; // 1-page (64 KB) absolute safety pad
                 if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-MEM] disp={dispNum} totalLayout={totalWithBarriers} exactPages={wasmPagesExact} pages={wasmPages} bytes={wasmPages * 65536} cap={_maxLinearMemoryPages * 65536} buf={totalMemoryBytes} scratch={scratchBase}+{scratchSize} struct={structRegionBase}+{totalStructBytes} shared={sharedMemBase}+{sharedMemSize} barrier={barrierBase}+{barrierSize} fence={fenceSlot} spt={scratchPerThread} gs={groupSize} _wc={_workerCount}");
 
+                // DIAGNOSTIC (Tuvok 2026-05-26): force a real 1-page memory.grow on every
+                // dispatch to test the SharedArrayBuffer-growth-lag hypothesis for the
+                // residual large-sort corruption. Bumping the required page count to one
+                // above the cached high-water mark drives the dispatch into the production
+                // grow branch below (grow + re-get buffer + _initializedWorkersByKernel
+                // clear → worker re-instantiation), exactly as a bigger kernel would. Capped
+                // at the linear-memory budget so it degrades to a no-op near the ceiling
+                // instead of throwing OOM. RETAINED default-off (grow hypothesis disfavored
+                // but not killed) — use to re-test grow if the residual recurs after the
+                // monotonic kernelId fix. See WasmBackend.ForceGrowEachDispatch.
+                if (WasmBackend.ForceGrowEachDispatch
+                    && _cachedWasmMemory != null
+                    && _cachedWasmPages + 1 <= _maxLinearMemoryPages)
+                {
+                    wasmPages = Math.Max(wasmPages, _cachedWasmPages + 1);
+                }
+
                 // Determine whether we can reuse the cached memory.
                 // If there are other pending kernel dispatches running concurrently,
                 // they share the same SharedArrayBuffer and we'd corrupt their data.
@@ -848,13 +890,19 @@ namespace SpawnDev.ILGPU.Wasm
                     // Wasm modules are compiled (e.g., RadixSort pairs pipeline).
                     if (_cachedWasmMemory == null)
                     {
-                        _cachedWasmPages = wasmPages;
+                        // DIAGNOSTIC (Tuvok 2026-05-26, RETAINED default-off): PreGrowPages lets a
+                        // run pre-reserve a large initial memory so NO dispatch ever needs
+                        // memory.grow — the "remove the suspected cause" test of the SAB-growth-lag
+                        // hypothesis (disfavored but not killed). No-op (0) in production.
+                        int initialPages = Math.Min(_maxLinearMemoryPages,
+                            Math.Max(wasmPages, WasmBackend.PreGrowPages));
+                        _cachedWasmPages = initialPages;
                         _cachedWasmMemory = js.Call<JSObject>(
                             "eval",
-                            $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: {_maxLinearMemoryPages}, shared: true }})");
+                            $"new WebAssembly.Memory({{ initial: {initialPages}, maximum: {_maxLinearMemoryPages}, shared: true }})");
                         _cachedMemoryBuffer = _cachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
                         _initializedWorkersByKernel.Clear();
-                        if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-MEM-INIT] disp={dispNum} pages={wasmPages} bytes={wasmPages * 65536} cap={_maxLinearMemoryPages}");
+                        if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-MEM-INIT] disp={dispNum} pages={initialPages} (need={wasmPages}) bytes={initialPages * 65536} cap={_maxLinearMemoryPages}");
                     }
                     else
                     {
@@ -885,13 +933,17 @@ namespace SpawnDev.ILGPU.Wasm
                     // repeated SharedArrayBuffer allocation (the root cause of pairs sort OOM).
                     if (_cachedWasmMemory == null)
                     {
-                        _cachedWasmPages = wasmPages;
+                        // DIAGNOSTIC (Tuvok 2026-05-26): see PreGrowPages note in the
+                        // non-concurrent branch above. No-op (0) in production.
+                        int initialPages = Math.Min(_maxLinearMemoryPages,
+                            Math.Max(wasmPages, WasmBackend.PreGrowPages));
+                        _cachedWasmPages = initialPages;
                         _cachedWasmMemory = js.Call<JSObject>(
                             "eval",
-                            $"new WebAssembly.Memory({{ initial: {wasmPages}, maximum: {_maxLinearMemoryPages}, shared: true }})");
+                            $"new WebAssembly.Memory({{ initial: {initialPages}, maximum: {_maxLinearMemoryPages}, shared: true }})");
                         _cachedMemoryBuffer = _cachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
                         _initializedWorkersByKernel.Clear();
-                        if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-MEM-INIT-CC] disp={dispNum} pages={wasmPages} bytes={wasmPages * 65536} cap={_maxLinearMemoryPages}");
+                        if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-MEM-INIT-CC] disp={dispNum} pages={initialPages} (need={wasmPages}) bytes={initialPages * 65536} cap={_maxLinearMemoryPages}");
                     }
                     else if (wasmPages > _cachedWasmPages)
                     {
@@ -1486,24 +1538,31 @@ namespace SpawnDev.ILGPU.Wasm
             }
 
             // Per-kernel worker initialization tracking. Look up (or create) the
-            // HashSet<Worker> for this kernel's wasmBytes — workers in the set have
+            // KernelCacheEntry for this kernel's wasmBytes — it carries a stable unique
+            // KernelId (the worker-side module-cache key) plus the set of workers that
             // already received and compiled this specific kernel and don't need it
-            // re-sent. Different kernels live in different sets so multi-kernel
-            // pipelines (ML inference) don't thrash the worker-side module cache.
+            // re-sent. Different kernels get distinct entries (and distinct ids) so
+            // multi-kernel pipelines (ML inference) don't thrash the worker module cache.
             //
             // Surfaced 2026-05-04 by Data's StyleMosaic Wasm 10+ minute hang at rc.16:
             // ~100 dispatches × ~6 alternating kernel types × 8 workers = ~4800 worker-
             // side Wasm module re-compiles (50-100ms each) when the prior single-set
             // tracker was being cleared on every kernel switch. Now each (worker, kernel)
             // pair compiles once and reuses for the lifetime of the worker.
-            if (!_initializedWorkersByKernel.TryGetValue(wasmBytes, out var kernelInitSet))
+            if (!_initializedWorkersByKernel.TryGetValue(wasmBytes, out var kernelCacheEntry))
             {
-                kernelInitSet = new HashSet<Worker>();
-                _initializedWorkersByKernel[wasmBytes] = kernelInitSet;
+                kernelCacheEntry = new KernelCacheEntry
+                {
+                    // Unique + stable per distinct kernel (keyed by wasmBytes ref). Replaces the old
+                    // RuntimeHelpers.GetHashCode(wasmBytes) id: that identity hash RECYCLES under GC and
+                    // let two live kernels collide on a single worker-side module slot, so a worker could
+                    // run a stomped/stale module -> silent large-sort corruption under full-sweep churn.
+                    // A monotonic id cannot collide; see _nextKernelId.
+                    KernelId = Interlocked.Increment(ref _nextKernelId)
+                };
+                _initializedWorkersByKernel[wasmBytes] = kernelCacheEntry;
             }
-            // Stable per-kernel ID for the worker-side cache lookup. Use object hash
-            // of wasmBytes — same byte[] reference = same ID across dispatches.
-            int kernelId = System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(wasmBytes);
+            int kernelId = kernelCacheEntry.KernelId;
 
             var tasks = new List<Task>();
 
@@ -1548,7 +1607,7 @@ namespace SpawnDev.ILGPU.Wasm
                     // re-dispatch can resume the spin loop where it left off.
                     int yieldStateAddr = yieldStateRegionBase + w * 16;
 
-                    bool firstTimeOnWorker = kernelInitSet.Add(worker);
+                    bool firstTimeOnWorker = kernelCacheEntry.Workers.Add(worker);
                     worker.PostMessage(new WasmBarrierDispatchMessage
                     {
                         script = workerScript,
@@ -1595,7 +1654,7 @@ namespace SpawnDev.ILGPU.Wasm
                     handlerState.ViewLayoutDiag = _lastViewLayoutDiag;
                     handlerState.KernelName = compiledKernel.EntryPoint?.Name ?? "<unknown>";
 
-                    bool firstTimeOnWorker = kernelInitSet.Add(worker);
+                    bool firstTimeOnWorker = kernelCacheEntry.Workers.Add(worker);
                     worker.PostMessage(new WasmFlatDispatchMessage
                     {
                         script = workerScript,

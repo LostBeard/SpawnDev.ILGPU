@@ -189,18 +189,35 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                         Array.Sort(cpuKeys);
                         Array.Reverse(cpuKeys); // descending
 
-                        // Find first ROOT displacements (diff != -1, not cascade)
+                        // Find first ROOT displacements (diff != -1, not cascade) + aggregate
+                        // localization stats (Tuvok 2026-05-26): the residual Wasm sort race is
+                        // rare (~14%/sweep) and can't be force-reproduced, so when it DOES fire we
+                        // capture maximal context. localPos(i%256) histogram reveals thread-index
+                        // clustering (localPos 0 = "first thread does scan" ILGroupExtensions:150;
+                        // 255 = "last thread writes counters" RadixSortExtensions:728); diff buckets
+                        // separate the ±1 residual from the large-magnitude dominant mode; span +
+                        // distinct-group count shows whether errors cluster or scatter.
                         int mismatches = 0;
                         int shownRoot = 0;
                         int shownAny = 0;
+                        var localPosHist = new int[256];
+                        int diffPM1 = 0, diffSmall = 0, diffLarge = 0; // |diff|==1 / 2..16 / >16
+                        int firstMm = -1, lastMm = -1;
+                        var groupsHit = new System.Collections.Generic.HashSet<int>();
                         for (int i = 0; i < n; i++)
                         {
                             if (gpuKeys[i] != cpuKeys[i])
                             {
                                 mismatches++;
                                 int diff = gpuKeys[i] - cpuKeys[i];
+                                int ad = diff < 0 ? -diff : diff;
+                                if (ad == 1) diffPM1++; else if (ad <= 16) diffSmall++; else diffLarge++;
+                                localPosHist[i % 256]++;
+                                if (firstMm < 0) firstMm = i;
+                                lastMm = i;
+                                groupsHit.Add(i / 256);
                                 // Show ROOT displacements (|diff| > 1) separately from cascade
-                                if (Math.Abs(diff) > 1 && shownRoot < 10)
+                                if (ad > 1 && shownRoot < 10)
                                 {
                                     diag += $"\n  ROOT[{i}]: gpu={gpuKeys[i]} cpu={cpuKeys[i]} (diff={diff}, group~{i/256}, localPos={i%256})";
                                     shownRoot++;
@@ -212,7 +229,16 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                                 }
                             }
                         }
-                        diag = $"\n  Total mismatches vs CPU: {mismatches}" + diag;
+                        // Top-2 localPos buckets (for-loop, no LINQ in Blazor WASM)
+                        int topLp1 = 0, topLp2 = 0;
+                        for (int lp = 1; lp < 256; lp++)
+                        {
+                            if (localPosHist[lp] > localPosHist[topLp1]) { topLp2 = topLp1; topLp1 = lp; }
+                            else if (localPosHist[lp] > localPosHist[topLp2]) topLp2 = lp;
+                        }
+                        diag = $"\n  Total mismatches vs CPU: {mismatches} (|diff|==1:{diffPM1}, 2..16:{diffSmall}, >16:{diffLarge})" +
+                               $"\n  Span: first={firstMm} last={lastMm} distinct256Groups={groupsHit.Count}" +
+                               $"\n  Top localPos(i%256): [{topLp1}]={localPosHist[topLp1]}, [{topLp2}]={localPosHist[topLp2]}" + diag;
 
                         // Also show order violations
                         int shownOrd = 0;
