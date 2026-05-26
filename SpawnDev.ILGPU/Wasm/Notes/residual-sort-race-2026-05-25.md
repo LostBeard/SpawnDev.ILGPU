@@ -17,8 +17,9 @@ this, the kernelId collision wasn't the whole story and the V8-pure-spin / fiber
 are back in play.
 
 Docs updated: `Wasm/CLAUDE.md` (kernelId bullet in "Barrier Dispatch" + new "kernelId MUST be a monotonic
-unique id" section). Audit tracked: `Plans/gethashcode-as-id-audit-2026-05-26.md` (found a SECOND open
-instance — `WebGLAccelerator.cs:544` programId from `GLSLSource.GetHashCode()`, same bug class).
+unique id" section). Audit tracked: `Plans/gethashcode-as-id-audit-2026-05-26.md` (found + FIXED a SECOND
+instance — `WebGLAccelerator.cs:544` programId from `GLSLSource.GetHashCode()`, same bug class →
+now `WebGLCompiledKernel.ProgramId` monotonic id).
 The diag flags (`ForceGrowEachDispatch`, `PreGrowPages`) are RETAINED default-off (TJ call 2026-05-26):
 the grow/SAB-resize hypothesis is disfavored but NOT definitively killed, so the tooling stays ready to
 re-test grow if the residual recurs after this fix — rather than rebuild it later.

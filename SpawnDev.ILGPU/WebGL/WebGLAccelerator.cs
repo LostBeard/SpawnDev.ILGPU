@@ -540,8 +540,11 @@ namespace SpawnDev.ILGPU.WebGL
             var (jsParams, strideMap, outputs) = MarshalArguments(compiledKernel, args, webGlAccel);
 
 
-            // Build unique program ID from source hash
-            var programId = compiledKernel.GLSLSource.GetHashCode().ToString("X8");
+            // Stable per-kernel program id for the glWorker program cache (programCache[programId]).
+            // MUST NOT be GLSLSource.GetHashCode(): a non-unique string hash would let two distinct
+            // shaders collide on one cache slot → worker runs the WRONG compiled program → silent wrong
+            // output (same bug class as the Wasm kernelId). Uses the compiled kernel's monotonic ProgramId.
+            var programId = compiledKernel.ProgramId;
 
             var varyingNames = compiledKernel.OutputVaryings
                 .Select(o => o.VaryingName)

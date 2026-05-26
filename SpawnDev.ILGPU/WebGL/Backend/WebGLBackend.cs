@@ -477,6 +477,24 @@ namespace SpawnDev.ILGPU.WebGL.Backend
     public class WebGLCompiledKernel : CompiledKernel
     {
         /// <summary>
+        /// Monotonic source for the glWorker program-cache id (<see cref="ProgramId"/>). MUST be
+        /// unique-and-stable, NOT <c>GLSLSource.GetHashCode()</c>: a string hash is non-unique (two
+        /// distinct shaders CAN collide on one value) and <c>string.GetHashCode()</c> is volatile under
+        /// .NET Wasm Hybrid Globalization. A collision would make the glWorker reuse the WRONG cached GL
+        /// program (<c>programCache[programId]</c>, glWorker.js) → the wrong shader runs → silent wrong
+        /// output. See Wasm/CLAUDE.md "kernelId MUST be a monotonic unique id".
+        /// </summary>
+        private static int _nextProgramId = 0;
+
+        /// <summary>
+        /// Stable, process-unique id for this kernel's glWorker program-cache slot
+        /// (<c>programCache[programId]</c>). Assigned once at compile time; stable across all dispatches
+        /// of this compiled kernel and unique across distinct kernels. Replaces the old
+        /// <c>GLSLSource.GetHashCode()</c> id, which could collide and run the wrong cached program.
+        /// </summary>
+        public int ProgramId { get; } = System.Threading.Interlocked.Increment(ref _nextProgramId);
+
+        /// <summary>
         /// The generated GLSL ES 3.0 vertex shader source.
         /// </summary>
         public string GLSLSource { get; }
