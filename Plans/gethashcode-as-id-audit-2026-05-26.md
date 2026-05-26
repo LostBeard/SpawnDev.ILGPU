@@ -31,10 +31,24 @@ When such a value rides in a dispatch message / cache key, a collision makes the
 ### Finding #2 (WebGL programId) — FIXED 2026-05-26
 `WebGLCompiledKernel` now carries a stable `public int ProgramId { get; } = Interlocked.Increment(ref _nextProgramId);` assigned once at compile time (mirror of the Wasm `KernelCacheEntry.KernelId` fix). `WebGLAccelerator` sends `compiledKernel.ProgramId` as the dispatch-message `programId`; `glWorker.js` keys `programCache[programId]` on it. Confirmed by reading glWorker.js: `getOrCompileProgram(programId, source, ...)` returns the cached program when `programCache[programId]` exists — so two distinct shaders colliding on the old `GLSLSource.GetHashCode()` ran the WRONG program. The monotonic id is collision-proof; same compiled kernel → same id → correct cache hit; distinct kernels → distinct ids. `programId` is now an `int` (was an "X8" hex string); JS coerces it as an object key — no other consumer depended on the string form.
 
+## Wasm-reachable deep scan (2026-05-26) — VERDICT: nothing else affects Wasm function
+TJ focus = get the Wasm backend working; confirm no other `GetHashCode` affects its FUNCTION. Scanned the
+full Wasm runtime path (`WasmAccelerator`, `WorkerPool`, Wasm codegen) + the shared `ILGPU/` Runtime +
+Backends + `ILGPU.Algorithms/` that Wasm dispatch/compile flow through.
+
+- **`WorkerPool.cs`** — ZERO `GetHashCode`. The worker dispatch + module cache is clean (keyed on the now-monotonic kernelId).
+- **Wasm dir** — only the fixed kernelId + `WasmAccelerator.cs:667` `wasmBuf.GetHashCode()%1000` which is a `VerboseLogging`-only debug TAG (not an identity, off in production). Harmless; optional cleanup.
+- **`ILGPU/Runtime/KernelCache.cs:114,196`** — `public override int GetHashCode()` on `CachedCompiledKernelKey` / `CachedKernelKey`, each paired with `Equals`/`IEquatable`. **VERIFIED SAFE** — standard dictionary key pattern; collisions resolved by `Equals`, cannot return the wrong compiled kernel. (This is the kernel-compilation cache Wasm uses.) Do NOT "fix" — it's correct.
+- **`ILGPU/Runtime/DelegateSpecializationRouter.cs:35`** — `key = (accelerator.GetHashCode(), origMethod, targetMethod)` into a `ConcurrentDictionary`. **NEW FINDING (MEDIUM, cross-backend, OPEN):** uses `accelerator.GetHashCode()` as a standalone identity component (not `Equals`-backed; `Accelerator` doesn't override GetHashCode → default identity hash, which recycles under GC). Two accelerators colliding on the hash + same method pair → wrong cached kernel. **NOT on the Wasm sort/dispatch path** (only the `DelegateSpecialization<T>` feature), and needs an accelerator hash collision (typically 1 accelerator/process), so it does NOT affect current Wasm function. Fix when DelegateSpecialization is exercised: key on a monotonic accelerator id (or the Accelerator instance with proper Equals), not its hash.
+
+**Conclusion: the Wasm backend's function is now free of GetHashCode-as-identity bugs** (kernelId fixed; WorkerPool clean; KernelCache safe). The DelegateSpecializationRouter finding is tracked for later per TJ ("get the rest later").
+
 ## Checklist (TJ's notes 2026-05-26, part 3)
 - [x] Audit `SpawnDev.ILGPU` browser-backend modules for `GetHashCode` used as an identifier — done (table above).
 - [x] Fix finding #2 (WebGL programId) — FIXED 2026-05-26 (`WebGLCompiledKernel.ProgramId` monotonic id).
-- [ ] Scan `ILGPU/` fork core + `ILGPU.Algorithms/` fork (filter out legit value-type `GetHashCode` overrides).
+- [x] Scan the Wasm-REACHABLE `ILGPU/` Runtime + Backends + `ILGPU.Algorithms/` paths — done (see "Wasm-reachable deep scan" above). Wasm function is clean. KernelCache safe (Equals-backed).
+- [ ] Fix `DelegateSpecializationRouter.cs:35` (accelerator.GetHashCode() as cache key) — MEDIUM, cross-backend, not Wasm-blocking. Key on a monotonic accelerator id instead.
+- [ ] Scan the REST of `ILGPU/` fork core + `ILGPU.Algorithms/` (non-Wasm paths; filter out legit value-type `GetHashCode` overrides).
 - [ ] Scan `SpawnDev.ILGPU.P2P/`.
 - [ ] Scan sibling SpawnDev libraries (BlazorJS, RTC, WebTorrent, Codecs, etc.) for hash-as-wire-id / hash-as-cache-key.
 - [x] SharedMemoryResolver: confirmed identification logic is already decoupled from hash values (logs only).
