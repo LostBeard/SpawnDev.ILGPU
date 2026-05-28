@@ -1103,5 +1103,51 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                     throw new Exception($"RadixSort size={size}: {violations} order violations");
             }
         });
+
+        // ═══════════════════════════════════════════════════════════════
+        // REGRESSION GUARD (Tuvok 2026-05-26) — the GROUP-barrier yield-escape.
+        // Creates an OVERSUBSCRIBED accelerator (>> hardwareConcurrency workers) and runs a
+        // multi-group barrier kernel that crosses the GROUP barrier repeatedly. The group-barrier
+        // waiter MUST yield to JS past the spin threshold (like the phase barrier) and resume via
+        // the GROUP-RESUME path, or the spinning waiters starve the descheduled not-yet-arrived
+        // worker → livelock. Without the fix this HANGS (PMT 30s kill; prior Finding #3 = 2 timeouts
+        // at 2x oversub); with it, completes in ~4s with correct output. If this ever times out,
+        // someone removed/broke the group-barrier yield escape in GeneratePhaseDispatcher.
+        // ═══════════════════════════════════════════════════════════════
+        [TestMethod(Timeout = 60000)]
+        public async Task WasmGroupBarrierOversubscriptionTest()
+        {
+            int hw = SpawnDev.ILGPU.Wasm.WasmILGPUDevice.GetHardwareConcurrency();
+            int oversub = Math.Max(24, hw * 3); // force many more workers than cores
+            var builder = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm();
+            var context = builder.ToContext();
+            var acc = await context.CreateWasmAcceleratorAsync(
+                new WasmBackendOptions { WorkerCount = oversub });
+            try
+            {
+                int gs = 256, numGroups = 12, total = gs * numGroups;
+                var kernel = acc.LoadStreamKernel<Index1D, ArrayView<int>, int>(IsolationMultiGroupKernel);
+                for (int run = 0; run < 5; run++)
+                {
+                    using var buf = acc.Allocate1D<int>(total);
+                    kernel(new KernelConfig(numGroups, gs), (Index1D)total, buf.View, gs);
+                    await acc.SynchronizeAsync();
+                    var result = await buf.CopyToHostAsync<int>();
+                    for (int g = 0; g < numGroups; g++)
+                        for (int i = 0; i < gs; i++)
+                        {
+                            int expected = (i + 1) * 2;
+                            int actual = result[g * gs + i];
+                            if (actual != expected)
+                                throw new Exception($"GroupBarrierOversub run {run} group {g} pos {i}: expected {expected}, got {actual} (workers={oversub}, hw={hw})");
+                        }
+                }
+            }
+            finally
+            {
+                acc.Dispose();
+                context.Dispose();
+            }
+        }
     }
 }

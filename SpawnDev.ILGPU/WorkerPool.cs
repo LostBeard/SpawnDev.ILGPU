@@ -122,7 +122,26 @@ self.onmessage = async function(e) {
     var instance = _instancesById[kid];
     if (!instance) {
       instance = await WebAssembly.instantiate(module, {
-        env: { memory: d.memory },
+        env: {
+          memory: d.memory,
+          // Variant C (Trip 2026-05-27): env.notify shim. The wasm dispatcher's last-
+          // arriving worker calls this AFTER bumping the gen counter, waking all parked
+          // Atomics.wait(Infinity)ers on the gen slot. The wasm side passes count as
+          // int.MaxValue (positive wake-all), NOT -1: the ECMAScript spec coerces negative
+          // counts to +Infinity, but in V8 the negative form passed through WASM-to-host
+          // signed-i32 conversion did NOT wake parked waiters in our oversub repro (Trip
+          // 2026-05-27); int.MaxValue works reliably. Use the same value if you ever swap
+          // shims. View is constructed per-call because d.memory.buffer can swap on
+          // WebAssembly.Memory.grow; cost is negligible vs. the OS-park wake. Note: the
+          // `d` captured here is from the FIRST onmessage that instantiated this kernel
+          // for this worker, but d.memory is the WebAssembly.Memory object (stable across
+          // dispatches; .buffer follows growth). For accelerators that never grow memory
+          // (the common case), this is byte-equivalent to capturing fresh d each call.
+          notify: function (byteAddr, count) {
+            var view = new Int32Array(d.memory.buffer);
+            return Atomics.notify(view, byteAddr >>> 2, count);
+          },
+        },
         Math: _mathImports
       });
       _instancesById[kid] = instance;

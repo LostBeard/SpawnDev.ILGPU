@@ -2,6 +2,39 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.10 (2026-05-28) - Wasm residual large-sort race fix (scan/broadcast hardening)
+
+### Wasm: Group.Broadcast now validates per-group publish with an atomic tag handshake
+
+Fixes the residual descending-sort corruption that persisted after earlier dispatcher/barrier work and amplified under heavy external CPU contention (Fallout76 repro). The core issue manifested as occasional stale shared-slot consumption around scan + broadcast phases in large multi-group RadixSort workloads.
+
+`WasmKernelFunctionGenerator.GenerateCode(Broadcast)` now allocates two shared-memory slots per broadcast:
+
+- **value slot** - the broadcast payload
+- **tag slot** - an i32 group tag (`globalIdx / groupDimX`)
+
+Emit pattern:
+
+1. origin thread atomically stores value to the value slot
+2. origin thread atomically stores group tag to the tag slot
+3. barrier
+4. all threads spin on atomic tag load until it equals expected group tag
+5. all threads atomically load the value slot
+6. barrier
+
+This prevents consuming stale slot contents from a previous group when timing/scheduler pressure is high.
+
+### Verification
+
+- Targeted Wasm tests (all pass): `ScanBroadcastIsolationTest`, `GroupBroadcastDiagTest`, `RadixSortRepeatedResortTest`, `RadixSortDescending1_4MTest`, `RadixSortDescendingOddCountTest`, `RadixSortDescending4MTest`.
+- Full Wasm sweeps on patched tree: **459 pass / 0 fail / 4 skip** (run twice).
+- FO76 contention repro (two concurrent full sweeps): **1664 pass / 0 fail / 149 skip** on both runs, `RunState=Done`.
+
+### Scope
+
+- Pure SpawnDev.ILGPU wrapper/codegen change.
+- Fork dependencies unchanged (`SpawnDev.ILGPU.Fork` / `SpawnDev.ILGPU.Algorithms.Fork` remain `2.0.7`).
+
 ## 4.9.9 (2026-05-24) — WebGPU scalar-slot drift fix, WebGL GPU→GPU copy fix, new `CopyFromAsync`, Wasm barrier verdict
 
 Batches the three browser-backend fixes published locally as `4.9.9-local.1/2/3` plus the Wasm wait/notify barrier re-validation. Forks unchanged (`SpawnDev.ILGPU.Fork` / `SpawnDev.ILGPU.Algorithms.Fork` stay `2.0.7`) — these are pure SpawnDev.ILGPU codegen/runtime changes.

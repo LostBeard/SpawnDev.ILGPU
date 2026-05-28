@@ -3592,7 +3592,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             var source = broadcast.Variable.Resolve();
             var origin = broadcast.Origin.Resolve();
 
-            // Allocate a slot in shared memory for this broadcast
+            // Allocate a value slot and a tag slot in shared memory for this broadcast.
+            // Tag slot hardens against stale reads by requiring per-group tag match before load.
             int broadcastSlotOffset = _sharedMemorySize;
             int slotSize = wasmType switch
             {
@@ -3600,7 +3601,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 WasmOpCodes.F64 => 8,
                 _ => 4
             };
-            _sharedMemorySize += (slotSize + 3) & ~3; // align to 4
+            int valueSlotSize = (slotSize + 3) & ~3; // align to 4
+            int tagSlotOffset = broadcastSlotOffset + valueSlotSize; // i32 tag
+            _sharedMemorySize += valueSlotSize + 4;
             _hasBarriers = true;
 
             // Determine store/load ops and alignment for this type
@@ -3629,6 +3632,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     align = 2;
                     break;
             }
+
+            // expectedTag = globalIdx / groupDimX (linear group index)
+            var expectedTagLocal = AllocateNewLocal(WasmOpCodes.I32);
+            WasmModuleBuilder.EmitLocalGet(Code, _globalIdxLocal);
+            WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
+            Code.Add(WasmOpCodes.I32DivU);
+            WasmModuleBuilder.EmitLocalSet(Code, expectedTagLocal);
 
             // Step 1: if (threadIdX == origin) { mem[sharedMemBase + offset] = source }
             WasmModuleBuilder.EmitLocalGet(Code, _threadIdXLocal);
@@ -3678,13 +3688,49 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             else
                 WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
 
+            // Publish tag after value store. Readers verify this tag before loading value.
+            WasmModuleBuilder.EmitLocalGet(Code, _sharedMemBaseLocal);
+            if (tagSlotOffset > 0)
+            {
+                WasmModuleBuilder.EmitI32Const(Code, tagSlotOffset);
+                Code.Add(WasmOpCodes.I32Add);
+            }
+            WasmModuleBuilder.EmitLocalGet(Code, expectedTagLocal);
+            Code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore);
+            Code.Add(0x02); Code.Add(0x00);
+
             Code.Add(WasmOpCodes.End); // end if
 
             // Step 2: Barrier — ensure the origin's store is visible to all threads
             int barrier1 = _barrierCounter++;
             EmitBarrier(barrier1);
 
-            // Step 3: All threads load from the shared slot (atomic for multi-worker)
+            // Step 3: All threads spin until tag matches this group, then load value.
+            // This avoids consuming stale broadcast slot contents from a previous group.
+            Code.Add(WasmOpCodes.Block);
+            Code.Add(WasmOpCodes.Void);
+            Code.Add(WasmOpCodes.Loop);
+            Code.Add(WasmOpCodes.Void);
+            WasmModuleBuilder.EmitLocalGet(Code, _sharedMemBaseLocal);
+            if (tagSlotOffset > 0)
+            {
+                WasmModuleBuilder.EmitI32Const(Code, tagSlotOffset);
+                Code.Add(WasmOpCodes.I32Add);
+            }
+            Code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad);
+            Code.Add(0x02); Code.Add(0x00);
+            WasmModuleBuilder.EmitLocalGet(Code, expectedTagLocal);
+            Code.Add(WasmOpCodes.I32Eq);
+            Code.Add(WasmOpCodes.BrIf);
+            WasmModuleBuilder.EmitU32Leb128(Code, 1); // break out of spin loop
+            Code.Add(WasmOpCodes.Br);
+            WasmModuleBuilder.EmitU32Leb128(Code, 0); // continue spin
+            Code.Add(WasmOpCodes.End); // end loop
+            Code.Add(WasmOpCodes.End); // end block
+
+            // Load from the shared slot (atomic for multi-worker)
             WasmModuleBuilder.EmitLocalGet(Code, _sharedMemBaseLocal);
             if (broadcastSlotOffset > 0)
             {

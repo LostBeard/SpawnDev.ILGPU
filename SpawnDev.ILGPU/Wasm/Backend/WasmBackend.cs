@@ -480,6 +480,17 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 mathImports[name] = funcIdx++;
             gen.MathImports = mathImports;
 
+            // Variant C Step 1 (Trip 2026-05-27): reserve one extra import slot for the
+            // env.notify shim (i32 byteAddr, i32 count) -> i32. The physical import is
+            // added in CreateKernel after the math imports; bumping ExtraImportCount here
+            // ensures AssignHelperFunctionIndices (called from GenerateCode, which runs
+            // BEFORE CreateKernel) computes correct helper function indices that account
+            // for the notify slot. Declared unconditionally - non-barrier kernels never
+            // call it, but the unused import is ~10 bytes and keeps the index space
+            // identical across all kernel shapes. The call $notify EMIT is gated on
+            // enableYieldEscape (added in Step 4); Step 1 only adds the declaration.
+            data.ExtraImportCount = 1;
+
             // NOTE: Function index assignment for multi-block helpers is done in
             // WasmKernelFunctionGenerator.AssignHelperFunctionIndices(), called at the
             // start of GenerateCode(). This is because CreateKernelCodeGenerator runs
@@ -536,6 +547,23 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 int idx = moduleBuilder.ImportFunction("Math", name, binaryTypeIdx);
                 mathImports[name] = (uint)idx;
             }
+
+            // Variant C Step 1 (Trip 2026-05-27): env.notify import shim. Type =
+            // (i32 byteAddr, i32 count) -> i32 (woken count). The JS side (WorkerPool.cs
+            // WasmBootstrapScript) supplies a function that calls Atomics.notify on an
+            // Int32Array view over the shared SAB. Spec-correct, per syg's clarification
+            // on tc39/ecma262 #3800 (see _wasm_fork/NOTES_ecma262_3800_syg.md). Declared
+            // AFTER all math imports so math indices in CreateKernelCodeGenerator's
+            // mathImports dict (assigned 0..N-1 there) stay valid; notify takes index N.
+            // The kernel function comes next and gets index N+1.
+            // The matching ExtraImportCount=1 bump lives in CreateKernelCodeGenerator
+            // (above) so AssignHelperFunctionIndices computes helper indices correctly.
+            // Step 1 only DECLARES; the call $notify emit comes in Step 2 (gated on
+            // enableYieldEscape per Step 4). Currently this is an unused import.
+            int notifyTypeIdx = moduleBuilder.AddFuncType(
+                new byte[] { WasmOpCodes.I32, WasmOpCodes.I32 },
+                new byte[] { WasmOpCodes.I32 });
+            int notifyFuncIdx = moduleBuilder.ImportFunction("env", "notify", notifyTypeIdx);
 
             // Pass math imports to the code generator
             kernelGen.MathImports = mathImports;
@@ -607,7 +635,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // boundary crossings per dispatch for large sorts (260K elements).
             if (data.HasBarriers)
             {
-                GeneratePhaseDispatcher(moduleBuilder, funcIdx, paramTypes, definedFuncIndex);
+                bool enableYieldEscape = Options.EnableYieldEscape ?? false;
+                GeneratePhaseDispatcher(moduleBuilder, funcIdx, notifyFuncIdx, enableYieldEscape, paramTypes, definedFuncIndex);
                 definedFuncIndex++;
             }
 
@@ -686,6 +715,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         private void GeneratePhaseDispatcher(
             WasmModuleBuilder moduleBuilder,
             int kernelFuncIdx,
+            int notifyFuncIdx,
+            bool enableYieldEscape,
             byte[] kernelParamTypes,
             int definedFuncIndex)
         {
@@ -722,10 +753,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             int dispFuncIdx = moduleBuilder.AddFunction(dispTypeIdx);
             moduleBuilder.ExportFunction("dispatcher", dispFuncIdx);
 
-            // Locals: g, phase, tid, anyYielded, r, zeroIdx, savedGen, arrived, spinCount, resumed (10 i32)
+            // Locals: g, phase, tid, anyYielded, r, zeroIdx, savedGen, arrived, spinCount, resumed,
+            //         groupResume (11 i32)
             var locals = new List<WasmLocal>
             {
-                new WasmLocal { Type = WasmOpCodes.I32, Count = 10 }
+                new WasmLocal { Type = WasmOpCodes.I32, Count = 11 }
             };
             uint pG = (uint)dispParamTypes.Count;         // local index for g
             uint pPhase = pG + 1;
@@ -735,8 +767,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             uint pZeroIdx = pG + 5;
             uint pSavedGen = pG + 6;
             uint pArrived = pG + 7;
-            uint pSpinCount = pG + 8;     // counter for phase barrier spin iterations
-            uint pResumed = pG + 9;       // 1 if dispatcher was re-entered after a spin-yield, 0 otherwise
+            uint pSpinCount = pG + 8;     // counter for phase AND group barrier spin iterations
+            uint pResumed = pG + 9;       // 1 if re-entered after a PHASE-barrier spin-yield (yieldFlag=1)
+            uint pGroupResume = pG + 10;  // 1 if re-entered after a GROUP-barrier spin-yield (yieldFlag=2)
 
             // Yield-on-spin threshold. Pure spin runs ~5ns/iteration, so 1M = ~5ms before yielding to JS.
             // Tuning rationale (revised 2026-04-28 after Data's single-tab regression):
@@ -748,38 +781,74 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             //   timeslice waits typical of CPU oversub).
             const int YIELD_SPIN_THRESHOLD = 1_000_000;
             // yieldStateAddr layout (16 bytes per worker):
-            //   offset 0: yieldFlag  (i32) — 1 if dispatcher returned mid-spin, 0 if normal exit
+            //   offset 0: yieldFlag  (i32) — 0 = normal exit; 1 = yielded at PHASE barrier;
+            //                                2 = yielded at GROUP barrier (selects the resume path
+            //                                + which gen slot JS parks on)
             //   offset 4: savedG     (i32) — group index at yield
-            //   offset 8: savedPhase (i32) — phase index at yield
+            //   offset 8: savedPhase (i32) — phase index at yield (phase-barrier yield only)
             //   offset 12: savedGen  (i32) — generation value the spin loop was waiting on
+            //                                (phase gen for yieldFlag=1, group gen for yieldFlag=2)
 
             var code = new List<byte>();
 
-            // === SPIN-YIELD PROLOGUE ===
-            // If resumeMode != 0, we were re-dispatched after yielding mid-phase-barrier-spin.
-            // Restore (g, phase, savedGen) from yieldStateAddr; set pResumed=1 so the phase
-            // loop body knows to skip the tid loop + arrival++ (already done before yield)
-            // and jump straight to the spin loop with the saved savedGen.
-            // If resumeMode == 0, fresh dispatch: g=0, pResumed=0.
-            WasmModuleBuilder.EmitLocalGet(code, 15); // resumeMode
-            code.Add(WasmOpCodes.I32Eqz);
-            code.Add(WasmOpCodes.If);
-            code.Add(WasmOpCodes.Void);
-            // Fresh start: g = 0, resumed = 0
-            WasmModuleBuilder.EmitI32Const(code, 0);
-            WasmModuleBuilder.EmitLocalSet(code, pG);
-            WasmModuleBuilder.EmitI32Const(code, 0);
-            WasmModuleBuilder.EmitLocalSet(code, pResumed);
-            code.Add(WasmOpCodes.Else);
-            // Resume: g = load(yieldStateAddr + 4), resumed = 1
-            // (phase + savedGen are loaded inside the loop_g body so they apply to the right iteration)
-            WasmModuleBuilder.EmitLocalGet(code, 14); // yieldStateAddr
-            code.Add(WasmOpCodes.I32Load);
-            code.Add(0x02); code.Add(0x04); // align=2, offset=4 (savedG)
-            WasmModuleBuilder.EmitLocalSet(code, pG);
-            WasmModuleBuilder.EmitI32Const(code, 1);
-            WasmModuleBuilder.EmitLocalSet(code, pResumed);
-            code.Add(WasmOpCodes.End); // end if
+            if (enableYieldEscape)
+            {
+                // === SPIN-YIELD PROLOGUE === (Variant C path)
+                // If resumeMode != 0, we were re-dispatched after yielding mid-phase-barrier-spin.
+                // Restore (g, phase, savedGen) from yieldStateAddr; set pResumed=1 so the phase
+                // loop body knows to skip the tid loop + arrival++ (already done before yield)
+                // and jump straight to the spin loop with the saved savedGen.
+                // If resumeMode == 0, fresh dispatch: g=0, pResumed=0.
+                WasmModuleBuilder.EmitLocalGet(code, 15); // resumeMode
+                code.Add(WasmOpCodes.I32Eqz);
+                code.Add(WasmOpCodes.If);
+                code.Add(WasmOpCodes.Void);
+                // Fresh start: g = 0, resumed = 0, groupResume = 0
+                WasmModuleBuilder.EmitI32Const(code, 0);
+                WasmModuleBuilder.EmitLocalSet(code, pG);
+                WasmModuleBuilder.EmitI32Const(code, 0);
+                WasmModuleBuilder.EmitLocalSet(code, pResumed);
+                WasmModuleBuilder.EmitI32Const(code, 0);
+                WasmModuleBuilder.EmitLocalSet(code, pGroupResume);
+                code.Add(WasmOpCodes.Else);
+                // Resume: g = load(yieldStateAddr + 4). The yieldFlag (offset 0) selects which barrier
+                // we yielded at: 1 = PHASE barrier (resume into the phase loop spin, as before);
+                // 2 = GROUP barrier (skip the phase loop + group arrival, resume into the group spin).
+                // (phase + savedGen are loaded inside the loop_g body so they apply to the right iteration.)
+                WasmModuleBuilder.EmitLocalGet(code, 14); // yieldStateAddr
+                code.Add(WasmOpCodes.I32Load);
+                code.Add(0x02); code.Add(0x04); // align=2, offset=4 (savedG)
+                WasmModuleBuilder.EmitLocalSet(code, pG);
+                // if (load(yieldStateAddr+0 [yieldFlag]) == 2) group-resume; else phase-resume
+                WasmModuleBuilder.EmitLocalGet(code, 14); // yieldStateAddr
+                code.Add(WasmOpCodes.I32Load);
+                code.Add(0x02); code.Add(0x00); // align=2, offset=0 (yieldFlag)
+                WasmModuleBuilder.EmitI32Const(code, 2);
+                code.Add(WasmOpCodes.I32Eq);
+                code.Add(WasmOpCodes.If);
+                code.Add(WasmOpCodes.Void);
+                // GROUP-barrier resume: pResumed=0 (don't re-enter phase loop), pGroupResume=1
+                WasmModuleBuilder.EmitI32Const(code, 0);
+                WasmModuleBuilder.EmitLocalSet(code, pResumed);
+                WasmModuleBuilder.EmitI32Const(code, 1);
+                WasmModuleBuilder.EmitLocalSet(code, pGroupResume);
+                code.Add(WasmOpCodes.Else);
+                // PHASE-barrier resume: pResumed=1, pGroupResume=0
+                WasmModuleBuilder.EmitI32Const(code, 1);
+                WasmModuleBuilder.EmitLocalSet(code, pResumed);
+                WasmModuleBuilder.EmitI32Const(code, 0);
+                WasmModuleBuilder.EmitLocalSet(code, pGroupResume);
+                code.Add(WasmOpCodes.End); // end if (yieldFlag == 2)
+                code.Add(WasmOpCodes.End); // end if (resumeMode)
+            }
+            else
+            {
+                // === PURE-SPIN PROLOGUE === (v4.8.0 baseline path)
+                // No resume support: dispatcher always runs to completion. resumeMode (param 15),
+                // pResumed, pGroupResume locals are unused. Just initialize g=0.
+                WasmModuleBuilder.EmitI32Const(code, 0);
+                WasmModuleBuilder.EmitLocalSet(code, pG);
+            }
 
             // block $exit_g
             code.Add(WasmOpCodes.Block);
@@ -795,22 +864,40 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             code.Add(WasmOpCodes.BrIf);
             WasmModuleBuilder.EmitU32Leb128(code, 1); // break to $exit_g
 
-            // phase init: if resumed, use saved phase; else 0
-            // (after the first resumed iteration, pResumed is cleared so subsequent phases
-            // use phase=0 as normal)
-            WasmModuleBuilder.EmitLocalGet(code, pResumed);
-            code.Add(WasmOpCodes.If);
-            code.Add(WasmOpCodes.Void);
-            // Resume: phase = load(yieldStateAddr + 8)
-            WasmModuleBuilder.EmitLocalGet(code, 14); // yieldStateAddr
-            code.Add(WasmOpCodes.I32Load);
-            code.Add(0x02); code.Add(0x08); // align=2, offset=8 (savedPhase)
-            WasmModuleBuilder.EmitLocalSet(code, pPhase);
-            code.Add(WasmOpCodes.Else);
-            // Fresh: phase = 0
-            WasmModuleBuilder.EmitI32Const(code, 0);
-            WasmModuleBuilder.EmitLocalSet(code, pPhase);
-            code.Add(WasmOpCodes.End); // end if
+            if (enableYieldEscape)
+            {
+                // GROUP-RESUME SKIP: on a group-barrier resume (pGroupResume=1) this worker already
+                // ran all phases of group g, did the group zeroing, and arrived at the group barrier
+                // before it yielded — so skip the entire phase loop + zeroing and fall straight to the
+                // group barrier (which restores its savedGen below). Fresh / phase-resume runs this block.
+                WasmModuleBuilder.EmitLocalGet(code, pGroupResume);
+                code.Add(WasmOpCodes.I32Eqz);
+                code.Add(WasmOpCodes.If);
+                code.Add(WasmOpCodes.Void);
+
+                // phase init: if resumed, use saved phase; else 0
+                // (after the first resumed iteration, pResumed is cleared so subsequent phases
+                // use phase=0 as normal)
+                WasmModuleBuilder.EmitLocalGet(code, pResumed);
+                code.Add(WasmOpCodes.If);
+                code.Add(WasmOpCodes.Void);
+                // Resume: phase = load(yieldStateAddr + 8)
+                WasmModuleBuilder.EmitLocalGet(code, 14); // yieldStateAddr
+                code.Add(WasmOpCodes.I32Load);
+                code.Add(0x02); code.Add(0x08); // align=2, offset=8 (savedPhase)
+                WasmModuleBuilder.EmitLocalSet(code, pPhase);
+                code.Add(WasmOpCodes.Else);
+                // Fresh: phase = 0
+                WasmModuleBuilder.EmitI32Const(code, 0);
+                WasmModuleBuilder.EmitLocalSet(code, pPhase);
+                code.Add(WasmOpCodes.End); // end if
+            }
+            else
+            {
+                // Pure-spin: no group-resume wrapper, no phase-resume branching. phase = 0.
+                WasmModuleBuilder.EmitI32Const(code, 0);
+                WasmModuleBuilder.EmitLocalSet(code, pPhase);
+            }
 
             // block $exit_phase
             code.Add(WasmOpCodes.Block);
@@ -825,11 +912,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // skip them. Just load savedGen from the yield buffer and synthesize arrived=0 so
             // the if (arrived == workerCount) check below routes us straight to the spin path.
             // This entire wrapper is closed below right after the arrival++ stores pArrived.
-            WasmModuleBuilder.EmitLocalGet(code, pResumed);
-            code.Add(WasmOpCodes.I32Eqz);
-            code.Add(WasmOpCodes.If);
-            code.Add(WasmOpCodes.Void);
-            // ---- FRESH FLOW (executed when pResumed == 0) ----
+            if (enableYieldEscape)
+            {
+                WasmModuleBuilder.EmitLocalGet(code, pResumed);
+                code.Add(WasmOpCodes.I32Eqz);
+                code.Add(WasmOpCodes.If);
+                code.Add(WasmOpCodes.Void);
+            }
+            // ---- FRESH FLOW (always executed when gate is off; when on, executed when pResumed == 0) ----
 
             // anyYielded = 0
             WasmModuleBuilder.EmitI32Const(code, 0);
@@ -946,18 +1036,21 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(code, pArrived);
 
             // ---- end FRESH FLOW ----
-            code.Add(WasmOpCodes.Else);
-            // ---- RESUMED FLOW (executed when pResumed == 1) ----
-            // savedGen = load(yieldStateAddr + 12)
-            WasmModuleBuilder.EmitLocalGet(code, 14); // yieldStateAddr
-            code.Add(WasmOpCodes.I32Load);
-            code.Add(0x02); code.Add(0x0C); // align=2, offset=12 (saved savedGen)
-            WasmModuleBuilder.EmitLocalSet(code, pSavedGen);
-            // arrived = 0 (force the else / spin path on the workerCount check below)
-            WasmModuleBuilder.EmitI32Const(code, 0);
-            WasmModuleBuilder.EmitLocalSet(code, pArrived);
-            // ---- end RESUMED FLOW ----
-            code.Add(WasmOpCodes.End); // end if (FRESH vs RESUMED)
+            if (enableYieldEscape)
+            {
+                code.Add(WasmOpCodes.Else);
+                // ---- RESUMED FLOW (executed when pResumed == 1) ----
+                // savedGen = load(yieldStateAddr + 12)
+                WasmModuleBuilder.EmitLocalGet(code, 14); // yieldStateAddr
+                code.Add(WasmOpCodes.I32Load);
+                code.Add(0x02); code.Add(0x0C); // align=2, offset=12 (saved savedGen)
+                WasmModuleBuilder.EmitLocalSet(code, pSavedGen);
+                // arrived = 0 (force the else / spin path on the workerCount check below)
+                WasmModuleBuilder.EmitI32Const(code, 0);
+                WasmModuleBuilder.EmitLocalSet(code, pArrived);
+                // ---- end RESUMED FLOW ----
+                code.Add(WasmOpCodes.End); // end if (FRESH vs RESUMED)
+            }
 
             // if (arrived == workerCount) — last worker
             WasmModuleBuilder.EmitLocalGet(code, pArrived);
@@ -1039,6 +1132,25 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 code.Add(WasmOpCodes.Drop); // discard woken-count
             }
 
+            if (enableYieldEscape)
+            {
+                // Variant C Step 2 (Trip 2026-05-27): JS-side notify shim. The wasm-side
+                // memory.atomic.notify above is gated off by default (V8 race); ours uses
+                // the env.notify import which calls Atomics.notify(view, addr>>2, count).
+                // Spec-conformant Atomics.wait(Infinity) waiters require explicit notify -
+                // see _wasm_fork/NOTES_ecma262_3800_syg.md. fenceBase+4 = phase gen address.
+                // count = int.MaxValue (positive) - same value the wasm-side notify branch
+                // uses. Spec also accepts negative-as-infinity, but several engines have
+                // historically had bugs around the negative form; the positive max is the
+                // safe choice. Drop the woken-count return - we don't need it.
+                WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
+                WasmModuleBuilder.EmitI32Const(code, 4);
+                code.Add(WasmOpCodes.I32Add);             // fenceBase + 4 (phase gen byte addr)
+                WasmModuleBuilder.EmitI32Const(code, int.MaxValue); // count = wake-all
+                WasmModuleBuilder.EmitCall(code, (uint)notifyFuncIdx);
+                code.Add(WasmOpCodes.Drop);
+            }
+
             code.Add(WasmOpCodes.Else);
 
             if (UseWaitNotifyBarriers)
@@ -1079,18 +1191,20 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             else
             {
 
-            // Other workers: spin-wait with yield-to-JS after threshold.
-            // Pure spin (atomic.load only) avoids V8's broken wasm wait/notify path entirely
-            // (V8 14.7 FutexEmulation race - see Wasm/Notes/wait-notify-race-investigation-2026-04-26.md).
-            // The yield-to-JS after THRESHOLD spin iterations prevents OS scheduler starvation
-            // when host is CPU-oversubscribed: under simultaneous-start 2-tab oversub, pure spin
-            // alone starved indefinitely (Data 2026-04-28: 0 iters in 30 min). With yield, workers
-            // periodically save state + return; JS re-dispatches them after a microtask boundary,
-            // giving the OS a chance to schedule the descheduled last-arriver.
+            // Other workers: spin-wait. Variant C path adds a yield-to-JS escape after
+            // YIELD_SPIN_THRESHOLD iters when enableYieldEscape is on so the worker can park
+            // via Atomics.wait(Infinity) and avoid spin-starvation under CPU oversub. The
+            // last-arriving worker calls env.notify (after the gen-bump) to wake parked
+            // waiters. Pure-spin path (gate off) just spins until gen advances - relies on
+            // OS scheduler running every worker within the spin window (default config of
+            // WorkerCount <= hwConcurrency-2 leaves headroom that makes this reliable).
 
-            // spinCount = 0 (before entering spin block)
-            WasmModuleBuilder.EmitI32Const(code, 0);
-            WasmModuleBuilder.EmitLocalSet(code, pSpinCount);
+            if (enableYieldEscape)
+            {
+                // spinCount = 0 (before entering spin block)
+                WasmModuleBuilder.EmitI32Const(code, 0);
+                WasmModuleBuilder.EmitLocalSet(code, pSpinCount);
+            }
 
             code.Add(WasmOpCodes.Block); // $spin_exit
             code.Add(WasmOpCodes.Void);
@@ -1106,40 +1220,40 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             code.Add(WasmOpCodes.BrIf);
             WasmModuleBuilder.EmitU32Leb128(code, 1); // break (gen changed)
 
-            // spinCount++
-            WasmModuleBuilder.EmitLocalGet(code, pSpinCount);
-            WasmModuleBuilder.EmitI32Const(code, 1);
-            code.Add(WasmOpCodes.I32Add);
-            WasmModuleBuilder.EmitLocalSet(code, pSpinCount);
-            // if (spinCount > YIELD_SPIN_THRESHOLD) { save state + br $exit_g }
-            WasmModuleBuilder.EmitLocalGet(code, pSpinCount);
-            WasmModuleBuilder.EmitI32Const(code, YIELD_SPIN_THRESHOLD);
-            code.Add(WasmOpCodes.I32GtU);
-            code.Add(WasmOpCodes.If);
-            code.Add(WasmOpCodes.Void);
-            // ---- YIELD: persist state to yieldStateAddr, then exit dispatcher ----
-            // yieldStateAddr[0] = 1 (yieldFlag)
-            WasmModuleBuilder.EmitLocalGet(code, 14); // yieldStateAddr
-            WasmModuleBuilder.EmitI32Const(code, 1);
-            WasmModuleBuilder.EmitStore(code, WasmOpCodes.I32Store, 2, 0);
-            // yieldStateAddr[4] = g
-            WasmModuleBuilder.EmitLocalGet(code, 14);
-            WasmModuleBuilder.EmitLocalGet(code, pG);
-            WasmModuleBuilder.EmitStore(code, WasmOpCodes.I32Store, 2, 4);
-            // yieldStateAddr[8] = phase
-            WasmModuleBuilder.EmitLocalGet(code, 14);
-            WasmModuleBuilder.EmitLocalGet(code, pPhase);
-            WasmModuleBuilder.EmitStore(code, WasmOpCodes.I32Store, 2, 8);
-            // yieldStateAddr[12] = savedGen
-            WasmModuleBuilder.EmitLocalGet(code, 14);
-            WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
-            WasmModuleBuilder.EmitStore(code, WasmOpCodes.I32Store, 2, 12);
-            // EXIT THE FUNCTION (return) -- this leaves yieldFlag=1 in the buffer for JS to see.
-            // Cannot use `br $exit_g` here: that would fall through to the yieldFlag=0 store
-            // emitted right after end of $exit_g (which is the normal-exit clear), wiping out
-            // our yieldFlag=1 and causing JS to think the dispatcher completed normally.
-            code.Add(WasmOpCodes.Return);
-            code.Add(WasmOpCodes.End); // end yield-if
+            if (enableYieldEscape)
+            {
+                // spinCount++
+                WasmModuleBuilder.EmitLocalGet(code, pSpinCount);
+                WasmModuleBuilder.EmitI32Const(code, 1);
+                code.Add(WasmOpCodes.I32Add);
+                WasmModuleBuilder.EmitLocalSet(code, pSpinCount);
+                // if (spinCount > YIELD_SPIN_THRESHOLD) { save state + return }
+                WasmModuleBuilder.EmitLocalGet(code, pSpinCount);
+                WasmModuleBuilder.EmitI32Const(code, YIELD_SPIN_THRESHOLD);
+                code.Add(WasmOpCodes.I32GtU);
+                code.Add(WasmOpCodes.If);
+                code.Add(WasmOpCodes.Void);
+                // ---- YIELD: persist state to yieldStateAddr, then exit dispatcher ----
+                // yieldStateAddr[0] = 1 (yieldFlag)
+                WasmModuleBuilder.EmitLocalGet(code, 14); // yieldStateAddr
+                WasmModuleBuilder.EmitI32Const(code, 1);
+                WasmModuleBuilder.EmitStore(code, WasmOpCodes.I32Store, 2, 0);
+                // yieldStateAddr[4] = g
+                WasmModuleBuilder.EmitLocalGet(code, 14);
+                WasmModuleBuilder.EmitLocalGet(code, pG);
+                WasmModuleBuilder.EmitStore(code, WasmOpCodes.I32Store, 2, 4);
+                // yieldStateAddr[8] = phase
+                WasmModuleBuilder.EmitLocalGet(code, 14);
+                WasmModuleBuilder.EmitLocalGet(code, pPhase);
+                WasmModuleBuilder.EmitStore(code, WasmOpCodes.I32Store, 2, 8);
+                // yieldStateAddr[12] = savedGen
+                WasmModuleBuilder.EmitLocalGet(code, 14);
+                WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
+                WasmModuleBuilder.EmitStore(code, WasmOpCodes.I32Store, 2, 12);
+                // EXIT THE FUNCTION (return) -- leaves yieldFlag=1 in the buffer for JS to see.
+                code.Add(WasmOpCodes.Return);
+                code.Add(WasmOpCodes.End); // end yield-if
+            }
 
             // Continue spin
             code.Add(WasmOpCodes.Br);
@@ -1150,11 +1264,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             code.Add(WasmOpCodes.End); // end if (arrived == workerCount)
             } // end else (pure-spin phase waiter)
 
-            // Past the barrier: clear pResumed so subsequent phase iterations of THIS dispatch
-            // take the FRESH FLOW (need to do their own arrival++, gen-load, etc.).
-            // Only the FIRST iteration after a yield-resume needs to skip that work.
-            WasmModuleBuilder.EmitI32Const(code, 0);
-            WasmModuleBuilder.EmitLocalSet(code, pResumed);
+            if (enableYieldEscape)
+            {
+                // Past the barrier: clear pResumed so subsequent phase iterations of THIS dispatch
+                // take the FRESH FLOW (need to do their own arrival++, gen-load, etc.).
+                // Only the FIRST iteration after a yield-resume needs to skip that work.
+                WasmModuleBuilder.EmitI32Const(code, 0);
+                WasmModuleBuilder.EmitLocalSet(code, pResumed);
+            }
 
             // Acquire fence: matches EmitBarrier (WasmKernelFunctionGenerator.cs:3924).
             // Without this, non-atomic kernel writes from the just-completed phase
@@ -1221,9 +1338,26 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             code.Add(WasmOpCodes.End); // end block
             code.Add(WasmOpCodes.End); // end if (threadStart == 0)
 
+            if (enableYieldEscape)
+            {
+                code.Add(WasmOpCodes.End); // end if (pGroupResume == 0) — skip phase loop + zeroing on group-resume
+            }
+
             // Inter-worker group barrier: all workers must finish current group
             // (including shared memory zeroing) before any starts the next group.
             // Uses fenceBase + 16 for the group barrier (separate from phase barrier at +0).
+            // Variant C path: on a GROUP-barrier resume this worker already saved its group gen +
+            // arrived (RmwAdd+16) before yielding — re-doing the arrival would double-count and
+            // desync the barrier. So fresh/phase-resume → save gen + arrive; group-resume → restore
+            // savedGen + force arrived=0 (waiter spin path). Pure-spin path: never yields here,
+            // always fresh, always saves gen + arrives.
+            if (enableYieldEscape)
+            {
+                WasmModuleBuilder.EmitLocalGet(code, pGroupResume);
+                code.Add(WasmOpCodes.I32Eqz);
+                code.Add(WasmOpCodes.If);
+                code.Add(WasmOpCodes.Void);
+            }
             // Save generation
             WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
             code.Add(WasmOpCodes.AtomicPrefix);
@@ -1239,6 +1373,18 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitI32Const(code, 1);
             code.Add(WasmOpCodes.I32Add);
             WasmModuleBuilder.EmitLocalSet(code, pArrived);
+            if (enableYieldEscape)
+            {
+                code.Add(WasmOpCodes.Else);
+                // GROUP-barrier resume: restore savedGen (yieldStateAddr+12), force arrived=0 → waiter path.
+                WasmModuleBuilder.EmitLocalGet(code, 14); // yieldStateAddr
+                code.Add(WasmOpCodes.I32Load);
+                code.Add(0x02); code.Add(0x0C); // align=2, offset=12 (saved group savedGen)
+                WasmModuleBuilder.EmitLocalSet(code, pSavedGen);
+                WasmModuleBuilder.EmitI32Const(code, 0);
+                WasmModuleBuilder.EmitLocalSet(code, pArrived);
+                code.Add(WasmOpCodes.End); // end if (pGroupResume == 0) — group arrival
+            }
             // If last worker
             WasmModuleBuilder.EmitLocalGet(code, pArrived);
             WasmModuleBuilder.EmitLocalGet(code, 12); // workerCount
@@ -1288,6 +1434,19 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 code.Add(WasmOpCodes.Drop);
             }
 
+            if (enableYieldEscape)
+            {
+                // Variant C Step 2 (Trip 2026-05-27): JS-side notify for group-gen waiters.
+                // Same rationale as the phase-gen notify above. fenceBase+20 = group gen
+                // address; int.MaxValue = wake all.
+                WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
+                WasmModuleBuilder.EmitI32Const(code, 20);
+                code.Add(WasmOpCodes.I32Add);             // fenceBase + 20 (group gen byte addr)
+                WasmModuleBuilder.EmitI32Const(code, int.MaxValue); // count = wake-all
+                WasmModuleBuilder.EmitCall(code, (uint)notifyFuncIdx);
+                code.Add(WasmOpCodes.Drop);
+            }
+
             code.Add(WasmOpCodes.Else);
             if (UseWaitNotifyBarriers)
             {
@@ -1320,7 +1479,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
             else
             {
-            // Other workers: pure spin-wait for group generation to advance.
+            // Other workers: spin-wait for group generation to advance. Variant C path adds the
+            // yield-to-JS-after-threshold escape (mirrors phase waiter). Pure-spin path just spins.
+            if (enableYieldEscape)
+            {
+                WasmModuleBuilder.EmitI32Const(code, 0);
+                WasmModuleBuilder.EmitLocalSet(code, pSpinCount);
+            }
             code.Add(WasmOpCodes.Block);
             code.Add(WasmOpCodes.Void);
             code.Add(WasmOpCodes.Loop);
@@ -1333,6 +1498,34 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             code.Add(WasmOpCodes.I32Ne);
             code.Add(WasmOpCodes.BrIf);
             WasmModuleBuilder.EmitU32Leb128(code, 1); // break (gen changed)
+            if (enableYieldEscape)
+            {
+                // spinCount++
+                WasmModuleBuilder.EmitLocalGet(code, pSpinCount);
+                WasmModuleBuilder.EmitI32Const(code, 1);
+                code.Add(WasmOpCodes.I32Add);
+                WasmModuleBuilder.EmitLocalSet(code, pSpinCount);
+                // if (spinCount > YIELD_SPIN_THRESHOLD) { save group state (yieldFlag=2) + return }
+                WasmModuleBuilder.EmitLocalGet(code, pSpinCount);
+                WasmModuleBuilder.EmitI32Const(code, YIELD_SPIN_THRESHOLD);
+                code.Add(WasmOpCodes.I32GtU);
+                code.Add(WasmOpCodes.If);
+                code.Add(WasmOpCodes.Void);
+                // yieldStateAddr[0] = 2 (GROUP-barrier yieldFlag — distinct from the phase barrier's 1)
+                WasmModuleBuilder.EmitLocalGet(code, 14);
+                WasmModuleBuilder.EmitI32Const(code, 2);
+                WasmModuleBuilder.EmitStore(code, WasmOpCodes.I32Store, 2, 0);
+                // yieldStateAddr[4] = g
+                WasmModuleBuilder.EmitLocalGet(code, 14);
+                WasmModuleBuilder.EmitLocalGet(code, pG);
+                WasmModuleBuilder.EmitStore(code, WasmOpCodes.I32Store, 2, 4);
+                // yieldStateAddr[12] = savedGen (the group gen this waiter is blocked on)
+                WasmModuleBuilder.EmitLocalGet(code, 14);
+                WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
+                WasmModuleBuilder.EmitStore(code, WasmOpCodes.I32Store, 2, 12);
+                code.Add(WasmOpCodes.Return);
+                code.Add(WasmOpCodes.End); // end yield-if
+            }
             code.Add(WasmOpCodes.Br);
             WasmModuleBuilder.EmitU32Leb128(code, 0); // continue spin
             code.Add(WasmOpCodes.End); // end loop
@@ -1346,6 +1539,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.AtomicFence);
             code.Add(0x00); // fence ordering byte
 
+            if (enableYieldEscape)
+            {
+                // Past the group barrier: clear pGroupResume so the NEXT group iteration takes the
+                // fresh flow (runs its phase loop + arrives normally). Only the FIRST group after a
+                // group-barrier resume skips that work.
+                WasmModuleBuilder.EmitI32Const(code, 0);
+                WasmModuleBuilder.EmitLocalSet(code, pGroupResume);
+            }
+
             // g++
             WasmModuleBuilder.EmitLocalGet(code, pG);
             WasmModuleBuilder.EmitI32Const(code, 1);
@@ -1358,9 +1560,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             code.Add(WasmOpCodes.End); // end block $exit_g
 
             // Normal-exit path: clear yieldFlag in the per-worker yield buffer so JS sees
-            // "dispatcher completed all work, no re-dispatch needed". The yield-mid-spin
-            // path branches directly to $exit_g WITHOUT going through here, so it leaves
-            // yieldFlag=1 (the value it stored before the br).
+            // "dispatcher completed all work, no re-dispatch needed". The yield-mid-spin paths
+            // (phase + group barrier) RETURN before reaching here, so they leave yieldFlag=1
+            // (phase) or 2 (group) for JS to see and re-dispatch. ALWAYS emitted (even when
+            // gate is off and dispatcher never sets yieldFlag): defends against cross-dispatch
+            // state leaks if the yieldStateAddr region is reused without explicit zeroing.
             WasmModuleBuilder.EmitLocalGet(code, 14); // yieldStateAddr
             WasmModuleBuilder.EmitI32Const(code, 0);
             WasmModuleBuilder.EmitStore(code, WasmOpCodes.I32Store, 2, 0);
@@ -1399,6 +1603,35 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// keeps the descheduling window short.
         /// </summary>
         public int WorkerCount { get; set; } = Math.Max(2, WasmILGPUDevice.GetHardwareConcurrency() - 2);
+
+        /// <summary>
+        /// Variant C contention-safe barrier path (Trip 2026-05-27). When <c>true</c>, the
+        /// phase dispatcher emits the full spin + yield-to-JS + producer-side
+        /// <c>env.notify</c> path so a stalled worker parks in JS via
+        /// <c>Atomics.wait(Infinity)</c> until the last-arriving worker wakes it on the
+        /// gen-bump. When <c>false</c>, the dispatcher emits pure spin (no yield, no
+        /// notify, no resume-mode handling) - byte-identical to the v4.8.0 baseline hot
+        /// path.
+        /// </summary>
+        /// <remarks>
+        /// <para>
+        /// Default (left <c>null</c>): <see cref="WasmAccelerator.Create(Context, WasmBackendOptions)"/>
+        /// resolves to <c>true</c>. Variant C is the correct default because external CPU
+        /// contention (other tabs, games like Fallout 76, parallel test runs) can stall
+        /// any worker regardless of <c>WorkerCount</c>, and pure spin livelocks when that
+        /// happens (Data 2026-04-28: pure spin "0 iters in 30 min" at 2-tab oversub).
+        /// Variant C survives external contention by parking stalled workers in JS instead
+        /// of burning CPU. Healthy-machine overhead is small (~500ns per barrier for the
+        /// producer's notify call when no waiters are parked).
+        /// </para>
+        /// <para>
+        /// Set explicit <c>false</c> only when (a) you know the machine is healthy AND
+        /// nothing else is competing for CPU AND (b) you want byte-equivalent v4.8.0
+        /// pure-spin for micro-benchmarks where every nanosecond counts. Set explicit
+        /// <c>true</c> to make the choice unambiguous in test fixtures.
+        /// </para>
+        /// </remarks>
+        public bool? EnableYieldEscape { get; set; } = null;
 
         /// <summary>
         /// Maximum SharedArrayBuffer-backed <c>WebAssembly.Memory</c> size in 64 KiB pages.

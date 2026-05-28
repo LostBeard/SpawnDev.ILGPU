@@ -9,7 +9,9 @@ Write parallel compute code in C# and let the library pick the best available ba
 
 ## Recent Highlights
 
-**4.9.9 (current):** New backend-agnostic `CopyFromAsync` extension (`ArrayView<T>` / `ArrayView1D<T,TStride>` / `MemoryBuffer1D<T,TStride>`) - the async mirror of `CopyFrom`, draining pending Wasm worker dispatches before the copy (no-op on other backends). WebGPU scalar-slot drift fix for kernels with body-struct + trailing-scalar params (unblocks ML TensorView migration). WebGL GPU→GPU `CopyTo`/`CopyFrom` stale-CPU-side fix. Wasm `wait32`/`notify` barriers re-confirmed to race on V8 - pure-spin stays, gated default-off re-test harness retained.
+**4.9.10 (current):** Wasm residual large-sort race fix. `Group.Broadcast` codegen now uses a per-group atomic tag handshake (writer publishes value + group tag; readers wait for tag match before loading) to prevent stale shared-slot consumption under full-sweep churn and heavy CPU contention. Verified with two clean full Wasm sweeps (459/0/4 each) and two concurrent FO76 contention sweeps (1664/0/149 each).
+
+**4.9.9:** New backend-agnostic `CopyFromAsync` extension (`ArrayView<T>` / `ArrayView1D<T,TStride>` / `MemoryBuffer1D<T,TStride>`) - the async mirror of `CopyFrom`, draining pending Wasm worker dispatches before the copy (no-op on other backends). WebGPU scalar-slot drift fix for kernels with body-struct + trailing-scalar params (unblocks ML TensorView migration). WebGL GPU→GPU `CopyTo`/`CopyFrom` stale-CPU-side fix. Wasm `wait32`/`notify` barriers re-confirmed to race on V8 - pure-spin stays, gated default-off re-test harness retained.
 
 **4.9.6-4.9.8:** PTX vector memory intrinsics (`ld.v2/v4.f32`) + `ArrayView.LoadVectorized`/`StoreVectorized`, `System.Numerics.BitOperations` mapped to hardware GPU intrinsics, CUDA `DefaultMaxRegistersPerThread` occupancy fix, WebGPU `pow(negative_base, runtime_exp)` NaN fix, WebGLDevice probe-context leak fix.
 

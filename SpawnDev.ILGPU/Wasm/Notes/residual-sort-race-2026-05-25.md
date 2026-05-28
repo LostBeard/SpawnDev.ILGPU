@@ -1,5 +1,91 @@
 # Residual Wasm large-sort race — investigation notes (2026-05-25/26, Tuvok)
 
+## ★ SESSION 8 UPDATE (2026-05-27, Trip) — Variant C contention fix shipped; residual still ~1.6%/large-sort
+
+**Trip's lane (Variant C JS Atomics.wait+notify shim + always-on yield gate):** unrelated to this
+residual; built to fix a DIFFERENT bug (Tuvok-S7 50us-poll dispatcher livelock under
+Fallout76-class CPU contention — workersCompleted=0/10 watchdog at 120s). Variant C work lives
+in `D:\users\tj\Projects\SpawnDev.ILGPU-Trip\` (copy of Tuvok's tree). Specifically:
+- `WorkerPool.cs` — added `env.notify` JS shim closure imported into the WASM dispatcher.
+- `Wasm/Backend/WasmBackend.cs` — emit `call $notify(fenceBase+4, int.MaxValue)` after phase-gen
+  store and `call $notify(fenceBase+20, int.MaxValue)` after group-gen store. Plumbed
+  `enableYieldEscape` through `GeneratePhaseDispatcher`; gated the yield-park / state-save /
+  resume paths behind it. Default-on (changed from `WorkerCount > hwConcurrency - 2` heuristic
+  after observing the heuristic mis-classifies typical configs and falls into pure-spin
+  livelock under external contention).
+- `Wasm/WasmAccelerator.cs` — JS-side `Atomics.wait(..., savedGen)` is now `Infinity` (was 0.05s
+  poll); `MAX_YIELD_ITERS` tightened 1M → 10K. New `WasmBackendOptions.EnableYieldEscape`
+  (nullable bool) override.
+- `Wasm/Backend/WasmKernelFunctionGenerator.cs` — `GeneratorArgs.ExtraImportCount` to reserve
+  the `env.notify` import slot in function-index space (codegen now offsets kernel/dispatcher
+  funcIdx by 1).
+- Engine quirk caveat (added to the shim comment): in V8, `Atomics.notify(view, idx, -1)`
+  passed through a WASM-import signed-i32 conversion did NOT wake parked waiters in our
+  oversub repro. Use `int.MaxValue` (positive wake-all) for the count; the spec-equivalent
+  negative form has at least one engine-specific failure mode through the wasm-host boundary.
+
+**Verification (Trip's machine, no contention):**
+- `WasmGroupBarrierOversubscriptionTest` (24-worker oversub, forces gate=ON) — PASSES with
+  Variant C; previously hung at watchdog under Tuvok-S7 dispatcher.
+- `WasmTests.RadixSortDescending4MTest` STANDALONE on healthy machine — PASSES.
+- Full WasmTests sweep on healthy machine (Variant C-on default), 2026-05-27: **458 PASS / 1
+  FAIL / 4 SKIP / 463 total**, 8m28s wall. Single fail = `RadixSortRepeatedResortTest`
+  Frame 2, 48 mismatches in 500K, classic residual signature (diff buckets 0/5/43 across
+  |diff|==1 / 2..16 / >16, span 137703..137752, distinct256Groups=2). Rate is consistent with
+  Tuvok's prior observation (~12.5%/sweep at base, ~1.6%/large-sort) — **Variant C is benign
+  vs the residual: same rate, same signature.**
+
+**Verification (TJ's machine, Fallout76 + 2 concurrent sweeps, 2026-05-27 23:41):**
+- Run 1 (`_tj_dump_local`): 1663 PASS / **1 FAIL** / 149 SKIP / 1813 total, RunState=Done,
+  ~45 min wall. Failure = `RadixSortDescending1_4MTest` (350K mismatches in 1.4M, 70.7s).
+- Run 2 (`_tj_dump_local_2`): 1662 PASS / **2 FAIL** / 149 SKIP / 1813 total, RunState=Done,
+  ~45 min wall. Failures = `RadixSortDescendingOddCountTest` (204K mismatches in 1.5M, 74s)
+  and `RadixSortDescending4MTest` (4076623 mismatches in 4M — 96% wrong, 234s).
+- **The 4M descending under Fallout76 + 2 concurrent sweeps is the WORST observation of this
+  residual ever recorded (96% mismatches with diff>16 dominating: 4017847 entries).** Compare
+  with Tuvok-S6 4M observation: 68493 mismatches (1.6%). Heavy CPU contention does NOT cause
+  a different bug — same signature class — but it **amplifies the per-pass corruption
+  magnitude enormously**. Mechanism guess (unverified): under contention, multiple radix passes
+  may each tip the race, cascading.
+
+**Conclusion: Trip's Variant C work is unblocked + ships the contention fix (no more
+0/10-workersCompleted watchdog hangs). The residual is unchanged and unfixed.** The
+"4 prior sessions" bug list below is still open. Note that the diary's prior conclusion
+"only fires in full-sweep accumulation, not in any scoped repro" is reinforced here: Trip's
+single-test `RadixSortDescending4MTest` on healthy machine passed, but the full sweep fires
+the residual on an unrelated test (RepeatedResort Frame2). The pattern of "ANY 1 of 8 large
+sorts per sweep, ~12.5% rate" still holds.
+
+**Trip's audit on the broadcast/scan codegen path (per Tuvok's Session 6 strongest lead):**
+- `WasmKernelFunctionGenerator.GenerateCode(Broadcast)` (:3588-3733): atomic store + barrier
+  + atomic load + barrier pattern. Atomic ops are SeqCst on a per-call unique slot offset
+  (`broadcastSlotOffset = _sharedMemorySize; _sharedMemorySize += (slotSize+3) & ~3`).
+  Two broadcasts in the same kernel get DISTINCT slots. Per-spec correct.
+- `ILGroupExtensions.InclusiveScanImplementation` (:134-163): `sharedMemory[LinearIndex] =
+  value; Group.Barrier(); if (IsFirstThread) serial-scan; Group.Barrier();`. The first-thread
+  serial scan reads other threads' writes — visibility comes from the wasm dispatcher's
+  phase barrier (release fence before gen bump, acquire fence after spin exit). Per-spec
+  correct.
+- Wasm dispatcher's phase + group barriers (`WasmBackend.GeneratePhaseDispatcher`): release
+  fence at producer-side gen bump (lines 1080-1099 / 1416), acquire fence at waiter-side
+  post-spin (line 1280 / 1539). Per-spec correct release-acquire pair.
+- Cross-group shared-memory zeroing: worker0-only loop (lines 1305-1339) covering
+  `[sharedMemBase .. fenceSlot)` (= sharedMemSize + barrierSize bytes). Sequenced
+  before worker0's group-barrier arrival, published to other workers via release fence
+  → gen bump → acquire fence. Per-spec correct.
+- **Trip could not find a logic race by reading either** — matches Tuvok-S6's finding. The
+  bug is either an emitted-binary issue (codegen vs source-read divergence) or a genuine
+  V8-engine memory-ordering hole that fires under full-sweep state accumulation. Tuvok's
+  next-step list still stands: (1) disassemble emitted WASM of a captured failing kernel,
+  (2) in-dispatcher stale-read detector, (3) minimal V8 multi-worker seqcst repro.
+
+**Open question for next session:** is there a way to capture WHICH SHARED-MEMORY SLOT shows
+the stale read in a failing sweep? An in-kernel detector that compares the broadcast load
+against a known-correct value would localize the slip — but adding it without changing
+timing enough to mask the bug is the trick.
+
+---
+
 ## ✅ FIX LANDED (2026-05-26, Tuvok) — monotonic kernelId; GetHashCode removed
 
 The `kernelId` fix below is DONE. `WasmAccelerator` no longer derives the worker module-cache id from
@@ -65,9 +151,13 @@ in both init branches); BackendTestBase.cs = enhanced VerifyDescendingSort diag 
 BACK TO MASTER (temp tests removed); Tests9.cs = master. Group-barrier band-aid 7bfc364 in master =
 KEEP. Build is green (0 errors). Decide whether to keep the diag flags after the fix lands.
 
-**ALSO FOUND (separate robustness bug, Rule 1):** the Wasm GROUP barrier has NO anti-starvation
-yield escape (the PHASE barrier does) → worker oversubscription (2× cores) HANGS/livelocks (confirmed,
-2 PMT timeouts). Fix independently: add a yield escape to the group barrier in GeneratePhaseDispatcher.
+**ALSO FOUND (separate robustness bug, Rule 1) — FIXED 2026-05-26:** the Wasm GROUP barrier had NO
+anti-starvation yield escape (the PHASE barrier does) → worker oversubscription (2× cores) HANGS/livelocks
+(confirmed, 2 PMT timeouts). FIXED in `GeneratePhaseDispatcher`: the group waiter now has the same
+spin-count + threshold + save-state + return escape (distinct `yieldFlag=2`), with a GROUP-RESUME prologue
+path (skips phase loop + re-arrival, restores group savedGen) and the JS park waits on the group gen slot.
+VERIFIED: an oversubscribed (≥3× cores) multi-group kernel that previously timed out now COMPLETES in ~4s
+correct; full WasmTests sweep green. Documented in Wasm/CLAUDE.md.
 
 ---
 

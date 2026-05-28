@@ -276,7 +276,23 @@ namespace SpawnDev.ILGPU.Wasm
             catch { }
             accelerator._workerCount = options?.WorkerCount ?? Math.Max(2, hwConcurrency - 2);
             accelerator._maxLinearMemoryPages = options?.MaxLinearMemoryPages ?? 16384;
-            var backend = new WasmBackend(context, options ?? new WasmBackendOptions());
+            // Variant C (Trip 2026-05-27, revised after TJ's Fallout76 contention repro):
+            // default to ENABLED. The original section-9 design auto-gated on
+            // (WorkerCount > hwConcurrency-2), assuming healthy default-config accelerators
+            // never need yield. That assumption FAILS under external CPU contention (TJ's
+            // Fallout76 case + 2 concurrent test runs pegging all cores): even with default
+            // WorkerCount, external load can deschedule workers long enough that pure-spin
+            // livelocks (Data 2026-04-28: "0 iters in 30 min" at 2-tab oversub). External
+            // contention is unpredictable at construction time, so the safe default is
+            // always-on Variant C: yield-to-JS on threshold + Atomics.wait(Infinity) park +
+            // producer-side env.notify. Healthy-machine overhead is small (per-barrier
+            // notify call with no waiters parked = ~500ns). Caller can opt out by setting
+            // options.EnableYieldEscape = false to get byte-equivalent v4.8.0 pure-spin
+            // (useful for micro-benchmarks where you want zero notify overhead AND you
+            // KNOW the machine is healthy).
+            options ??= new WasmBackendOptions();
+            options.EnableYieldEscape ??= true;
+            var backend = new WasmBackend(context, options);
             accelerator.Backend = backend;
             accelerator.Init(backend);
             accelerator.DefaultStream = accelerator.CreateStreamInternal();
@@ -1849,19 +1865,27 @@ namespace SpawnDev.ILGPU.Wasm
                 // Eliminates ~1M JS-Wasm boundary crossings for large sorts.
                 // The "dispatcher" function is compiled into the Wasm module.
                 //
-                // SPIN-YIELD LOOP (2026-04-29 port from Riker's fork): the dispatcher may
-                // return mid-spin when a phase barrier fails to advance within
+                // SPIN-YIELD LOOP (Variant C, Trip 2026-05-27): the dispatcher may return
+                // mid-spin when a phase OR group barrier fails to advance within
                 // YIELD_SPIN_THRESHOLD iterations (~5ms at ~5ns/iter on modern Wasm). When
-                // it does, yieldStateAddr[0] is left as 1 (yieldFlag) and the dispatcher's
-                // spin-loop position is saved to the per-worker yield buffer. This wrapper
-                // re-invokes the dispatcher with resumeMode=1 so it picks up exactly where
-                // it left off. JS-side `Atomics.wait` between iterations OS-parks the worker
-                // thread (50us timeout, no notify required - the next gen-bump satisfies the
-                // value-mismatch fast-exit), giving the OS a chance to schedule any worker
-                // that was descheduled mid-spin. This bypasses the broken WASM
-                // `memory.atomic.wait32`/`notify` lowering in V8 14.7+ and SpiderMonkey's
-                // recent FutexEmulation, while still avoiding pure-spin starvation under
-                // CPU oversub.
+                // it does, yieldStateAddr[0] is left as 1 (phase) or 2 (group) and the
+                // dispatcher's spin-loop position is saved to the per-worker yield buffer.
+                // This wrapper re-invokes the dispatcher with resumeMode=1 so it picks up
+                // exactly where it left off.
+                //
+                // JS-side `Atomics.wait(..., Infinity)` parks the worker until the WASM
+                // producer (last-arriving worker) calls `env.notify` after its seqcst
+                // gen-bump store - see WasmBackend.GeneratePhaseDispatcher Step 2 notify
+                // emits. The notify shim is spec-correct per tc39/ecma262 #3800 (syg):
+                // `Atomics.wait` returning "not-equal" does NOT imply visibility of
+                // surrounding stores; the standard pattern is `while (load != target)
+                // wait(...)`, which our dispatcher's spin-on-re-entry provides.
+                //
+                // Why Infinity (no timeout): a timed wait re-polls every Tms even when the
+                // gen never advances mid-window. Under Fallout76-class CPU contention,
+                // hundreds of barrier yields * Tms re-polls = framework-cap timeout.
+                // Infinity wait + producer notify = exactly one park per genuine stall,
+                // exactly one wake per gen-bump. No polling overhead.
                 sb.AppendLine("    const dispatcher = d._instance.exports.dispatcher;");
                 sb.AppendLine("    const threadStart = d.threadStart;");
                 sb.AppendLine("    const threadEnd = d.threadEnd;");
@@ -1875,11 +1899,23 @@ namespace SpawnDev.ILGPU.Wasm
                 // (The same buffer underlies d.memory; aliasing is intentional.)
                 sb.AppendLine("    const yMem32 = new Int32Array(d.memory.buffer);");
                 sb.AppendLine($"    const yieldFlagIdx = yieldStateAddr >>> 2;");
-                // gen index in i32 view: fenceSlot+4 is the phase generation slot.
+                // gen index in i32 view: fenceSlot+4 is the phase generation slot, fenceSlot+20
+                // the group generation slot. A spin-yield can happen at EITHER barrier — the park
+                // below must wait on the gen slot matching the barrier we yielded at (yieldFlag).
                 sb.AppendLine($"    const genIdx = {(fenceSlot + 4) >>> 2};");
+                sb.AppendLine($"    const groupGenIdx = {(fenceSlot + 20) >>> 2};");
                 sb.AppendLine("    let resumeMode = 0;");
                 sb.AppendLine("    let yieldIters = 0;");
-                sb.AppendLine("    const MAX_YIELD_ITERS = 1000000;");
+                // Variant C Step 5 (Trip 2026-05-27): tightened from 1,000,000 to 10,000.
+                // With Atomics.wait(Infinity)+producer notify, each yieldIter corresponds
+                // to one ACTUAL stalled barrier (one park, one wake). Realistic kernels
+                // under heavy contention yield O(barriers-that-actually-stall), which is
+                // bounded by total-barrier-count, not iteration-count. 10K provides O(1000x)
+                // headroom over the largest measured RadixSort barrier load, and fails fast
+                // on pathological cases (missed notify, dispatcher livelock) within ~1s
+                // instead of the old MAX*timeout walltime. If a legitimate kernel ever
+                // exceeds 10K yield events, that's a real bug worth surfacing.
+                sb.AppendLine("    const MAX_YIELD_ITERS = 10000;");
                 sb.AppendLine("    while (true) {");
                 sb.AppendLine("      try {");
                 sb.Append($"        dispatcher(threadStart, threadEnd, {numGroups}, {groupSize}, {gridDimX}, {gridDimY}, {scratchBase}, {scratchPerThread}, {sharedMemBase}, {barrierBase}, {dynamicSharedLength}, {zeroRegionSize}, {workerCount}, {fenceSlot}, yieldStateAddr, resumeMode");
@@ -1894,12 +1930,22 @@ namespace SpawnDev.ILGPU.Wasm
                 sb.AppendLine("      if (yieldFlag === 0) break;");
                 sb.AppendLine("      yieldIters++;");
                 sb.AppendLine("      if (yieldIters >= MAX_YIELD_ITERS) { self.postMessage({ done: false, error: 'Dispatcher exceeded MAX_YIELD_ITERS=' + MAX_YIELD_ITERS }); return; }");
-                // Atomics.wait OS-parks the worker thread (50us timeout). Returns "not-equal"
-                // immediately if gen has already advanced -- zero overhead in that case.
-                // We never call notify; the WASM gen-bump (atomic.store) is enough because
-                // Atomics.wait re-checks the value after wakeup and exits on mismatch.
+                // Variant C Step 3 (Trip 2026-05-27): Atomics.wait WITHOUT timeout (Infinity).
+                // OS-parks the worker thread until the wasm producer's `env.notify` shim is
+                // called by the last-arriving worker (after its seqcst gen-bump). If gen has
+                // already advanced past savedGen by the time we get here, the wait returns
+                // "not-equal" immediately - zero overhead in that case. Otherwise we park
+                // until the notify, no polling. Atomics.wait return value (`ok` / `not-equal`
+                // / `timed-out`) is intentionally discarded: regardless of which fired, we
+                // resume the dispatcher and let its spin-on-re-entry re-check the gen. This
+                // matches the standard condition-variable `while (load != target) wait()`
+                // pattern from tc39/ecma262 #3800 (syg). See NOTES_ecma262_3800_syg.md.
                 sb.AppendLine("      const savedGen = yMem32[yieldFlagIdx + 3];");
-                sb.AppendLine("      Atomics.wait(yMem32, genIdx, savedGen, 0.05);");
+                // yieldFlag 1 = phase-barrier yield (park on phase gen), 2 = group-barrier
+                // yield (park on group gen). Parking on the wrong slot mismatches
+                // immediately and busy-loops instead of parking.
+                sb.AppendLine("      const waitGenIdx = (yieldFlag === 2) ? groupGenIdx : genIdx;");
+                sb.AppendLine("      Atomics.wait(yMem32, waitGenIdx, savedGen);");
                 sb.AppendLine("      resumeMode = 1;");
                 sb.AppendLine("    }");
             }
