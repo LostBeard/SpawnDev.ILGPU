@@ -474,6 +474,30 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new Exception($"ReduceAsync<AddInt32> expected {expectedSum}, got {sumResult}");
         });
 
+        // Verifies MemSetToZeroAsync: a kernel fills the buffer with nonzero values
+        // (unawaited dispatch), then MemSetToZeroAsync must order AFTER that kernel and
+        // zero the buffer. On Wasm the sync MemSetToZero would race the in-flight worker
+        // kernel (immediate SAB write bypassing the dispatch queue); the async variant
+        // drains first. WebGPU records the clear into the same encoder; desktop is
+        // stream-ordered. Skipped on WebGL (MemSet is deferred CPU-side upload — readback
+        // reads the GPU/worker side, so this CPU-fill pattern isn't meaningful there).
+        [TestMethod]
+        public async Task MemSetToZeroAsyncTest() => await RunTest(async accelerator =>
+        {
+            const int count = 64;
+            using var buf = accelerator.Allocate1D<int>(count);
+            var fill = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(
+                (i, v) => v[i] = i + 1);
+            fill((Index1D)count, buf.View); // unawaited dispatch
+            await buf.View.MemSetToZeroAsync(accelerator.DefaultStream);
+            var result = await buf.CopyToHostAsync<int>();
+            for (int i = 0; i < count; i++)
+                if (result[i] != 0)
+                    throw new Exception(
+                        $"MemSetToZeroAsync: index {i} = {result[i]}, expected 0 (zero-fill " +
+                        "did not order after the kernel)");
+        });
+
         // ILGPUReduceSmallTest removed — the main ILGPUReduceTest covers the same functionality.
         // The small test was a diagnostic that exposed a pre-existing WebGL GLSL codegen bug
         // (_idx undeclared identifier in Reduce kernel shader). Not a Wasm issue.

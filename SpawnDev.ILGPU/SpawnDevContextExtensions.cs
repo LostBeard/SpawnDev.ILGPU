@@ -564,6 +564,51 @@ namespace SpawnDev.ILGPU
 
         #endregion
 
+        #region Unified MemSet (async)
+
+        /// <summary>
+        /// Asynchronously zero-fills the <paramref name="view"/>, ordered AFTER any
+        /// in-flight kernel work on Wasm. Backend-agnostic async sibling of the sync
+        /// <c>ArrayView.MemSetToZero</c>.
+        ///
+        /// <para><b>Why this exists.</b> On Wasm the sync <c>MemSetToZero</c> writes the
+        /// <c>SharedArrayBuffer</c> on the main thread immediately and bypasses the
+        /// dispatch queue (<c>WasmAccelerator._pendingWork</c>); if worker kernels are
+        /// still reading/writing the buffer the zero-fill races them and the CUDA-style
+        /// stream-ordering contract ("memset happens after prior kernels") is broken.
+        /// This variant awaits <see cref="SynchronizeAsync"/> on the Wasm accelerator
+        /// first, so the fill is correctly ordered after pending dispatches. On other
+        /// backends the implicit wait is unnecessary and skipped: WebGPU records the
+        /// fill into the same command encoder as the kernels; WebGL routes it through
+        /// the in-order GL worker; CUDA/OpenCL serialize via the stream; CPU is sync.
+        /// Mirrors <see cref="CopyFromAsync{T}(ArrayView{T}, ArrayView{T})"/>.</para>
+        /// </summary>
+        /// <typeparam name="T">The element type.</typeparam>
+        /// <param name="view">The view to zero.</param>
+        /// <param name="stream">The accelerator stream.</param>
+        public static async Task MemSetToZeroAsync<T>(this ArrayView<T> view, AcceleratorStream stream)
+            where T : unmanaged
+        {
+            var acc = ((IContiguousArrayView)view).Buffer?.Accelerator;
+            // Only Wasm needs the explicit drain — its MemSet is an immediate SAB write
+            // that bypasses the dispatch queue. See XML doc above.
+            if (acc is WasmAccelerator wasm)
+                await wasm.SynchronizeAsync();
+            view.MemSetToZero(stream);
+        }
+
+        /// <summary>
+        /// <see cref="ArrayView1D{T,TStride}"/> overload of
+        /// <see cref="MemSetToZeroAsync{T}(ArrayView{T}, AcceleratorStream)"/>.
+        /// </summary>
+        public static Task MemSetToZeroAsync<T, TStride>(
+            this ArrayView1D<T, TStride> view, AcceleratorStream stream)
+            where T : unmanaged
+            where TStride : struct, IStride1D
+            => view.BaseView.MemSetToZeroAsync(stream);
+
+        #endregion
+
         #region Unified Synchronization
 
         /// <summary>
