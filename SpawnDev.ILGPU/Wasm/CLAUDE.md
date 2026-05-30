@@ -41,11 +41,21 @@ seeing backend types):
 
 **Rule:** algorithm/consumer code that needs a host-visible scalar/array after a dispatch
 must `await accelerator.SynchronizeAsync()` + `view.CopyToCPUAsync(...)` (or SpawnDev's
-`CopyToHostAsync` / `CopyFromAsync`) — NEVER the synchronous `CopyToCPU`/`Synchronize`,
-which silently do nothing on these backends. `ReductionExtensions.ReduceAsync` was the
-canonical victim (was `Task.Run(sync Reduce)` → threw on WebGPU / stale on Wasm); it now
-uses these. The synchronous `Reduce`→scalar overloads throw a clear `NotSupportedException`
-on Wasm/WebGL/WebGPU instead of returning stale data.
+`CopyToHostAsync` / `CopyFromAsync` / `MemSetToZeroAsync`) — NEVER the synchronous
+`CopyToCPU`/`Synchronize`/`MemSet`, which silently do nothing on these backends.
+`ReductionExtensions.ReduceAsync` was the canonical victim (was `Task.Run(sync Reduce)` →
+threw on WebGPU / stale on Wasm); it now uses these. The synchronous `Reduce`→scalar
+overloads throw a clear `NotSupportedException` on Wasm/WebGL/WebGPU instead of returning
+stale data.
+
+**Race detector (opt-in):** `WasmMemoryBuffer.DetectHostBufferRaces` (default false). When
+true, the synchronous host ops (`MemSet` / `CopyTo` / `CopyToHost`) throw if the buffer has
+an in-flight dispatch (`_pendingSnapshotIntents > 0`, incremented synchronously at queue
+time in `RunKernel`). `CopyFrom*` are NOT guarded — the lazy snapshot mechanism
+(`PrepareHostWrite`) protects them by design. Enable it in a PMT sweep to ENUMERATE any
+remaining sync-readback race sites that the async APIs replace; a properly-drained path
+never trips it. Locked by `WasmTests.DetectHostBufferRaceTest` (sync read on the same JS
+turn as an unawaited dispatch deterministically throws; succeeds after `SynchronizeAsync`).
 - **Serialized dispatch** — `RunKernelAsync` awaits `_pendingWork` before each dispatch.
 - **Struct-with-view serialization** — CLR layout ≠ IR layout. Use `WasmParamInfo.StructFields` + `FlattenCLRStruct()` for manual IR-layout serialization. See SKILL.md for details.
 - **`IsViewType()` distinguishes views from struct-with-view** — checks if `DirectFields[0] is AddressSpaceType`.

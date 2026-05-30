@@ -304,6 +304,7 @@ namespace SpawnDev.ILGPU.Wasm
         /// </summary>
         public T[] CopyToHost<T>(long length) where T : unmanaged
         {
+            GuardHostBufferRace(nameof(CopyToHost));
             return TypedArrayView.Read<T>(0, length);
         }
 
@@ -363,12 +364,42 @@ namespace SpawnDev.ILGPU.Wasm
                 new Uint8Array(SharedBuffer, sourceByteOffset, copyBytes.Value);
         }
 
+        /// <summary>
+        /// Diagnostic flag (default false). When true, the synchronous host buffer ops
+        /// (<see cref="MemSet"/> / <see cref="CopyTo"/> / <see cref="CopyToHost{T}"/>)
+        /// throw if a dispatch touching this buffer is still in flight
+        /// (<see cref="_pendingSnapshotIntents"/> &gt; 0) - i.e. the host is reading or
+        /// zeroing a <see cref="SharedArrayBuffer"/> that worker kernels may still be
+        /// writing. Enable in tests / diagnostics to ENUMERATE the sync-readback races
+        /// that the async APIs (<c>CopyToHostAsync</c> / <c>CopyFromAsync</c> /
+        /// <c>MemSetToZeroAsync</c> / <c>SynchronizeAsync</c>) are meant to replace; the
+        /// intent counter is incremented synchronously at dispatch queue time and drops
+        /// to zero only after a real drain, so a properly-awaited path never trips it.
+        /// <c>CopyFrom*</c> are intentionally NOT guarded - they are protected by the
+        /// lazy snapshot mechanism (<see cref="PrepareHostWrite"/>) by design.
+        /// </summary>
+        public static bool DetectHostBufferRaces;
+
+        private void GuardHostBufferRace(string op)
+        {
+            if (DetectHostBufferRaces && _pendingSnapshotIntents > 0)
+            {
+                throw new InvalidOperationException(
+                    $"WasmMemoryBuffer.{op} on a buffer with {_pendingSnapshotIntents} " +
+                    "in-flight dispatch(es): the host is touching a SharedArrayBuffer that " +
+                    "worker kernels may still be writing. Await accelerator.SynchronizeAsync() " +
+                    "(or use CopyToHostAsync / CopyFromAsync / MemSetToZeroAsync) before this " +
+                    "synchronous operation.");
+            }
+        }
+
         /// <inheritdoc/>
         protected override void MemSet(
             AcceleratorStream stream,
             byte value,
             in ArrayView<byte> targetView)
         {
+            GuardHostBufferRace(nameof(MemSet));
             int offset = (int)targetView.LoadEffectiveAddressAsPtr();
             int length = (int)targetView.LengthInBytes;
             using var view = new Uint8Array(SharedBuffer, offset, length);
@@ -381,6 +412,7 @@ namespace SpawnDev.ILGPU.Wasm
             in ArrayView<byte> sourceView,
             in ArrayView<byte> targetView)
         {
+            GuardHostBufferRace(nameof(CopyTo));
             int srcOffset = (int)sourceView.LoadEffectiveAddressAsPtr();
             int length = (int)sourceView.LengthInBytes;
 
