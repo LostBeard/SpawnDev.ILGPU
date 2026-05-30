@@ -116,6 +116,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         private readonly HashSet<long> _bodyStructTypesToSkip = new();
 
         /// <summary>
+        /// During cross-assembly MethodCall inlining, maps helper-method
+        /// <see cref="Parameter"/> nodes to the kernel call-site argument values so
+        /// <see cref="ResolveToParameter"/> and <see cref="TryFindBodyStructRoot"/> see
+        /// the real body-struct kernel param (e.g. TensorView inp), not the helper's
+        /// distinct Parameter object.
+        /// </summary>
+        private readonly Dictionary<global::ILGPU.IR.Values.Parameter, Value> _inlineParamAliasesGL = new();
+
+        /// <summary>
         /// Kernel parameter offset: number of leading IR parameters that are NOT user buffers.
         ///
         /// For auto-grouped stream kernels (LoadAutoGroupedStreamKernel&lt;Index1D, ...&gt;),
@@ -215,6 +224,31 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// wasting TF slots on read-only input buffers, which causes interleaving
         /// bugs in multi-buffer kernels.
         /// </summary>
+        /// <summary>
+        /// Resolves a buffer access (load source or store target) to the param index used
+        /// for input/output/TF tracking. Body-struct view fields use the synthetic index
+        /// from <see cref="TryResolveBodyStructField"/> (handles ArrayView1D wrapper chains);
+        /// direct view params use their kernel param index.
+        /// </summary>
+        private bool TryGetBufferTrackingKey(Value src, int paramOffset, out int bufferKey)
+        {
+            bufferKey = -1;
+            var resolved = src.Resolve();
+            if (TryResolveBodyStructField(resolved, out _, out _, out var bsInfo) && bsInfo.IsView)
+            {
+                bufferKey = bsInfo.SyntheticParamIndex;
+                return true;
+            }
+            var (param, fieldIdx) = ResolveToParamAndFieldStatic(resolved);
+            if (param == null || param.Index < paramOffset)
+                return false;
+            bufferKey = (fieldIdx >= 0 && _bodyStructParamsGL.TryGetValue(param.Index, out var bsf)
+                && fieldIdx < bsf.Count && bsf[fieldIdx].IsView)
+                ? bsf[fieldIdx].SyntheticParamIndex
+                : param.Index;
+            return true;
+        }
+
         private void AnalyzeOutputBuffers()
         {
             int paramOffset = KernelParamOffset;
@@ -230,16 +264,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     if (value.Value is Store store)
                     {
                         var target = store.Target.Resolve();
-                        var (param, fieldIdx) = ResolveToParamAndFieldStatic(target);
-                        if (param != null && param.Index >= paramOffset)
+                        if (TryGetBufferTrackingKey(target, paramOffset, out int outKey))
                         {
-                            // Body-struct view-field stores key by synthetic param index
-                            // so per-field output tracking is independent of the parent
-                            // body-struct param's other fields.
-                            int outKey = (fieldIdx >= 0 && _bodyStructParamsGL.TryGetValue(param.Index, out var bsf)
-                                && fieldIdx < bsf.Count && bsf[fieldIdx].IsView)
-                                ? bsf[fieldIdx].SyntheticParamIndex
-                                : param.Index;
                             _outputParamIndices.Add(outKey);
                             if (!uniqueLeaExprs.TryGetValue(outKey, out var exprSet))
                             {
@@ -268,16 +294,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         // Atomic operations (Atomic.Add etc.) write to a buffer element.
                         // Mark the target param as an output so it gets an atomic vote TF varying.
                         var atomicTarget = atomic.Target.Resolve();
-                        var (param, fieldIdx) = ResolveToParamAndFieldStatic(atomicTarget);
-                        if (param != null && param.Index >= paramOffset)
+                        if (TryGetBufferTrackingKey(atomicTarget, paramOffset, out int outKey))
                         {
-                            // WebGL has no atomics; if an atomic targets a body-struct field
-                            // the kernel will fail capability check upstream. Still key by
-                            // synthetic index for consistency with output tracking.
-                            int outKey = (fieldIdx >= 0 && _bodyStructParamsGL.TryGetValue(param.Index, out var bsfA)
-                                && fieldIdx < bsfA.Count && bsfA[fieldIdx].IsView)
-                                ? bsfA[fieldIdx].SyntheticParamIndex
-                                : param.Index;
                             _atomicParamIndices.Add(outKey);
                             _outputParamIndices.Add(outKey);
                         }
@@ -307,15 +325,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     {
                         // Trace: Load.Source → LEA → GetField? → ... → Parameter.
                         // Body-struct view-field loads key by synthetic param index.
-                        var (param, fieldIdx) = ResolveToParamAndFieldStatic(load.Source.Resolve());
-                        if (param != null && param.Index >= paramOffset)
-                        {
-                            int inKey = (fieldIdx >= 0 && _bodyStructParamsGL.TryGetValue(param.Index, out var bsf)
-                                && fieldIdx < bsf.Count && bsf[fieldIdx].IsView)
-                                ? bsf[fieldIdx].SyntheticParamIndex
-                                : param.Index;
+                        if (TryGetBufferTrackingKey(load.Source.Resolve(), paramOffset, out int inKey))
                             _inputParamIndices.Add(inKey);
-                        }
                     }
                 }
             }
@@ -355,6 +366,30 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// from the body struct). chainDepth is the count of GetField links walked
         /// (1 = direct, 2 = ArrayView1D wrapper, 3+ = deeper unwrap of BaseView etc).
         /// </summary>
+        /// <summary>
+        /// Cross-assembly MethodCall inlining binds callee <c>this</c> to a
+        /// <see cref="Load"/> of a struct snapshot, not always the kernel
+        /// <see cref="global::ILGPU.IR.Values.Parameter"/> directly. Peel those wrappers
+        /// before body-struct root detection.
+        /// </summary>
+        private static Value? PeelStructAccessRoot(Value root)
+        {
+            var current = root.Resolve();
+            for (int i = 0; i < 16 && current != null; i++)
+            {
+                if (current is global::ILGPU.IR.Values.Load load)
+                    current = load.Source.Resolve();
+                else if (current is ConvertValue cv)
+                    current = cv.Value.Resolve();
+                else if (current is AddressSpaceCast asc)
+                    current = asc.Value.Resolve();
+                else
+                    return current;
+            }
+
+            return current;
+        }
+
         private bool TryFindBodyStructRoot(GetField value,
             out global::ILGPU.IR.Values.Parameter bodyParam,
             out BodyStructFieldInfoGL rootFieldInfo,
@@ -370,7 +405,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             //   x_n = GetField(x_{n-1}, fi_{n-1})
             //   ...
             //   x_1 = GetField(parameter, outerFi)  // outerFi is the body-struct field index
-            //   x_1.ObjectValue.Resolve() is Parameter
+            //   x_1.ObjectValue.Resolve() is Parameter (or Load(Parameter) after cross-asm inline)
             GetField current = value;
             int outerFi = -1;
             int depth = 0;
@@ -378,9 +413,16 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             {
                 depth++;
                 outerFi = current.FieldSpan.Index;
-                var resolvedObject = current.ObjectValue.Resolve();
+                var resolvedObject = PeelStructAccessRoot(current.ObjectValue);
                 if (resolvedObject is global::ILGPU.IR.Values.Parameter param)
                 {
+                    if (_inlineParamAliasesGL.TryGetValue(param, out var aliasedArg))
+                    {
+                        var peeledAlias = PeelStructAccessRoot(aliasedArg);
+                        if (peeledAlias is global::ILGPU.IR.Values.Parameter kernelParam)
+                            param = kernelParam;
+                    }
+
                     if (_bodyStructParamsGL.TryGetValue(param.Index, out var bsFields))
                     {
                         if (outerFi >= 0 && outerFi < bsFields.Count)
@@ -673,7 +715,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             {
                 foreach (var value in block)
                 {
-                    if (value.Value.Type.IsPrimitiveType || value.Value.Type.IsStructureType)
+                    var node = value.Value.Type;
+                    // PointerType (LEA results, alloca pointers) must be hoisted: structured
+                    // if/else emits branch-scoped `int v_N = ...` otherwise, and a sibling
+                    // branch's `v_N = ...` hits undeclared identifier (IntMathTest v_34).
+                    if (node.IsPrimitiveType || node.IsStructureType || node is PointerType)
                         _hoistedPrimitives.Add(value.Value);
                 }
             }
@@ -744,6 +790,27 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         }
 
         /// <summary>
+        /// True for TensorView-shaped body structs: one embedded view (typically
+        /// ArrayView1D) plus multiple Int32 shape fields (D0..D3, Rank). These have
+        /// NumFields == 6 like ArrayView3D wrappers but are user body structs, not views.
+        /// </summary>
+        private static bool IsTensorViewLikeBodyStruct(StructureType st)
+        {
+            int viewFieldCount = 0;
+            int int32FieldCount = 0;
+            for (int i = 0; i < st.NumFields; i++)
+            {
+                if (IsViewFieldType(st.Fields[i]))
+                    viewFieldCount++;
+                else if (st.Fields[i] is PrimitiveType pt
+                    && pt.BasicValueType == BasicValueType.Int32)
+                    int32FieldCount++;
+            }
+
+            return viewFieldCount == 1 && int32FieldCount >= 4;
+        }
+
+        /// <summary>
         /// True when a StructureType is a "body struct" — a user-defined struct kernel
         /// parameter holding at least one ArrayView field, distinct from the
         /// ArrayView1D/2D/3D wrappers themselves. Discrimination:
@@ -757,6 +824,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// </summary>
         private static bool IsBodyStruct(StructureType st)
         {
+            if (IsTensorViewLikeBodyStruct(st))
+                return true;
+
             int viewFieldCount = 0;
             for (int i = 0; i < st.NumFields; i++)
             {
@@ -1603,8 +1673,6 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // No-op here.
                 if (_bodyStructParamsGL.ContainsKey(param.Index))
                 {
-                    var bsVar = Load(param);
-                    declaredVariables.Add(bsVar.Name);
                     AppendLine($"// param{param.Index} is body struct (per-field access via u_param{param.Index}_f<N>)");
                     continue;
                 }
@@ -1618,7 +1686,6 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 {
                     // Buffer parameters: the variable represents the sampler/texture
                     // Actual access is done via texelFetch in LoadElementAddress
-                    declaredVariables.Add(variable.Name);
                     AppendLine($"// param{param.Index} is buffer (accessed via u_param{param.Index})");
                 }
                 else if (_emulatedF64Params.Contains(param.Index))
@@ -1650,34 +1717,29 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             foreach (var value in _hoistedPrimitives)
             {
                 var variable = Load(value);
-                if (!declaredVariables.Contains(variable.Name))
+                // All LEA / alloca pointers are int indices in GLSL (see EmitLeaIntPointer),
+                // regardless of element type. TypeGenerator maps PointerType → element type
+                // (e.g. struct_BVHNode for a struct[] alloca), which produced invalid hoists
+                // like `struct_N v_K = struct_N(0)` (BVHRayTraversalTest).
+                string type;
+                string init;
+                if (value.Type is PointerType)
                 {
-                    declaredVariables.Add(variable.Name);
-                    string type = TypeGenerator[value.Type];
-                    // Track boolean variables for logical operator selection
-                    if (type == "bool")
-                        booleanVariables.Add(variable.Name);
-                    // GLSL struct constructors require all fields — not just (0)
-                    string init;
-                    if (value.Type is global::ILGPU.IR.Types.StructureType structType && type.StartsWith("struct_"))
-                    {
-                        var sb = new StringBuilder();
-                        sb.Append($"{type}(");
-                        for (int i = 0; i < structType.NumFields; i++)
-                        {
-                            if (i > 0) sb.Append(", ");
-                            var fieldGlslType = TypeGenerator[structType.Fields[i]];
-                            sb.Append(GetDefaultValue(fieldGlslType));
-                        }
-                        sb.Append(")");
-                        init = sb.ToString();
-                    }
-                    else
-                    {
-                        init = GetDefaultValue(type);
-                    }
-                    AppendLine($"{type} {variable.Name} = {init};");
+                    type = "int";
+                    init = "0";
                 }
+                else if (value.Type is global::ILGPU.IR.Types.StructureType structType
+                    && TypeGenerator[value.Type].StartsWith("struct_"))
+                {
+                    type = TypeGenerator[value.Type];
+                    init = GetStructDefaultInitializer(structType);
+                }
+                else
+                {
+                    type = TypeGenerator[value.Type];
+                    init = GetDefaultValue(type);
+                }
+                TryEmitDeclaration(variable.Name, type, init);
             }
         }
 
@@ -1696,6 +1758,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             _ => $"{glslType}(0)"
         };
 
+        private void EmitHoistedOrTypedAssignment(Value value, Variable target, string valueExpr, string comment = "")
+        {
+            if (_hoistedPrimitives.Contains(value))
+                AppendLine($"{target} = {valueExpr};{(string.IsNullOrEmpty(comment) ? "" : $" // {comment}")}");
+            else
+                EmitTypedAssignment(target, TypeGenerator[value.Type], valueExpr, comment);
+        }
+
         /// <summary>
         /// Override Alloca to declare local arrays at function scope (not inside switch/case).
         /// In multi-block kernels, arrays must be visible across all state machine blocks.
@@ -1709,7 +1779,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 string arrayName = $"local_arr_{_localArrayCounter++}";
                 var target = Load(value);
                 _allocaArrayNames[target.Name] = arrayName;
-                declaredVariables.Add(target.Name);
+                bool firstPtrDecl = declaredVariables.Add(target.Name);
                 // Use VariableBuilder when state machine is active to hoist to function scope
                 if (IsStateMachineActive)
                 {
@@ -1720,12 +1790,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     // that survive SSAStructureConstruction (per its length threshold)
                     // hit "undeclared identifier" on the alloca's pointer variable.
                     // Tuvok 2026-04-24 VP9 iDCT 8x8 WebGL path.
-                    VariableBuilder.AppendLine($"    int {target.Name} = 0;");
+                    if (firstPtrDecl)
+                        VariableBuilder.AppendLine($"    int {target.Name} = 0;");
                 }
                 else
                 {
                     AppendLine($"{elementType} {arrayName}[{arraySize}];");
-                    AppendLine($"int {target.Name} = 0;");
+                    if (firstPtrDecl)
+                        AppendLine($"int {target.Name} = 0;");
                 }
                 return;
             }
@@ -1756,16 +1828,18 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 string arrayName = $"local_arr_{_localArrayCounter++}";
                 var target = Load(value);
                 _allocaArrayNames[target.Name] = arrayName;
-                declaredVariables.Add(target.Name);
+                bool firstPtrDecl = declaredVariables.Add(target.Name);
                 if (IsStateMachineActive)
                 {
                     VariableBuilder.AppendLine($"    {elementType} {arrayName}[1];");
-                    VariableBuilder.AppendLine($"    int {target.Name} = 0;");
+                    if (firstPtrDecl)
+                        VariableBuilder.AppendLine($"    int {target.Name} = 0;");
                 }
                 else
                 {
                     AppendLine($"{elementType} {arrayName}[1];");
-                    AppendLine($"int {target.Name} = 0;");
+                    if (firstPtrDecl)
+                        AppendLine($"int {target.Name} = 0;");
                 }
                 return;
             }
@@ -1809,14 +1883,18 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             string arrayName = $"local_arr_{_localArrayCounter++}";
             var target = Load(value);
             _allocaArrayNames[target.Name] = arrayName;
-            declaredVariables.Add(target.Name);
+            bool firstPtrDecl = declaredVariables.Add(target.Name);
             if (IsStateMachineActive)
             {
                 VariableBuilder.AppendLine($"    {elementType} {arrayName}[{arraySize}];");
+                if (firstPtrDecl)
+                    VariableBuilder.AppendLine($"    int {target.Name} = 0;");
             }
             else
             {
                 AppendLine($"{elementType} {arrayName}[{arraySize}];");
+                if (firstPtrDecl)
+                    AppendLine($"int {target.Name} = 0;");
             }
         }
 
@@ -2290,6 +2368,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         if (phi.Sources[i] == sourceBlock)
                         {
                             var sourceVal = Load(phi[i]);
+                            if (!declaredVariables.Contains(targetVar.Name))
+                                Declare(targetVar);
                             AppendLine($"{targetVar} = {sourceVal};");
 
                             // Propagate buffer pointer mappings through phi nodes.
@@ -2621,6 +2701,83 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
+        /// <summary>
+        /// Cross-assembly struct accessors (e.g. SpawnDev.ILGPU.ML.Tensors.TensorView.Get2D)
+        /// compile to <see cref="MethodCall"/> nodes when the kernel lambda lives in a
+        /// different assembly. <see cref="GLSLFunctionGenerator"/> cannot route buffer
+        /// access for body-struct fields (no <see cref="TryResolveBodyStructField"/>), so
+        /// fn-call emission silently zeros. Inline single-block implementations at the
+        /// kernel call site by binding callee parameters to the caller's variables -
+        /// same pattern as <see cref="WGSLKernelFunctionGenerator.GenerateCode(MethodCall)"/>.
+        /// </summary>
+        public override void GenerateCode(MethodCall methodCall)
+        {
+            var targetMethod = methodCall.Target;
+
+            if (targetMethod.HasImplementation
+                && !targetMethod.HasFlags(MethodFlags.External)
+                && !targetMethod.HasFlags(MethodFlags.Intrinsic)
+                && targetMethod.HasFlags(MethodFlags.Inline))
+            {
+                var blockList = targetMethod.Blocks.ToList();
+                if (blockList.Count == 1)
+                {
+                    InlineCrossAssemblyMethodCall(methodCall, targetMethod, blockList[0]);
+                    return;
+                }
+            }
+
+            base.GenerateCode(methodCall);
+        }
+
+        private void InlineCrossAssemblyMethodCall(
+            MethodCall methodCall,
+            Method targetMethod,
+            BasicBlock block)
+        {
+            var savedParamBindings = new List<(Value Param, Variable? Previous)>();
+
+            _inlineParamAliasesGL.Clear();
+            for (int i = 0; i < targetMethod.Parameters.Count && i < methodCall.Nodes.Length; i++)
+            {
+                var param = targetMethod.Parameters[i];
+                var arg = methodCall.Nodes[i].Resolve();
+                if (param is global::ILGPU.IR.Values.Parameter hp)
+                    _inlineParamAliasesGL[hp] = arg;
+
+                valueVariables.TryGetValue(param, out var previous);
+                savedParamBindings.Add((param, previous));
+                valueVariables[param] = Load(arg);
+            }
+
+            Variable? resultVar = null;
+            if (!methodCall.Type.IsVoidType)
+            {
+                resultVar = Load(methodCall);
+                Declare(resultVar);
+            }
+
+            foreach (var value in block)
+                GenerateCodeFor(value);
+
+            if (block.Terminator is ReturnTerminator ret
+                && resultVar != null
+                && !ret.IsVoidReturn)
+            {
+                AppendLine($"{resultVar} = {Load(ret.ReturnValue.Resolve())};");
+            }
+
+            foreach (var (param, previous) in savedParamBindings)
+            {
+                if (previous != null)
+                    valueVariables[param] = previous;
+                else
+                    valueVariables.Remove(param);
+            }
+
+            _inlineParamAliasesGL.Clear();
+        }
+
         public override void GenerateCode(LoadElementAddress value)
         {
             var target = Load(value);
@@ -2641,8 +2798,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 if (_crossBlockPointers.Contains(value))
                     _crossBlockPointerExprs[target.Name] = $"texelFetch({bindingName}, ivec2((int({offset}) + {bindingName}_offset) % {bindingName}_tileW, (int({offset}) + {bindingName}_offset) / {bindingName}_tileW), 0)";
 
-                declaredVariables.Add(target.Name);
-                AppendLine($"int {target.Name} = int({offset}); // body-struct LEA into {bindingName}");
+                EmitLeaIntPointer(target, offset.ToString(), $"body-struct LEA into {bindingName}");
                 Bind(value, new Variable(target.Name, "int"));
                 _leaParamMap[target.Name] = synth;
                 if (_subWordParams.ContainsKey(synth))
@@ -2660,7 +2816,6 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     {
                         bool isF64 = _emulatedF64Params.Contains(param.Index);
                         _emulatedVarMappings[target.Name] = (param.Index, isF64);
-                        declaredVariables.Add(target.Name);
 
                         AppendLine($"int {target.Name}_base_idx = int({offset}) * 2;");
                         return;
@@ -2672,8 +2827,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         _crossBlockPointerExprs[target.Name] = $"texelFetch({cbBn}, ivec2((int({offset}) + {cbBn}_offset) % {cbBn}_tileW, (int({offset}) + {cbBn}_offset) / {cbBn}_tileW), 0)";
                     }
 
-                    declaredVariables.Add(target.Name);
-                    AppendLine($"int {target.Name} = int({offset}); // LEA into param{param.Index}");
+                    EmitLeaIntPointer(target, offset.ToString(), $"LEA into param{param.Index}");
                     // Re-bind with correct type: the GLSL variable is declared as 'int',
                     // but the IR type is a pointer whose element type may differ (e.g. float).
                     Bind(value, new Variable(target.Name, "int"));
@@ -2699,8 +2853,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     _crossBlockPointerExprs[target.Name] = $"texelFetch({srcBn}, ivec2((int({offset}) + {srcBn}_offset) % {srcBn}_tileW, (int({offset}) + {srcBn}_offset) / {srcBn}_tileW), 0)";
                 }
 
-                declaredVariables.Add(target.Name);
-                AppendLine($"int {target.Name} = int({offset}); // LEA into param{sourceParamIdx} (via alias)");
+                EmitLeaIntPointer(target, offset.ToString(), $"LEA into param{sourceParamIdx} (via alias)");
                 Bind(value, new Variable(target.Name, "int"));
                 _leaParamMap[target.Name] = sourceParamIdx;
                 if (_subWordParams.ContainsKey(sourceParamIdx))
@@ -2740,9 +2893,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // Local array element access via LAEA pointer
             if (_leaArrayExprs.TryGetValue(source.Name, out var arrayExpr))
             {
-                string prefix = _hoistedPrimitives.Contains(loadVal) ? "" : $"{TypeGenerator[loadVal.Type]} ";
-                declaredVariables.Add(target.Name);
-                AppendLine($"{prefix}{target} = {arrayExpr};");
+                if (_hoistedPrimitives.Contains(loadVal))
+                    AppendLine($"{target} = {arrayExpr};");
+                else
+                    EmitTypedAssignment(target, TypeGenerator[loadVal.Type], arrayExpr);
                 return;
             }
 
@@ -2752,7 +2906,6 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 int paramOffset = KernelParamOffset;
                 if (param.Index >= paramOffset)
                 {
-                    declaredVariables.Add(target.Name);
                     AppendLine($"// {target} aliases buffer param{param.Index}");
                     _leaParamMap[target.Name] = param.Index;
                     return;
@@ -3067,7 +3220,6 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         {
             var target = Load(value);
             var source = Load(value.Pointer);
-            declaredVariables.Add(target.Name);
             // Propagate the param mapping if source is a param alias
             if (_leaParamMap.TryGetValue(source.ToString(), out var paramIdx))
                 _leaParamMap[target.Name] = paramIdx;
@@ -3099,7 +3251,6 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         public override void GenerateCode(GetViewLength value)
         {
             var target = Load(value);
-            string prefix = _hoistedPrimitives.Contains(value) ? "" : $"{TypeGenerator[value.Type]} ";
 
             // Trace the view back to its kernel parameter
             var param = ResolveToParameter(value.View);
@@ -3119,7 +3270,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     // Non-emulated path (shouldn't happen for long, but be safe)
                     lengthExpr = $"u_param{param.Index}_length";
                 }
-                AppendLine($"{prefix}{target} = {lengthExpr};");
+                EmitHoistedOrTypedAssignment(value, target, lengthExpr);
             }
             else
             {
@@ -3143,8 +3294,6 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var rootParam = ResolveToParameter(value.ObjectValue);
             if (rootParam != null && _bodyStructParamsGL.ContainsKey(rootParam.Index))
             {
-                var target = Load(value);
-                declaredVariables.Add(target.Name);
                 AppendLine($"// SetField on body-struct param {rootParam.Index} field {value.FieldSpan.Index} (suppressed; per-field samplers handle access)");
                 return;
             }
@@ -3172,23 +3321,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     // for the Dense flag. Important: must intercept here so the
                     // standard GenerateCode(GetField) doesn't fall through to a
                     // 2D-view stride emit and reference an undeclared uniform.
-                    string prefix = _hoistedPrimitives.Contains(value) ? "" : $"{TypeGenerator[value.Type]} ";
-                    declaredVariables.Add(target.Name);
                     string typeName = TypeGenerator[value.Type];
-                    if (typeName == "uvec2")
+                    string metadataExpr = typeName switch
                     {
-                        // Int64-encoded length
-                        AppendLine($"{prefix}{target} = i64_from_i32({rootFieldInfo.BindingName}_length);");
-                    }
-                    else if (typeName == "int" || typeName == "uint")
-                    {
-                        AppendLine($"{prefix}{target} = {rootFieldInfo.BindingName}_length;");
-                    }
-                    else
-                    {
-                        // Dense flag or other tag — emit a zero placeholder
-                        AppendLine($"{prefix}{target} = {typeName}(0);");
-                    }
+                        "uvec2" => $"i64_from_i32({rootFieldInfo.BindingName}_length)",
+                        "int" => $"{rootFieldInfo.BindingName}_length",
+                        "uint" => $"{rootFieldInfo.BindingName}_length",
+                        _ => $"{typeName}(0)"
+                    };
+                    EmitHoistedOrTypedAssignment(value, target, metadataExpr);
                     return;
                 }
                 if (rootFieldInfo.IsView)
@@ -3196,7 +3337,6 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     // The root field is a view (raw or wrapped). The kernel body's
                     // LEA hook recognizes the GetField chain via TryResolveBodyStructField.
                     // No GLSL emit needed for any link in the chain.
-                    declaredVariables.Add(target.Name);
                     if (chainDepth == 1)
                     {
                         // Outer GetField: GetField(bodyParam, fi) returning the view (or wrapper)
@@ -3216,8 +3356,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     if (chainDepth == 2 && fi == 1)
                     {
                         // ArrayView1D wrapper Length field
-                        string prefix = _hoistedPrimitives.Contains(value) ? "" : $"{TypeGenerator[value.Type]} ";
-                        AppendLine($"{prefix}{target} = {rootFieldInfo.BindingName}_length;");
+                        EmitHoistedOrTypedAssignment(value, target, $"{rootFieldInfo.BindingName}_length");
                         return;
                     }
                     // Anything else in the chain (stride extraction, BaseView's own
@@ -3229,9 +3368,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 if (rootFieldInfo.IsScalar && chainDepth == 1)
                 {
                     // Direct scalar field of body struct.
-                    string prefix = _hoistedPrimitives.Contains(value) ? "" : $"{TypeGenerator[value.Type]} ";
-                    declaredVariables.Add(target.Name);
-                    AppendLine($"{prefix}{target} = {rootFieldInfo.BindingName};");
+                    EmitHoistedOrTypedAssignment(value, target, rootFieldInfo.BindingName);
                     return;
                 }
             }
@@ -3263,7 +3400,6 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         if (value.FieldSpan.Index == 0)
                         {
                             // Field 0: buffer pointer alias
-                            declaredVariables.Add(target.Name);
                             _leaParamMap[target.Name] = param.Index;
                             AppendLine($"// {target} = buffer alias for param{param.Index}");
                             return;
@@ -3803,7 +3939,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 else if (dstBasicType == BasicValueType.Int8)
                     castExpr = isTargetUnsigned ? $"({castExpr} & 0xFF)" : $"(({castExpr} << 24) >> 24)";
             }
-            AppendLine($"{prefix}{target} = {castExpr};");
+            EmitHoistedOrTypedAssignment(value, target, castExpr);
         }
 
         #endregion
@@ -3879,9 +4015,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     //   3D ArrayView3D<T> = 6 fields (pointer, index, length, strideX, strideY, strideZ)
                     if (st.NumFields == 6)
                     {
-                        isView = true;
-                        is3DView = true;
-                        isMultiDim = true;
+                        if (!IsTensorViewLikeBodyStruct(st))
+                        {
+                            isView = true;
+                            is3DView = true;
+                            isMultiDim = true;
+                        }
                     }
                     else if (st.NumFields == 4)
                     {
@@ -3914,7 +4053,17 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         private global::ILGPU.IR.Values.Parameter? ResolveToParameter(Value value)
         {
-            if (value is global::ILGPU.IR.Values.Parameter p) return p;
+            if (value is global::ILGPU.IR.Values.Parameter p)
+            {
+                if (_inlineParamAliasesGL.TryGetValue(p, out var aliased)
+                    && aliased.Resolve() is global::ILGPU.IR.Values.Parameter kernelParam)
+                {
+                    return kernelParam;
+                }
+
+                return p;
+            }
+
             if (value is GetField gf) return ResolveToParameter(gf.ObjectValue);
             if (value is global::ILGPU.IR.Values.Load load) return ResolveToParameter(load.Source);
             if (value is LoadElementAddress lea) return ResolveToParameter(lea.Source);

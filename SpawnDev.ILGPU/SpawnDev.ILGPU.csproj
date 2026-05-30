@@ -4,8 +4,8 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.10</Version>
-		<PackageReleaseNotes>v4.9.10: Wasm residual large-sort race fix under heavy contention. Broadcast codegen now uses a per-group atomic tag handshake (writer publishes value + group tag; readers wait for tag match before consuming slot), hardening scan/broadcast correctness under full-sweep churn and Fallout76-class CPU pressure. Validation: two full Wasm sweeps clean (459/0/4 each) and two concurrent FO76 contention sweeps clean (1664/0/149 each, RunState=Done).</PackageReleaseNotes>
+		<Version>4.9.10-local.15</Version>
+		<PackageReleaseNotes>v4.9.10-local.15: WebGL nested struct hoisted init uses per-field constructors (BVHRayTraversal); all PointerType hoists as int. Prior local.14: LEA scope fix + Wasm yield scaling.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>

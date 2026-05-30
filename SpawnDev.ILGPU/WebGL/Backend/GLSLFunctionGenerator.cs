@@ -101,15 +101,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 if (Method.ReturnType is global::ILGPU.IR.Types.StructureType structType
                     && returnType.StartsWith("struct_"))
                 {
-                    var sb = new StringBuilder();
-                    sb.Append($"{returnType}(");
-                    for (int i = 0; i < structType.NumFields; i++)
-                    {
-                        if (i > 0) sb.Append(", ");
-                        sb.Append(GetDefaultValue(TypeGenerator[structType.Fields[i]]));
-                    }
-                    sb.Append(")");
-                    init = sb.ToString();
+                    init = GetStructDefaultInitializer(structType);
                 }
                 else
                 {

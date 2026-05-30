@@ -202,8 +202,15 @@ function handleCopyBuffer(msg) {
 // ---- Shader Compilation ----
 
 function getOrCompileProgram(programId, source, varyingNames) {
-    if (programCache[programId] && !programCache[programId].disposed) {
-        return programCache[programId];
+    const cached = programCache[programId];
+    if (cached && !cached.disposed && cached.source === source) {
+        return cached;
+    }
+    if (cached && !cached.disposed) {
+        gl.deleteProgram(cached.program);
+        gl.deleteShader(cached.vs);
+        gl.deleteShader(cached.fs);
+        cached.disposed = true;
     }
 
     const vs = gl.createShader(gl.VERTEX_SHADER);
@@ -243,9 +250,9 @@ function getOrCompileProgram(programId, source, varyingNames) {
         throw new Error('Program link error: ' + log);
     }
 
-    const cached = { program, vs, fs, uniformCache: {}, disposed: false };
-    programCache[programId] = cached;
-    return cached;
+    const entry = { program, vs, fs, uniformCache: {}, disposed: false, source };
+    programCache[programId] = entry;
+    return entry;
 }
 
 function getUniformLoc(cached, name) {

@@ -205,6 +205,47 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
+        /// <summary>
+        /// Emit a typed GLSL variable declaration with initializer when this name is not yet
+        /// declared in shader source. Returns true if a new declaration was emitted.
+        /// </summary>
+        protected bool TryEmitDeclaration(string name, string glslType, string initializer)
+        {
+            if (!declaredVariables.Add(name))
+                return false;
+
+            if (glslType == "bool")
+                booleanVariables.Add(name);
+
+            string line = $"{glslType} {name} = {initializer};";
+            if (IsStateMachineActive)
+                VariableBuilder.AppendLine($"    {line}");
+            else
+                AppendLine(line);
+            return true;
+        }
+
+        /// <summary>
+        /// Declare or assign an int LEA pointer variable used for buffer/alloca indexing.
+        /// </summary>
+        protected void EmitLeaIntPointer(Variable target, string offsetExpr, string comment = "")
+        {
+            string init = $"int({offsetExpr})";
+            string suffix = string.IsNullOrEmpty(comment) ? "" : $" // {comment}";
+            if (!TryEmitDeclaration(target.Name, "int", init))
+                AppendLine($"{target.Name} = {init};{suffix}");
+        }
+
+        /// <summary>
+        /// Declare or assign a variable of the given GLSL type.
+        /// </summary>
+        protected void EmitTypedAssignment(Variable target, string glslType, string valueExpr, string comment = "")
+        {
+            string suffix = string.IsNullOrEmpty(comment) ? "" : $" // {comment}";
+            if (!TryEmitDeclaration(target.Name, glslType, valueExpr))
+                AppendLine($"{target} = {valueExpr};{suffix}");
+        }
+
         #endregion
 
         #region Type Casting Helpers
@@ -259,6 +300,31 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             };
         }
 
+        /// <summary>
+        /// GLSL ES 3.0 struct constructor with one argument per field (nested structs recurse).
+        /// Single-arg <c>struct_N(0)</c> is rejected by ANGLE ("constructor parameters does not
+        /// match structure fields") - BVHRayTraversalTest / rc.16 fn-def Bug D.
+        /// </summary>
+        protected string GetStructDefaultInitializer(global::ILGPU.IR.Types.StructureType structType)
+        {
+            string glslType = TypeGenerator[structType];
+            var sb = new StringBuilder();
+            sb.Append(glslType);
+            sb.Append('(');
+            for (int i = 0; i < structType.NumFields; i++)
+            {
+                if (i > 0) sb.Append(", ");
+                var fieldNode = structType.Fields[i];
+                string fieldGlslType = TypeGenerator[fieldNode];
+                if (fieldNode is global::ILGPU.IR.Types.StructureType nested
+                    && fieldGlslType.StartsWith("struct_"))
+                    sb.Append(GetStructDefaultInitializer(nested));
+                else
+                    sb.Append(GetDefaultValue(fieldGlslType));
+            }
+            sb.Append(')');
+            return sb.ToString();
+        }
 
         #endregion
 
@@ -1515,7 +1581,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 string arrayName = $"local_arr_{_localArrayCounter++}";
                 var target = Load(value);
                 _allocaArrayNames[target.Name] = arrayName;
-                declaredVariables.Add(target.Name);
+                bool firstPtrDecl = declaredVariables.Add(target.Name);
                 AppendLine($"{elementType} {arrayName}[{arraySize}];");
                 // Declare the alloca's pointer variable as an integer offset=0 so that
                 // downstream "generic LEA" codegen emitting `v_target = v_alloca + offset`
@@ -1523,7 +1589,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // this, WebGL shader compile fails with "undeclared identifier" on
                 // v_alloca whenever loop-unrolled LEAs survive SSAStructureConstruction
                 // (Tuvok 2026-04-24 VP9 iDCT 8x8 path, LocalMemory<int>(64)).
-                AppendLine($"int {target.Name} = 0;");
+                if (firstPtrDecl)
+                    AppendLine($"int {target.Name} = 0;");
             }
         }
 
@@ -1550,7 +1617,6 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         {
             var target = Load(value);
             var arraySource = Load(value.ArrayValue);
-            declaredVariables.Add(target.Name);
             // value.Dimensions[0] is the index expression
             var indexVar = Load(value.Dimensions[0]);
             // Map from the Alloca variable to the actual array name
@@ -1607,7 +1673,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     ? "int(2147483648u)"
                     : value.Int32Value.ToString(),
                 BasicValueType.Int64 => value.Int64Value.ToString(),
-                BasicValueType.Float16 => FormatFloat(value.Float32Value),
+                BasicValueType.Float16 => FormatFloat((float)value.Float16Value),
                 BasicValueType.Float32 => FormatFloat(value.Float32Value),
                 BasicValueType.Float64 => FormatFloat((float)value.Float64Value),
                 _ => "0"
@@ -1645,16 +1711,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // GLSL struct constructors require all fields — cannot use structType(0)
             if (value.Type is StructureType structType)
             {
-                var sb = new StringBuilder();
-                sb.Append($"{target} = {target.Type}(");
-                for (int i = 0; i < structType.NumFields; i++)
-                {
-                    if (i > 0) sb.Append(", ");
-                    var fieldGlslType = TypeGenerator[structType.Fields[i]];
-                    sb.Append(GetDefaultValue(fieldGlslType));
-                }
-                sb.Append("); // null");
-                AppendLine(sb.ToString());
+                AppendLine($"{target} = {GetStructDefaultInitializer(structType)}; // null");
             }
             else
             {
