@@ -317,6 +317,7 @@ namespace ILGPU.Algorithms
             where T : unmanaged
             where TReduction : struct, IScanReduceOperation<T>
         {
+            EnsureSyncReadbackSupported(accelerator);
             using var output = accelerator.Allocate1D<T>(1);
             accelerator.Reduce<T, TReduction>(stream, input, output.View);
             T result = default;
@@ -336,13 +337,23 @@ namespace ILGPU.Algorithms
         /// Uses the internal cache to realize a temporary output buffer.
         /// </remarks>
         /// <returns>The reduced value.</returns>
-        public static Task<T> ReduceAsync<T, TReduction>(
+        public static async Task<T> ReduceAsync<T, TReduction>(
             this Accelerator accelerator,
             AcceleratorStream stream,
             ArrayView<T> input)
             where T : unmanaged
-            where TReduction : struct, IScanReduceOperation<T> =>
-            Task.Run(() => accelerator.Reduce<T, TReduction>(stream, input));
+            where TReduction : struct, IScanReduceOperation<T>
+        {
+            // Real async reduction. The previous Task.Run(() => sync Reduce) was fake:
+            // the inner sync Reduce ends in a synchronous CopyToCPU which throws on
+            // WebGPU (no sync readback) and reads stale/zero on Wasm/WebGL (the
+            // reduction kernel is still in flight). Dispatch, then await the backend's
+            // REAL async drain + readback via ArrayView.CopyToCPUAsync.
+            using var output = accelerator.Allocate1D<T>(1);
+            accelerator.Reduce<T, TReduction>(stream, input, output.View);
+            var result = await output.View.CopyToCPUAsync(stream).ConfigureAwait(false);
+            return result[0];
+        }
 
         /// <summary>
         /// Performs a reduction using a reduction logic.
@@ -388,11 +399,34 @@ namespace ILGPU.Algorithms
             where TStride : struct, IStride1D
             where TReduction : struct, IScanReduceOperation<T>
         {
+            EnsureSyncReadbackSupported(accelerator);
             using var output = accelerator.Allocate1D<T>(1);
             accelerator.Reduce<T, TStride, TReduction>(stream, input, output.View);
             T result = default;
             output.View.CopyToCPU(stream, ref result, 1);
             return result;
+        }
+
+        /// <summary>
+        /// Guards the synchronous <c>Reduce</c>-to-scalar overloads against browser
+        /// backends, which have no usable synchronous GPU-&gt;CPU readback: WebGPU
+        /// throws on sync readback, and Wasm/WebGL would read stale data before the
+        /// in-flight reduction kernel finishes (a silent wrong result). Callers on
+        /// those backends must use <c>ReduceAsync</c>.
+        /// </summary>
+        private static void EnsureSyncReadbackSupported(Accelerator accelerator)
+        {
+            switch (accelerator.AcceleratorType)
+            {
+                case AcceleratorType.Wasm:
+                case AcceleratorType.WebGL:
+                case AcceleratorType.WebGPU:
+                    throw new NotSupportedException(
+                        $"Synchronous Reduce-to-scalar is not supported on the " +
+                        $"{accelerator.AcceleratorType} backend: browser backends have no " +
+                        "synchronous GPU->CPU readback (WebGPU throws; Wasm/WebGL would read " +
+                        "stale data before in-flight kernels finish). Use ReduceAsync instead.");
+            }
         }
 
         /// <summary>
@@ -408,13 +442,20 @@ namespace ILGPU.Algorithms
         /// Uses the internal cache to realize a temporary output buffer.
         /// </remarks>
         /// <returns>The reduced value.</returns>
-        public static Task<T> ReduceAsync<T, TStride, TReduction>(
+        public static async Task<T> ReduceAsync<T, TStride, TReduction>(
             this Accelerator accelerator,
             AcceleratorStream stream,
             ArrayView1D<T, TStride> input)
             where T : unmanaged
             where TStride : struct, IStride1D
-            where TReduction : struct, IScanReduceOperation<T> =>
-            Task.Run(() => accelerator.Reduce<T, TStride, TReduction>(stream, input));
+            where TReduction : struct, IScanReduceOperation<T>
+        {
+            // Real async reduction — see ReduceAsync<T, TReduction> above for why the
+            // former Task.Run(sync Reduce) was incorrect on browser backends.
+            using var output = accelerator.Allocate1D<T>(1);
+            accelerator.Reduce<T, TStride, TReduction>(stream, input, output.View);
+            var result = await output.View.CopyToCPUAsync(stream).ConfigureAwait(false);
+            return result[0];
+        }
     }
 }

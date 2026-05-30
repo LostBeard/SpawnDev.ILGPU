@@ -439,6 +439,41 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new Exception($"Reduce<AddInt32> expected {expectedSum2}, got {sumResult[0]}");
         });
 
+        // Tests the REAL async ReduceAsync API. Before the 2026-05-29 async/sync fix this
+        // was Task.Run(() => sync Reduce) — fake async whose inner sync CopyToCPU THREW on
+        // WebGPU (no sync GPU->CPU readback) and returned STALE/zero on Wasm (the reduction
+        // kernel was still in flight). It now routes through the core virtual
+        // AcceleratorStream/Accelerator.SynchronizeAsync drain + ArrayView.CopyToCPUAsync
+        // readback, so it returns correct scalars on every backend. Exercises the full
+        // dispatch -> real async drain -> async readback path end to end.
+        [TestMethod]
+        public async Task ILGPUReduceAsyncTest() => await RunTest(async accelerator =>
+        {
+            const int count = 256;
+            var data = new int[count];
+            for (int i = 0; i < count; i++) data[i] = i + 1; // 1..256
+            using var inputBuf = accelerator.Allocate1D(data);
+
+            int maxResult = await accelerator.ReduceAsync<
+                int, global::ILGPU.Algorithms.ScanReduceOperations.MaxInt32>(
+                accelerator.DefaultStream, inputBuf.View.BaseView);
+            if (maxResult != 256)
+                throw new Exception($"ReduceAsync<MaxInt32> expected 256, got {maxResult}");
+
+            int minResult = await accelerator.ReduceAsync<
+                int, global::ILGPU.Algorithms.ScanReduceOperations.MinInt32>(
+                accelerator.DefaultStream, inputBuf.View.BaseView);
+            if (minResult != 1)
+                throw new Exception($"ReduceAsync<MinInt32> expected 1, got {minResult}");
+
+            int sumResult = await accelerator.ReduceAsync<
+                int, global::ILGPU.Algorithms.ScanReduceOperations.AddInt32>(
+                accelerator.DefaultStream, inputBuf.View.BaseView);
+            int expectedSum = count * (count + 1) / 2; // 32896
+            if (sumResult != expectedSum)
+                throw new Exception($"ReduceAsync<AddInt32> expected {expectedSum}, got {sumResult}");
+        });
+
         // ILGPUReduceSmallTest removed — the main ILGPUReduceTest covers the same functionality.
         // The small test was a diagnostic that exposed a pre-existing WebGL GLSL codegen bug
         // (_idx undeclared identifier in Reduce kernel shader). Not a Wasm issue.

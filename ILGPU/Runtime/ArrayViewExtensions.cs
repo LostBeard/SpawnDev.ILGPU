@@ -17,6 +17,8 @@ using ILGPU.Util;
 using System;
 using System.Diagnostics;
 using System.Runtime.CompilerServices;
+using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 
 namespace ILGPU.Runtime
 {
@@ -925,6 +927,56 @@ namespace ILGPU.Runtime
             source.CopyToCPUUnsafeAsync(stream, ref cpuData, length);
             stream.Synchronize();
         }
+
+        /// <summary>
+        /// Asynchronously copies the contents of the given view back to the host as a
+        /// managed array. This is the backend-agnostic, browser-safe readback: it routes
+        /// through <see cref="MemoryBuffer.CopyToRawAsync"/>, which awaits the accelerator's
+        /// real async drain before reading. Unlike the synchronous <c>CopyToCPU</c>, this
+        /// returns correct data on Wasm (drains in-flight worker kernels first) and does not
+        /// throw on WebGPU / WebGL (which have no synchronous GPU-&gt;CPU readback).
+        /// </summary>
+        /// <typeparam name="T">The element type.</typeparam>
+        /// <param name="source">The source view to read back.</param>
+        /// <param name="stream">The used accelerator stream.</param>
+        /// <returns>A task producing the view's <c>Length</c> elements.</returns>
+        [NotInsideKernel]
+        public static async Task<T[]> CopyToCPUAsync<T>(
+            this ArrayView<T> source,
+            AcceleratorStream stream)
+            where T : unmanaged
+        {
+            var contig = (IContiguousArrayView)source;
+            var buffer = contig.Buffer
+                ?? throw new InvalidOperationException(
+                    "ArrayView has no backing buffer.");
+            long countElems = source.Length;
+            if (countElems == 0)
+                return Array.Empty<T>();
+            int elementSize = ((IArrayView)source).ElementSize;
+            long byteOffset = contig.IndexInBytes;
+            long byteCount = countElems * elementSize;
+
+            var bytes = await buffer
+                .CopyToRawAsync(stream, byteOffset, byteCount)
+                .ConfigureAwait(false);
+
+            var result = new T[countElems];
+            MemoryMarshal.Cast<byte, T>(bytes).CopyTo(new Span<T>(result));
+            return result;
+        }
+
+        /// <summary>
+        /// <see cref="ArrayView1D{T, TStride}"/> overload of
+        /// <see cref="CopyToCPUAsync{T}(ArrayView{T}, AcceleratorStream)"/>.
+        /// </summary>
+        [NotInsideKernel]
+        public static Task<T[]> CopyToCPUAsync<T, TStride>(
+            this ArrayView1D<T, TStride> source,
+            AcceleratorStream stream)
+            where T : unmanaged
+            where TStride : struct, IStride1D =>
+            source.BaseView.CopyToCPUAsync(stream);
 
         /// <summary>
         /// Copies from the CPU source address into the given target view while

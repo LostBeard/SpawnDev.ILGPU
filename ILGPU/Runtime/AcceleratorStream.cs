@@ -53,7 +53,19 @@ namespace ILGPU.Runtime
         /// Synchronizes all queued operations asynchronously.
         /// </summary>
         /// <returns>A task object to wait for.</returns>
-        public Task SynchronizeAsync() => Task.Run(synchronizeAction);
+        /// <remarks>
+        /// The default implementation offloads the blocking
+        /// <see cref="Synchronize"/> call to a thread-pool thread, which is correct
+        /// for backends whose <see cref="Synchronize"/> genuinely blocks until the
+        /// queue drains (CUDA, OpenCL, CPU). Single-threaded browser backends
+        /// (Wasm, WebGPU, WebGL) cannot block-wait and their synchronous
+        /// <see cref="Synchronize"/> is a non-blocking flush / no-op; those streams
+        /// MUST override this to await their real async drain. Algorithm code that
+        /// needs a host-visible result after an unawaited dispatch must await this
+        /// (or <see cref="Accelerator.SynchronizeAsync"/>) rather than calling the
+        /// synchronous <see cref="Synchronize"/>.
+        /// </remarks>
+        public virtual Task SynchronizeAsync() => Task.Run(synchronizeAction);
 
         /// <summary>
         /// Makes the associated accelerator the current one for this thread and

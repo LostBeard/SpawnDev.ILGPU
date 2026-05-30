@@ -17,6 +17,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace ILGPU.Runtime
 {
@@ -270,6 +271,29 @@ namespace ILGPU.Runtime
         /// Synchronizes pending operations.
         /// </summary>
         protected abstract void SynchronizeInternal();
+
+        /// <summary>
+        /// Asynchronously synchronizes all pending operations on this accelerator.
+        /// </summary>
+        /// <returns>A task that completes once all submitted work has finished.</returns>
+        /// <remarks>
+        /// The default implementation simply runs the synchronous
+        /// <see cref="Synchronize"/> and returns a completed task, which is correct
+        /// for backends whose <see cref="Synchronize"/> blocks until the queue drains
+        /// (CUDA, OpenCL, CPU). Single-threaded browser backends (Wasm, WebGPU,
+        /// WebGL) cannot block-wait — their synchronous <see cref="Synchronize"/> is a
+        /// non-blocking flush / no-op — so they MUST override this to await their real
+        /// drain (worker dispatch completion, queue.OnSubmittedWorkDone, GL fence).
+        /// Algorithm and consumer code that needs a host-visible result after an
+        /// unawaited dispatch must <c>await</c> this rather than calling the
+        /// synchronous <see cref="Synchronize"/>, which silently does nothing on those
+        /// backends.
+        /// </remarks>
+        public virtual Task SynchronizeAsync()
+        {
+            Synchronize();
+            return Task.CompletedTask;
+        }
 
         /// <summary>
         /// Clears all internal caches.

@@ -141,6 +141,29 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
+        /// <summary>
+        /// Real async GPU-&gt;CPU readback through the GL worker (Transform Feedback
+        /// output is only host-visible via worker readback). Overrides
+        /// <see cref="MemoryBuffer.CopyToRawAsync"/>; the synchronous <see cref="CopyTo"/>
+        /// below reads the CPU-side backing array, which is stale when a kernel TF write
+        /// was the most recent producer. <c>ReadbackAndGetUint8ArrayAsync</c> drains
+        /// pending dispatches first.
+        /// </summary>
+        protected override async Task<byte[]> CopyToRawAsync(
+            AcceleratorStream stream,
+            long sourceOffsetInBytes,
+            long lengthInBytes)
+        {
+            if (lengthInBytes < 0)
+                throw new ArgumentOutOfRangeException(nameof(lengthInBytes));
+            if (lengthInBytes == 0)
+                return global::System.Array.Empty<byte>();
+            var accel = (WebGLAccelerator)Accelerator;
+            using var u8 = await accel.ReadbackAndGetUint8ArrayAsync(
+                this, sourceOffsetInBytes, lengthInBytes);
+            return u8.ReadBytes();
+        }
+
         protected override void CopyTo(
             AcceleratorStream stream,
             in ArrayView<byte> source,

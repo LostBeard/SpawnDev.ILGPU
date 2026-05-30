@@ -321,6 +321,29 @@ namespace SpawnDev.ILGPU.Wasm
             return CopyToHost<T>(length);
         }
 
+        /// <summary>
+        /// Real async GPU-&gt;CPU readback. Drains in-flight worker kernels first
+        /// (the core synchronous <see cref="CopyTo"/> reads the SharedArrayBuffer
+        /// immediately and would observe a partially-written buffer while workers are
+        /// still running). Overrides <see cref="MemoryBuffer.CopyToRawAsync"/> so
+        /// <c>ArrayView&lt;T&gt;.CopyToCPUAsync</c> and algorithm code are correct on Wasm.
+        /// </summary>
+        protected override async Task<byte[]> CopyToRawAsync(
+            AcceleratorStream stream,
+            long sourceOffsetInBytes,
+            long lengthInBytes)
+        {
+            if (lengthInBytes < 0)
+                throw new ArgumentOutOfRangeException(nameof(lengthInBytes));
+            if (Accelerator is WasmAccelerator wasmAccel)
+                await wasmAccel.SynchronizeAsync();
+            if (lengthInBytes == 0)
+                return System.Array.Empty<byte>();
+            using var u8 = new Uint8Array(
+                SharedBuffer, (int)sourceOffsetInBytes, (int)lengthInBytes);
+            return u8.ReadBytes();
+        }
+
         public async Task<Uint8Array> CopyToHostUint8ArrayAsync(long sourceByteOffset = 0, long? copyBytes = null)
         {
             if (SharedBuffer == null) return new Uint8Array();

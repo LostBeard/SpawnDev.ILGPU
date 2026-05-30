@@ -1155,6 +1155,14 @@ namespace SpawnDev.ILGPU.WebGL
             // (use SynchronizeAsync extension method instead)
         }
 
+        /// <summary>
+        /// Real async drain. The synchronous <see cref="Accelerator.Synchronize"/> is a
+        /// no-op under worker offloading; this awaits all pending GL-worker dispatches.
+        /// Overrides the core default so algorithm-layer async readback is correct.
+        /// </summary>
+        public override Task SynchronizeAsync() =>
+            WebGLAcceleratorExtensions.SynchronizeAsync(this);
+
         protected override void OnBind() { }
         protected override void OnUnbind() { }
 
@@ -1258,6 +1266,8 @@ namespace SpawnDev.ILGPU.WebGL
             public WebGLStream(Accelerator acc) : base(acc) { }
             protected override void DisposeAcceleratorObject(bool disposing) { }
             public override void Synchronize() { }
+            public override Task SynchronizeAsync() =>
+                WebGLAcceleratorExtensions.SynchronizeAsync((WebGLAccelerator)Accelerator);
             protected override global::ILGPU.Runtime.ProfilingMarker AddProfilingMarkerInternal() => throw new NotSupportedException();
         }
 

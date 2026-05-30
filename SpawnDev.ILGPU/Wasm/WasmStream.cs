@@ -31,6 +31,14 @@ namespace SpawnDev.ILGPU.Wasm
         /// </summary>
         public override void Synchronize() => Accelerator.Synchronize();
 
+        /// <summary>
+        /// Real async drain. The synchronous <see cref="Synchronize"/> cannot block on
+        /// the single Blazor thread, so it only reaps completed dispatch tasks; this
+        /// awaits all in-flight worker kernels via the accelerator's pending-work set.
+        /// </summary>
+        public override System.Threading.Tasks.Task SynchronizeAsync() =>
+            ((WasmAccelerator)Accelerator).SynchronizeAsync();
+
         /// <inheritdoc/>
         protected override ProfilingMarker AddProfilingMarkerInternal() =>
             throw new System.NotSupportedException(

@@ -105,6 +105,27 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             throw new NotSupportedException("Synchronous GPU to CPU copies are not supported in WebGPU backend. Use CopyToHostAsync.");
         }
 
+        /// <summary>
+        /// Real async GPU-&gt;CPU readback via <c>CopyBufferToBuffer</c> + <c>mapAsync</c>.
+        /// Overrides <see cref="MemoryBuffer.CopyToRawAsync"/> because the synchronous
+        /// <see cref="CopyTo"/> above is impossible on WebGPU (readback is inherently
+        /// async). This makes <c>ArrayView&lt;T&gt;.CopyToCPUAsync</c> and algorithm-layer
+        /// async readback work on WebGPU instead of throwing.
+        /// </summary>
+        protected override async Task<byte[]> CopyToRawAsync(
+            AcceleratorStream stream,
+            long sourceOffsetInBytes,
+            long lengthInBytes)
+        {
+            if (lengthInBytes < 0)
+                throw new ArgumentOutOfRangeException(nameof(lengthInBytes));
+            if (lengthInBytes == 0)
+                return global::System.Array.Empty<byte>();
+            using var u8 = await NativeBuffer.CopyToHostUint8ArrayAsync(
+                sourceOffsetInBytes, lengthInBytes);
+            return u8.ReadBytes();
+        }
+
         protected override void MemSet(AcceleratorStream stream, byte value, in ArrayView<byte> view)
         {
             var length = (int)view.Length;

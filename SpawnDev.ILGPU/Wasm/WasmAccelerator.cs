@@ -2317,8 +2317,11 @@ namespace SpawnDev.ILGPU.Wasm
 
         /// <summary>
         /// Asynchronously waits for all pending kernel dispatches to complete.
+        /// Overrides the core no-op-on-Wasm <see cref="Accelerator.SynchronizeAsync"/>
+        /// with the real worker-dispatch drain (the synchronous
+        /// <see cref="Accelerator.Synchronize"/> only reaps already-completed tasks).
         /// </summary>
-        public async Task SynchronizeAsync()
+        public override async Task SynchronizeAsync()
         {
             if (_pendingWork.Count > 0)
             {

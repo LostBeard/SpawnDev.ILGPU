@@ -1880,6 +1880,16 @@ namespace SpawnDev.ILGPU.WebGPU
             // Surface any GPU validation errors that occurred during dispatch
             NativeAccelerator.ThrowIfGpuErrors();
         }
+
+        /// <summary>
+        /// Real async drain. The synchronous <see cref="Accelerator.Synchronize"/>
+        /// only flushes the command encoder (non-blocking); this awaits
+        /// <c>queue.OnSubmittedWorkDone()</c> so submitted GPU work has actually
+        /// finished before the caller reads results. Overrides the core default.
+        /// </summary>
+        public override Task SynchronizeAsync() =>
+            WebGPUAcceleratorExtensions.SynchronizeAsync(this);
+
         protected override void OnBind() { }
         protected override void OnUnbind() { }
         protected override void DisposeAccelerator_SyncRoot(bool disposing) { if (disposing) NativeAccelerator.Dispose(); }
@@ -2028,6 +2038,14 @@ namespace SpawnDev.ILGPU.WebGPU
             internal void IncrementPassCount() => _pendingPassCount++;
 
             public override void Synchronize() => Flush();
+
+            /// <summary>
+            /// Real async drain — forwards to the owning accelerator so submitted
+            /// GPU work is actually awaited (the sync <see cref="Synchronize"/> only
+            /// flushes the encoder).
+            /// </summary>
+            public override Task SynchronizeAsync() =>
+                WebGPUAcceleratorExtensions.SynchronizeAsync((WebGPUAccelerator)Accelerator);
 
             protected override void DisposeAcceleratorObject(bool disposing)
             {

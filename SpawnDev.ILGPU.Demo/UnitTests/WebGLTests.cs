@@ -85,6 +85,10 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             throw new UnsupportedTestException("WebGL: GroupExtensions.Reduce requires shared memory + barriers + atomics, unsupported in vertex shaders");
 
         [TestMethod]
+        public new async Task ILGPUReduceAsyncTest() =>
+            throw new UnsupportedTestException("WebGL: GroupExtensions.Reduce requires shared memory + barriers + atomics, unsupported in vertex shaders");
+
+        [TestMethod]
         public new async Task ILGPUReduceFloatTest() =>
             throw new UnsupportedTestException("WebGL: GroupExtensions.Reduce unsupported in vertex shaders");
 
@@ -731,6 +735,12 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod]
         public new async Task DualScanKernelTest() =>
             throw new UnsupportedTestException("WebGL: requires shared memory + barriers");
+        [TestMethod]
+        public new async Task CrossGroupScanReuseDetectorTest() =>
+            throw new UnsupportedTestException("WebGL: requires shared memory + barriers + atomics");
+        [TestMethod]
+        public new async Task GridStrideScanStateDetectorTest() =>
+            throw new UnsupportedTestException("WebGL: requires shared memory + barriers + atomics");
         [TestMethod]
         public new async Task TwoPassScanSimulationTest() =>
             throw new UnsupportedTestException("WebGL: requires shared memory + barriers");

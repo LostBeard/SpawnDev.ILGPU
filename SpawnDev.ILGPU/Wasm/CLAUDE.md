@@ -13,6 +13,39 @@ Compiles ILGPU IR → WebAssembly binary. Dispatches via Web Workers with Shared
 
 ## Hard Constraints
 - **Blazor WASM is single-threaded** — all async, no blocking. `stream.Synchronize()` is a no-op.
+
+## Async drain + readback — core virtuals (2026-05-29)
+
+`stream.Synchronize()` / `accelerator.Synchronize()` CANNOT block on the single Blazor
+thread, so on Wasm/WebGL they only reap completed tasks and on WebGPU only flush the
+encoder — **none of them drain in-flight work.** Any code that does an immediate buffer
+op (`CopyTo`/`CopyToCPU`/`MemSet`/sync `CopyToHost`) right after an unawaited dispatch
+races the workers (Wasm reads stale; WebGPU sync GPU→CPU `CopyTo` throws). `CopyFromAsync`
+was the first patch of one instance of this class.
+
+The real fix is a pair of overridable core async primitives (so the algorithm layer in
+`ILGPU.Algorithms`, which references only `ILGPU` core, can reach a true drain without
+seeing backend types):
+
+- **`Accelerator.SynchronizeAsync()` / `AcceleratorStream.SynchronizeAsync()`** — now
+  `virtual` in core (`Accelerator.cs`, `AcceleratorStream.cs`). Default = run sync
+  `Synchronize` + completed task (correct for CUDA/OpenCL/CPU). `WasmAccelerator` /
+  `WasmStream` override to `await Task.WhenAll(_pendingWork)`; WebGPU/WebGL override to
+  their real async waits. The core `AcceleratorStream.SynchronizeAsync` used to be a
+  NON-virtual `Task.Run(synchronizeAction)` — fake on Wasm (ran the no-op on a thread).
+- **`MemoryBuffer.CopyToRawAsync(stream, offsetBytes, lengthBytes)`** — `virtual` in core,
+  returns `Task<byte[]>`. Default = drain via `SynchronizeAsync` then sync `CopyTo`.
+  `WasmMemoryBuffer` overrides = drain then read the `SharedArrayBuffer` slice;
+  `WebGPUMemoryBuffer` = `CopyBufferToBuffer` + `mapAsync`; `WebGLMemoryBuffer` = GL-worker
+  readback. Exposed to consumers as the core extension **`ArrayView<T>.CopyToCPUAsync(stream)`**.
+
+**Rule:** algorithm/consumer code that needs a host-visible scalar/array after a dispatch
+must `await accelerator.SynchronizeAsync()` + `view.CopyToCPUAsync(...)` (or SpawnDev's
+`CopyToHostAsync` / `CopyFromAsync`) — NEVER the synchronous `CopyToCPU`/`Synchronize`,
+which silently do nothing on these backends. `ReductionExtensions.ReduceAsync` was the
+canonical victim (was `Task.Run(sync Reduce)` → threw on WebGPU / stale on Wasm); it now
+uses these. The synchronous `Reduce`→scalar overloads throw a clear `NotSupportedException`
+on Wasm/WebGL/WebGPU instead of returning stale data.
 - **Serialized dispatch** — `RunKernelAsync` awaits `_pendingWork` before each dispatch.
 - **Struct-with-view serialization** — CLR layout ≠ IR layout. Use `WasmParamInfo.StructFields` + `FlattenCLRStruct()` for manual IR-layout serialization. See SKILL.md for details.
 - **`IsViewType()` distinguishes views from struct-with-view** — checks if `DirectFields[0] is AddressSpaceType`.

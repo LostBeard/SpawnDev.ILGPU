@@ -10,10 +10,12 @@
 // ---------------------------------------------------------------------------------------
 
 using ILGPU.Resources;
+using ILGPU.Runtime.CPU;
 using System;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
+using System.Threading.Tasks;
 
 namespace ILGPU.Runtime
 {
@@ -146,6 +148,50 @@ namespace ILGPU.Runtime
             AcceleratorStream stream,
             in ArrayView<byte> sourceView,
             in ArrayView<byte> targetView);
+
+        /// <summary>
+        /// Asynchronously copies a raw byte range of this buffer back to the host.
+        /// </summary>
+        /// <param name="stream">The used accelerator stream.</param>
+        /// <param name="sourceOffsetInBytes">The source offset in bytes.</param>
+        /// <param name="lengthInBytes">The number of bytes to read back.</param>
+        /// <returns>A task producing the copied bytes.</returns>
+        /// <remarks>
+        /// This is the overridable async GPU-&gt;CPU readback hook. The default
+        /// implementation awaits <see cref="AcceleratorStream.SynchronizeAsync"/>
+        /// (the real drain on backends that override it) and then performs the
+        /// synchronous <see cref="CopyTo(AcceleratorStream, long, in ArrayView{byte})"/>,
+        /// which is correct for CUDA / OpenCL / CPU. Browser backends MUST override
+        /// this because their synchronous <see cref="CopyTo"/> either reads stale data
+        /// before worker kernels finish (Wasm) or throws because synchronous GPU-&gt;CPU
+        /// readback is impossible (WebGPU / WebGL); each provides a true async readback
+        /// (SharedArrayBuffer read after drain, <c>mapAsync</c>, GL worker readback).
+        /// Prefer the typed <c>ArrayView&lt;T&gt;.CopyToCPUAsync</c> extension over
+        /// calling this directly.
+        /// </remarks>
+        protected internal virtual async Task<byte[]> CopyToRawAsync(
+            AcceleratorStream stream,
+            long sourceOffsetInBytes,
+            long lengthInBytes)
+        {
+            if (lengthInBytes < 0)
+                throw new ArgumentOutOfRangeException(nameof(lengthInBytes));
+
+            // Real drain first. Overridden to a true async wait on browser backends;
+            // offloads the blocking Synchronize on CUDA / OpenCL / CPU.
+            await stream.SynchronizeAsync().ConfigureAwait(false);
+
+            var result = new byte[lengthInBytes];
+            if (lengthInBytes == 0)
+                return result;
+
+            using var cpuBuffer = CPUMemoryBuffer.Create(
+                Accelerator,
+                ref result[0],
+                lengthInBytes);
+            CopyTo(stream, sourceOffsetInBytes, cpuBuffer.AsRawArrayView());
+            return result;
+        }
 
         /// <summary>
         /// Copies elements from the source view to the current buffer.
