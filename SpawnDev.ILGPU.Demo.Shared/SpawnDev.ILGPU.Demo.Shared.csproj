@@ -10,6 +10,7 @@
 	<ItemGroup>
 		<ProjectReference Include="..\SpawnDev.ILGPU\SpawnDev.ILGPU.csproj" />
 		<ProjectReference Include="..\SpawnDev.ILGPU.P2P\SpawnDev.ILGPU.P2P.csproj" />
+		<ProjectReference Include="..\..\..\SpawnDev.ILGPU.ML\SpawnDev.ILGPU.ML\SpawnDev.ILGPU.ML\SpawnDev.ILGPU.ML.csproj" />
 		<ProjectReference Include="..\ILGPU\ILGPU.csproj" />
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 		<PackageReference Include="SpawnDev.UnitTesting.Blazor" Version="2.5.3" />
