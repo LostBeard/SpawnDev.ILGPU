@@ -1,6 +1,5 @@
 using ILGPU;
 using ILGPU.Runtime;
-using SpawnDev.ILGPU.ML.Tensors;
 using SpawnDev.UnitTesting;
 
 namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
@@ -712,12 +711,14 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 
         #endregion
 
-        #region Cross-assembly ML TensorView (SpawnDev.ILGPU.ML.Tensors.TensorView)
+        #region ML-pattern mirror tests (same-assembly ArrayView1D / ViewStructHalf)
 
         /// <summary>
-        /// Exact MLTestBase.TensorView_Half_RoundTrip using the real
-        /// <see cref="TensorView{T}"/> type from SpawnDev.ILGPU.ML (cross-assembly kernel).
-        /// ViewStructHalf tests in this file are same-assembly and do not catch ML-only failures.
+        /// Two-buffer float ArrayView1D sanity (in + 1.5f -> out). Mirrors the ML
+        /// TensorView round-trip pattern with ILGPU's own ArrayView1D so the ILGPU
+        /// solution stays free of any SpawnDev.ILGPU.ML reference (that reference broke
+        /// the ILGPU GitHub Pages build). The real cross-assembly TensorView&lt;Half&gt;
+        /// round-trip lives in MLTestBase.TensorTests.TensorView_Half_RoundTrip.
         /// </summary>
         [TestMethod]
         public async Task ML_ArrayView1D_Float_TwoBuffer_Sanity() => await RunTest(async accelerator =>
@@ -811,49 +812,11 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new Exception($"ArrayView1D sanity: expected {expected} got {actual}");
         });
 
-        [TestMethod]
-        public async Task ML_TensorView_Half_RoundTrip_CrossAssembly() => await RunTest(async accelerator =>
-        {
-            const int Rows = 4, Cols = 8;
-            const int Count = Rows * Cols;
-            var hostHalf = new global::ILGPU.Half[Count];
-            for (int i = 0; i < Count; i++)
-                hostHalf[i] = (global::ILGPU.Half)(i * 0.25f);
-
-            if (!accelerator.Capabilities.Float16)
-                throw new UnsupportedTestException("Float16 not supported on this device");
-
-            using var inBuf = accelerator.Allocate1D(hostHalf);
-            using var outBuf = accelerator.Allocate1D<global::ILGPU.Half>(Count);
-
-            var inView = new TensorView<global::ILGPU.Half>(inBuf.View, Rows, Cols, 1, 1, 2);
-            var outView = new TensorView<global::ILGPU.Half>(outBuf.View, Rows, Cols, 1, 1, 2);
-
-            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, TensorView<global::ILGPU.Half>, TensorView<global::ILGPU.Half>>(
-                (Index1D idx, TensorView<global::ILGPU.Half> inp, TensorView<global::ILGPU.Half> outp) =>
-                {
-                    int c = idx % inp.D1;
-                    int r = idx / inp.D1;
-                    var v = inp.Get2D(r, c);
-                    outp.Set2D(r, c, v + (global::ILGPU.Half)1.5f);
-                });
-            kernel((Index1D)Count, inView, outView);
-            await accelerator.SynchronizeAsync();
-
-            var result = await outBuf.CopyToHostAsync<global::ILGPU.Half>(0, Count);
-            for (int i = 0; i < Count; i++)
-            {
-                float expected = (float)hostHalf[i] + 1.5f;
-                float actual = (float)result[i];
-                if (Math.Abs(actual - expected) > 1e-2f)
-                {
-                    var diag = SpawnDev.ILGPU.Wasm.WasmAccelerator._lastImplicitIndexDebug;
-                    var structDiag = SpawnDev.ILGPU.Wasm.WasmAccelerator._lastStructSerialDebug;
-                    throw new Exception(
-                        $"Idx {i}: expected {expected} got {actual} | wasm={diag} | structBytes={structDiag}");
-                }
-            }
-        });
+        // NOTE: the cross-assembly TensorView<Half> round-trip test that used the real
+        // SpawnDev.ILGPU.ML.Tensors.TensorView<T> lives in the ML solution
+        // (MLTestBase.TensorTests.TensorView_Half_RoundTrip) - ILGPU must not reference ML
+        // (it broke the ILGPU GitHub Pages build). The same-assembly ViewStructHalf mirror
+        // tests above cover the struct-param dispatch from the ILGPU side.
 
         #endregion
     }
