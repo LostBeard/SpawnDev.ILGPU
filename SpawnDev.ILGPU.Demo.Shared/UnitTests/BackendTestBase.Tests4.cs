@@ -36,6 +36,25 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             output[index] = IntrinsicMath.Clamp(val, 0.0f, 10.0f);
         }
 
+        // --- System.Math.Clamp redirect regression ---
+        // System.Math.Clamp(value, min, max) inlines `throw ThrowMinMaxException(...)`,
+        // which the IL frontend cannot lower to IR -> NotSupportedException('Throw') at
+        // PreCompile on every browser backend (WebGPU/WebGL/Wasm). The frontend
+        // RemappedIntrinsics table now remaps Math.Clamp -> throw-free IntrinsicMath.Clamp
+        // before inlining (same path as Math.Min/Max). These kernels lock that in.
+        // Int overload mirrors the consumer repro: Math.Clamp((int)(channel*255f), 0, 255).
+        static void MathClampIntKernel(Index1D index, ArrayView<int> output)
+        {
+            int val = (int)index * 100 - 250; // -250,-150,-50,50,150,250,350,450
+            output[index] = Math.Clamp(val, 0, 255);
+        }
+
+        static void MathClampFloatKernel(Index1D index, ArrayView<float> output)
+        {
+            float val = index * 3.0f - 10.0f; // -10,-7,-4,-1,2,5,8,11
+            output[index] = Math.Clamp(val, 0.0f, 10.0f);
+        }
+
         // --- Multiple LoadStreamKernel on Same Accelerator ---
         // Regression test for _uf_group_iter redeclaration bug (PLANS.md Bug #2).
         // Two LoadStreamKernel kernels that both need the uniformity transform
@@ -432,6 +451,38 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             for (int i = 0; i < len; i++)
                 if (MathF.Abs(result[i] - expected[i]) > 0.01f)
                     throw new Exception($"IntrinsicMath.Clamp failed at {i}. Expected {expected[i]}, got {result[i]}");
+        });
+
+        [TestMethod]
+        public async Task MathClampIntTest() => await RunTest(async accelerator =>
+        {
+            int len = 8;
+            using var buf = accelerator.Allocate1D<int>(len);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(MathClampIntKernel);
+            kernel((Index1D)len, buf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await buf.CopyToHostAsync<int>();
+
+            int[] expected = { 0, 0, 0, 50, 150, 250, 255, 255 };
+            for (int i = 0; i < len; i++)
+                if (result[i] != expected[i])
+                    throw new Exception($"Math.Clamp(int) failed at {i}. Expected {expected[i]}, got {result[i]}");
+        });
+
+        [TestMethod]
+        public async Task MathClampFloatTest() => await RunTest(async accelerator =>
+        {
+            int len = 8;
+            using var buf = accelerator.Allocate1D<float>(len);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>>(MathClampFloatKernel);
+            kernel((Index1D)len, buf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await buf.CopyToHostAsync<float>();
+
+            float[] expected = { 0, 0, 0, 0, 2, 5, 8, 10 };
+            for (int i = 0; i < len; i++)
+                if (MathF.Abs(result[i] - expected[i]) > 0.01f)
+                    throw new Exception($"Math.Clamp(float) failed at {i}. Expected {expected[i]}, got {result[i]}");
         });
 
         [TestMethod]

@@ -69,6 +69,26 @@ var binaryMathFunctions = new (string, TypeInformation, TypeInformation, string)
         ("Log",   FloatTypes[1], FloatTypes[2],       "CPUMathType")
     };
 
+// System.Math.Clamp(value, min, max) inlines a `throw ThrowMinMaxException(...)`,
+// which the IL frontend cannot translate to IR (NotSupportedException on Throw),
+// breaking every browser backend (WebGPU/WebGL/Wasm) at PreCompile. Remap it to
+// the throw-free IntrinsicMath.Clamp (= Max(Min(value, max), min)) BEFORE inlining,
+// exactly like Min/Max above. Item2 is always null: MathF has NO Clamp overload, so
+// no MathF remapping is emitted (emitting one would MissingMethodException at init).
+var ternaryMathFunctions = new (string, TypeInformation, TypeInformation, string)[]
+    {
+        ("Clamp", null, SignedIntTypes[0],   "MathType"),
+        ("Clamp", null, SignedIntTypes[1],   "MathType"),
+        ("Clamp", null, SignedIntTypes[2],   "MathType"),
+        ("Clamp", null, SignedIntTypes[3],   "MathType"),
+        ("Clamp", null, UnsignedIntTypes[0], "MathType"),
+        ("Clamp", null, UnsignedIntTypes[1], "MathType"),
+        ("Clamp", null, UnsignedIntTypes[2], "MathType"),
+        ("Clamp", null, UnsignedIntTypes[3], "MathType"),
+        ("Clamp", null, FloatTypes[1],       "MathType"),
+        ("Clamp", null, FloatTypes[2],       "MathType")
+    };
+
 
 var interlockedFunctions = new (string, bool, bool, int, Type)[]
     {
@@ -131,6 +151,15 @@ namespace ILGPU.Frontend.Intrinsic
                 systemMathType,
                 <#= className #>,
                 "<#= method #>",
+                typeof(<#= type.Type #>),
+                typeof(<#= type.Type #>));
+<# } #>
+<# foreach (var (method, _, type, className) in ternaryMathFunctions) { #>
+            AddRemapping(
+                systemMathType,
+                <#= className #>,
+                "<#= method #>",
+                typeof(<#= type.Type #>),
                 typeof(<#= type.Type #>),
                 typeof(<#= type.Type #>));
 <# } #>

@@ -42,7 +42,7 @@ Many `System.Math` methods contain implicit argument validation with `throw`. Al
 
 | Method | Contains `throw`? | Auto-redirected? | Notes |
 |--------|-------------------|:----------------:|-------|
-| `Math.Clamp(val, min, max)` | ✅ Yes | ✅ Yes | Redirected to `Min(Max(val, min), max)` |
+| `Math.Clamp(val, min, max)` | ✅ Yes | ✅ Yes | Remapped at the IL frontend to `IntrinsicMath.Clamp` (= `Max(Min(val, max), min)`) before inlining. Verified on all 6 backends. |
 | `Math.Round(x)` | ✅ Yes | ✅ Yes | Redirected to throw-free wrapper |
 | `Math.Truncate(x)` | ✅ Yes | ✅ Yes | Redirected to throw-free wrapper |
 | `Math.Sign(x)` | ✅ Yes | ✅ Yes | Redirected to throw-free wrapper |
@@ -54,7 +54,7 @@ Many `System.Math` methods contain implicit argument validation with `throw`. Al
 | `Math.Min(a, b)` | ❌ No | — | Safe to use directly |
 | `Math.Max(a, b)` | ❌ No | — | Safe to use directly |
 
-> **Auto-redirects**: The `RegisterMathIntrinsics()` infrastructure in each browser backend automatically intercepts calls to problematic .NET methods and replaces them with throw-free equivalents at compile time. You can use `Math.Clamp`, `Math.Round`, `Math.Truncate`, and `Math.Sign` directly in kernels — they will work on all backends.
+> **Auto-redirects**: Two layers handle problematic .NET methods. (1) `Math.Clamp` (and `Math.Min`/`Max`/`Abs`) are remapped at the IL frontend by `RemappedIntrinsics` to their throw-free `IntrinsicMath` equivalents **before** the body is inlined — this is the robust path and works on all 6 backends (a backend-only redirect fires too late, after the frontend already tries to lower the `throw`). (2) `RegisterMathIntrinsics()` in each browser backend redirects the remaining cases (`Math.Round`, `Math.Truncate`, `Math.Sign`, `MathF.FusedMultiplyAdd`, `XMath.Rsqrt`/`Rcp`) at codegen time. You can use `Math.Clamp`, `Math.Round`, `Math.Truncate`, and `Math.Sign` directly in kernels.
 
 ### General Rule
 

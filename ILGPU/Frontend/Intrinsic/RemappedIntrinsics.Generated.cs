@@ -273,6 +273,76 @@ namespace ILGPU.Frontend.Intrinsic
                 "Log",
                 typeof(double),
                 typeof(double));
+            AddRemapping(
+                systemMathType,
+                MathType,
+                "Clamp",
+                typeof(sbyte),
+                typeof(sbyte),
+                typeof(sbyte));
+            AddRemapping(
+                systemMathType,
+                MathType,
+                "Clamp",
+                typeof(short),
+                typeof(short),
+                typeof(short));
+            AddRemapping(
+                systemMathType,
+                MathType,
+                "Clamp",
+                typeof(int),
+                typeof(int),
+                typeof(int));
+            AddRemapping(
+                systemMathType,
+                MathType,
+                "Clamp",
+                typeof(long),
+                typeof(long),
+                typeof(long));
+            AddRemapping(
+                systemMathType,
+                MathType,
+                "Clamp",
+                typeof(byte),
+                typeof(byte),
+                typeof(byte));
+            AddRemapping(
+                systemMathType,
+                MathType,
+                "Clamp",
+                typeof(ushort),
+                typeof(ushort),
+                typeof(ushort));
+            AddRemapping(
+                systemMathType,
+                MathType,
+                "Clamp",
+                typeof(uint),
+                typeof(uint),
+                typeof(uint));
+            AddRemapping(
+                systemMathType,
+                MathType,
+                "Clamp",
+                typeof(ulong),
+                typeof(ulong),
+                typeof(ulong));
+            AddRemapping(
+                systemMathType,
+                MathType,
+                "Clamp",
+                typeof(float),
+                typeof(float),
+                typeof(float));
+            AddRemapping(
+                systemMathType,
+                MathType,
+                "Clamp",
+                typeof(double),
+                typeof(double),
+                typeof(double));
             var systemMathFType = typeof(MathF);
 
                 AddRemapping(
