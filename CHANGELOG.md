@@ -2,6 +2,61 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.11 (2026-05-31) - Math.Clamp in kernels on all backends + async browser parity
+
+Bundles forks **SpawnDev.ILGPU.Fork 2.0.8** and **SpawnDev.ILGPU.Algorithms.Fork 2.0.8** (both
+carry the `ILGPU/` core changes below - consumers must take all three packages together).
+
+### `Math.Clamp` now compiles and runs in kernels on all 6 backends
+
+`System.Math.Clamp(value, min, max)` inlines `throw ThrowMinMaxException(...)`, which the IL
+frontend cannot lower to IR. On WebGPU / WebGL / Wasm this failed at kernel PreCompile with
+`InternalCompilerException -> NotSupportedException('Throw')`. The pre-existing backend-level
+redirect fired too late (it runs in the IR Intrinsics pass, after the frontend already tried to
+lower the throwing body).
+
+Fix: `Math.Clamp(T,T,T)` is now remapped at the IL frontend (`RemappedIntrinsics`) to the
+throw-free `IntrinsicMath.Clamp` (`= Max(Min(value, max), min)`, built on the `[MathIntrinsic]`
+Min/Max) before inlining - the same robust path `Math.Min`/`Max`/`Abs` already use. Covers all 10
+`IntrinsicMath`-supported types (sbyte/short/int/long, byte/ushort/uint/ulong, float, double).
+`MathF` has no `Clamp` overload, so none is remapped. Verified GREEN on WebGPU, WebGL, Wasm, CPU,
+CUDA, OpenCL via `MathClampIntTest` / `MathClampFloatTest`.
+
+### Async browser parity - overridable core async primitives
+
+`Synchronize()` cannot block on the single Blazor thread, so on Wasm/WebGL it only reaps completed
+tasks and on WebGPU only flushes the encoder - none of them drain in-flight work. Any immediate
+buffer op after an unawaited dispatch raced the workers (Wasm read stale, WebGPU sync GPU->CPU
+`CopyTo` threw).
+
+- `Accelerator.SynchronizeAsync()` / `AcceleratorStream.SynchronizeAsync()` are now `virtual` in
+  core; Wasm/WebGPU/WebGL override to their real async waits (the core `AcceleratorStream` version
+  was previously a non-virtual `Task.Run(synchronizeAction)` - fake on Wasm).
+- `MemoryBuffer.CopyToRawAsync(stream, offset, length)` is now `virtual` in core, exposed to
+  consumers as `ArrayView<T>.CopyToCPUAsync(stream)`. Per-backend overrides do a true drain +
+  readback.
+- `ReductionExtensions.ReduceAsync` (in `ILGPU.Algorithms`) was `Task.Run(sync Reduce)` - threw on
+  WebGPU / returned stale on Wasm. It now uses the async primitives. The synchronous `Reduce`->scalar
+  overloads throw a clear `NotSupportedException` on Wasm/WebGL/WebGPU instead of returning stale data.
+- New `ArrayView<T>.MemSetToZeroAsync()` - async sibling of `CopyFromAsync`.
+
+### Wasm: TensorView + Half struct-param dispatch
+
+`TensorView<T>`-shaped body structs with trailing `Half` fields now serialize and dispatch
+correctly on Wasm (struct-with-view IR-layout serialization + Float16 path). Plus residual large-sort
+hardening + diagnostics (the rare heavy-duplicate multi-pass race remains under investigation).
+
+### WebGL: nested-struct hoisted init via per-field constructors
+
+Nested struct hoisted initialization (e.g. BVH ray traversal) now emits per-field constructors;
+PointerType hoists as int.
+
+### Opt-in Wasm host-buffer race detector
+
+`WasmMemoryBuffer.DetectHostBufferRaces` (default false) makes the synchronous host ops throw if the
+buffer has an in-flight dispatch - enable it in a sweep to enumerate any remaining sync-readback race
+sites that the async APIs replace.
+
 ## 4.9.10-local.12 (2026-05-28) - Wasm/WebGL Float16 constant codegen fix
 
 ### Wasm + WebGL: `PrimitiveValue` for `Float16` must not use `Float32Value`

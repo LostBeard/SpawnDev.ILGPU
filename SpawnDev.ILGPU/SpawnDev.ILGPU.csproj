@@ -4,8 +4,8 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.10-local.15</Version>
-		<PackageReleaseNotes>v4.9.10-local.15: WebGL nested struct hoisted init uses per-field constructors (BVHRayTraversal); all PointerType hoists as int. Prior local.14: LEA scope fix + Wasm yield scaling.</PackageReleaseNotes>
+		<Version>4.9.11</Version>
+		<PackageReleaseNotes>v4.9.11: Math.Clamp now works in kernels on all 6 backends (frontend remap to throw-free IntrinsicMath.Clamp); async browser parity (overridable SynchronizeAsync/CopyToCPUAsync core virtuals + real ReduceAsync drain), MemSetToZeroAsync, Wasm TensorView+Half struct-param dispatch, WebGL nested-struct hoisted init, opt-in Wasm host-buffer race detector. Bundles forks 2.0.8.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -59,8 +59,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.7" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.7" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.8" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.8" />
 	</ItemGroup>
 
 	<ItemGroup>
