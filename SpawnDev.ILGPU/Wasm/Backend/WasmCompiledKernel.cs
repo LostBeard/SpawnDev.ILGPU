@@ -82,6 +82,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public List<string> StoreTargetTrace { get; }
 
         /// <summary>
+        /// IR parameter index of dispatch user arg <c>args[paramIdx]</c> (after optional
+        /// Index extent skip in args[]). Equals codegen startIdx offset: 0 for
+        /// GridStrideLoopKernel (LongIndex extent at IR param 0), 1 for typical kernels.
+        /// </summary>
+        public int IrUserParamIndexOffset { get; }
+
+        /// <summary>
         /// Creates a new compiled Wasm kernel.
         /// </summary>
         public WasmCompiledKernel(
@@ -97,7 +104,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             int scratchPerThread = 0,
             int phaseCount = 1,
             HashSet<int>? writtenParamIndices = null,
-            List<string>? storeTargetTrace = null)
+            List<string>? storeTargetTrace = null,
+            int irUserParamIndexOffset = 1)
             : base(context, entryPoint, null)
         {
             WasmBinary = wasmBinary;
@@ -111,6 +119,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             PhaseCount = phaseCount;
             WrittenParamIndices = writtenParamIndices ?? new HashSet<int>();
             StoreTargetTrace = storeTargetTrace ?? new List<string>();
+            IrUserParamIndexOffset = irUserParamIndexOffset;
         }
     }
 
@@ -122,6 +131,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public int Index { get; set; }
         public string Name { get; set; } = "";
         public bool IsView { get; set; }
+        /// <summary>User body struct (e.g. TensorView) with embedded views expanded to flat view args.</summary>
+        public bool IsBodyStruct { get; set; }
         public bool IsScalar { get; set; }
         public byte WasmType { get; set; } = WasmOpCodes.I32;
         public int ElementSize { get; set; } = 4;

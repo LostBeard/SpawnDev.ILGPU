@@ -1180,12 +1180,147 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     $"First errors:\n{details}");
         });
 
+        /// <summary>
+        /// HIGH-TRIAL cross-group shared-reuse detector for the residual Wasm large-sort race.
+        /// The residual only reproduces under full-sweep accumulation, and the 16-group
+        /// diagnostics above fire at most once per sweep (16 cross-group-reuse trials/run).
+        /// This runs the SAME production scan + broadcast path RadixSort uses, but at
+        /// 4M-scale group count (16384 groups) so a single dispatch exercises thousands of
+        /// cross-group shared-memory REUSES — the exact pressure the failing 4M sort applies.
+        ///
+        /// Per group g, every thread feeds value v=(g%251)+1 into an inclusive scan; thread i
+        /// must observe scanned == v*(i+1). A stale cross-worker read of another worker's
+        /// shared write (the scan's unprotected `sharedMemory[i]` / `scanResults[..]` loads)
+        /// yields a wrong partial → counted in errorCount[0]. The boundary value is read via
+        /// Group.Broadcast (tag-hardened in 4.9.10) → counted separately in errorCount[1], so
+        /// scanReadErrors>0 with broadcastErrors==0 localizes the residual to the UNPROTECTED
+        /// scan read, not the broadcast. Self-verifying (no CPU reference array); passes
+        /// silently when clean so it is safe to leave in the suite as a regression guard.
+        /// </summary>
+        [TestMethod]
+        public async Task CrossGroupScanReuseDetectorTest() => await RunTest(async accelerator =>
+        {
+            int groupSize = Math.Min(256, accelerator.MaxNumThreadsPerGroup);
+            int numGroups = 16384; // 4M-scale cross-group reuse pressure (matches failing 4M sort)
+
+            // [0] = scan-read corruptions, [1] = Group.Broadcast corruptions,
+            // [2] = direct shared-boundary-read corruptions (radix line-747 pattern)
+            using var errorBuf = accelerator.Allocate1D(new int[3]);
+
+            var kernel = accelerator.LoadStreamKernel<ArrayView<int>>(
+                CrossGroupScanReuseDetectorKernel);
+            kernel(new KernelConfig(numGroups, groupSize), errorBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var errors = await errorBuf.CopyToHostAsync<int>();
+            if (errors[0] > 0 || errors[1] > 0 || errors[2] > 0)
+                throw new Exception(
+                    $"CrossGroupScanReuseDetector: scanReadErrors={errors[0]}, broadcastErrors={errors[1]}, " +
+                    $"directBoundaryErrors={errors[2]} across {numGroups} groups of {groupSize}.\n" +
+                    $"scanReadErrors>0 => stale unprotected scan cross-worker read.\n" +
+                    $"directBoundaryErrors>0 => stale direct shared boundary read (the radix line-747 pattern, " +
+                    $"NOT covered by the Group.Broadcast tag handshake).\n" +
+                    $"broadcastErrors>0 => the tag-hardened broadcast itself is still racing (deeper V8 issue).");
+        });
+
+        /// <summary>
+        /// Companion to CrossGroupScanReuseDetectorTest covering the OTHER live residual
+        /// hypothesis: a loop-carried local being lost across a phase-barrier yield INSIDE a
+        /// loop (the radix presort runs its scan + 4 barriers inside a grid-stride loop —
+        /// RadixSortExtensions.cs:700-757). A scan barrier is a yield point in phase mode; if
+        /// EmitSaveAllLocals drops a loop-carried value across the yield, the accumulator
+        /// corrupts even when every individual read is fresh. This kernel loops the production
+        /// InclusiveScan ITERS times (=> ITERS*2 in-loop yields) carrying an accumulator that
+        /// must survive them, and self-verifies BOTH per-iteration scan freshness [0] and the
+        /// loop-carried accumulator [1]. Runs at 4M-group scale for cross-group reuse pressure.
+        /// </summary>
+        [TestMethod]
+        public async Task GridStrideScanStateDetectorTest() => await RunTest(async accelerator =>
+        {
+            int groupSize = Math.Min(256, accelerator.MaxNumThreadsPerGroup);
+            // Hypothesis B needs ITERATIONS (in-loop yields), not group count. Keep groups modest
+            // so the 64-iteration in-kernel loop (128 in-loop barrier syncs/group) stays well under
+            // the 30s PMT cap even under FO76 contention — 16384 groups timed out and cascaded.
+            int numGroups = 256;
+            using var errorBuf = accelerator.Allocate1D(new int[2]);
+
+            var kernel = accelerator.LoadStreamKernel<ArrayView<int>>(
+                GridStrideScanStateDetectorKernel);
+            kernel(new KernelConfig(numGroups, groupSize), errorBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var errors = await errorBuf.CopyToHostAsync<int>();
+            if (errors[0] > 0 || errors[1] > 0)
+                throw new Exception(
+                    $"GridStrideScanStateDetector: scanFreshnessErrors={errors[0]}, " +
+                    $"loopCarriedStateErrors={errors[1]} across {numGroups} groups of {groupSize}.\n" +
+                    $"scanFreshnessErrors>0 => a per-iteration scan cross-worker read was stale.\n" +
+                    $"loopCarriedStateErrors>0 => an accumulator was corrupted across an in-loop barrier yield " +
+                    $"(EmitSaveAllLocals state save/restore gap — distinct from a stale read).");
+        });
+
         #region Tests9 Diagnostic Kernel Methods
 
         /// <summary>
         /// Kernel that mimics MultiPassScanKernel2's boundary scan + broadcast.
         /// Loads rightBoundaries[Group.IdxX], does inclusive scan, broadcasts from Grid.IdxX.
         /// </summary>
+        /// <summary>
+        /// Per-group self-verifying scan + broadcast. value v=(g%251)+1 (distinct between
+        /// adjacent groups, nonzero, no int overflow at *256). Inclusive scan: thread i must
+        /// see v*(i+1). Boundary broadcast from last thread must be v*DimX. Any mismatch is a
+        /// stale cross-worker read of reused shared memory; counted atomically per error class.
+        /// </summary>
+        static void CrossGroupScanReuseDetectorKernel(ArrayView<int> errorCount)
+        {
+            int g = Grid.IdxX;
+            int v = (g % 251) + 1;
+            int scanned = GroupExtensions.InclusiveScan<int, AddInt32>(v);
+            int expectedScan = v * (Group.IdxX + 1);
+            if (scanned != expectedScan)
+                Atomic.Add(ref errorCount[0], 1); // scan cross-worker read stale
+
+            // [1] Boundary via Group.Broadcast (tag-hardened in 4.9.10).
+            int boundary = Group.Broadcast(scanned, Group.DimX - 1);
+            int expectedBoundary = v * Group.DimX;
+            if (boundary != expectedBoundary)
+                Atomic.Add(ref errorCount[1], 1);
+
+            // [2] Boundary via a DIRECT cross-worker shared read — the UNPROTECTED pattern
+            // RadixSortExtensions.cs:747 uses (`scanMemory[groupSize*j - 1]`), which is NOT a
+            // Group.Broadcast and is NOT covered by the tag handshake. Size 300 (not 256) to
+            // avoid same-size alloca dedup with the scan's internal 256-slot workspace.
+            var sh = SharedMemory.Allocate<int>(300);
+            sh[Group.IdxX] = scanned;
+            Group.Barrier();
+            int directBoundary = sh[Group.DimX - 1]; // last thread's value, read by all (cross-worker)
+            if (directBoundary != expectedBoundary)
+                Atomic.Add(ref errorCount[2], 1);
+            Group.Barrier(); // guard sh against reuse before all threads have read
+        }
+
+        /// <summary>
+        /// Loops the production InclusiveScan ITERS times carrying an accumulator across the
+        /// scan's in-loop barrier yields. Per iteration k (uniform across the group) thread i
+        /// must see scanned == k*(i+1); acc must end at (i+1)*ITERS*(ITERS+1)/2. A dropped
+        /// loop-carried local across a yield corrupts acc without any stale read.
+        /// </summary>
+        static void GridStrideScanStateDetectorKernel(ArrayView<int> errorCount)
+        {
+            const int iters = 64; // ITERS*2 in-loop yields; max k*(IdxX+1)=64*256, acc<=532480 (no overflow)
+            int acc = 0;
+            for (int k = 1; k <= iters; k++)
+            {
+                int scanned = GroupExtensions.InclusiveScan<int, AddInt32>(k);
+                if (scanned != k * (Group.IdxX + 1))
+                    Atomic.Add(ref errorCount[0], 1);
+                acc += scanned;
+            }
+            int expectedAcc = (Group.IdxX + 1) * (iters * (iters + 1) / 2);
+            if (acc != expectedAcc)
+                Atomic.Add(ref errorCount[1], 1);
+        }
+
         static void ScanBroadcastIsolationKernel(
             ArrayView<int> rightBoundaries,
             ArrayView<int> output)

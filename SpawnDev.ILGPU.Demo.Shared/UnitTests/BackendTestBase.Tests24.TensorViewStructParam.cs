@@ -1,5 +1,6 @@
 using ILGPU;
 using ILGPU.Runtime;
+using SpawnDev.ILGPU.ML.Tensors;
 using SpawnDev.UnitTesting;
 
 namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
@@ -43,6 +44,19 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             public readonly int D0, D1, D2, D3, Rank;
             public ViewStructI(ArrayView1D<int, Stride1D.Dense> data, int d0, int d1, int d2, int d3, int rank)
             { Data = data; D0 = d0; D1 = d1; D2 = d2; D3 = d3; Rank = rank; }
+        }
+
+        /// <summary>Mirrors SpawnDev.ILGPU.ML.Tensors.TensorView&lt;Half&gt; field layout.</summary>
+        public readonly struct ViewStructHalf
+        {
+            public readonly ArrayView1D<global::ILGPU.Half, Stride1D.Dense> Data;
+            public readonly int D0, D1, D2, D3, Rank;
+            public ViewStructHalf(ArrayView1D<global::ILGPU.Half, Stride1D.Dense> data, int d0, int d1, int d2, int d3, int rank)
+            { Data = data; D0 = d0; D1 = d1; D2 = d2; D3 = d3; Rank = rank; }
+
+            /// <summary>Mirrors SpawnDev.ILGPU.ML.Tensors.TensorView&lt;Half&gt;.Get2D / Set2D.</summary>
+            public global::ILGPU.Half Get2D(int r, int c) => Data[r * D1 + c];
+            public void Set2D(int r, int c, global::ILGPU.Half v) => Data[r * D1 + c] = v;
         }
 
         // Kernel pattern: read from first TensorView-shaped struct, write to second.
@@ -310,6 +324,86 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
             if (diffs > 0)
                 throw new Exception($"{diffs}/{N} mismatches. First: {msg}");
+        });
+
+        /// <summary>
+        /// Same as <see cref="TensorViewStructParam_Half_AddConstant_Indexes_Correctly"/> but
+        /// calls Get2D/Set2D like MLTestBase.TensorView_Half_RoundTrip (not raw Data[]).
+        /// </summary>
+        [TestMethod]
+        public async Task TensorViewStructParam_Half_Get2DSet2D_RoundTrip() => await RunTest(async accelerator =>
+        {
+            const int Rows = 4, Cols = 8;
+            const int Count = Rows * Cols;
+            var hostIn = new global::ILGPU.Half[Count];
+            for (int i = 0; i < Count; i++)
+                hostIn[i] = (global::ILGPU.Half)(i * 0.25f);
+
+            using var inBuf = accelerator.Allocate1D(hostIn);
+            using var outBuf = accelerator.Allocate1D<global::ILGPU.Half>(Count);
+
+            var inView = new ViewStructHalf(inBuf.View, Rows, Cols, 1, 1, 2);
+            var outView = new ViewStructHalf(outBuf.View, Rows, Cols, 1, 1, 2);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ViewStructHalf, ViewStructHalf>(
+                (Index1D idx, ViewStructHalf inp, ViewStructHalf outp) =>
+                {
+                    int c = idx % inp.D1;
+                    int r = idx / inp.D1;
+                    var v = inp.Get2D(r, c);
+                    outp.Set2D(r, c, (global::ILGPU.Half)((float)v + 1.5f));
+                });
+            kernel((Index1D)Count, inView, outView);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outBuf.CopyToHostAsync<global::ILGPU.Half>(0, Count);
+            for (int i = 0; i < Count; i++)
+            {
+                float expected = (float)hostIn[i] + 1.5f;
+                float actual = (float)result[i];
+                if (Math.Abs(actual - expected) > 1e-2f)
+                    throw new Exception($"Idx {i}: expected {expected} got {actual}");
+            }
+        });
+
+        /// <summary>
+        /// TensorView&lt;Half&gt; body-struct kernel pattern from SpawnDev.ILGPU.ML
+        /// (MLTestBase.TensorView_Half_RoundTrip). Regression for Wasm/WebGL zero-output bug.
+        /// </summary>
+        [TestMethod]
+        public async Task TensorViewStructParam_Half_AddConstant_Indexes_Correctly() => await RunTest(async accelerator =>
+        {
+            const int Rows = 4, Cols = 8;
+            const int Count = Rows * Cols;
+            var hostIn = new global::ILGPU.Half[Count];
+            for (int i = 0; i < Count; i++)
+                hostIn[i] = (global::ILGPU.Half)(i * 0.25f);
+
+            using var inBuf = accelerator.Allocate1D(hostIn);
+            using var outBuf = accelerator.Allocate1D<global::ILGPU.Half>(Count);
+
+            var inView = new ViewStructHalf(inBuf.View, Rows, Cols, 1, 1, 2);
+            var outView = new ViewStructHalf(outBuf.View, Rows, Cols, 1, 1, 2);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ViewStructHalf, ViewStructHalf>(
+                (Index1D idx, ViewStructHalf inp, ViewStructHalf outp) =>
+                {
+                    int c = idx % inp.D1;
+                    int r = idx / inp.D1;
+                    var v = inp.Data[r * inp.D1 + c];
+                    outp.Data[r * outp.D1 + c] = (global::ILGPU.Half)((float)v + 1.5f);
+                });
+            kernel((Index1D)Count, inView, outView);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outBuf.CopyToHostAsync<global::ILGPU.Half>(0, Count);
+            for (int i = 0; i < Count; i++)
+            {
+                float expected = (float)hostIn[i] + 1.5f;
+                float actual = (float)result[i];
+                if (Math.Abs(actual - expected) > 1e-2f)
+                    throw new Exception($"Idx {i}: expected {expected} got {actual}");
+            }
         });
 
         /// <summary>
@@ -614,6 +708,151 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 if (MathF.Abs(actual[i] - (1000f + i)) > 1e-4f) diffs++;
             if (diffs > 0)
                 throw new Exception($"{diffs}/{N} float mismatches.");
+        });
+
+        #endregion
+
+        #region Cross-assembly ML TensorView (SpawnDev.ILGPU.ML.Tensors.TensorView)
+
+        /// <summary>
+        /// Exact MLTestBase.TensorView_Half_RoundTrip using the real
+        /// <see cref="TensorView{T}"/> type from SpawnDev.ILGPU.ML (cross-assembly kernel).
+        /// ViewStructHalf tests in this file are same-assembly and do not catch ML-only failures.
+        /// </summary>
+        [TestMethod]
+        public async Task ML_ArrayView1D_Float_TwoBuffer_Sanity() => await RunTest(async accelerator =>
+        {
+            const int Count = 32;
+            var host = new float[Count];
+            for (int i = 0; i < Count; i++) host[i] = i * 0.25f;
+            using var inBuf = accelerator.Allocate1D(host);
+            using var outBuf = accelerator.Allocate1D<float>(Count);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>>(
+                (Index1D idx, ArrayView1D<float, Stride1D.Dense> inp, ArrayView1D<float, Stride1D.Dense> outp) =>
+                {
+                    outp[idx] = inp[idx] + 1.5f;
+                });
+            kernel((Index1D)Count, inBuf.View, outBuf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await outBuf.CopyToHostAsync<float>(0, Count);
+            if (MathF.Abs(result[0] - (host[0] + 1.5f)) > 1e-4f)
+                throw new Exception($"float ArrayView1D two-buffer: expected {host[0] + 1.5f} got {result[0]}");
+        });
+
+        [TestMethod]
+        public async Task ViewStructHalf_DirectIndex_OneBuffer_Write() => await RunTest(async accelerator =>
+        {
+            if (!accelerator.Capabilities.Float16)
+                throw new UnsupportedTestException("Float16 not supported on this device");
+            using var buf = accelerator.Allocate1D<global::ILGPU.Half>(4);
+            var outView = new ViewStructHalf(buf.View, 4, 1, 1, 1, 1);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ViewStructHalf>(
+                (Index1D idx, ViewStructHalf outp) => { outp.Data[idx] = (global::ILGPU.Half)1.5f; });
+            kernel((Index1D)4, outView);
+            await accelerator.SynchronizeAsync();
+            var result = await buf.CopyToHostAsync<global::ILGPU.Half>(0, 4);
+            if (MathF.Abs((float)result[0] - 1.5f) > 1e-2f)
+                throw new Exception($"ViewStructHalf direct index: expected 1.5 got {(float)result[0]}");
+        });
+
+        [TestMethod]
+        public async Task ML_ArrayView1D_Float_OneBuffer_Write() => await RunTest(async accelerator =>
+        {
+            using var buf = accelerator.Allocate1D<float>(4);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>>(
+                (Index1D idx, ArrayView1D<float, Stride1D.Dense> dst) => { dst[idx] = 1.5f; });
+            kernel((Index1D)4, buf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await buf.CopyToHostAsync<float>(0, 4);
+            if (MathF.Abs(result[0] - 1.5f) > 1e-4f)
+                throw new Exception($"float ArrayView1D one-buffer: expected 1.5 got {result[0]}");
+        });
+
+        [TestMethod]
+        public async Task ML_ArrayView1D_Half_OneBuffer_Write() => await RunTest(async accelerator =>
+        {
+            if (!accelerator.Capabilities.Float16)
+                throw new UnsupportedTestException("Float16 not supported on this device");
+            using var buf = accelerator.Allocate1D<global::ILGPU.Half>(4);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<global::ILGPU.Half, Stride1D.Dense>>(
+                (Index1D idx, ArrayView1D<global::ILGPU.Half, Stride1D.Dense> dst) =>
+                {
+                    dst[idx] = (global::ILGPU.Half)1.5f;
+                });
+            kernel((Index1D)4, buf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await buf.CopyToHostAsync<global::ILGPU.Half>(0, 4);
+            if (MathF.Abs((float)result[0] - 1.5f) > 1e-2f)
+                throw new Exception($"ArrayView1D half one-buffer write: expected 1.5 got {(float)result[0]}");
+        });
+
+        [TestMethod]
+        public async Task ML_ArrayView1D_Half_TwoBuffer_Sanity() => await RunTest(async accelerator =>
+        {
+            if (!accelerator.Capabilities.Float16)
+                throw new UnsupportedTestException("Float16 not supported on this device");
+            const int Count = 32;
+            var hostHalf = new global::ILGPU.Half[Count];
+            for (int i = 0; i < Count; i++)
+                hostHalf[i] = (global::ILGPU.Half)(i * 0.25f);
+            using var inBuf = accelerator.Allocate1D(hostHalf);
+            using var outBuf = accelerator.Allocate1D<global::ILGPU.Half>(Count);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<global::ILGPU.Half, Stride1D.Dense>, ArrayView1D<global::ILGPU.Half, Stride1D.Dense>>(
+                (Index1D idx, ArrayView1D<global::ILGPU.Half, Stride1D.Dense> inp, ArrayView1D<global::ILGPU.Half, Stride1D.Dense> outp) =>
+                {
+                    outp[idx] = inp[idx] + (global::ILGPU.Half)1.5f;
+                });
+            kernel((Index1D)Count, inBuf.View, outBuf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await outBuf.CopyToHostAsync<global::ILGPU.Half>(0, Count);
+            float actual = (float)result[0];
+            float expected = (float)hostHalf[0] + 1.5f;
+            if (Math.Abs(actual - expected) > 1e-2f)
+                throw new Exception($"ArrayView1D sanity: expected {expected} got {actual}");
+        });
+
+        [TestMethod]
+        public async Task ML_TensorView_Half_RoundTrip_CrossAssembly() => await RunTest(async accelerator =>
+        {
+            const int Rows = 4, Cols = 8;
+            const int Count = Rows * Cols;
+            var hostHalf = new global::ILGPU.Half[Count];
+            for (int i = 0; i < Count; i++)
+                hostHalf[i] = (global::ILGPU.Half)(i * 0.25f);
+
+            if (!accelerator.Capabilities.Float16)
+                throw new UnsupportedTestException("Float16 not supported on this device");
+
+            using var inBuf = accelerator.Allocate1D(hostHalf);
+            using var outBuf = accelerator.Allocate1D<global::ILGPU.Half>(Count);
+
+            var inView = new TensorView<global::ILGPU.Half>(inBuf.View, Rows, Cols, 1, 1, 2);
+            var outView = new TensorView<global::ILGPU.Half>(outBuf.View, Rows, Cols, 1, 1, 2);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, TensorView<global::ILGPU.Half>, TensorView<global::ILGPU.Half>>(
+                (Index1D idx, TensorView<global::ILGPU.Half> inp, TensorView<global::ILGPU.Half> outp) =>
+                {
+                    int c = idx % inp.D1;
+                    int r = idx / inp.D1;
+                    var v = inp.Get2D(r, c);
+                    outp.Set2D(r, c, v + (global::ILGPU.Half)1.5f);
+                });
+            kernel((Index1D)Count, inView, outView);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outBuf.CopyToHostAsync<global::ILGPU.Half>(0, Count);
+            for (int i = 0; i < Count; i++)
+            {
+                float expected = (float)hostHalf[i] + 1.5f;
+                float actual = (float)result[i];
+                if (Math.Abs(actual - expected) > 1e-2f)
+                {
+                    var diag = SpawnDev.ILGPU.Wasm.WasmAccelerator._lastImplicitIndexDebug;
+                    var structDiag = SpawnDev.ILGPU.Wasm.WasmAccelerator._lastStructSerialDebug;
+                    throw new Exception(
+                        $"Idx {i}: expected {expected} got {actual} | wasm={diag} | structBytes={structDiag}");
+                }
+            }
         });
 
         #endregion

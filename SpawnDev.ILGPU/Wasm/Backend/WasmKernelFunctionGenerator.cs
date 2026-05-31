@@ -53,6 +53,19 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         private readonly Dictionary<int, int> _viewStrideStartField = new();
 
         /// <summary>
+        /// When single-block helpers are inlined, maps the helper's <see cref="Parameter"/>
+        /// nodes to the call-site argument values so <see cref="TraceToParameter"/> can
+        /// resolve struct fields (e.g. TensorView.Data) back to the kernel parameter.
+        /// </summary>
+        private readonly Dictionary<global::ILGPU.IR.Values.Parameter, Value> _inlineParamAliases = new();
+
+        /// <summary>Per body-struct param: IR field metadata (populated by <see cref="ScanBodyStructParams"/>).</summary>
+        private readonly Dictionary<int, List<BodyStructFieldInfoWasm>> _bodyStructFields = new();
+
+        /// <summary>Expanded flat view args for body-struct embedded views: (IR param index, IR view field index) → locals.</summary>
+        private readonly Dictionary<(int paramIndex, int viewFieldIndex), uint[]> _bodyStructViewLocals = new();
+
+        /// <summary>
         /// The parameter info for marshaling (written to GeneratorArgs).
         /// </summary>
         private readonly List<WasmParamInfo> _paramInfos = new();
@@ -194,6 +207,17 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// Set after alloca usage is known, before state machine code generation.
         /// </summary>
         private int _phaseStateOffset = 0;
+
+        /// <summary>
+        /// Byte positions in <see cref="Code"/> where a full-locals SAVE block must be
+        /// inserted. Saves are DEFERRED (not emitted inline) so every save covers the
+        /// FINAL local count — symmetric with the deferred restore prologue. Without this,
+        /// an inline save at an early barrier captured only <c>_locals.Count</c>-as-of-then,
+        /// while the restore (built at the end) reads the final count, so any local
+        /// allocated after that barrier was restored from an unwritten/stale scratch slot.
+        /// Cleared at the start of each function's state-machine generation.
+        /// </summary>
+        private readonly List<int> _saveAllLocalsInsertPoints = new();
 
         /// <summary>
         /// Cumulative scratch offset for helper calls. Each helper with barriers
@@ -483,6 +507,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // Store the index type for decomposition in GetField
             _indexType = entryPoint.IndexType;
 
+            ScanBodyStructParams();
+
             // Fixed params: globalIdx (i32), dimX (i32), dimY (i32), scratchBase (i32),
             //               groupDimX (i32), threadIdX (i32), sharedMemBase (i32), barrierBase (i32)
             _globalIdxLocal = _nextLocalIndex++;
@@ -651,6 +677,59 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         ElementSize = elemSize,
                     });
                 }
+                else if (paramType is StructureType bodySt && IsBodyStruct(bodySt)
+                    && _bodyStructFields.TryGetValue(i, out var bsFields))
+                {
+                    _hasViews = true;
+                    foreach (var bf in bsFields)
+                    {
+                        if (!bf.IsView)
+                            continue;
+
+                        FuncParamTypes.Add(WasmOpCodes.I32);
+                        uint offsetLocal = _nextLocalIndex++;
+                        _paramCount++;
+                        FuncParamTypes.Add(WasmOpCodes.I32);
+                        uint lengthLocal = _nextLocalIndex++;
+                        _paramCount++;
+                        FuncParamTypes.Add(WasmOpCodes.I32);
+                        uint strideLocal = _nextLocalIndex++;
+                        _paramCount++;
+                        FuncParamTypes.Add(WasmOpCodes.I32);
+                        uint stride2Local = _nextLocalIndex++;
+                        _paramCount++;
+
+                        _bodyStructViewLocals[(i, bf.FieldIndex)] = new[]
+                        {
+                            offsetLocal, lengthLocal, strideLocal, stride2Local,
+                        };
+                        if (WasmBackend.VerboseLogging)
+                            WasmBackend.Log($"[Wasm-Setup]   BodyStruct view: param[{i}] field[{bf.FieldIndex}] -> locals {offsetLocal},{lengthLocal},{strideLocal},{stride2Local}");
+                    }
+
+                    var wasmType = GetWasmTypeFromIR(paramType);
+                    FuncParamTypes.Add(wasmType);
+                    uint valLocal = _nextLocalIndex++;
+                    _paramCount++;
+
+                    _paramLocals[i] = new[] { valLocal };
+                    _localMap[GetValueKey(param)] = valLocal;
+
+                    var structFields = new List<StructFieldInfo>();
+                    FlattenStructLayout(bodySt, 0, structFields);
+
+                    _paramInfos.Add(new WasmParamInfo
+                    {
+                        Index = i,
+                        Name = $"param{i}",
+                        IsBodyStruct = true,
+                        IsScalar = true,
+                        WasmType = wasmType,
+                        StructFields = structFields,
+                        StructSize = bodySt.Size,
+                        IRTypeName = paramType?.GetType().Name + ":" + paramType?.ToString(),
+                    });
+                }
                 else
                 {
                     var wasmType = GetWasmTypeFromIR(paramType);
@@ -690,6 +769,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             // Store param infos for the backend
             _generatorArgs.ParamInfos = _paramInfos;
+            _generatorArgs.IrUserParamIndexOffset = startIdx;
 
             // Setup shared memory allocations
             SetupSharedAllocations(Allocas.SharedAllocations, isDynamic: false);
@@ -1173,6 +1253,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // when all locals are known. For now, record the insertion point.
             int phaseEntryInsertPoint = Code.Count;
 
+            // SAVE blocks are likewise deferred to the end (final local count) and recorded
+            // here as they are reached. Reset per function (kernel + each helper share this
+            // generator's fields) so positions never leak across function bodies.
+            _saveAllLocalsInsertPoints.Clear();
+
             // block $exit (void — return value tracked via _yieldedLocal)
             Code.Add(WasmOpCodes.Block);
             Code.Add(WasmOpCodes.Void);
@@ -1322,8 +1407,25 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     WasmModuleBuilder.EmitLocalSet(prologueCode, localIdx);
                 }
 
-                // Insert prologue at the recorded position
-                Code.InsertRange(phaseEntryInsertPoint, prologueCode);
+                // Build the full-count SAVE block once (final _locals → symmetric with the
+                // restore prologue above). Inserted at every recorded save site.
+                var saveBlock = new List<byte>();
+                EmitSaveAllLocalsTo(saveBlock);
+
+                // Coordinate ALL deferred insertions — the restore prologue + every save
+                // block — in a SINGLE pass, in DESCENDING byte position. Inserting from the
+                // back forward keeps every not-yet-applied (lower) position valid, since an
+                // insert only shifts bytes at HIGHER positions. Wasm branches use structured
+                // depth (not byte offsets), so the inserted bytes never break control flow.
+                var deferredInserts = new List<(int pos, List<byte> bytes)>();
+                deferredInserts.Add((phaseEntryInsertPoint, prologueCode));
+                for (int s = 0; s < _saveAllLocalsInsertPoints.Count; s++)
+                    deferredInserts.Add((_saveAllLocalsInsertPoints[s], saveBlock));
+
+                // Sort by position descending (no LINQ — codegen runs in Blazor WASM).
+                deferredInserts.Sort((a, b) => b.pos.CompareTo(a.pos));
+                for (int s = 0; s < deferredInserts.Count; s++)
+                    Code.InsertRange(deferredInserts[s].pos, deferredInserts[s].bytes);
             }
             // Set PhaseCount only for the kernel (not helpers — helpers don't drive dispatch).
             if (!_isHelperFunction)
@@ -1492,6 +1594,31 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         public override void GenerateCode(Load value)
         {
+            // Global Float16 loads (e.g. ArrayView1D<Half>[idx]) must not use the
+            // StructureType scratch-snapshot path — ILGPU can type the load as
+            // StructureType even though the source is a 2-byte global half element.
+            if (value.Source.Resolve().Type is AddressSpaceType addrHalfLd
+                && addrHalfLd.ElementType is PrimitiveType ptHalfLd
+                && ptHalfLd.BasicValueType == BasicValueType.Float16
+                && (value.Type is PrimitiveType ptGlobalHalf
+                    && ptGlobalHalf.BasicValueType == BasicValueType.Float16
+                    || value.Type is StructureType stHalfLd && stHalfLd.Size <= 8))
+            {
+                var targetHalf = AllocateLocal(value, GetWasmType(value));
+                EmitGetLocal(value.Source.Resolve());
+                if (_hasBarriers)
+                {
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad16U);
+                    Code.Add(0x01); Code.Add(0x00);
+                }
+                else
+                    WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load16U, 1, 0);
+                EmitF16ToF32();
+                WasmModuleBuilder.EmitLocalSet(Code, targetHalf);
+                return;
+            }
+
             // For struct types, copy to scratch for snapshot semantics.
             // Without this, in-place pre-sort `view[pos] = value` can overwrite
             // the source data that another thread's Load references (aliasing).
@@ -1518,6 +1645,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     // Must use 2-byte load/store to preserve struct layout (no f16↔f32 conversion here).
                     bool isFloat16Field = fieldType is PrimitiveType ptF16Chk
                         && ptF16Chk.BasicValueType == BasicValueType.Float16;
+                    bool isViewPtrField = fieldType is AddressSpaceType;
                     byte fieldWasmType = GetWasmTypeFromIR(fieldType);
                     byte loadOp, storeOp;
                     uint align;
@@ -1527,6 +1655,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         loadOp = WasmOpCodes.I32Load16U;
                         storeOp = WasmOpCodes.I32Store16;
                         align = 1;
+                    }
+                    else if (isViewPtrField && fieldType.Size >= 8)
+                    {
+                        loadOp = WasmOpCodes.I64Load;
+                        storeOp = WasmOpCodes.I64Store;
+                        align = 3;
                     }
                     else switch (fieldWasmType)
                     {
@@ -1554,6 +1688,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                             // Float16: 2-byte atomic load
                             WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicLoad16U, 1, 0);
                         }
+                        else if (isViewPtrField && fieldType.Size >= 8)
+                        {
+                            WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I64AtomicLoad, 3, 0);
+                        }
                         else switch (fieldWasmType)
                         {
                             case WasmOpCodes.I64:
@@ -1577,6 +1715,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         {
                             // Float16: 2-byte store to scratch (raw f16 bits)
                             WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store16, 1, 0);
+                        }
+                        else if (isViewPtrField && fieldType.Size >= 8)
+                        {
+                            WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I64Store, 3, 0);
                         }
                         else switch (fieldWasmType)
                         {
@@ -1802,6 +1944,80 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             var source = value.Source.Resolve();
             var index = value.Offset.Resolve();
 
+            {
+                Value? leaSrc = source;
+                for (int leaDepth = 0; leaDepth < 12 && leaSrc != null; leaDepth++)
+                {
+                    if (leaSrc is GetField gfLea
+                        && TryResolveBodyStructField(gfLea, out var bsParamLea, out var bsInfoLea, out _)
+                        && bsInfoLea.IsView
+                        && _bodyStructViewLocals.TryGetValue((bsParamLea.Index, bsInfoLea.FieldIndex), out var bsViewLocalsLea))
+                    {
+                        WasmModuleBuilder.EmitLocalGet(Code, bsViewLocalsLea[0]);
+                        EmitGetLocal(index.Resolve());
+                        if (GetWasmTypeFromIR(index.Type) == WasmOpCodes.I64)
+                            Code.Add(WasmOpCodes.I32WrapI64);
+                        int elemSizeLea = 4;
+                        if (value.Type is AddressSpaceType addrBs
+                            && addrBs.ElementType is PrimitiveType ptBs)
+                            elemSizeLea = GetElementSize(ptBs.BasicValueType);
+                        WasmModuleBuilder.EmitI32Const(Code, elemSizeLea);
+                        Code.Add(WasmOpCodes.I32Mul);
+                        Code.Add(WasmOpCodes.I32Add);
+                        WasmModuleBuilder.EmitLocalSet(Code, target);
+                        return;
+                    }
+
+                    leaSrc = leaSrc switch
+                    {
+                        GetField gfWalk => gfWalk.ObjectValue.Resolve(),
+                        NewView nv => nv.Pointer.Resolve(),
+                        global::ILGPU.IR.Values.Load load => load.Source.Resolve(),
+                        ConvertValue cv => cv.Value.Resolve(),
+                        AddressSpaceCast asc => asc.Value.Resolve(),
+                        _ => null,
+                    };
+                }
+            }
+
+            // Cross-assembly body structs (e.g. ML TensorView<T>) may lower inp.Data[idx] as
+            // ArrayView1D ops on a temp without a GetField in the LEA walk chain. Trace to the
+            // kernel body-struct param and use the expanded view offset locals from dispatch.
+            {
+                int bsParamIdx = TraceToParameter(source);
+                if (bsParamIdx >= 0
+                    && _bodyStructFields.TryGetValue(bsParamIdx, out var bsFieldsTraced))
+                {
+                    int viewFi = -1;
+                    for (int fi = 0; fi < bsFieldsTraced.Count; fi++)
+                    {
+                        if (bsFieldsTraced[fi].IsView)
+                        {
+                            viewFi = bsFieldsTraced[fi].FieldIndex;
+                            break;
+                        }
+                    }
+
+                    if (viewFi >= 0
+                        && _bodyStructViewLocals.TryGetValue((bsParamIdx, viewFi), out var bsViewLocalsTraced))
+                    {
+                        WasmModuleBuilder.EmitLocalGet(Code, bsViewLocalsTraced[0]);
+                        EmitGetLocal(index.Resolve());
+                        if (GetWasmTypeFromIR(index.Type) == WasmOpCodes.I64)
+                            Code.Add(WasmOpCodes.I32WrapI64);
+                        int elemSizeBs = 4;
+                        if (value.Type is AddressSpaceType addrBs2
+                            && addrBs2.ElementType is PrimitiveType ptBs2)
+                            elemSizeBs = GetElementSize(ptBs2.BasicValueType);
+                        WasmModuleBuilder.EmitI32Const(Code, elemSizeBs);
+                        Code.Add(WasmOpCodes.I32Mul);
+                        Code.Add(WasmOpCodes.I32Add);
+                        WasmModuleBuilder.EmitLocalSet(Code, target);
+                        return;
+                    }
+                }
+            }
+
             var sourceLocal = GetLocal(source);
             var indexLocal = GetLocal(index);
             if (WasmBackend.VerboseLogging)
@@ -1902,6 +2118,60 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         WasmModuleBuilder.EmitLocalSet(Code, target);
                         return;
                 }
+            }
+
+            if (TryResolveBodyStructField(value, out var bsParam, out var bsInfo, out _)
+                && bsInfo.IsView
+                && _bodyStructViewLocals.TryGetValue((bsParam.Index, bsInfo.FieldIndex), out var bsViewLocals))
+            {
+                var targetWasmType = GetWasmType(value);
+                int strideStartField = 3;
+                if (fieldIndex == 0)
+                {
+                    WasmModuleBuilder.EmitLocalGet(Code, bsViewLocals[0]);
+                }
+                else if (fieldIndex < strideStartField)
+                {
+                    if (fieldIndex == 1)
+                    {
+                        WasmModuleBuilder.EmitLocalGet(Code, bsViewLocals[1]);
+                        if (targetWasmType == WasmOpCodes.I64)
+                            Code.Add(WasmOpCodes.I64ExtendI32S);
+                    }
+                    else
+                    {
+                        if (targetWasmType == WasmOpCodes.I64)
+                            WasmModuleBuilder.EmitI64Const(Code, 0);
+                        else
+                            WasmModuleBuilder.EmitI32Const(Code, 0);
+                    }
+                }
+                else if (fieldIndex - strideStartField == 0)
+                {
+                    WasmModuleBuilder.EmitLocalGet(Code, bsViewLocals[2]);
+                    if (targetWasmType == WasmOpCodes.I64)
+                        Code.Add(WasmOpCodes.I64ExtendI32S);
+                }
+                else if (fieldIndex - strideStartField == 1)
+                {
+                    WasmModuleBuilder.EmitLocalGet(Code, bsViewLocals[3]);
+                    if (targetWasmType == WasmOpCodes.I64)
+                        Code.Add(WasmOpCodes.I64ExtendI32S);
+                }
+                else
+                {
+                    if (targetWasmType == WasmOpCodes.I64)
+                        WasmModuleBuilder.EmitI64Const(Code, 1);
+                    else
+                        WasmModuleBuilder.EmitI32Const(Code, 1);
+                }
+
+                if (targetWasmType == WasmOpCodes.I32
+                    && GetWasmTypeFromIR(value.Type) == WasmOpCodes.I64)
+                    Code.Add(WasmOpCodes.I32WrapI64);
+
+                WasmModuleBuilder.EmitLocalSet(Code, target);
+                return;
             }
 
             // Check if source is (or traces to) a Parameter that maps to an ArrayView.
@@ -2031,6 +2301,19 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 {
                     WasmModuleBuilder.EmitI32Const(Code, byteOffset);
                     Code.Add(WasmOpCodes.I32Add);
+                }
+
+                bool isViewPtrField = fieldType is AddressSpaceType;
+                if (isViewPtrField && fieldType.Size >= 8)
+                {
+                    if (_hasBarriers)
+                        WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I64AtomicLoad, 3, 0);
+                    else
+                        WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I64Load, 3, 0);
+                    if (GetWasmType(value) == WasmOpCodes.I32)
+                        Code.Add(WasmOpCodes.I32WrapI64);
+                    WasmModuleBuilder.EmitLocalSet(Code, target);
+                    return;
                 }
 
                 if (isFloat16Field)
@@ -2195,6 +2478,27 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // and don't map back to the kernel signature.
             TrackParamWrite(target, "Store");
 
+            // Global Float16 stores (e.g. ArrayView1D<Half>[idx] = …) must run before the
+            // StructureType field-copy path. ILGPU can lower the stored half as a
+            // StructureType wrapper; the field-copy path writes the wrong width.
+            if (target.Type is AddressSpaceType addrF16Global
+                && addrF16Global.ElementType is PrimitiveType ptF16Global
+                && ptF16Global.BasicValueType == BasicValueType.Float16)
+            {
+                EmitGetLocal(target);
+                EmitGetLocal(storeValue);
+                EmitF32ToF16();
+                if (_hasBarriers)
+                {
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore16);
+                    Code.Add(0x01); Code.Add(0x00);
+                }
+                else
+                    WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store16, 1, 0);
+                return;
+            }
+
             // Fix B v4: DISABLED — #1's analysis shows barriers already separate Load/Store
             // phases. Each thread writes to a unique position (guaranteed by exclusive scan),
             // and struct Load scratch copies preserve data across barriers. The extra yield
@@ -2230,6 +2534,21 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // For struct types, we need to copy each field from source to destination
             if (storeValue.Type is StructureType structType)
             {
+                // ArrayView1D<Half>[idx] = (Half)expr lowers storeValue as a small StructureType
+                // (not PrimitiveType Float16). The field-copy loop writes the wrong width.
+                if (target.Type is AddressSpaceType addrHalfMis
+                    && addrHalfMis.ElementType is PrimitiveType ptHalfMis
+                    && ptHalfMis.BasicValueType == BasicValueType.Float16
+                    && structType.Size <= 8)
+                {
+                    EmitGetLocal(target);
+                    EmitGetLocal(storeValue);
+                    if (GetWasmType(storeValue) == WasmOpCodes.F32)
+                        EmitF32ToF16();
+                    WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store16, 1, 0);
+                    return;
+                }
+
                 int structSize = structType.Size;
                 // Copy field by field
                 for (int i = 0; i < structType.NumFields; i++)
@@ -2613,10 +2932,17 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         {
             var targetMethod = methodCall.Target;
 
-            // Check if this is a helper function
-            if (!_generatorArgs.HelperMethods.TryGetValue(targetMethod, out var helperAllocas))
+            // Registered helpers (same compilation unit). Cross-assembly struct accessors
+            // (e.g. SpawnDev.ILGPU.ML.Tensors.TensorView.Get2D) stay as MethodCall in the
+            // kernel IR but are not in HelperMethods — base.GenerateCode returns 0 for them.
+            bool registeredHelper = _generatorArgs.HelperMethods.TryGetValue(targetMethod, out var helperAllocas);
+            bool inlineCrossAssembly = !registeredHelper
+                && targetMethod.HasImplementation
+                && !targetMethod.HasFlags(global::ILGPU.IR.MethodFlags.External)
+                && !targetMethod.HasFlags(global::ILGPU.IR.MethodFlags.Intrinsic);
+
+            if (!registeredHelper && !inlineCrossAssembly)
             {
-                // Not a helper — fall through to base class
                 base.GenerateCode(methodCall);
                 return;
             }
@@ -2625,18 +2951,21 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // so that the kernel's _sharedMemorySize accounts for the helper's allocas).
             // Only set up ONCE per unique helper — multiple calls to the same helper
             // share the same shared memory region.
-            bool alreadySetup = _setupSharedHelpers.Contains(targetMethod);
-            if (!alreadySetup)
+            if (registeredHelper)
             {
-                // Also check by name (generic specializations may differ by reference)
-                foreach (var m in _setupSharedHelpers)
-                    if (m.Name == targetMethod.Name) { alreadySetup = true; break; }
-            }
-            if (!alreadySetup)
-            {
-                _setupSharedHelpers.Add(targetMethod);
-                SetupSharedAllocations(helperAllocas.SharedAllocations, isDynamic: false);
-                SetupSharedAllocations(helperAllocas.DynamicSharedAllocations, isDynamic: true);
+                bool alreadySetup = _setupSharedHelpers.Contains(targetMethod);
+                if (!alreadySetup)
+                {
+                    // Also check by name (generic specializations may differ by reference)
+                    foreach (var m in _setupSharedHelpers)
+                        if (m.Name == targetMethod.Name) { alreadySetup = true; break; }
+                }
+                if (!alreadySetup)
+                {
+                    _setupSharedHelpers.Add(targetMethod);
+                    SetupSharedAllocations(helperAllocas.SharedAllocations, isDynamic: false);
+                    SetupSharedAllocations(helperAllocas.DynamicSharedAllocations, isDynamic: true);
+                }
             }
 
             // Allocate result local if non-void
@@ -2649,13 +2978,19 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // Check if this is a multi-block helper with a pre-assigned function index.
             // Try direct reference lookup first, then name-based fallback
             // (generic specializations may create different Method instances).
-            bool foundHelper = _generatorArgs.HelperFunctionIndices.TryGetValue(targetMethod, out int helperFuncIdx);
-            if (!foundHelper)
+            // Cross-assembly accessors always use the inline path below.
+            bool foundHelper = false;
+            int helperFuncIdx = 0;
+            if (registeredHelper)
             {
-                foreach (var kv in _generatorArgs.HelperFunctionIndices)
+                foundHelper = _generatorArgs.HelperFunctionIndices.TryGetValue(targetMethod, out helperFuncIdx);
+                if (!foundHelper)
                 {
-                    if (kv.Key.Name == targetMethod.Name)
-                    { helperFuncIdx = kv.Value; foundHelper = true; break; }
+                    foreach (var kv in _generatorArgs.HelperFunctionIndices)
+                    {
+                        if (kv.Key.Name == targetMethod.Name)
+                        { helperFuncIdx = kv.Value; foundHelper = true; break; }
+                    }
                 }
             }
             if (foundHelper)
@@ -2894,12 +3229,25 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 // Inline path: single-block or multi-block (nested SM fallback)
                 if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Inline] Inlining helper: {targetMethod.Name} ({targetMethod.Parameters.Count} params, {methodCall.Nodes.Length} args)");
 
-                // Map call arguments to helper's parameters
+                var savedInlineLocalMap = new List<(string ParamKey, bool HadEntry, uint PreviousLocal)>();
+
+                _inlineParamAliases.Clear();
+                for (int i = 0; i < targetMethod.Parameters.Count && i < methodCall.Nodes.Length; i++)
+                {
+                    if (targetMethod.Parameters[i] is global::ILGPU.IR.Values.Parameter hp)
+                        _inlineParamAliases[hp] = methodCall.Nodes[i].Resolve();
+                }
+
+                // Map call arguments to helper's parameters (restore after inline so
+                // helper param keys do not leak into the kernel's _localMap).
                 for (int i = 0; i < targetMethod.Parameters.Count && i < methodCall.Nodes.Length; i++)
                 {
                     var param = targetMethod.Parameters[i];
                     var arg = methodCall.Nodes[i].Resolve();
                     var paramKey = GetValueKey(param);
+
+                    bool hadEntry = _localMap.TryGetValue(paramKey, out uint previousLocal);
+                    savedInlineLocalMap.Add((paramKey, hadEntry, previousLocal));
 
                     if (_localMap.TryGetValue(GetValueKey(arg), out uint argLocal))
                     {
@@ -2908,10 +3256,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     }
                     else
                     {
-                        var paramWasmType = GetWasmType(param);
+                        // Struct kernel params are i32 scratch addresses in Wasm.
+                        byte paramWasmType = param.Type is StructureType
+                            ? WasmOpCodes.I32
+                            : GetWasmType(param);
                         var local = AllocateLocal(param, paramWasmType);
                         EmitGetLocal(arg);
                         WasmModuleBuilder.EmitLocalSet(Code, local);
+                        _localMap[paramKey] = local;
                         if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Inline]   param[{i}] '{paramKey}' -> new local_{local} (copied)");
                     }
                 }
@@ -2934,6 +3286,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                             WasmModuleBuilder.EmitLocalSet(Code, resultLocal.Value);
                         }
                     }
+
+                    foreach (var (paramKey, hadEntry, previousLocal) in savedInlineLocalMap)
+                    {
+                        if (hadEntry)
+                            _localMap[paramKey] = previousLocal;
+                        else
+                            _localMap.Remove(paramKey);
+                    }
+                    _inlineParamAliases.Clear();
                 }
                 else
                 {
@@ -3008,6 +3369,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     _blockCount = savedBlockCount;
                     _isStateMachine = savedIsStateMachine;
                     _currentBlockEmitIndex = savedCurrentBlockEmitIndex;
+
+                    foreach (var (paramKey, hadEntry, previousLocal) in savedInlineLocalMap)
+                    {
+                        if (hadEntry)
+                            _localMap[paramKey] = previousLocal;
+                        else
+                            _localMap.Remove(paramKey);
+                    }
+                    _inlineParamAliases.Clear();
                 }
 
                 if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Inline] Done inlining {targetMethod.Name}");
@@ -3156,14 +3526,43 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// <see cref="TraceWriteTargetToParameter"/> for tracking Store/Atomic write
         /// targets where pointer-walking is correct.
         /// </summary>
+        /// <summary>
+        /// Cross-assembly MethodCall inlining can bind callee <c>this</c> to a
+        /// <see cref="Load"/> of a struct snapshot instead of the kernel parameter.
+        /// </summary>
+        private static Value? PeelStructAccessRoot(Value root)
+        {
+            var current = root.Resolve();
+            for (int i = 0; i < 16 && current != null; i++)
+            {
+                if (current is global::ILGPU.IR.Values.Load load)
+                    current = load.Source.Resolve();
+                else if (current is ConvertValue cv)
+                    current = cv.Value.Resolve();
+                else if (current is AddressSpaceCast asc)
+                    current = asc.Value.Resolve();
+                else
+                    return current;
+            }
+
+            return current;
+        }
+
         private int TraceToParameter(Value source)
         {
-            var current = source;
+            var current = PeelStructAccessRoot(source);
             int depth = 0;
             while (current != null && depth < 20)
             {
-                if (current is global::ILGPU.IR.Values.Parameter)
+                if (current is global::ILGPU.IR.Values.Parameter p)
                 {
+                    if (_inlineParamAliases.TryGetValue(p, out var aliasedRoot))
+                    {
+                        current = aliasedRoot.Resolve();
+                        depth++;
+                        continue;
+                    }
+
                     for (int pi = 0; pi < Method.Parameters.Count; pi++)
                     {
                         if (Method.Parameters[pi] == current) return pi;
@@ -3173,6 +3572,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
                 if (current is GetField gf)
                     current = gf.ObjectValue.Resolve();
+                else if (current is global::ILGPU.IR.Values.Load load)
+                    current = load.Source.Resolve();
+                else if (current is ConvertValue cv)
+                    current = cv.Value.Resolve();
                 else if (current is NewView nv)
                     current = nv.Pointer.Resolve();
                 else if (current is AddressSpaceCast asc)
@@ -3197,7 +3600,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// </summary>
         private int TraceWriteTargetToParameter(Value source)
         {
-            var current = source;
+            var current = PeelStructAccessRoot(source);
             int depth = 0;
             while (current != null && depth < 20)
             {
@@ -3783,7 +4186,28 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// Used at barrier points in phase mode to preserve state across phase calls.
         /// Layout: scratchBase + _phaseStateOffset, one slot per local.
         /// </summary>
+        /// <summary>
+        /// Records that a full-locals SAVE block must be inserted at the current code
+        /// position. The block itself is emitted later (see <see cref="_saveAllLocalsInsertPoints"/>
+        /// and the deferred-insert pass at the end of body generation) so it captures the
+        /// FINAL local count — exactly mirroring the deferred restore prologue. Emitting
+        /// nothing inline is safe: a save leaves the Wasm value stack empty, so the
+        /// subsequent yield bookkeeping (continuation store, br) is unaffected, and the
+        /// block lands in front of it when inserted. Wasm uses structured control flow
+        /// (br depth, not byte offsets), so later byte insertion does not disturb branches.
+        /// </summary>
         private void EmitSaveAllLocals()
+        {
+            _saveAllLocalsInsertPoints.Add(Code.Count);
+        }
+
+        /// <summary>
+        /// Emits the actual save-all-locals byte sequence into <paramref name="target"/>.
+        /// Mirror of <see cref="EmitRestoreAllLocalsTo"/> — same <c>_locals</c> list, same
+        /// type-stepped offsets from <see cref="_phaseStateOffset"/> — so save and restore
+        /// are symmetric by construction.
+        /// </summary>
+        private void EmitSaveAllLocalsTo(List<byte> target)
         {
             int offset = _phaseStateOffset;
             for (int i = 0; i < _locals.Count; i++)
@@ -3792,29 +4216,29 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 byte type = _locals[i].Type;
 
                 // Address = scratchBase + offset
-                WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
-                WasmModuleBuilder.EmitI32Const(Code, offset);
-                Code.Add(WasmOpCodes.I32Add);
+                WasmModuleBuilder.EmitLocalGet(target, _scratchBaseLocal);
+                WasmModuleBuilder.EmitI32Const(target, offset);
+                target.Add(WasmOpCodes.I32Add);
 
                 // Value to store
-                WasmModuleBuilder.EmitLocalGet(Code, localIdx);
+                WasmModuleBuilder.EmitLocalGet(target, localIdx);
 
                 switch (type)
                 {
                     case WasmOpCodes.I32:
-                        WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store, 2, 0);
+                        WasmModuleBuilder.EmitStore(target, WasmOpCodes.I32Store, 2, 0);
                         offset += 4;
                         break;
                     case WasmOpCodes.I64:
-                        WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I64Store, 3, 0);
+                        WasmModuleBuilder.EmitStore(target, WasmOpCodes.I64Store, 3, 0);
                         offset += 8;
                         break;
                     case WasmOpCodes.F32:
-                        WasmModuleBuilder.EmitStore(Code, WasmOpCodes.F32Store, 2, 0);
+                        WasmModuleBuilder.EmitStore(target, WasmOpCodes.F32Store, 2, 0);
                         offset += 4;
                         break;
                     case WasmOpCodes.F64:
-                        WasmModuleBuilder.EmitStore(Code, WasmOpCodes.F64Store, 3, 0);
+                        WasmModuleBuilder.EmitStore(target, WasmOpCodes.F64Store, 3, 0);
                         offset += 8;
                         break;
                 }
@@ -4113,9 +4537,163 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         #region Helpers
 
-        /// <summary>
-        /// Checks if an IR type is an ArrayView type.
-        /// </summary>
+        private sealed class BodyStructFieldInfoWasm
+        {
+            public int FieldIndex { get; set; }
+            public bool IsView { get; set; }
+            public bool IsViewMetadata { get; set; }
+            public bool IsScalar { get; set; }
+        }
+
+        private static bool IsViewFieldType(TypeNode type)
+        {
+            if (type is AddressSpaceType)
+                return true;
+            if (type is StructureType st
+                && st.NumFields > 0
+                && (st.Fields[0] is AddressSpaceType
+                    || st.Fields[0].ToString().Contains("View", StringComparison.Ordinal)))
+                return true;
+            return type.ToString().Contains("View", StringComparison.Ordinal);
+        }
+
+        private void ScanBodyStructParams()
+        {
+            _bodyStructFields.Clear();
+            foreach (var param in Method.Parameters)
+            {
+                if (param.ParameterType is not StructureType st || !IsBodyStruct(st))
+                    continue;
+
+                var fields = new List<BodyStructFieldInfoWasm>(st.NumFields);
+                int viewMetadataPhase = 0;
+                for (int fi = 0; fi < st.NumFields; fi++)
+                {
+                    var fieldType = st.Fields[fi];
+                    bool isView = IsViewFieldType(fieldType);
+                    bool isViewMetadata = false;
+                    if (isView)
+                        viewMetadataPhase = 1;
+                    else if (viewMetadataPhase == 1)
+                    {
+                        if (fieldType.ToString().Contains("Int64", StringComparison.Ordinal))
+                        {
+                            isViewMetadata = true;
+                            viewMetadataPhase = 2;
+                        }
+                        else
+                            viewMetadataPhase = 0;
+                    }
+                    else if (viewMetadataPhase == 2)
+                    {
+                        if (fieldType.ToString().Contains("Int8", StringComparison.Ordinal))
+                        {
+                            isViewMetadata = true;
+                            viewMetadataPhase = 0;
+                        }
+                        else
+                            viewMetadataPhase = 0;
+                    }
+
+                    fields.Add(new BodyStructFieldInfoWasm
+                    {
+                        FieldIndex = fi,
+                        IsView = isView,
+                        IsViewMetadata = isViewMetadata,
+                        IsScalar = !isView && !isViewMetadata && fieldType is PrimitiveType,
+                    });
+                }
+
+                _bodyStructFields[param.Index] = fields;
+            }
+        }
+
+        private static bool IsBodyStruct(StructureType st)
+        {
+            if (IsTensorViewLikeBodyStruct(st))
+                return true;
+
+            int viewFieldCount = 0;
+            for (int i = 0; i < st.NumFields; i++)
+            {
+                if (IsViewFieldType(st.Fields[i]))
+                    viewFieldCount++;
+            }
+
+            if (viewFieldCount == 0)
+                return false;
+            if (viewFieldCount >= 2)
+                return true;
+
+            if (st.NumFields > 0 && IsViewFieldType(st.Fields[0]))
+            {
+                if (st.NumFields == 3 || st.NumFields == 4 || st.NumFields == 6)
+                    return false;
+            }
+
+            return true;
+        }
+
+        private bool TryResolveBodyStructField(
+            GetField value,
+            out global::ILGPU.IR.Values.Parameter bodyParam,
+            out BodyStructFieldInfoWasm info,
+            out int chainDepth)
+        {
+            bodyParam = null!;
+            info = null!;
+            chainDepth = 0;
+            if (!TryFindBodyStructRoot(value, out bodyParam, out info, out chainDepth))
+                return false;
+            return info.IsView;
+        }
+
+        private bool TryFindBodyStructRoot(
+            GetField value,
+            out global::ILGPU.IR.Values.Parameter bodyParam,
+            out BodyStructFieldInfoWasm rootFieldInfo,
+            out int chainDepth)
+        {
+            bodyParam = null!;
+            rootFieldInfo = null!;
+            chainDepth = 0;
+
+            Value? current = value;
+            int outerFi = -1;
+            int depth = 0;
+            while (current != null && depth < 20)
+            {
+                depth++;
+                if (current is not GetField gf)
+                    return false;
+
+                outerFi = gf.FieldSpan.Index;
+                current = PeelStructAccessRoot(gf.ObjectValue);
+                if (current is global::ILGPU.IR.Values.Parameter param)
+                {
+                    if (_inlineParamAliases.TryGetValue(param, out var aliasedRoot))
+                    {
+                        current = aliasedRoot.Resolve();
+                        continue;
+                    }
+
+                    if (param.ParameterType is not StructureType st || !IsBodyStruct(st))
+                        return false;
+                    if (!_bodyStructFields.TryGetValue(param.Index, out var fields))
+                        return false;
+                    if (outerFi < 0 || outerFi >= fields.Count)
+                        return false;
+
+                    bodyParam = param;
+                    rootFieldInfo = fields[outerFi];
+                    chainDepth = depth;
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         /// <summary>
         /// Recursively flattens an IR StructureType into its leaf fields.
         /// ILGPU's StructureType already stores flattened fields (no nested structs),
@@ -4178,12 +4756,40 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             return false;
         }
 
+        /// <summary>
+        /// TensorView&lt;T&gt; body structs embed one view plus Int32 shape fields.
+        /// They must use the scalar-struct scratch path, not the single-view param path.
+        /// </summary>
+        private static bool IsTensorViewLikeBodyStruct(StructureType st)
+        {
+            int viewFieldCount = 0;
+            int int32FieldCount = 0;
+            for (int i = 0; i < st.NumFields; i++)
+            {
+                var field = st.Fields[i];
+                if (field is AddressSpaceType
+                    || (field is StructureType fst
+                        && fst.NumFields > 0
+                        && (fst.Fields[0] is AddressSpaceType
+                            || fst.Fields[0].ToString().Contains("View"))))
+                    viewFieldCount++;
+                else if (field is PrimitiveType pt
+                    && pt.BasicValueType == BasicValueType.Int32)
+                    int32FieldCount++;
+            }
+
+            return viewFieldCount == 1 && int32FieldCount >= 4;
+        }
+
         protected bool IsViewType(TypeNode type)
         {
             if (type is AddressSpaceType)
                 return true;
             if (type is StructureType structType)
             {
+                if (IsTensorViewLikeBodyStruct(structType))
+                    return false;
+
                 // A view StructureType (ArrayView<T>, ArrayView1D<T, TStride>) has
                 // EXACTLY ONE AddressSpaceType DirectField (the pointer). Wrapper
                 // structs like ArrayView1D add primitive metadata fields (Extent,

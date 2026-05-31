@@ -506,6 +506,7 @@ namespace SpawnDev.ILGPU.Wasm
                     _lastImplicitIndexDebug = $"[D{_dispatchCount}] hasImpl={hasImplicitIndex}, dim={dimension}, argCnt={args.Length}, piCnt={paramInfos.Count}";
                 else
                     _lastImplicitIndexDebug = $"[D{_dispatchCount}]";
+                _lastStructSerialDebug = null;
                 int argOffset = hasImplicitIndex ? 1 : 0;
 
                 // Collect UNIQUE buffers (dedup SubViews of the same buffer) and
@@ -517,6 +518,8 @@ namespace SpawnDev.ILGPU.Wasm
                 var viewSubOffsets = new List<int>();   // per-view: SubView byte offset
                 var viewElemSizes = new List<int>();    // per-view: bytes per element (from view's generic arg)
                 var wasmArgs = new List<(bool isBuffer, WasmMemoryBuffer? buffer, int length, int stride, int stride2, object? value)>();
+                // IR param index for each struct wasmArg (wasmArgIdx drifts when body-struct views expand).
+                var wasmStructIrParamIndices = new List<int>();
 
                 // Per-buffer host-write counter snapshots taken at copy-IN time.
                 // The copy-OUT phase compares each buffer's current `HostWriteCounter`
@@ -608,14 +611,12 @@ namespace SpawnDev.ILGPU.Wasm
                             // to copy-all when the codegen trace found no writes to any
                             // buffer-typed param (defensive — don't break unknown kernels).
                             //
-                            // Match against the codegen's IR-param-index space. ILGPU IR's
-                            // kernel function always has the implicit Index at Method.Parameters[0],
-                            // and user parameters start at Method.Parameters[1]. The dispatcher's
-                            // `paramIdx` is the user-arg-index (0-based across user params, NOT
-                            // counting the Index). Translating: IR param index = paramIdx + 1.
-                            // This holds whether or not args[0] is the implicit Index — the IR
-                            // shape is consistent regardless of how args[] is constructed.
-                            int irParamIdx = paramIdx + 1;
+                            // Match against the codegen IR-param-index space. Use the offset
+                            // recorded at compile time (SetupParameters startIdx): 1 when IR
+                            // param[0] is the implicit Index mapped to globalIdx, 0 when IR
+                            // param[0] is LongIndex1D extent (GridStrideLoopKernel) or an
+                            // explicit body struct at param[0].
+                            int irParamIdx = paramIdx + compiledKernel.IrUserParamIndexOffset;
                             if (compiledKernel.WrittenParamIndices.Contains(irParamIdx))
                                 writtenBufferIndices.Add(bufIdx);
                             if (WasmBackend.VerboseLogging)
@@ -749,6 +750,37 @@ namespace SpawnDev.ILGPU.Wasm
                             }
                         }
 
+                        // Map dispatch user-arg index to IR parameter index (see IrUserParamIndexOffset).
+                        int irParamIndexForArg = paramIdx + compiledKernel.IrUserParamIndexOffset;
+                        WasmParamInfo? piForArg = null;
+                        foreach (var piScan in paramInfos)
+                        {
+                            if (piScan.Index == irParamIndexForArg)
+                            {
+                                piForArg = piScan;
+                                break;
+                            }
+                        }
+
+                        if (!decomposed && piForArg?.IsBodyStruct == true && args[i] != null)
+                        {
+                            AddBodyStructExpandedViewWasmArgs(
+                                args[i],
+                                i,
+                                paramIdx,
+                                paramInfos,
+                                compiledKernel,
+                                wasmArgs,
+                                uniqueBuffers,
+                                bufferInfos,
+                                bufferRanges,
+                                viewBufferIdx,
+                                viewSubOffsets,
+                                viewElemSizes,
+                                writtenBufferIndices,
+                                dispNum);
+                        }
+
                         if (!decomposed)
                         {
                             // Unwrap LongIndex types to their underlying long value
@@ -759,6 +791,12 @@ namespace SpawnDev.ILGPU.Wasm
                             else if (arg is LongIndex3D)
                                 throw new NotSupportedException("LongIndex3D kernel parameters are not yet supported on the Wasm backend. Use LongIndex1D or restructure the kernel.");
                             wasmArgs.Add((false, null, 0, 0, 0, arg));
+                            if (arg != null && (
+                                (arg.GetType().IsValueType && !arg.GetType().IsPrimitive && !arg.GetType().IsEnum)
+                                || arg.GetType().IsDefined(typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute), false)))
+                            {
+                                wasmStructIrParamIndices.Add(piForArg?.Index ?? irParamIndexForArg);
+                            }
                         }
                     }
                 }
@@ -1108,6 +1146,7 @@ namespace SpawnDev.ILGPU.Wasm
                 var flatArgs = new List<string>();
                 int viewIndex = 0; // tracks views for SubView offset lookup
                 int wasmArgIdx = 0; // tracks current wasmArgs index for IR param lookup
+                int structSerializeIdx = 0;
                 foreach (var (isBuffer, buffer, length, stride, stride2, value) in wasmArgs)
                 {
                     if (isBuffer)
@@ -1141,8 +1180,19 @@ namespace SpawnDev.ILGPU.Wasm
                             // Check if the IR treats this as a scalar (e.g., SpecializedValue<int>
                             // is a struct wrapping an int, but the IR lowers it to PrimitiveType).
                             // In that case, unwrap to the inner value instead of serializing to scratch.
-                            int irIdx = wasmArgIdx + argOffset;
-                            var irParam = (irIdx < paramInfos.Count) ? paramInfos[irIdx] : null;
+                            int irIdx = structSerializeIdx < wasmStructIrParamIndices.Count
+                                ? wasmStructIrParamIndices[structSerializeIdx]
+                                : structSerializeIdx + compiledKernel.IrUserParamIndexOffset;
+                            structSerializeIdx++;
+                            WasmParamInfo? irParam = null;
+                            foreach (var pi in paramInfos)
+                            {
+                                if (pi.Index == irIdx)
+                                {
+                                    irParam = pi;
+                                    break;
+                                }
+                            }
                             if (irParam != null && irParam.IsScalar && irParam.StructFields == null && irParam.StructSize == 0)
                             {
                                 // IR expects a scalar, but CLR has a wrapper struct. Extract first field.
@@ -1172,10 +1222,10 @@ namespace SpawnDev.ILGPU.Wasm
                             // Look up the IR struct layout from the compiled kernel's param info.
                             // This tells us the exact byte offset and type of each leaf field
                             // as the kernel expects them in scratch memory.
-                            int irParamIdx = wasmArgIdx + argOffset; // adjust for implicit index skip
-                            var irLayout = (irParamIdx < paramInfos.Count) ? paramInfos[irParamIdx].StructFields : null;
-                            int irStructSize = (irParamIdx < paramInfos.Count) ? paramInfos[irParamIdx].StructSize : 0;
-                            var piEntry = (irParamIdx < paramInfos.Count) ? paramInfos[irParamIdx] : null;
+                            int irParamIdx = irIdx;
+                            var irLayout = irParam?.StructFields;
+                            int irStructSize = irParam?.StructSize ?? 0;
+                            var piEntry = irParam;
                             _lastImplicitIndexDebug += $" | STRUCT: idx={wasmArgIdx},irIdx={irParamIdx},piCnt={paramInfos.Count},hasLayout={irLayout != null},irSize={irStructSize},piIsView={piEntry?.IsView},piIsScalar={piEntry?.IsScalar},piName={piEntry?.Name},irType={piEntry?.IRTypeName}";
 
                             byte[] bytes;
@@ -1183,68 +1233,141 @@ namespace SpawnDev.ILGPU.Wasm
                             if (irLayout != null && irLayout.Count > 0 && irStructSize > 0)
                             {
                                 // Manual serialization using IR layout.
-                                // Flatten the CLR struct depth-first to get primitive values
-                                // in the same order as the IR's flattened fields.
                                 structSize = irStructSize;
                                 bytes = new byte[structSize];
-                                var flatValues = new List<object>();
-                                FlattenCLRStruct(value, flatValues);
+                                bool isDisplayClass = !value.GetType().IsValueType
+                                    && value.GetType().IsDefined(typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute), false);
 
-                                _lastImplicitIndexDebug += $" | IRLayout: fields={irLayout.Count}, size={structSize}, clrFlat={flatValues.Count}";
-                                // Type-matched serialization: CLR/IR field ordering may differ
-                                // for complex structs. Match IR view-pointer fields with CLR
-                                // IArrayView values, and non-view fields with primitives.
-                                var viewValues = flatValues.Where(v => v is IArrayView).ToList();
-                                var nonViewValues = flatValues.Where(v => !(v is IArrayView)).ToList();
-                                int viewIdx = 0, nonViewIdx = 0;
-                                for (int fi = 0; fi < irLayout.Count; fi++)
+                                if (isDisplayClass)
                                 {
-                                    var field = irLayout[fi];
-                                    object? fieldVal;
-                                    if (field.IsViewPtr && viewIdx < viewValues.Count)
-                                        fieldVal = viewValues[viewIdx++];
-                                    else if (!field.IsViewPtr && nonViewIdx < nonViewValues.Count)
-                                        fieldVal = nonViewValues[nonViewIdx++];
-                                    else
-                                        fieldVal = null;
-                                    _lastImplicitIndexDebug += $" | f{fi}:off={field.Offset},t=0x{field.WasmType:X2},vp={field.IsViewPtr},v={fieldVal?.GetType().Name}";
-
-                                    if (field.IsViewPtr)
+                                    // Capturing-lambda display class (reference type): cannot
+                                    // Unsafe.Write or SizeOf the CLR type. Walk capture fields in
+                                    // declaration order and pack into IR layout (matches WebGL path).
+                                    var captFields = value.GetType().GetFields(
+                                        BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                                    int captIdx = 0;
+                                    for (int fi = 0; fi < irLayout.Count; fi++)
                                     {
-                                        // View pointer: write the Wasm buffer offset
-                                        if (fieldVal is IArrayView iavInner)
-                                        {
-                                            var wasmBuf = iavInner.Buffer as WasmMemoryBuffer;
-                                            if (wasmBuf != null && uniqueBuffers.TryGetValue(wasmBuf, out int bufIdxInner))
-                                            {
-                                                int wasmOffset = bufferOffsets[bufIdxInner];
-                                                // Get SubView byte offset from view's Index
-                                                int subOffset = 0;
-                                                try
-                                                {
-                                                    var viewType = fieldVal.GetType();
-                                                    var baseProp = viewType.GetProperty("BaseView");
-                                                    object viewObj = baseProp != null ? baseProp.GetValue(fieldVal)! : fieldVal;
-                                                    var indexProp = viewObj.GetType().GetProperty("Index",
-                                                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                                                    if (indexProp?.GetValue(viewObj) is long idx)
-                                                        subOffset = (int)(idx * iavInner.Buffer.ElementSize);
-                                                }
-                                                catch { }
-                                                BitConverter.TryWriteBytes(bytes.AsSpan(field.Offset), wasmOffset + subOffset);
-                                            }
-                                        }
-                                        else
-                                        {
-                                            // Fallback: write 0
-                                            BitConverter.TryWriteBytes(bytes.AsSpan(field.Offset), 0);
-                                        }
-                                    }
-                                    else
-                                    {
-                                        // Primitive value: write at the IR offset
+                                        var field = irLayout[fi];
+                                        if (field.IsViewPtr)
+                                            continue;
+                                        object? fieldVal = captIdx < captFields.Length
+                                            ? captFields[captIdx++].GetValue(value)
+                                            : null;
                                         WritePrimitiveToBytes(bytes, field.Offset, fieldVal, field.WasmType, field.Size);
                                     }
+                                    _lastImplicitIndexDebug += $" | DisplayClass: fields={captFields.Length}, irLeaves={irLayout.Count}";
+                                }
+                                else
+                                {
+                                int clrStructSize = global::ILGPU.Interop.SizeOf(value.GetType());
+                                _lastImplicitIndexDebug += $" | IRLayout: fields={irLayout.Count}, size={structSize}, clrSize={clrStructSize}";
+
+                                // Cross-assembly body structs (e.g. SpawnDev.ILGPU.ML.Tensors.TensorView<T>)
+                                // share the same CLR sequential layout as same-assembly mirrors, but
+                                // CLR flatten order can diverge from IR leaf order. When sizes match,
+                                // blit the CLR struct verbatim then patch only the view-pointer slots.
+                                if (clrStructSize == irStructSize)
+                                {
+                                    var handle = System.Runtime.InteropServices.GCHandle.Alloc(
+                                        bytes, System.Runtime.InteropServices.GCHandleType.Pinned);
+                                    try
+                                    {
+                                        unsafe
+                                        {
+                                            byte* ptr = (byte*)handle.AddrOfPinnedObject();
+                                            var unsafeWriteMethod = _unsafeWriteCache.GetOrAdd(value.GetType(), t =>
+                                                typeof(Unsafe)
+                                                    .GetMethod("Write", BindingFlags.Public | BindingFlags.Static)!
+                                                    .MakeGenericMethod(t));
+                                            unsafeWriteMethod.Invoke(null, new object[] { (IntPtr)ptr, value });
+                                        }
+                                    }
+                                    finally { handle.Free(); }
+
+                                    var viewsInStruct = new List<IArrayView>();
+                                    CollectArrayViewsFromStruct(value, viewsInStruct);
+                                    int viewPatchIdx = 0;
+                                    for (int fi = 0; fi < irLayout.Count; fi++)
+                                    {
+                                        var field = irLayout[fi];
+                                        if (!field.IsViewPtr)
+                                            continue;
+
+                                        IArrayView? iavInner = viewPatchIdx < viewsInStruct.Count
+                                            ? viewsInStruct[viewPatchIdx++]
+                                            : null;
+                                        WriteViewPtrToStructBytes(
+                                            bytes, field.Offset, field.Size, iavInner,
+                                            uniqueBuffers, bufferOffsets);
+                                    }
+                                }
+                                else
+                                {
+                                    var flatValues = new List<object>();
+                                    FlattenCLRStruct(value, flatValues);
+
+                                    _lastImplicitIndexDebug += $" | clrFlat={flatValues.Count}";
+
+                                    // When CLR flatten count matches IR leaf count, write field-by-field
+                                    // in lockstep. The view/non-view split path mis-orders cross-assembly
+                                    // TensorView<T> (clrSize 64, irSize 48, flatCount 8) — surfaced by
+                                    // ML_TensorView_Half_RoundTrip_CrossAssembly (2026-05-28).
+                                    if (flatValues.Count == irLayout.Count)
+                                    {
+                                        var viewsInStruct = new List<IArrayView>();
+                                        CollectArrayViewsFromStruct(value, viewsInStruct);
+                                        int viewPatchIdx = 0;
+                                        for (int fi = 0; fi < irLayout.Count; fi++)
+                                        {
+                                            var field = irLayout[fi];
+                                            object? fieldVal = field.IsViewPtr
+                                                ? (viewPatchIdx < viewsInStruct.Count ? viewsInStruct[viewPatchIdx++] : null)
+                                                : flatValues[fi];
+                                            _lastImplicitIndexDebug += $" | f{fi}:off={field.Offset},t=0x{field.WasmType:X2},vp={field.IsViewPtr},v={fieldVal?.GetType().Name}";
+
+                                            if (field.IsViewPtr)
+                                            {
+                                                WriteViewPtrToStructBytes(
+                                                    bytes, field.Offset, field.Size, fieldVal as IArrayView,
+                                                    uniqueBuffers, bufferOffsets);
+                                            }
+                                            else
+                                            {
+                                                WritePrimitiveToBytes(bytes, field.Offset, fieldVal, field.WasmType, field.Size);
+                                            }
+                                        }
+                                    }
+                                    else
+                                    {
+                                        var viewValues = flatValues.Where(v => v is IArrayView).ToList();
+                                        var nonViewValues = flatValues.Where(v => !(v is IArrayView)).ToList();
+                                        int viewIdx = 0, nonViewIdx = 0;
+                                        for (int fi = 0; fi < irLayout.Count; fi++)
+                                        {
+                                            var field = irLayout[fi];
+                                            object? fieldVal;
+                                            if (field.IsViewPtr && viewIdx < viewValues.Count)
+                                                fieldVal = viewValues[viewIdx++];
+                                            else if (!field.IsViewPtr && nonViewIdx < nonViewValues.Count)
+                                                fieldVal = nonViewValues[nonViewIdx++];
+                                            else
+                                                fieldVal = null;
+                                            _lastImplicitIndexDebug += $" | f{fi}:off={field.Offset},t=0x{field.WasmType:X2},vp={field.IsViewPtr},v={fieldVal?.GetType().Name}";
+
+                                            if (field.IsViewPtr)
+                                            {
+                                                WriteViewPtrToStructBytes(
+                                                    bytes, field.Offset, field.Size, fieldVal as IArrayView,
+                                                    uniqueBuffers, bufferOffsets);
+                                            }
+                                            else
+                                            {
+                                                WritePrimitiveToBytes(bytes, field.Offset, fieldVal, field.WasmType, field.Size);
+                                            }
+                                        }
+                                    }
+                                }
                                 }
                                 // TEMP: store view pointer debug info
                                 {
@@ -1255,7 +1378,7 @@ namespace SpawnDev.ILGPU.Wasm
                                         int val = df.Size >= 4 ? BitConverter.ToInt32(bytes, df.Offset) : bytes[df.Offset];
                                         vpDbg.Append($"[{dfi}]off={df.Offset},t={df.WasmType:X},vp={df.IsViewPtr},sz={df.Size},val={val} ");
                                     }
-                                    _lastStructSerialDebug = vpDbg.ToString();
+                                    _lastStructSerialDebug = (_lastStructSerialDebug ?? "") + $" | param{wasmArgIdx}@{structRegionBase + scratchCursor}:{vpDbg}";
                                 }
                             }
                             else if (value.GetType().IsValueType)
@@ -1525,11 +1648,13 @@ namespace SpawnDev.ILGPU.Wasm
 
             // Build the worker script
             string argStr = string.Join(", ", flatArgs);
+            int maxYieldIters = Math.Max(10000, compiledKernel.BarrierCount * Math.Max(phaseCount, 1) * 250);
             var workerScript = BuildWasmWorkerScript(
                 gridDimX, gridDimY, scratchBase, scratchPerThread,
                 sharedMemBase, barrierBase, fenceSlot,
                 groupSize, numGroups, hasBarriers, argStr,
                 dynamicSharedElements, workerCount, phaseCount,
+                maxYieldIters,
                 // Zero region covers shared memory + barrier counters only.
                 // MUST NOT include fence slots — the group barrier uses fenceSlot+16/+20
                 // immediately after the zero loop. If a slow worker zeroes the arrival
@@ -1849,6 +1974,7 @@ namespace SpawnDev.ILGPU.Wasm
             int dynamicSharedLength = 0,
             int workerCount = 1,
             int phaseCount = 1,
+            int maxYieldIters = 10000,
             int zeroRegionSize = 0)
         {
             // Produces an async function body string that is sent as the 'script' field
@@ -1906,16 +2032,10 @@ namespace SpawnDev.ILGPU.Wasm
                 sb.AppendLine($"    const groupGenIdx = {(fenceSlot + 20) >>> 2};");
                 sb.AppendLine("    let resumeMode = 0;");
                 sb.AppendLine("    let yieldIters = 0;");
-                // Variant C Step 5 (Trip 2026-05-27): tightened from 1,000,000 to 10,000.
-                // With Atomics.wait(Infinity)+producer notify, each yieldIter corresponds
-                // to one ACTUAL stalled barrier (one park, one wake). Realistic kernels
-                // under heavy contention yield O(barriers-that-actually-stall), which is
-                // bounded by total-barrier-count, not iteration-count. 10K provides O(1000x)
-                // headroom over the largest measured RadixSort barrier load, and fails fast
-                // on pathological cases (missed notify, dispatcher livelock) within ~1s
-                // instead of the old MAX*timeout walltime. If a legitimate kernel ever
-                // exceeds 10K yield events, that's a real bug worth surfacing.
-                sb.AppendLine("    const MAX_YIELD_ITERS = 10000;");
+                // Scale with kernel barrier load: under Fallout76-class CPU contention a single
+                // barrier crossing may need many park/wake cycles before all workers advance.
+                // Floor 10K catches missed-notify / livelock quickly on healthy machines.
+                sb.AppendLine($"    const MAX_YIELD_ITERS = {maxYieldIters};");
                 sb.AppendLine("    while (true) {");
                 sb.AppendLine("      try {");
                 sb.Append($"        dispatcher(threadStart, threadEnd, {numGroups}, {groupSize}, {gridDimX}, {gridDimY}, {scratchBase}, {scratchPerThread}, {sharedMemBase}, {barrierBase}, {dynamicSharedLength}, {zeroRegionSize}, {workerCount}, {fenceSlot}, yieldStateAddr, resumeMode");
@@ -1975,10 +2095,112 @@ namespace SpawnDev.ILGPU.Wasm
         }
 
         /// <summary>
-        /// Patches ArrayView pointer fields inside a serialized struct to use the
-        /// correct Wasm memory offsets. Without this, the serialized NativePtr (0)
-        /// causes kernels to write to address 0 instead of the buffer's actual location.
+        /// TensorView-style body structs: emit flat view kernel args (offset, length, strides)
+        /// before the struct-scratch arg so Wasm codegen can route GetField/LEA through view locals.
         /// </summary>
+        private void AddBodyStructExpandedViewWasmArgs(
+            object structArg,
+            int argsIndex,
+            int paramIdx,
+            List<WasmParamInfo> paramInfos,
+            WasmCompiledKernel compiledKernel,
+            List<(bool isBuffer, WasmMemoryBuffer? buffer, int length, int stride, int stride2, object? value)> wasmArgs,
+            Dictionary<WasmMemoryBuffer, int> uniqueBuffers,
+            List<(WasmMemoryBuffer buffer, int byteOffset)> bufferInfos,
+            List<(int minByte, int maxByte)> bufferRanges,
+            List<int> viewBufferIdx,
+            List<int> viewSubOffsets,
+            List<int> viewElemSizes,
+            HashSet<int> writtenBufferIndices,
+            int dispNum)
+        {
+            var views = new List<IArrayView>();
+            CollectArrayViewsFromStruct(structArg, views);
+            foreach (var iav in views)
+            {
+                var wasmBuf = iav.Buffer as WasmMemoryBuffer;
+                if (wasmBuf == null)
+                {
+                    wasmArgs.Add((false, null, 0, 0, 0, 0));
+                    continue;
+                }
+
+                if (!uniqueBuffers.TryGetValue(wasmBuf, out int bufIdx))
+                {
+                    bufIdx = bufferInfos.Count;
+                    uniqueBuffers[wasmBuf] = bufIdx;
+                    bufferInfos.Add((wasmBuf, 0));
+                    bufferRanges.Add((0, (int)wasmBuf.LengthInBytes));
+                }
+
+                viewBufferIdx.Add(bufIdx);
+
+                int irParamIdx = paramIdx + compiledKernel.IrUserParamIndexOffset;
+                if (compiledKernel.WrittenParamIndices.Contains(irParamIdx))
+                    writtenBufferIndices.Add(bufIdx);
+
+                int viewElemSizeForLength = wasmBuf.ElementSize;
+                int subViewByteOffset = 0;
+                try
+                {
+                    var viewType = iav.GetType();
+                    var baseProp = viewType.GetProperty("BaseView");
+                    object viewObj = baseProp != null ? baseProp.GetValue(iav)! : iav;
+                    var viewGenericType = viewObj.GetType();
+                    if (viewGenericType.IsGenericType)
+                    {
+                        var elemType = viewGenericType.GetGenericArguments()[0];
+                        int actualSize = global::ILGPU.Interop.SizeOf(elemType);
+                        if (actualSize > 0)
+                            viewElemSizeForLength = actualSize;
+                    }
+
+                    var indexProp = viewObj.GetType().GetProperty("Index",
+                        BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                    if (indexProp?.GetValue(viewObj) is long longIdx)
+                        subViewByteOffset = (int)(longIdx * viewElemSizeForLength);
+                }
+                catch { }
+
+                viewSubOffsets.Add(subViewByteOffset);
+                viewElemSizes.Add(viewElemSizeForLength);
+
+                int stride = 1;
+                int stride2 = 0;
+                var argType = iav.GetType();
+                var argCache = _strideCache.GetOrAdd(argType, t => new StrideReflectionCache
+                {
+                    StrideProp = t.GetProperty("Stride"),
+                });
+                if (argCache.StrideProp != null)
+                {
+                    var strideObj = argCache.StrideProp.GetValue(iav);
+                    if (strideObj != null)
+                    {
+                        var strideType = strideObj.GetType();
+                        if (argCache.YStrideProp == null && argCache.XStrideProp == null)
+                        {
+                            argCache.YStrideProp = strideType.GetProperty("YStride");
+                            argCache.XStrideProp = strideType.GetProperty("XStride");
+                            argCache.ZStrideProp = strideType.GetProperty("ZStride");
+                        }
+
+                        if (argCache.YStrideProp != null)
+                            stride = (int)argCache.YStrideProp.GetValue(strideObj)!;
+                        else if (argCache.XStrideProp != null)
+                            stride = (int)argCache.XStrideProp.GetValue(strideObj)!;
+
+                        if (argCache.ZStrideProp != null)
+                            stride2 = (int)argCache.ZStrideProp.GetValue(strideObj)!;
+                    }
+                }
+
+                if (WasmBackend.VerboseLogging)
+                    WasmBackend.Log($"[Wasm] BodyStruct expanded view arg[{argsIndex}]: length={iav.Length}, stride={stride}, stride2={stride2}");
+                wasmArgs.Add((true, wasmBuf, (int)iav.Length, stride, stride2, null));
+            }
+        }
+
         /// <summary>
         /// Recursively scans a struct for IArrayView fields and adds their
         /// buffers to the buffer collection (for copy-in/copy-out and NativePtr patching).
@@ -2082,7 +2304,7 @@ namespace SpawnDev.ILGPU.Wasm
                                 var indexProp = viewObj.GetType().GetProperty("Index",
                                     BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
                                 if (indexProp?.GetValue(viewObj) is long idx)
-                                    subOffset = (int)(idx * view.Buffer.ElementSize);
+                                    subOffset = (int)(idx * GetViewElementSizeBytes(view));
                             }
                             catch { }
 
@@ -2097,6 +2319,30 @@ namespace SpawnDev.ILGPU.Wasm
             {
                 WasmBackend.Log($"[Wasm-CRITICAL] PatchViewPointersInStruct FAILED: {ex.GetType().Name}: {ex.Message}");
             }
+        }
+
+        /// <summary>
+        /// Element size for SubView byte-offset math. Uses the view's generic element
+        /// type, not <see cref="MemoryBuffer.ElementSize"/> (can disagree after Cast).
+        /// </summary>
+        private static int GetViewElementSizeBytes(IArrayView view)
+        {
+            int elemSize = view.Buffer.ElementSize;
+            try
+            {
+                var viewType = view.GetType();
+                var baseProp = viewType.GetProperty("BaseView");
+                object viewObj = baseProp != null ? baseProp.GetValue(view)! : view;
+                var genericType = viewObj.GetType();
+                if (genericType.IsGenericType)
+                {
+                    int actualSize = global::ILGPU.Interop.SizeOf(genericType.GetGenericArguments()[0]);
+                    if (actualSize > 0)
+                        return actualSize;
+                }
+            }
+            catch { }
+            return elemSize;
         }
 
         private static void FindViewFieldsInStruct(
@@ -2130,6 +2376,75 @@ namespace SpawnDev.ILGPU.Wasm
                 {
                     try { runningOffset += System.Runtime.InteropServices.Marshal.SizeOf(field.FieldType); }
                     catch { runningOffset += IntPtr.Size; }
+                }
+            }
+        }
+
+        private static void WriteViewPtrToStructBytes(
+            byte[] bytes,
+            int fieldOffset,
+            int fieldSize,
+            IArrayView? fieldVal,
+            Dictionary<WasmMemoryBuffer, int> uniqueBuffers,
+            List<int> bufferOffsets)
+        {
+            if (fieldVal is IArrayView iavInner)
+            {
+                var wasmBuf = iavInner.Buffer as WasmMemoryBuffer;
+                if (wasmBuf != null && uniqueBuffers.TryGetValue(wasmBuf, out int bufIdxInner))
+                {
+                    int wasmOffset = bufferOffsets[bufIdxInner];
+                    int subOffset = 0;
+                    try
+                    {
+                        var viewType = fieldVal.GetType();
+                        var baseProp = viewType.GetProperty("BaseView");
+                        object viewObj = baseProp != null ? baseProp.GetValue(fieldVal)! : fieldVal;
+                        var indexProp = viewObj.GetType().GetProperty("Index",
+                            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        if (indexProp?.GetValue(viewObj) is long idx)
+                            subOffset = (int)(idx * GetViewElementSizeBytes(iavInner));
+                    }
+                    catch { }
+
+                    long ptr = wasmOffset + subOffset;
+                    if (fieldSize >= 8)
+                        BitConverter.TryWriteBytes(bytes.AsSpan(fieldOffset, 8), ptr);
+                    else
+                        BitConverter.TryWriteBytes(bytes.AsSpan(fieldOffset, Math.Min(4, fieldSize)), (int)ptr);
+                    return;
+                }
+            }
+
+            if (fieldSize >= 8)
+                BitConverter.TryWriteBytes(bytes.AsSpan(fieldOffset, 8), 0L);
+            else
+                BitConverter.TryWriteBytes(bytes.AsSpan(fieldOffset, Math.Min(4, fieldSize)), 0);
+        }
+
+        /// <summary>
+        /// Depth-first collection of every <see cref="IArrayView"/> in a struct, in
+        /// declaration order. Used to patch IR view-pointer slots after a CLR blit.
+        /// </summary>
+        private static void CollectArrayViewsFromStruct(object structValue, List<IArrayView> results)
+        {
+            var fields = structValue.GetType().GetFields(
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+
+            foreach (var field in fields)
+            {
+                object? val;
+                try { val = field.GetValue(structValue); }
+                catch { continue; }
+                if (val == null) continue;
+
+                if (val is IArrayView iav)
+                {
+                    results.Add(iav);
+                }
+                else if (val.GetType().IsValueType && !val.GetType().IsPrimitive && !val.GetType().IsEnum)
+                {
+                    CollectArrayViewsFromStruct(val, results);
                 }
             }
         }

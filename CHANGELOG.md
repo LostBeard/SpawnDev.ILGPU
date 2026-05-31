@@ -2,6 +2,20 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.10-local.12 (2026-05-28) - Wasm/WebGL Float16 constant codegen fix
+
+### Wasm + WebGL: `PrimitiveValue` for `Float16` must not use `Float32Value`
+
+`Float16` IR constants store raw half bits in `PrimitiveValue.rawValue`. Wasm codegen promoted them to `f32` via `Float32Value`, which reinterprets those bits as IEEE-754 single precision (garbage near zero). Kernels that assigned `(Half)1.5f` to `ArrayView1D<Half>` or `TensorView<Half>` wrote zeros while float paths worked.
+
+- `WasmCodeGenerator.GenerateCode(PrimitiveValue)`: emit `(float)value.Float16Value` when `BasicValueType == Float16`.
+- `GLSLCodeGenerator.GenerateCode(PrimitiveValue)`: same fix for WebGL.
+
+### Verification
+
+- `WasmTests.ML_ArrayView1D_Half_OneBuffer_Write`, `ML_ArrayView1D_Half_TwoBuffer_Sanity`, `ML_TensorView_Half_RoundTrip_CrossAssembly` pass.
+- `WebGLTests.ML_TensorView_Half_RoundTrip_CrossAssembly` pass.
+
 ## 4.9.10 (2026-05-28) - Wasm residual large-sort race fix (scan/broadcast hardening)
 
 ### Wasm: Group.Broadcast now validates per-group publish with an atomic tag handshake

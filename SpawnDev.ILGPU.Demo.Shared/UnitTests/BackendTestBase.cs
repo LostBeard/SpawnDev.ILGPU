@@ -80,15 +80,39 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         protected async Task RunTest(Func<Accelerator, Task> testBody)
         {
             var accelerator = await GetOrCreateAcceleratorAsync();
+            // DIAGNOSTIC (Tuvok 2026-05-29): per-pass radix counter localizer. No-op unless this
+            // is the Wasm accelerator AND RadixCounterLocalizer.Enabled. Captures each radix pass's
+            // Kernel1 bucket counts; on any test failure, appends a report pinpointing the FIRST
+            // pass whose counter sum diverges (Kernel1 miscount) vs "counts OK -> scan/scatter bug".
+            bool loc = RadixCounterLocalizer.Install(accelerator);
             try
             {
                 await testBody(accelerator);
             }
-            catch
+            catch (UnsupportedTestException)
             {
+                // A skip must pass through unchanged so the runner records a Skip, not a Fail.
+                // Never wrap it with the localizer report (doing so turned WebGPU-only tests into
+                // Wasm failures, since the localizer is installed on Wasm and wrapped the skip).
+                throw;
+            }
+            catch (Exception ex)
+            {
+                string locReport = null;
+                if (loc)
+                {
+                    try { (_, locReport) = await RadixCounterLocalizer.AnalyzeAsync(); }
+                    catch (Exception aex) { locReport = "[RadixCounterLocalizer] analyze failed: " + aex.Message; }
+                }
                 // GPU fault may have corrupted the context — invalidate cache
                 InvalidateCache();
+                if (locReport != null)
+                    throw new Exception(ex.Message + "\n\n" + locReport, ex);
                 throw;
+            }
+            finally
+            {
+                if (loc) RadixCounterLocalizer.Uninstall();
             }
         }
 

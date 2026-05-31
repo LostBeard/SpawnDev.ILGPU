@@ -1,5 +1,276 @@
 # Residual Wasm large-sort race — investigation notes (2026-05-25/26, Tuvok)
 
+## ★★★ SESSION 10 (2026-05-29 PM, Tuvok, lead) — engine-vs-pattern REPRO ran on real Chrome; barrier+fan-in read visibility is SOUND → boundary-read hypothesis REFUTED
+
+**This settles the decided Session-9 question.** Ran the approved repro on TJ's **actual Chrome
+148.0.7778.216 (HeadlessChrome, V8 ~14.8)** — the live engine where the residual fires — driven by
+a zero-dep CDP harness, NOT Node (whose V8 13.6 is irrelevant).
+
+**Repro design (faithful to RadixSortExtensions.cs:747 + WasmGroupExtensions.cs:98-102):** ONE writer
+(thread 0) writes a SINGLE reused shared slot BEFORE a generation barrier; every other worker does
+exactly ONE `Atomics.load` of that same slot AFTER the barrier, **no re-validate loop** — the exact
+fan-in shape of the radix scatter boundary read and the scan boundary reads (both are
+thread-0-serial-write → barrier → many-thread single-read; confirmed identical shape by reading both).
+Value rotates per iteration so any stale (prior-generation) read is detectable; double-barrier brackets
+slot reuse. Reads are `Atomics.load` (seq_cst) to match our `_hasBarriers` codegen.
+Files: `_research/v8-atomics-wait-bug/{spin_single_reused_slot.mjs, fanin.html, fanin-worker.js, run-fanin-chrome.mjs}`.
+
+**Three barrier variants tested, the decisive one being the PRODUCTION path under oversubscription:**
+- `spin` = bare seq_cst spin (our default at concurrency ≤ cores).
+- `yield-park` = **faithful production path**: spin then `Atomics.wait`-park (no timeout), OUTER while
+  re-checks gen on wake (WasmBackend dispatcher spin + WasmAccelerator Variant C park). This is what
+  actually runs when workers >> cores — i.e. Fallout76 multitasking, the exact residual condition.
+- `wait-loop` = pure wait/notify with the correct while-loop (TC39 #3800 Test-4 form), for contrast.
+
+**RESULTS (TJ's Chrome 148, two independent runs):**
+| config | workers | oversub | reads | stale | verdict |
+|--------|---------|---------|-------|-------|---------|
+| spin | 12 (=cores) | 1x | 3,300,000 | **0** | fresh (run A); run B timed out = bare-spin STARVATION, not visibility |
+| yield-park | 24 | 2x | 1,380,000 + 4,600,000 | **0** | fresh |
+| yield-park | 48 | 4x | 1,410,000 + 4,700,000 | **0** | fresh |
+| wait-loop | 24 | 2x | 1,380,000 + 4,600,000 | **0** | fresh |
+
+**~18 MILLION oversubscribed fan-in park/wake reads on the production barrier, ZERO stale.**
+
+**VERDICT — the boundary-read visibility hypothesis is REFUTED.** A single `Atomics.load` of a reused
+slot after the production yield-park barrier is FRESH on Chrome 148 even at 4x oversubscription. The
+Session-9 prime suspect (RadixSortExtensions.cs:747 direct boundary read + the scan boundary reads
+lacking a re-validate loop) is **NOT** the residual cause — those reads do not need hardening; the
+barrier already establishes the happens-before. Corollary: the ca20808 broadcast tag-handshake almost
+certainly did NOT fix anything for the residual (its benefit was already noted statistically unproven,
+~1.6% unchanged) — consistent with the read never having been the problem.
+
+**Magnitude argument that makes 0-stale dispositive (not just "low trials"):** TJ's failing sweeps show
+~21% mismatch (run1 `RadixSortDescending4M`: 2373 viol / 874,509 mismatches). A barrier-visibility
+failure at that magnitude would have lit up an 18M-read oversubscribed test thousands of times. Zero
+fires ⇒ the residual is a CATASTROPHIC-magnitude logic bug, not a sprinkle of read staleness.
+
+**REDIRECT — next suspects are KERNEL-SIDE / DISPATCH-SIDE (a wholesale-corruption mechanism), in order:**
+1. **Shared-memory slot lifetime / overlap.** `SetupSharedAllocations` (WasmKernelFunctionGenerator.cs:3680)
+   dedups by `GetValueKey(alloca)` SSA identity. The scan deliberately allocates 1024 vs 256 (WasmGroupExtensions.cs:90-92
+   comment) to stop the IR coalescing two distinct workspaces into one aliased alloca. AUDIT: do any two
+   distinct shared allocas in the radix presort kernel (scanMemory, scan workspace 1024, scanResults 256,
+   broadcast slots) collide on offset, or does fiber-phase re-entry reuse a slot a later phase already
+   clobbered? Wholesale offset overlap → ~21% wholesale corruption — fits far better than a read race.
+2. **Fiber state-save/restore across the scatter phases.** `pos` (Index1D) is recomputed after barrier
+   739 from shared reads; locals `bits/value/inRange/gridIdx/i` computed before the barrier must survive
+   a yield. S9 read EmitSaveAllLocals/RestoreAllLocalsTo as symmetric — but re-verify the SPECIFIC
+   presort kernel's phase boundaries (the `_dump`'d 018_kernel_6.wasm) don't drop or mis-offset a local
+   that feeds `pos`/`view[pos]=value` after a group yield under oversubscription.
+3. **kernelId collision is already fixed (monotonic, in TJ's build via 5647870 < ca20808) yet residual
+   persisted on 2026-05-29 — so it was NOT the whole story (the memory note predicted this).**
+
+**ARBITER ON THE REAL KERNEL:** the Session-9 detector `CrossGroupScanReuseDetectorTest` splits scan-read
+[0] / broadcast [1] / DIRECT-boundary-read [2] into separate atomic counters. Given THIS repro proves the
+engine doesn't return stale for any of those read shapes, if counter [2] ever fires on the real kernel under
+a contended sweep it means the slot was CLOBBERED (logic), not read-stale (engine) — pointing straight at
+suspect #1/#2. Run it in TJ's FO76 2-concurrent sweep.
+
+**Working tree:** repro files added under `_research/` (research artifacts, not library). No library/codegen
+change — Rule 4b: the proven racing read was the hypothesis under test, and it is now REFUTED, so there is
+nothing to "fix" on the read path. Detectors from S9 remain uncommitted as regression guards.
+
+### SESSION 10 follow-up — scoped PMT under live FO76 + fiber save/restore ASYMMETRY found
+
+**Empirical run (scoped PMT `RadixSortDescendingWithSentinels`, all backends, under TJ's live FO76 100%-core contention):**
+`_ilgpudump/playwright-latest.json` —
+- **Wasm: PASS but 144,252 ms** (normally seconds). The 144s = workers yielding/parking *heavily* under
+  FO76 → the fiber save/restore path was exercised MAXIMALLY and still produced correct output. So the
+  residual is rare even under heavy yielding (~1/7), not caught in one run.
+- **CPU: "Fail" but durationMs=600,203 = the 10:00 Phase-A cap → it TIMED OUT, starved by FO76 (CPU ILGPU
+  spawns threads that never got scheduled). NOT a sort violation.** Confirms the bug is **Wasm-specific**,
+  not in the shared radix algorithm. (Generic "Test run failed" w/ no assertion = lost-output/timeout
+  signature per PMT CLAUDE.md, not a real failure.)
+- WebGPU / WebGPUNoSubgroups / CUDA / OpenCL: PASS. WebGL: skip.
+
+**Conclusion:** chasing the intermittent Wasm residual by looping PMT is low-yield (≤1/7) and fights FO76;
+TJ's 2-concurrent FO76 sweep is the reliable repro. Pin the mechanism by reading instead.
+
+**FIBER SAVE/RESTORE COUNT ASYMMETRY (structurally confirmed by reading — the lead non-barrier suspect):**
+- `EmitSaveAllLocals` (WasmKernelFunctionGenerator.cs:4156) is emitted **INLINE** at each barrier/yield
+  site (call sites 2481, 3077, 3114, 4321) and loops `for i in 0.._locals.Count` — i.e. however many
+  locals exist *at that point in the IR walk*.
+- Locals are allocated **lazily mid-walk** (e.g. `helperPhaseLocal`/`helperScratchBaseLocal` at 3017/3022).
+- The **restore prologue is DEFERRED**: built once at the END with the FINAL `_locals.Count`
+  (`EmitRestoreAllLocalsTo(prologueCode)` at 1368) and `InsertRange`'d at each phase entry (1395).
+- ⇒ A save at an EARLY barrier writes FEWER slots than a later phase's restore READS. Any local allocated
+  after that barrier is restored from a slot the early save never wrote (stale from a prior group's
+  later-phase save, or zero-init scratch). `_phaseStateOffset` is fixed so per-local offsets are stable;
+  the bug is purely the COUNT mismatch.
+- **Live-or-benign?** For radix's specific allocation order it *appears* benign (late locals like `pos`
+  are recomputed in-phase; loop-carried `gridIdx` is allocated before all barriers, so every save includes
+  it; `helperPhaseLocal` is used only in its own later phase). I could NOT prove it's the active residual
+  by reading — but it IS a textbook latent correctness bug: save/restore must be symmetric **by
+  construction**, not by accident of allocation order. Under heavy yielding (FO76) a single late-allocated
+  loop-carried local read at a phase top would corrupt wholesale — matching the residual's profile.
+
+**FIX IMPLEMENTED (TJ approved 2026-05-29, "implement now"):** `WasmKernelFunctionGenerator.cs` — saves are
+now DEFERRED exactly like the restore prologue. `EmitSaveAllLocals()` no longer emits inline; it records the
+current `Code.Count` in `_saveAllLocalsInsertPoints`. The actual bytes are produced by new
+`EmitSaveAllLocalsTo(target)` (mirror of `EmitRestoreAllLocalsTo`). At end-of-body-generation (after the
+final local count is known) a single full-count save block is built and `InsertRange`'d at every recorded
+save site; the restore prologue + all save blocks are inserted in ONE pass sorted by DESCENDING byte
+position so indices stay valid (inserting back-to-front only shifts higher positions). `_saveAllLocalsInsertPoints`
+is `Clear()`ed at the start of each function's state-machine generation (kernel + each helper share the
+generator's fields). Net effect: every save writes the SAME 277 locals at the SAME offsets the restore reads
+→ symmetric by construction. Wasm structured control flow (br depth, not byte offsets) makes byte insertion
+safe — the existing restore-prologue InsertRange already relies on this.
+
+**Why this is a no-regression-by-construction change:** deferred save emits IDENTICAL bytes at the IDENTICAL
+byte position as the old inline save, only with the final count instead of the partial count. Stores are
+stack-neutral; scratch was already reserved for the full count (`ComputePhaseStateSize`), so writing the
+full set uses exactly the reservation (the old inline saves UNDER-wrote it). **Build: green (exit 0).**
+
+**VALIDATION:**
+- (1) **no-regression — GREEN** (`PMT_FILTER=Detector`, under live FO76 contention): 14 pass / 0 fail / 2
+  WebGL-skip. **`WasmTests.CrossGroupScanReuseDetectorTest` PASS + `WasmTests.GridStrideScanStateDetectorTest`
+  PASS** (the latter is purpose-built for loop-carried-local survival across barriers — the exact path this
+  fix changes). All 6 backends green. The deferred-save fix did NOT break the fiber path.
+- (2) **residual — FIX DID NOT CLOSE IT.** TJ's FO76 2-concurrent sweep (2026-05-29 ~16:00) with the fix
+  CONFIRMED in the build (presort kernel grew **50,572 → 74,658 bytes** = the deferred full-count saves) STILL
+  failed. So the save/restore asymmetry was a real latent bug but **NOT the residual cause.** Keep the
+  hardening; resume the hunt. Failing instance (other concurrent instance passed 916/0/8):
+  - `RadixSortDescendingWithSentinels` — **TIMEOUT 241s** (livelock/starvation under contention).
+  - `RadixSortRepeatedResort` — **ObjectDisposed CASCADE** (disposed mid-dispatch, downstream of the timeout).
+  - `RadixSortDescendingOddCount` — **CATASTROPHIC CORRUPTION**: 1216 viol / 1.44M mismatches (96%), wrong from
+    **index 0 / group 0 / localPos 0**, the true-max values (9999976…) DISPLACED out of the top. magnitude >16
+    dominant (1.29M). ROOT=gpu.
+  - `RadixSortSpawnSceneSimulation` — MILD localized corruption (6 viol, group ~235, ±small, distinct256Groups=6).
+
+### SESSION 10 REDIRECT (post-FO76) — DISPATCH-LIFECYCLE race, NOT kernel-internal
+
+Exonerated so far (visibility/ordering/arrival/layout/save-asymmetry — all by reading + repro + the now-failed
+fix). The **ObjectDisposed-mid-dispatch** error + **wholesale corruption from index 0** point to a NEW layer:
+**inter-dispatch completion synchronization in `WasmAccelerator.DispatchToWorkers` / `RunKernelAsync`**
+(WasmAccelerator.cs ~1506/1863). RadixSort is MANY dispatches (per pass: Kernel1 count+presort → host scan of
+counter → Kernel2 scatter). If completion detection is racy under contention — host considers dispatch N done
+while a worker is still finishing (e.g. a heavily-yielded worker, or the "all workers posted done" count
+mis-fires) — then dispatch N+1 starts writing/reading buffers dispatch N hasn't drained → wholesale
+displacement from index 0. The ObjectDisposed cascade is the same lifecycle race surfacing as a teardown bug.
+This fits intermittent + contention-only + Wasm-only + wholesale better than any kernel-internal read race
+(which the repro proved sound). **NEXT: read `DispatchToWorkers` completion/await + the worker `done`/yield
+accounting in the JS worker loop (WasmAccelerator.cs ~2039) for a count/early-complete race.**
+The Sentinels TIMEOUT is a SEPARATE liveness issue (group/phase barrier starvation under extreme contention)
+that also produces the ObjectDisposed cascade on teardown.
+
+**UPDATE — dispatch-completion + worker→host-visibility BOTH largely EXONERATED:**
+- Host completion-await (`DispatchToWorkers` ~1832-1866) drains ALL worker tasks via WhenAny before returning;
+  dispatches serialized via `_pendingWork`. Persistent-handler stale-message guard (`if (tcs==null) return;` +
+  `CurrentTcs=null` after handling, lines 1545-1547) is correct for one-terminal-post-per-dispatch (the worker
+  JS loop posts done exactly once at yieldFlag==0 / on error; yields post nothing).
+- Worker→host SAB visibility: there IS a spec-level gap (worker posts `done` with NO release fence — line 2093;
+  host `CopyToHost` has NO acquire — WasmMemoryBuffer.cs:305). BUT it does NOT explain the corruption: (a) the
+  data is MISPLACED-VALID, not stale-garbage; (b) the `counter` is scanned by a GPU KERNEL on Wasm (scan routes
+  to CreateSingleGroupScan), so the host NEVER reads `counter` mid-sort — it's worker→worker (repro-proven
+  sound); (c) the host reads only the FINAL output, after `CopyToHostAsync`→`SynchronizeAsync` drains all
+  dispatches. So worker→host visibility is not the residual. (postMessage in V8 also acts as a fence in
+  practice.) NOT pursuing a fence fix here — no evidence it's the bug.
+
+**HONEST STATE: residual NOT root-caused.** Exonerated by reading/repro/the failed fix: barrier
+visibility/ordering/arrival, shared-mem layout, fiber save-asymmetry (fixed, didn't close it), dispatch
+completion, worker→host visibility. The corruption is a GENUINE GPU-side compute error in the multi-pass
+sort under contention (Kernel1 per-group counts, the scan kernel, or Kernel2 pos), intermittent, misplaced-valid.
+
+**DECISIVE NEXT STEP (uses EXISTING infra): per-pass counter localization.** RadixSortExtensions.cs:308 has a
+diagnostic hook "called after each radix sort pass with (bitIdx, counterView); counterView has 4*numGroups
+per-group bucket counts from Kernel1." Identifies the FIRST pass whose counter diverges → narrows the bug to a
+single pass + Kernel1-counts-vs-scan-vs-scatter.
+
+### SESSION 10 — PER-PASS COUNTER LOCALIZER BUILT + WIRED (uncommitted, build GREEN)
+
+**TJ caught a critical flaw mid-design:** the existing `PerPassHook` calls `stream.Synchronize()` which is a
+**NO-OP on Wasm** (single-threaded async; only `await SynchronizeAsync()` is a real barrier, which a sync
+`Action` hook can't call). And Wasm `CopyTo` (`WasmMemoryBuffer.cs:356`) is a **synchronous immediate SAB read**
+that does NOT serialize through `_pendingWork` — so any host/device copy from the hook races the still-queued
+worker dispatches. **The ONLY stream-ordered primitive on Wasm is a KERNEL dispatch** (serializes via
+`_pendingWork`). So the existing hook only ever worked on CPU/CUDA/OpenCL, never Wasm.
+
+**Implementation** (`SpawnDev.ILGPU.Demo.Shared/UnitTests/RadixCounterLocalizer.cs` + wired into
+`BackendTestBase.RunTest`):
+- The hook snapshots each pass's `counterView` with a tiny **copy kernel** (`dst[i]=src[i]`) into a fresh
+  per-pass GPU buffer — queues after that pass's Kernel1, before the next pass overwrites it.
+- After the sort's own `SynchronizeAsync`, `AnalyzeAsync` reads every snapshot and checks the **reference-free
+  invariant**: every pass's bucket-count SUM must be CONSTANT (== element count). First deviating pass ⇒
+  Kernel1 miscounted there (localized). All sums equal but sort still wrong ⇒ counts FINE, bug is in
+  SCAN or SCATTER (pos), not the count. Negative/absurd entries flag a corrupted shared-mem scan directly.
+- **Wasm-gated** (`ShouldInstrument` checks accelerator type contains "Wasm") so it's a NO-OP on
+  WebGPU/CUDA/OpenCL (avoids re-entrant mid-sort kernel launches there). `Enabled=true` by default.
+- Wired into `RunTest`: installs before every test body, and on ANY failure appends the localizer report to
+  the exception message → lands in `latest.json`'s error field that TJ reads. `Uninstall` in finally.
+- **Build GREEN** (`dotnet build SpawnDev.ILGPU.Demo.Shared -c Release`, exit 0). NOT yet run under PMT/FO76.
+
+**HOW TO READ THE NEXT SWEEP:** when a Wasm radix test fails, its error in `_tj_dump_local/latest.json` now ends
+with `[RadixCounterLocalizer] N pass-snapshots ... ROOT: ...`. Two outcomes:
+- `ROOT: FIRST corrupted counter at pass#K` → read that pass's emitted Kernel1 phase code (the count is wrong).
+- `ROOT: all per-pass counter sums CONSISTENT → bug is in SCAN or SCATTER` → the count is fine; pivot to the
+  scan kernel or Kernel2 `pos` computation.
+- **If the residual STOPS reproducing with the localizer enabled** (the extra per-pass copy-kernel dispatches
+  add serialization), that is itself a signal: the bug is an INTER-PASS / dispatch-overlap race, not within a
+  single pass. (Set `RadixCounterLocalizer.Enabled=false` to A/B this.)
+
+**OPEN (separate from corruption):** the `RadixSortDescendingWithSentinels` 241s TIMEOUT = group/phase-barrier
+livelock under extreme FO76 contention; it cascades into the `RepeatedResort` ObjectDisposed. Distinct liveness
+bug; may warrant a higher `WasmDispatchWatchdogSeconds` or a starvation fix, but is NOT the corruption.
+- **HONESTY:** this fix removes a real latent asymmetry and is no-regression-verified, but whether it CLOSES
+  the residual is UNPROVEN until the FO76 sweep runs clean across many trials. If the residual recurs after
+  this, the asymmetry was not the (whole) cause and the hunt continues (next: helper-internal state, cross-
+  group counter scan). **Mechanism note:** the fix specifically corrects loop-carried late-allocated locals —
+  a local set in a later phase of iteration N and read at the top of an earlier phase in iteration N+1 was
+  NOT saved by the early-phase barrier (allocated after that barrier's inline save) → restored from stale
+  scratch on resume → wholesale corruption, ONLY under yielding (FO76). This matches the residual's profile.
+
+---
+
+## ★★ SESSION 9 (2026-05-29, Tuvok, lead) — binary trace + reads-already-atomic refutation + high-trial detector built
+
+**Inputs:** TJ's 2 concurrent FO76-contended sweeps (2026-05-29 12-14): each **1695 pass / 1 fail**,
+complementary large sorts (run1 `RadixSortDescending4M` 2373 viol / 874509 mismatches ~21% under
+contention; run2 `RadixSortAscending1_4M` 192 viol). Same residual signature; NOT a regression from
+the uncommitted local.13/14/15 working tree (which builds clean).
+
+**NEW grounded findings (emitted-binary level, not source-reading):**
+1. **Disassembled the actual failing presort kernel** (`_tj_dump_local/2026-05-29_12-14-20/wasm/018_kernel_6.wasm`,
+   helpers=1 barriers=20 47KB — the RadixSort presort). func 26 = phase dispatcher, func 24 = kernel
+   phase code, func 25 = scan helper. Traced func 26: **all phase/group barrier fences are present and
+   correctly placed in the binary** — release fence before arrival RMW (22041) and before phase-gen
+   store (22080); acquire fence post-spin (22130); group release fence before group-gen store (22196),
+   group acquire (22241). Happens-before chain complete per the wasm memory model. **RULES OUT a
+   missing/misplaced-fence codegen bug** — the prior "correct per spec" verdict now holds at binary level.
+2. **Cross-worker shared reads are ALREADY atomic loads** in barrier kernels. `WasmKernelFunctionGenerator.GenerateCode(Load)`
+   emits `i32.atomic.load` (and i64/f32/f64 atomic variants) for ALL types when `_hasBarriers`
+   (lines 1852-1878; struct + Float16 paths at 1650-1707 / 1576). func 24/25 both show atomic loads
+   present (the 295 plain loads are per-thread private scratch/state, not cross-worker). **So
+   "make the scan reads atomic" is a NON-FIX — they already are.** This refutes the easy hypothesis.
+3. **Sharpened mechanism:** before ca20808 the broadcast already did atomic-store → barrier → SINGLE
+   atomic-load. The tag handshake added a SPIN-RETRY atomic-load-until-tag-fresh. The ONLY way that
+   helps is if **a single atomic read after a spec-correct seqcst barrier can still return stale on V8**
+   (chromium#490434403 family) and retrying eventually sees fresh. UNPROVEN — and note Trip's S8 caveat
+   that the handshake's benefit is itself statistically unproven (residual unchanged at ~1.6%).
+
+**Routing confirmed:** RadixSort `GroupExtensions.ExclusiveScan<int,AddInt32>` (RadixSortExtensions.cs:724)
+→ `WasmAlgorithmContext` redirect → `WasmGroupExtensions.ExclusiveScan` → InclusiveScanImplementation.
+The scatter ALSO reads cross-bucket boundary totals via a DIRECT shared read `scanMemory[groupSize*j-1]`
+(RadixSortExtensions.cs:747) — NOT a Group.Broadcast, NOT covered by the tag handshake. Prime suspect
+for the "block displacement by k" signature.
+
+**HIGH-TRIAL DETECTOR BUILT** (`BackendTestBase.Tests9.cs` `CrossGroupScanReuseDetectorTest` +
+`CrossGroupScanReuseDetectorKernel`; WebGL skip in WebGLTests.cs). Runs the REAL scan + broadcast path
+at 16384 groups (4M-scale cross-group reuse) self-verifying per group (v=(g%251)+1, scanned must =
+v*(IdxX+1)), splitting **three** read patterns into separate atomic counters:
+`[0]` scan cross-worker read, `[1]` Group.Broadcast (tag-hardened), `[2]` DIRECT shared boundary read
+(the radix line-747 pattern). Passes silently when clean (safe permanent regression guard).
+**Verified clean scoped on all 8 capable backends ×2 (logic correct → any sweep fire is unambiguous).**
+Decisive interpretation when it fires in a contended/full sweep:
+- `[2]>0, [1]==0` → direct shared boundary read is the residual; broadcast handshake doesn't cover it
+  → fix = route radix's line-747 boundary reads through the hardened broadcast (or harden direct reads).
+- `[0]>0` → scan internal cross-worker read stale → fix the scan read path.
+- `[1]>0` → tag-hardened broadcast STILL races → deeper V8 single-atomic-read staleness.
+- all clean in many contended sweeps while sorts still fail → mechanism is elsewhere (redirect).
+
+**IN FLIGHT:** full `PMT_FILTER=WasmTests` sweep (detector included) on Tuvok's machine; TJ's FO76 +
+2-concurrent setup is the stronger repro. Tree: detector test added (additive, low-risk); no library
+change yet — waiting on detector evidence before touching codegen (Rule 4b: prove the racing read first).
+
 ## ★ SESSION 8 UPDATE (2026-05-27, Trip) — Variant C contention fix shipped; residual still ~1.6%/large-sort
 
 **Trip's lane (Variant C JS Atomics.wait+notify shim + always-on yield gate):** unrelated to this

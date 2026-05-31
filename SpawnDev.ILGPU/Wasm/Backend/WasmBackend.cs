@@ -702,7 +702,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 data.ScratchPerThread,
                 data.PhaseCount,
                 kernelGen.WrittenParamIndices,
-                kernelGen.StoreTargetTrace);
+                kernelGen.StoreTargetTrace,
+                data.IrUserParamIndexOffset);
         }
 
         /// <summary>
