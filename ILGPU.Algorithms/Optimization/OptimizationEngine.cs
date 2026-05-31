@@ -17,6 +17,7 @@ using System;
 using System.Diagnostics;
 using System.Numerics;
 using System.Threading;
+using System.Threading.Tasks;
 
 #if NET7_0_OR_GREATER
 
@@ -427,6 +428,26 @@ namespace ILGPU.Algorithms.Optimization
         }
 
         /// <summary>
+        /// Browser-safe async counterpart of
+        /// <see cref="LoadParameters(AcceleratorStream, ArrayView{TElementType})"/>: awaits
+        /// the accelerator's real async readback of the device parameters into the page-locked
+        /// CPU mirror. Works on every backend including Wasm/WebGL/WebGPU (where the
+        /// synchronous overload relies on a no-op/unsupported synchronization).
+        /// </summary>
+        /// <param name="stream">The accelerator stream.</param>
+        /// <param name="parameters">The source array view to load parameters from.</param>
+        public async Task LoadParametersAsync(
+            AcceleratorStream stream,
+            ArrayView<TElementType> parameters)
+        {
+            if (parameters.Length != NumParameters)
+                throw new ArgumentOutOfRangeException(nameof(parameters));
+            var host = await parameters.CopyToCPUAsync(stream).ConfigureAwait(false);
+            for (int i = 0; i < host.Length; ++i)
+                parametersCPU[i] = host[i];
+        }
+
+        /// <summary>
         /// Loads optimization parameters from the given span.
         /// </summary>
         /// <param name="stream">The accelerator stream.</param>
@@ -453,6 +474,12 @@ namespace ILGPU.Algorithms.Optimization
             AcceleratorStream stream,
             ArrayView<TElementType> parameters)
         {
+            // Copies device parameters into the page-locked CPU mirror and relies on a
+            // synchronous Synchronize for host coherence; on Wasm/WebGL Synchronize is a
+            // no-op (GetParameter would then read stale pinned memory) and WebGPU has no
+            // sync readback. Desktop-only framework — fail loud on browser backends.
+            stream.Accelerator.EnsureSyncReadbackSupported(
+                "an async parameter load (not yet implemented for browser backends)");
             parameters.CopyTo(stream, parametersCPU.ArrayView);
             stream.Synchronize();
         }
@@ -608,10 +635,17 @@ namespace ILGPU.Algorithms.Optimization
         /// <param name="stream">The current accelerator stream.</param>
         /// <param name="resultView">The source view.</param>
         /// <returns>The CPU-based </returns>
-        protected internal OptimizationResult<TElementType, TEvalType> FetchToCPUAsync(
+        protected internal OptimizationResult<TElementType, TEvalType> FetchToCPU(
             AcceleratorStream stream,
             OptimizationResultView<TElementType, TEvalType> resultView)
         {
+            // This is a SYNCHRONOUS, zero-copy readback into the page-locked CPU mirrors: two
+            // CopyTo calls + the implicit sync. It reads stale on Wasm and throws on
+            // WebGPU/WebGL (no synchronous GPU->CPU readback). Fail loud on the browser
+            // backends and direct callers to the async FetchToCPUAsync, which returns a
+            // managed OptimizationResultCPU and works on every backend.
+            stream.Accelerator.EnsureSyncReadbackSupported("FetchToCPUAsync");
+
             // Copy result to CPU to group by range of numerical values
             resultView.PositionView.CopyTo(
                 stream,
@@ -624,6 +658,32 @@ namespace ILGPU.Algorithms.Optimization
             return new OptimizationResult<TElementType, TEvalType>(
                 resultEvalBufferCPU.Span,
                 resultElementBufferCPU.Span,
+                resultView.ElapsedTime);
+        }
+
+        /// <summary>
+        /// Asynchronously fetches the given result view back to the host as a managed
+        /// <see cref="OptimizationResultCPU{TElementType, TEvalType}"/>. This is the
+        /// browser-safe readback: it awaits the accelerator's real async drain via
+        /// <see cref="ArrayViewExtensions.CopyToCPUAsync{T}(ArrayView{T}, AcceleratorStream)"/>,
+        /// so it returns correct data on Wasm and does not throw on WebGPU/WebGL. Works on
+        /// every backend (desktop included).
+        /// </summary>
+        /// <param name="stream">The current accelerator stream.</param>
+        /// <param name="resultView">The device-side result view to read back.</param>
+        /// <returns>A task producing the CPU-side optimization result.</returns>
+        protected internal async Task<OptimizationResultCPU<TElementType, TEvalType>>
+            FetchToCPUAsync(
+            AcceleratorStream stream,
+            OptimizationResultView<TElementType, TEvalType> resultView)
+        {
+            var positions = await resultView.PositionView
+                .CopyToCPUAsync(stream).ConfigureAwait(false);
+            var evals = await resultView.ResultView.BaseView
+                .CopyToCPUAsync(stream).ConfigureAwait(false);
+            return new OptimizationResultCPU<TElementType, TEvalType>(
+                evals[0],
+                positions,
                 resultView.ElapsedTime);
         }
 

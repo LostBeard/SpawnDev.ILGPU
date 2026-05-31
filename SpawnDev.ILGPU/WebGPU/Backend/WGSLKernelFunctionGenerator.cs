@@ -234,6 +234,29 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         // Maps LEA result variable name → (bufferBindingName, fieldLayout)
         // Populated during LoadElementAddress, consumed by Load and Store.
         private Dictionary<string, (string BindingName, List<PackedStructFieldInfo> Layout)> _packedStructLEAVars = new();
+
+        /// <summary>
+        /// Names of LoadElementAddress result pointers that index a bool-remapped shared
+        /// (workgroup) array — i.e. <c>&amp;shared_N[i]</c> where shared_N is declared
+        /// <c>array&lt;i32, N&gt;</c> in place of the illegal <c>array&lt;bool, N&gt;</c>
+        /// (see SharedMemoryResolver.BoolRemappedVars). Load/Store of these pointers convert
+        /// between WGSL <c>bool</c> and the stored <c>i32</c> 0/1 representation.
+        /// </summary>
+        private readonly HashSet<string> _boolSharedPtrs = new();
+
+        /// <summary>
+        /// True when <paramref name="ptr"/> is an IR pointer into shared (workgroup) memory
+        /// whose element type is <c>bool</c>. Such arrays are declared <c>array&lt;i32,N&gt;</c>
+        /// (WGSL forbids workgroup bool), so Load/Store must convert i32 0/1 ↔ WGSL bool. This
+        /// is the IR-type-based detection that survives pointer casts (PointerCast/AddressSpaceCast),
+        /// which the name-based <see cref="_boolSharedPtrs"/> set does not always track.
+        /// </summary>
+        private bool IsBoolSharedPointer(Value ptr)
+        {
+            return ptr.Type is global::ILGPU.IR.Types.PointerType pt
+                && pt.AddressSpace == MemoryAddressSpace.Shared
+                && TypeGenerator[pt.ElementType] == "bool";
+        }
         // Maps LoadFieldAddress result var name → (bindingName, field info) for NON-emulated scalar fields
         // (emu_f64/emu_i64 fields from LoadFieldAddress are registered in _emulatedVarMappings instead)
         private Dictionary<string, (string BindingName, PackedStructFieldInfo FieldInfo)> _packedScalarFieldPtrs = new();
@@ -5065,12 +5088,37 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 Builder.Append($"&{sourceVal}[{offsetExpr}];");
             }
             Builder.AppendLine();
+
+            // If this pointer indexes a bool element in shared (workgroup) memory, the backing
+            // array was remapped to array<i32,N> (WGSL forbids workgroup bool), so remember the
+            // pointer and have Load/Store convert the i32 0/1 storage to/from WGSL bool. Detect
+            // from the IR pointer type (address space + element) — robust regardless of whether
+            // the source was the shared var directly or a NewView alias of it.
+            if (value.Type is global::ILGPU.IR.Types.PointerType leaBoolPtr
+                && leaBoolPtr.AddressSpace == MemoryAddressSpace.Shared
+                && TypeGenerator[leaBoolPtr.ElementType] == "bool")
+                _boolSharedPtrs.Add(target.Name);
         }
 
         public override void GenerateCode(global::ILGPU.IR.Values.Load loadVal)
         {
             var target = Load(loadVal);
             var source = Load(loadVal.Source);
+
+            // Bool-remapped shared array: storage is i32 (0/1). The IR load value is usually
+            // already i32 (ILGPU lowers bool memory through ints), in which case a plain
+            // `target = *ptr` is correct. Only when the load's own WGSL type is `bool` do we
+            // convert (`*ptr != 0i`) — otherwise we'd assign a bool to an i32 target. The
+            // matching Store mirrors this.
+            if (_boolSharedPtrs.Contains(source.Name) || IsBoolSharedPointer(loadVal.Source))
+            {
+                Declare(target);
+                if (TypeGenerator[loadVal.Type] == "bool")
+                    AppendLine($"{target} = (*{source}) != 0i;");
+                else
+                    AppendLine($"{target} = *{source};");
+                return;
+            }
 
             // Special handling for loading an ArrayView parameter (which is a struct).
             // We cannot 'load' the struct from the buffer binding (which is array<T>).
@@ -5274,6 +5322,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         {
             var address = Load(storeVal.Target);
             var val = Load(storeVal.Value);
+
+            // Bool-remapped shared array: storage is i32 (0/1). ILGPU already lowers the bool
+            // value to an i32 (0/1) before the store (e.g. `select(0,1,cond)` / `i32(1)` for
+            // `true`), so a plain `*ptr = val` (i32→i32) is correct — do NOT wrap in another
+            // select (that would be `select(i32,i32,i32)`, which WGSL rejects). The matching
+            // Load converts the i32 storage back to a WGSL bool. We still short-circuit here so
+            // the value isn't misrouted through the emulated-64/packed branches below.
+            if (_boolSharedPtrs.Contains(address.Name) || IsBoolSharedPointer(storeVal.Target))
+            {
+                if (TypeGenerator[storeVal.Value.Type] == "bool")
+                    AppendLine($"*{address} = select(0i, 1i, {val});");
+                else
+                    AppendLine($"*{address} = {val};");
+                return;
+            }
 
             // Check for emulated 64-bit buffer store (Parameter arrays registered earlier)
             if (_emulatedVarMappings.TryGetValue(address.ToString(), out var emulInfo))
@@ -6409,6 +6472,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 AppendLine($"{prefix}{target} = {left} {op} {right};");
             }
         }
+        public override void GenerateCode(global::ILGPU.IR.Values.PointerCast value)
+        {
+            var src = Load(value.Value);
+            if (_boolSharedPtrs.Contains(src.Name))
+            {
+                // Alias the cast result directly to the source pointer rather than emitting
+                // the base `v_target = v_source; // ptrCast`. WGSL pointers are not
+                // var-declarable (Declare() skips ptr types), so that assignment targets an
+                // undeclared value ("unresolved value 'v_N'") and the shader fails to compile.
+                // Aliasing avoids the bogus declaration AND carries the bool-remapped-shared
+                // tag straight through to the eventual Load/Store (which convert i32 0/1 ↔ bool).
+                valueVariables[value] = src;
+                return;
+            }
+            base.GenerateCode(value);
+        }
+
         public override void GenerateCode(AddressSpaceCast value)
         {
             // When the source is a kernel-side local alloca, the kernel emits
@@ -6425,6 +6505,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // expression `&v_source` and let the call emit pick it up inline.
             // No separate `let` line per cast → 50KB saved per kernel.
             var source = Load(value.Value);
+            // Bool-remapped shared pointer: alias the cast result to the source pointer (same
+            // reasoning as the PointerCast override) so we neither emit a bogus undeclared-pointer
+            // assignment nor lose the bool-remapped-shared tag the Load/Store rely on.
+            if (_boolSharedPtrs.Contains(source.Name))
+            {
+                valueVariables[value] = source;
+                return;
+            }
             if (value.Type is AddressSpaceType
                 && _localAllocaVarNames.Contains(source.Name))
             {

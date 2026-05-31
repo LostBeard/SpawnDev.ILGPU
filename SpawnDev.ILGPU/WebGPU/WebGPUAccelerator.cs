@@ -802,21 +802,25 @@ namespace SpawnDev.ILGPU.WebGPU
                     var a = args[i];
                     if (a != null && a.GetType().IsValueType && !(a is IArrayView) && ContainsPointerFields(a.GetType()))
                     {
-                        // This is a body struct — track which effectiveArgs entries are non-view fields
+                        // This is a body struct — track which effectiveArgs entries are non-view fields.
+                        // Classify the ACTUAL flattened leaves (expandedArgs over this arg's range),
+                        // NOT the shallow direct fields. FlattenStructFields recurses through
+                        // view-wrapper structs (e.g. SequentialGroupExecutor's VariableView<int> field
+                        // unwraps to its ArrayView<int> BaseView leaf — an IArrayView) and through
+                        // nested body structs, so a direct field's type does not reliably indicate
+                        // whether the leaf it produces is a view or a scalar, nor how many leaves it
+                        // produces. Walking the produced leaves keeps this classification in lock-step
+                        // with the expansion (and therefore with the WGSL bindings). The old shallow
+                        // walk misclassified the VariableView field as a scalar — so Phase-1 skipped the
+                        // executor's view binding (built 3 of the WGSL's 4 → "bind group mismatch") —
+                        // and also drifted indices for nested body structs.
                         var nonViewIndices = new List<int>();
                         int baseIdx = argsToEffectiveOffset[i];
-                        var fields = a.GetType().GetFields(System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
-                        int fieldEffIdx = baseIdx;
-                        foreach (var field in fields)
+                        int endIdx = (i + 1 < args.Length) ? argsToEffectiveOffset[i + 1] : effectiveArgsCount;
+                        for (int j = baseIdx; j < endIdx; j++)
                         {
-                            var fieldVal = field.GetValue(a);
-                            if (fieldVal is IArrayView)
-                                fieldEffIdx++; // View field → buffer binding, not scalar
-                            else
-                            {
-                                nonViewIndices.Add(fieldEffIdx); // Non-view field → scalar
-                                fieldEffIdx++;
-                            }
+                            if (!(expandedArgs[j] is IArrayView))
+                                nonViewIndices.Add(j); // Non-view leaf → scalar
                         }
                         bodyStructScalarEffectiveIdxMap[i] = nonViewIndices;
                     }

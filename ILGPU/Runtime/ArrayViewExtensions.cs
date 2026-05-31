@@ -979,6 +979,134 @@ namespace ILGPU.Runtime
             source.BaseView.CopyToCPUAsync(stream);
 
         /// <summary>
+        /// Async, browser-safe equivalent of
+        /// <see cref="GetAsArray1D{T}(ArrayView1D{T, Stride1D.Dense})"/>: awaits the
+        /// accelerator's real async drain, then reads the dense 1D view back to a managed
+        /// array. Use this instead of <c>GetAsArray1D</c> on Wasm/WebGL/WebGPU, where the
+        /// synchronous readback returns stale data (Wasm) or throws (WebGPU/WebGL).
+        /// </summary>
+        /// <typeparam name="T">The element type.</typeparam>
+        /// <param name="view">The source view to read back.</param>
+        /// <param name="stream">The used accelerator stream.</param>
+        /// <returns>A task producing the view's <c>Length</c> elements.</returns>
+        [NotInsideKernel]
+        public static Task<T[]> GetAsArray1DAsync<T>(
+            this ArrayView1D<T, Stride1D.Dense> view,
+            AcceleratorStream stream)
+            where T : unmanaged =>
+            view.BaseView.CopyToCPUAsync(stream);
+
+        /// <summary>
+        /// <see cref="GetAsArray1DAsync{T}(ArrayView1D{T, Stride1D.Dense},
+        /// AcceleratorStream)"/> using the view's default stream.
+        /// </summary>
+        [NotInsideKernel]
+        public static Task<T[]> GetAsArray1DAsync<T>(
+            this ArrayView1D<T, Stride1D.Dense> view)
+            where T : unmanaged =>
+            view.GetAsArray1DAsync(view.GetDefaultStream());
+
+        /// <summary>
+        /// Async, browser-safe equivalent of
+        /// <see cref="GetAsArray2D{T}(ArrayView2D{T, Stride2D.General}, AcceleratorStream)"/>:
+        /// reads the underlying buffer back via <see cref="CopyToCPUAsync{T}(ArrayView{T},
+        /// AcceleratorStream)"/> (the real async drain + readback) and reshapes it into a 2D
+        /// array using the view's stride, so it is correct for any stride/transposition and
+        /// works on Wasm/WebGL/WebGPU where the synchronous <c>GetAsArray2D</c> reads stale
+        /// data or throws.
+        /// </summary>
+        /// <typeparam name="T">The element type.</typeparam>
+        /// <typeparam name="TStride">The 2D stride type.</typeparam>
+        /// <param name="view">The source view.</param>
+        /// <param name="stream">The used accelerator stream.</param>
+        /// <returns>A task producing the reshaped 2D array.</returns>
+        [NotInsideKernel]
+        public static async Task<T[,]> GetAsArray2DAsync<T, TStride>(
+            this ArrayView2D<T, TStride> view,
+            AcceleratorStream stream)
+            where T : unmanaged
+            where TStride : struct, IStride2D
+        {
+            var ext = view.IntExtent;
+            if (!view.IsValid || ext.X == 0 || ext.Y == 0)
+                return new T[ext.X < 0 ? 0 : ext.X, ext.Y < 0 ? 0 : ext.Y];
+
+            var flat = await view.BaseView.CopyToCPUAsync(stream).ConfigureAwait(false);
+            var result = new T[ext.X, ext.Y];
+            for (int x = 0; x < ext.X; ++x)
+                for (int y = 0; y < ext.Y; ++y)
+                    result[x, y] = flat[
+                        (int)view.Stride.ComputeElementIndexChecked(
+                            new Index2D(x, y), ext)];
+            return result;
+        }
+
+        /// <summary>
+        /// Async, browser-safe equivalent of
+        /// <see cref="GetAsArray3D{T}(ArrayView3D{T, Stride3D.General}, AcceleratorStream)"/>;
+        /// see <see cref="GetAsArray2DAsync{T, TStride}"/> for the approach.
+        /// </summary>
+        /// <typeparam name="T">The element type.</typeparam>
+        /// <typeparam name="TStride">The 3D stride type.</typeparam>
+        /// <param name="view">The source view.</param>
+        /// <param name="stream">The used accelerator stream.</param>
+        /// <returns>A task producing the reshaped 3D array.</returns>
+        [NotInsideKernel]
+        public static async Task<T[,,]> GetAsArray3DAsync<T, TStride>(
+            this ArrayView3D<T, TStride> view,
+            AcceleratorStream stream)
+            where T : unmanaged
+            where TStride : struct, IStride3D
+        {
+            var ext = view.IntExtent;
+            if (!view.IsValid || ext.X == 0 || ext.Y == 0 || ext.Z == 0)
+                return new T[
+                    ext.X < 0 ? 0 : ext.X,
+                    ext.Y < 0 ? 0 : ext.Y,
+                    ext.Z < 0 ? 0 : ext.Z];
+
+            var flat = await view.BaseView.CopyToCPUAsync(stream).ConfigureAwait(false);
+            var result = new T[ext.X, ext.Y, ext.Z];
+            for (int x = 0; x < ext.X; ++x)
+                for (int y = 0; y < ext.Y; ++y)
+                    for (int z = 0; z < ext.Z; ++z)
+                        result[x, y, z] = flat[
+                            (int)view.Stride.ComputeElementIndexChecked(
+                                new Index3D(x, y, z), ext)];
+            return result;
+        }
+
+        /// <summary>
+        /// Guards a synchronous GPU-&gt;CPU readback against the browser backends, which have
+        /// no usable synchronous readback: WebGPU/WebGL throw on a synchronous GPU-&gt;CPU
+        /// copy, and Wasm would read stale data before in-flight worker kernels finish (a
+        /// silent wrong result). Call this at the top of any synchronous-readback convenience
+        /// API so it fails loud with an actionable message instead of returning corrupt data;
+        /// the caller should switch to the matching <c>...Async</c> method on those backends.
+        /// </summary>
+        /// <param name="accelerator">The accelerator to check.</param>
+        /// <param name="asyncAlternative">
+        /// The name of the async method to recommend in the exception message.
+        /// </param>
+        public static void EnsureSyncReadbackSupported(
+            this Accelerator accelerator,
+            string asyncAlternative)
+        {
+            switch (accelerator.AcceleratorType)
+            {
+                case AcceleratorType.Wasm:
+                case AcceleratorType.WebGL:
+                case AcceleratorType.WebGPU:
+                    throw new NotSupportedException(
+                        "Synchronous GPU->CPU readback is not supported on the " +
+                        $"{accelerator.AcceleratorType} backend: browser backends have no " +
+                        "synchronous GPU->CPU readback (WebGPU/WebGL throw; Wasm would read " +
+                        "stale data before in-flight kernels finish). Use " +
+                        $"{asyncAlternative} instead.");
+            }
+        }
+
+        /// <summary>
         /// Copies from the CPU source address into the given target view while
         /// synchronizing the current accelerator stream.
         /// </summary>

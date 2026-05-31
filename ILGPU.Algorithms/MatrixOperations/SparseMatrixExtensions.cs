@@ -12,6 +12,7 @@
 using ILGPU.Runtime;
 using ILGPU.Util;
 using System;
+using System.Threading.Tasks;
 
 namespace ILGPU.Algorithms.MatrixOperations
 {
@@ -64,12 +65,48 @@ namespace ILGPU.Algorithms.MatrixOperations
         where TPredicate : struct, InlineList.IPredicate<Index2D>;
 
     /// <summary>
+    /// Async, browser-safe counterpart of
+    /// <see cref="SparseMatrixShapeInfoProvider{TPredicate}"/>: returns the maximum neighbor
+    /// count via the accelerator's real async GPU-&gt;CPU readback, so it works on
+    /// Wasm/WebGL/WebGPU (which have no synchronous readback).
+    /// </summary>
+    /// <typeparam name="TPredicate">The predicate type.</typeparam>
+    public delegate Task<int> SparseMatrixShapeInfoProviderAsync<TPredicate>(
+        AcceleratorStream stream,
+        LongIndex2D matrixExtent,
+        TPredicate predicate,
+        ArrayView<int> numNeighbors)
+        where TPredicate : struct, InlineList.IPredicate<Index2D>;
+
+    /// <summary>
     /// A sparse matrix shape converter that translates dense matrices into sparse shapes.
     /// </summary>
     /// <typeparam name="T">The element type.</typeparam>
     /// <typeparam name="TPredicate">The predicate type.</typeparam>
     /// <typeparam name="TStride">The matrix stride.</typeparam>
     public delegate SparseMatrixShapeView<TStride> SparseMatrixShapeConverter<
+        T,
+        TPredicate,
+        TStride>(
+        AcceleratorStream stream,
+        ArrayView2D<T, TStride> inputMatrix,
+        TPredicate predicate,
+        ArrayView<int> numNeighbors,
+        Func<int, ArrayView2D<int, TStride>> getNeighborsFunc)
+        where T : unmanaged
+        where TPredicate : struct, InlineList.IPredicate<Index2D>
+        where TStride : struct, IStride2D;
+
+    /// <summary>
+    /// Async, browser-safe counterpart of
+    /// <see cref="SparseMatrixShapeConverter{T, TPredicate, TStride}"/>: awaits the async
+    /// max-neighbor readback before sizing and launching the conversion kernel, so it works
+    /// on Wasm/WebGL/WebGPU.
+    /// </summary>
+    /// <typeparam name="T">The element type.</typeparam>
+    /// <typeparam name="TPredicate">The predicate type.</typeparam>
+    /// <typeparam name="TStride">The matrix stride.</typeparam>
+    public delegate Task<SparseMatrixShapeView<TStride>> SparseMatrixShapeConverterAsync<
         T,
         TPredicate,
         TStride>(
@@ -293,6 +330,15 @@ namespace ILGPU.Algorithms.MatrixOperations
             }
             var internalView = tempView.SubView(0, 1);
 
+            // This provider inherently needs the GPU-computed max neighbor count back on
+            // the CPU (the conversion kernel is sized by it), so it ends in a synchronous
+            // CopyToCPU. That reads stale on Wasm and throws on WebGPU/WebGL. Fail loud on
+            // the browser backends instead of returning a corrupt count. (A truly async
+            // sparse-matrix shape API would ripple Task<int> through the converter delegate
+            // chain; add it if a browser consumer ever needs sparse matrices.)
+            accelerator.EnsureSyncReadbackSupported(
+                "an async sparse-matrix shape path (not yet implemented for browser backends)");
+
             // Return custom wrapper
             return (stream, extent, predicate, numNeighborsView) =>
             {
@@ -309,6 +355,59 @@ namespace ILGPU.Algorithms.MatrixOperations
                 int maxCount = 0;
                 internalView.CopyToCPU(stream, ref maxCount, 1);
                 return maxCount;
+            };
+        }
+
+        /// <summary>
+        /// Async, browser-safe counterpart of
+        /// <see cref="CreateSparseMatrixInfoProvider{TPredicate}(Accelerator,
+        /// ArrayView{int})"/>: the returned provider awaits the accelerator's real async
+        /// readback of the GPU-computed max neighbor count, so it works on Wasm/WebGL/WebGPU
+        /// as well as desktop.
+        /// </summary>
+        /// <typeparam name="TPredicate">
+        /// The predicate used to sparsify the input matrix.
+        /// </typeparam>
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="tempView">
+        /// The input temporary value view (at least of length 1).
+        /// </param>
+        public static SparseMatrixShapeInfoProviderAsync<TPredicate>
+            CreateSparseMatrixInfoProviderAsync<TPredicate>(
+            this Accelerator accelerator,
+            ArrayView<int> tempView)
+            where TPredicate : struct, InlineList.IPredicate<Index2D>
+        {
+            // Load basic sparse matrix info kernel
+            var infoProvider = accelerator.CreateSparseMatrixInfoProvider<
+                TPredicate,
+                SparseViewTarget>();
+
+            if (tempView.Length < 1)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(tempView),
+                    "Temp view needs to have at least a single element");
+            }
+            var internalView = tempView.SubView(0, 1);
+
+            // Return custom async wrapper
+            return async (stream, extent, predicate, numNeighborsView) =>
+            {
+                // Construct sparse target and reset data
+                var sparseTarget = new SparseViewTarget(
+                    numNeighborsView,
+                    internalView.VariableView(0));
+                internalView.MemSetToZero(stream);
+
+                // Get info
+                infoProvider(stream, extent, predicate, sparseTarget);
+
+                // Fetch max count via the real async drain + readback
+                var host = await internalView
+                    .CopyToCPUAsync(stream)
+                    .ConfigureAwait(false);
+                return host[0];
             };
         }
 
@@ -337,6 +436,39 @@ namespace ILGPU.Algorithms.MatrixOperations
         {
             // Get or create provider
             var provider = accelerator.CreateSparseMatrixInfoProvider<TPredicate>(
+                tempView);
+
+            // Compute actual sparsity information
+            return provider(stream, matrixExtent, predicate, numNeighbors);
+        }
+
+        /// <summary>
+        /// Async, browser-safe counterpart of
+        /// <see cref="ComputeSparseMatrixShapeInfo{TPredicate}(Accelerator,
+        /// AcceleratorStream, Index2D, TPredicate, ArrayView{int}, ArrayView{int})"/>.
+        /// </summary>
+        /// <typeparam name="TPredicate">
+        /// The predicate used to sparsify the input matrix.
+        /// </typeparam>
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="stream">The current accelerator stream.</param>
+        /// <param name="matrixExtent">The dense input matrix extent.</param>
+        /// <param name="predicate">The predicate used to sparsify the matrix.</param>
+        /// <param name="numNeighbors">The number of neighbors per row.</param>
+        /// <param name="tempView">
+        /// The input temporary value view (at least of length 1).
+        /// </param>
+        public static Task<int> ComputeSparseMatrixShapeInfoAsync<TPredicate>(
+            this Accelerator accelerator,
+            AcceleratorStream stream,
+            Index2D matrixExtent,
+            TPredicate predicate,
+            ArrayView<int> numNeighbors,
+            ArrayView<int> tempView)
+            where TPredicate : struct, InlineList.IPredicate<Index2D>
+        {
+            // Get or create async provider
+            var provider = accelerator.CreateSparseMatrixInfoProviderAsync<TPredicate>(
                 tempView);
 
             // Compute actual sparsity information
@@ -379,6 +511,59 @@ namespace ILGPU.Algorithms.MatrixOperations
             {
                 // Determine an info value
                 int max = infoProvider(stream, matrix.Extent, predicate, numNeighbors);
+
+                // Convert the actual neighbor information
+                var neighbors = getNeighborsFunc(max);
+                kernel(stream, (int)matrix.Extent.X, matrix, predicate, neighbors);
+                return new SparseMatrixShapeView<TStride>(
+                    neighbors,
+                    numNeighbors,
+                    matrix.IntExtent.X,
+                    matrix.IntExtent.Y);
+            };
+        }
+
+        /// <summary>
+        /// Async, browser-safe counterpart of
+        /// <see cref="CreateSparseMatrixShapeConverter{T, TPredicate, TStride}(Accelerator,
+        /// ArrayView{int})"/>: the returned converter awaits the async max-neighbor readback
+        /// before sizing and launching the conversion kernel, so it works on
+        /// Wasm/WebGL/WebGPU.
+        /// </summary>
+        /// <typeparam name="T">The value type to operate on.</typeparam>
+        /// <typeparam name="TPredicate">
+        /// The predicate used to sparsify the input matrix.
+        /// </typeparam>
+        /// <typeparam name="TStride">The element striding of the matrices.</typeparam>
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="tempView">
+        /// The input temporary value view (at least of length 1).
+        /// </param>
+        public static SparseMatrixShapeConverterAsync<T, TPredicate, TStride>
+            CreateSparseMatrixShapeConverterAsync<T, TPredicate, TStride>(
+            this Accelerator accelerator,
+            ArrayView<int> tempView)
+            where T : unmanaged
+            where TStride : struct, IStride2D
+            where TPredicate : struct, InlineList.IPredicate<Index2D>
+        {
+            // Load basic sparse matrix convert kernel
+            var kernel = accelerator.LoadAutoGroupedKernel<
+                Index1D,
+                ArrayView2D<T, TStride>,
+                TPredicate,
+                ArrayView2D<int, TStride>>(SparseMatrixShapeConverterKernel);
+
+            // Load basic async info provider
+            var infoProvider =
+                accelerator.CreateSparseMatrixInfoProviderAsync<TPredicate>(tempView);
+
+            // Returns new async launcher delegate
+            return async (stream, matrix, predicate, numNeighbors, getNeighborsFunc) =>
+            {
+                // Determine an info value via the async readback
+                int max = await infoProvider(stream, matrix.Extent, predicate, numNeighbors)
+                    .ConfigureAwait(false);
 
                 // Convert the actual neighbor information
                 var neighbors = getNeighborsFunc(max);

@@ -498,6 +498,70 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                         "did not order after the kernel)");
         });
 
+        // Tests the REAL async UniqueAsync API. The sync Unique ends in a synchronous
+        // CopyToCPU of the new length — which throws on WebGPU and reads stale on Wasm (the
+        // unique kernel is still in flight). UniqueAsync dispatches, then awaits the backend's
+        // real async drain + readback (ArrayView.CopyToCPUAsync). Verifies both the returned
+        // length and the compacted prefix against a CPU reference. (Sync Unique now throws a
+        // clear NotSupportedException on the browser backends instead of returning garbage.)
+        [TestMethod]
+        public async Task ILGPUUniqueAsyncTest() => await RunTest(async accelerator =>
+        {
+            // Consecutive-duplicate removal: 1,1,2,3,3,3,4,5,5 -> 1,2,3,4,5 (length 5).
+            int[] data = { 1, 1, 2, 3, 3, 3, 4, 5, 5 };
+            const int expectedUnique = 5;
+            using var buf = accelerator.Allocate1D(data);
+
+            long newLength = await accelerator.UniqueAsync<
+                int, global::ILGPU.Algorithms.ComparisonOperations.ComparisonInt32>(
+                accelerator.DefaultStream, buf.View.BaseView);
+            if (newLength != expectedUnique)
+                throw new Exception(
+                    $"UniqueAsync expected length {expectedUnique}, got {newLength}");
+
+            var result = await buf.View.BaseView.CopyToCPUAsync(accelerator.DefaultStream);
+            int[] expectedPrefix = { 1, 2, 3, 4, 5 };
+            for (int i = 0; i < expectedPrefix.Length; i++)
+                if (result[i] != expectedPrefix[i])
+                    throw new Exception(
+                        $"UniqueAsync compacted[{i}]={result[i]}, expected {expectedPrefix[i]}");
+        });
+
+        // Tests the REAL async GetAsArray2DAsync core primitive. Uploads a known 2D pattern,
+        // mutates it on the GPU via an UNAWAITED 1D dispatch over the flat base view, then
+        // GetAsArray2DAsync must drain the in-flight work and reshape the readback back into a
+        // 2D array using the view's stride. The synchronous GetAsArray2D reads stale on Wasm /
+        // throws on WebGPU; this is the browser-safe counterpart and verifies stride-correct
+        // reshaping against a CPU reference (src + 1).
+        [TestMethod]
+        public async Task GetAsArray2DAsyncTest() => await RunTest(async accelerator =>
+        {
+            const int w = 4, h = 3;
+            var src = new int[w, h];
+            for (int x = 0; x < w; x++)
+                for (int y = 0; y < h; y++)
+                    src[x, y] = x * 100 + y;
+            using var buf = accelerator.Allocate2DDenseX(src);
+
+            // Mutate every element on the GPU via the flat base view (unawaited dispatch) so
+            // the async readback must drain in-flight work before reshaping.
+            var inc = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(
+                (i, v) => v[i] = v[i] + 1);
+            inc((Index1D)(int)buf.View.BaseView.Length, buf.View.BaseView);
+
+            var arr = await buf.View.GetAsArray2DAsync(accelerator.DefaultStream);
+            if (arr.GetLength(0) != w || arr.GetLength(1) != h)
+                throw new Exception(
+                    $"GetAsArray2DAsync shape {arr.GetLength(0)}x{arr.GetLength(1)}, " +
+                    $"expected {w}x{h}");
+            for (int x = 0; x < w; x++)
+                for (int y = 0; y < h; y++)
+                    if (arr[x, y] != src[x, y] + 1)
+                        throw new Exception(
+                            $"GetAsArray2DAsync[{x},{y}]={arr[x, y]}, " +
+                            $"expected {src[x, y] + 1}");
+        });
+
         // ILGPUReduceSmallTest removed — the main ILGPUReduceTest covers the same functionality.
         // The small test was a diagnostic that exposed a pre-existing WebGL GLSL codegen bug
         // (_idx undeclared identifier in Reduce kernel shader). Not a Wasm issue.

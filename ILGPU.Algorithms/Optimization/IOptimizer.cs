@@ -13,6 +13,7 @@ using ILGPU.Algorithms.Vectors;
 using ILGPU.Runtime;
 using System;
 using System.Numerics;
+using System.Threading.Tasks;
 
 #pragma warning disable CA1814 // Use jagged arrays if possible
 
@@ -155,7 +156,7 @@ namespace ILGPU.Algorithms.Optimization
         /// A result object containing CPU views to the actual results being computed
         /// asynchronously on the device.
         /// </returns>
-        OptimizationResult<TElementType, TEvalType> OptimizeToCPUAsync(
+        OptimizationResult<TElementType, TEvalType> OptimizeToCPU(
             AcceleratorStream stream,
             ReadOnlySpan<TElementType> bestPosition,
             TEvalType bestResult,
@@ -168,7 +169,40 @@ namespace ILGPU.Algorithms.Optimization
                 bestResult,
                 maxNumIterations,
                 maxTime);
-            return Engine.FetchToCPUAsync(stream, resultView);
+            return Engine.FetchToCPU(stream, resultView);
+        }
+
+        /// <summary>
+        /// Browser-safe async counterpart of
+        /// <see cref="OptimizeToCPU(AcceleratorStream, ReadOnlySpan{TElementType}, TEvalType,
+        /// int, TimeSpan?)"/>: runs the full optimization loop (pure GPU dispatch) and then
+        /// awaits the real async readback, returning a managed
+        /// <see cref="OptimizationResultCPU{TElementType, TEvalType}"/>. Works on every
+        /// backend including Wasm/WebGL/WebGPU. Takes <see cref="ReadOnlyMemory{T}"/> rather
+        /// than a span because an async method cannot have a ref-struct parameter; the loop
+        /// consumes the span synchronously before the first await.
+        /// </summary>
+        /// <param name="stream">The currently accelerator stream.</param>
+        /// <param name="bestPosition">The currently known best position.</param>
+        /// <param name="bestResult">The currently known best result.</param>
+        /// <param name="maxNumIterations">The maximum number of iterations to perform.</param>
+        /// <param name="maxTime">The maximum wall-clock time allowed.</param>
+        /// <returns>A task producing the CPU-side optimization result.</returns>
+        async Task<OptimizationResultCPU<TElementType, TEvalType>> OptimizeToCPUAsync(
+            AcceleratorStream stream,
+            ReadOnlyMemory<TElementType> bestPosition,
+            TEvalType bestResult,
+            int maxNumIterations,
+            TimeSpan? maxTime = null)
+        {
+            var resultView = Optimize(
+                stream,
+                bestPosition.Span,
+                bestResult,
+                maxNumIterations,
+                maxTime);
+            return await Engine.FetchToCPUAsync(stream, resultView)
+                .ConfigureAwait(false);
         }
     }
 
@@ -235,12 +269,37 @@ namespace ILGPU.Algorithms.Optimization
                 data.ArrayView);
 
         /// <summary>
+        /// Browser-safe async counterpart of
+        /// <see cref="LoadParticles(PageLockedArray2D{TNumericType})"/>: queues the device
+        /// copy then awaits the accelerator's real async drain so the page-locked target is
+        /// coherent. Correct on Wasm/WebGL/WebGPU, where the synchronous variant relies on a
+        /// no-op/unsupported synchronization.
+        /// </summary>
+        /// <param name="data">The page-locked target to load the particles into.</param>
+        public async Task LoadParticlesAsync(PageLockedArray2D<TNumericType> data)
+        {
+            Optimizer.Engine.PositionsView.DataView.BaseView.CopyTo(
+                Stream,
+                data.ArrayView);
+            await Stream.SynchronizeAsync().ConfigureAwait(false);
+        }
+
+        /// <summary>
         /// Loads all particle positions and converts them into a 2D array.
         /// </summary>
         /// <remarks>Caution as this operation can be slow.</remarks>
         /// <returns>The loaded 2D array of particle positions.</returns>
         public TNumericType[,] LoadParticles() =>
             Optimizer.Engine.PositionsView.DataView.GetAsArray2D(Stream);
+
+        /// <summary>
+        /// Browser-safe async counterpart of <see cref="LoadParticles()"/>: reads the
+        /// particle positions back via the real async drain + readback and reshapes them into
+        /// a 2D array. Works on every backend including Wasm/WebGL/WebGPU.
+        /// </summary>
+        /// <returns>A task producing the loaded 2D array of particle positions.</returns>
+        public Task<TNumericType[,]> LoadParticlesAsync() =>
+            Optimizer.Engine.PositionsView.DataView.GetAsArray2DAsync(Stream);
 
         /// <summary>
         /// Performs a single optimization step.
@@ -271,7 +330,20 @@ namespace ILGPU.Algorithms.Optimization
         /// Finishes the current optimization run while loading all results to the CPU.
         /// </summary>
         /// <returns>The optimization result accessible from the CPU side..</returns>
-        public OptimizationResult<TElementType, TEvalType> FinishToCPUAsync()
+        public OptimizationResult<TElementType, TEvalType> FinishToCPU()
+        {
+            var resultView = Finish();
+            return Engine.FetchToCPU(Stream, resultView);
+        }
+
+        /// <summary>
+        /// Browser-safe async counterpart of <see cref="FinishToCPU"/>: finishes the run
+        /// (GPU dispatch) then awaits the real async readback, returning a managed
+        /// <see cref="OptimizationResultCPU{TNumericType, TEvalType}"/>. Works on every
+        /// backend including Wasm/WebGL/WebGPU.
+        /// </summary>
+        /// <returns>A task producing the CPU-side optimization result.</returns>
+        public Task<OptimizationResultCPU<TElementType, TEvalType>> FinishToCPUAsync()
         {
             var resultView = Finish();
             return Engine.FetchToCPUAsync(Stream, resultView);

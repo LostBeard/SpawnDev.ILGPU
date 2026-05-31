@@ -92,4 +92,48 @@ namespace ILGPU.Algorithms.Optimization
         /// </summary>
         public double ElapsedTime { get; }
     }
+
+    /// <summary>
+    /// An optimization result in CPU space backed by managed arrays rather than spans.
+    /// Unlike the zero-copy ref struct
+    /// <see cref="OptimizationResult{TElementType, TEvalType}"/>, this can be produced by the
+    /// asynchronous readback path and returned across an <c>await</c> boundary, which is what
+    /// the browser backends (Wasm/WebGL/WebGPU) require — they have no synchronous GPU-&gt;CPU
+    /// readback. Use it via the <c>...Async</c> optimization methods.
+    /// </summary>
+    /// <typeparam name="TElementType">
+    /// The numeric element type used for optimization.
+    /// </typeparam>
+    /// <typeparam name="TEvalType">
+    /// The evaluation type used for evaluation.
+    /// </typeparam>
+    public readonly struct OptimizationResultCPU<TElementType, TEvalType>
+        where TElementType : unmanaged
+        where TEvalType : unmanaged
+    {
+        internal OptimizationResultCPU(
+            TEvalType result,
+            TElementType[] resultVector,
+            double elapsedTime)
+        {
+            Result = result;
+            ResultVector = resultVector;
+            ElapsedTime = elapsedTime;
+        }
+
+        /// <summary>
+        /// Returns the actual result value.
+        /// </summary>
+        public TEvalType Result { get; }
+
+        /// <summary>
+        /// Returns the best result vector (a managed copy of the device-side positions).
+        /// </summary>
+        public TElementType[] ResultVector { get; }
+
+        /// <summary>
+        /// The total elapsed time in milliseconds.
+        /// </summary>
+        public double ElapsedTime { get; }
+    }
 }

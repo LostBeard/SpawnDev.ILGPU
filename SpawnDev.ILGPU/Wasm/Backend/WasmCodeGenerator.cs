@@ -111,6 +111,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             /// </summary>
             public List<Method> HelperFunctionOrder { get; } = new();
 
+            /// <summary>
+            /// First IR kernel parameter index for user args at dispatch args[paramIdx].
+            /// Matches codegen <c>SetupParameters</c> startIdx: 1 when param[0] is the
+            /// implicit Index mapped to globalIdx, 0 when param[0] is e.g. LongIndex1D
+            /// extent (GridStrideLoopKernel) or an explicit body struct.
+            /// </summary>
+            public int IrUserParamIndexOffset { get; set; }
+
             public GeneratorArgs(
                 WasmBackend backend,
                 EntryPoint entryPoint,
@@ -674,6 +682,24 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>
+        /// Emits an integer width-coercion instruction when <paramref name="srcType"/>
+        /// differs from <paramref name="targetType"/> across the i32/i64 boundary
+        /// (<c>i64.extend_i32_s</c> widening, <c>i32.wrap_i64</c> narrowing). Assumes the
+        /// value to coerce is already on top of the stack. No-op when the types match or
+        /// when either side is a float type (callers handle float width separately).
+        /// Integer widening uses signed extension to match the codegen default.
+        /// </summary>
+        private void EmitIntWidthCoercion(byte srcType, byte targetType)
+        {
+            if (srcType == targetType)
+                return;
+            if (targetType == WasmOpCodes.I64 && srcType == WasmOpCodes.I32)
+                Code.Add(WasmOpCodes.I64ExtendI32S);
+            else if (targetType == WasmOpCodes.I32 && srcType == WasmOpCodes.I64)
+                Code.Add(WasmOpCodes.I32WrapI64);
+        }
+
         public virtual void GenerateCode(BinaryArithmeticValue value)
         {
             var target = AllocateLocal(value, GetWasmType(value));
@@ -693,9 +719,19 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 //   → left right left right i32.ge_s select
                 var leftLocal = AllocateNewLocal(wasmType);
                 var rightLocal = AllocateNewLocal(wasmType);
+                // The operands may not already match the result type — e.g. integer
+                // Min/Max of a view length (i64) and an i32 index (View.Length is i64,
+                // View.IntLength narrows, but ILGPU can feed the raw i64 length into the
+                // Min). The general arithmetic path below coerces operands to the result
+                // type; the Min/Max select path must do the same, otherwise we copy an
+                // i64 value into an i32 temp (or vice-versa) and the module fails to
+                // validate ("local.set expected i32 found i64"). Coerce to wasmType
+                // (i32<->i64 width) on the way into each temp local.
                 EmitGetLocal(left);
+                EmitIntWidthCoercion(GetLocalType(GetLocal(left)), wasmType);
                 WasmModuleBuilder.EmitLocalSet(Code, leftLocal);
                 EmitGetLocal(right);
+                EmitIntWidthCoercion(GetLocalType(GetLocal(right)), wasmType);
                 WasmModuleBuilder.EmitLocalSet(Code, rightLocal);
 
                 // Push val1 (left), val2 (right)
@@ -1153,11 +1189,44 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             var trueVal = predicate.TrueValue.Resolve();
             var falseVal = predicate.FalseValue.Resolve();
 
-            EmitGetLocal(trueVal);
-            EmitGetLocal(falseVal);
+            // The Wasm `select` instruction requires BOTH value operands to have the same
+            // type, and the result must match the target local's type. The IR does not always
+            // pre-convert the two branches to a common type — e.g. `cond ? 0 : longView[i]`
+            // leaves an i32 constant against an i64 load — so emit a width/kind coercion to the
+            // predicate's unified type for each branch. Without this, the validator rejects the
+            // module ("local.set expected type i32, found i64" / select type mismatch). The
+            // condition operand stays i32 (it is the boolean selector).
+            EmitGetLocalCoercedTo(trueVal, wasmType);
+            EmitGetLocalCoercedTo(falseVal, wasmType);
             EmitGetLocal(condition);
             Code.Add(WasmOpCodes.Select);
             WasmModuleBuilder.EmitLocalSet(Code, target);
+        }
+
+        /// <summary>
+        /// Emits a <c>local.get</c> for <paramref name="operand"/> and, if its Wasm type
+        /// differs from <paramref name="targetType"/>, the numeric conversion that coerces it
+        /// to that type (i32&lt;-&gt;i64 width, f32&lt;-&gt;f64 width). Used where the Wasm
+        /// instruction requires operands of a single unified type (e.g. <c>select</c>) but the
+        /// IR left mixed-width branches. Integer widening uses signed extension (the codegen
+        /// default; matches <see cref="GenerateCode(ConvertValue)"/>).
+        /// </summary>
+        private void EmitGetLocalCoercedTo(Value operand, byte targetType)
+        {
+            EmitGetLocal(operand);
+            var srcType = GetWasmType(operand);
+            if (srcType == targetType)
+                return;
+            byte? conv = (srcType, targetType) switch
+            {
+                (WasmOpCodes.I32, WasmOpCodes.I64) => WasmOpCodes.I64ExtendI32S,
+                (WasmOpCodes.I64, WasmOpCodes.I32) => WasmOpCodes.I32WrapI64,
+                (WasmOpCodes.F32, WasmOpCodes.F64) => WasmOpCodes.F64PromoteF32,
+                (WasmOpCodes.F64, WasmOpCodes.F32) => WasmOpCodes.F32DemoteF64,
+                _ => (byte?)null,
+            };
+            if (conv.HasValue)
+                Code.Add(conv.Value);
         }
 
         // Constants & Values
@@ -1175,7 +1244,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     WasmModuleBuilder.EmitI64Const(Code, value.Int64Value);
                     break;
                 case WasmOpCodes.F32:
-                    WasmModuleBuilder.EmitF32Const(Code, value.Float32Value);
+                    // Float16 constants store raw half bits in rawValue — Float32Value
+                    // reinterprets those bits as float (garbage). Promote via Float16Value.
+                    float f32Const = value.BasicValueType == BasicValueType.Float16
+                        ? (float)value.Float16Value
+                        : value.Float32Value;
+                    WasmModuleBuilder.EmitF32Const(Code, f32Const);
                     break;
                 case WasmOpCodes.F64:
                     WasmModuleBuilder.EmitF64Const(Code, value.Float64Value);

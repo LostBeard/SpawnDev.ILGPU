@@ -317,7 +317,7 @@ namespace ILGPU.Algorithms
             where T : unmanaged
             where TReduction : struct, IScanReduceOperation<T>
         {
-            EnsureSyncReadbackSupported(accelerator);
+            accelerator.EnsureSyncReadbackSupported("ReduceAsync");
             using var output = accelerator.Allocate1D<T>(1);
             accelerator.Reduce<T, TReduction>(stream, input, output.View);
             T result = default;
@@ -399,34 +399,12 @@ namespace ILGPU.Algorithms
             where TStride : struct, IStride1D
             where TReduction : struct, IScanReduceOperation<T>
         {
-            EnsureSyncReadbackSupported(accelerator);
+            accelerator.EnsureSyncReadbackSupported("ReduceAsync");
             using var output = accelerator.Allocate1D<T>(1);
             accelerator.Reduce<T, TStride, TReduction>(stream, input, output.View);
             T result = default;
             output.View.CopyToCPU(stream, ref result, 1);
             return result;
-        }
-
-        /// <summary>
-        /// Guards the synchronous <c>Reduce</c>-to-scalar overloads against browser
-        /// backends, which have no usable synchronous GPU-&gt;CPU readback: WebGPU
-        /// throws on sync readback, and Wasm/WebGL would read stale data before the
-        /// in-flight reduction kernel finishes (a silent wrong result). Callers on
-        /// those backends must use <c>ReduceAsync</c>.
-        /// </summary>
-        private static void EnsureSyncReadbackSupported(Accelerator accelerator)
-        {
-            switch (accelerator.AcceleratorType)
-            {
-                case AcceleratorType.Wasm:
-                case AcceleratorType.WebGL:
-                case AcceleratorType.WebGPU:
-                    throw new NotSupportedException(
-                        $"Synchronous Reduce-to-scalar is not supported on the " +
-                        $"{accelerator.AcceleratorType} backend: browser backends have no " +
-                        "synchronous GPU->CPU readback (WebGPU throws; Wasm/WebGL would read " +
-                        "stale data before in-flight kernels finish). Use ReduceAsync instead.");
-            }
         }
 
         /// <summary>

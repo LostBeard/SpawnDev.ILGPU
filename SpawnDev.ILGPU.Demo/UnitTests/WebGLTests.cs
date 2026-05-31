@@ -93,6 +93,14 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             throw new UnsupportedTestException("WebGL: MemSet is deferred CPU-side upload; readback reads the GPU/worker side, so the kernel-fill -> memset -> readback verification pattern is not meaningful on WebGL");
 
         [TestMethod]
+        public new async Task ILGPUUniqueAsyncTest() =>
+            throw new UnsupportedTestException("WebGL: Unique requires a group scan (shared memory + barriers), unsupported in vertex shaders");
+
+        [TestMethod]
+        public new async Task SharedBoolMemoryTest() =>
+            throw new UnsupportedTestException("WebGL: shared memory + barriers unsupported in vertex shaders");
+
+        [TestMethod]
         public new async Task ILGPUReduceFloatTest() =>
             throw new UnsupportedTestException("WebGL: GroupExtensions.Reduce unsupported in vertex shaders");
 

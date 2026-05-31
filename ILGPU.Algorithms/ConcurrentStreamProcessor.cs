@@ -138,6 +138,79 @@ namespace ILGPU.Algorithms
             }
         }
 
+        /// <summary>
+        /// Browser-safe async counterpart of
+        /// <see cref="ProcessConcurrently(int, Action{AcceleratorStream, int})"/>.
+        /// </summary>
+        /// <param name="numActions">The number of actions to submit.</param>
+        /// <param name="action">The action to invoke on each stream to submit work.</param>
+        public Task ProcessConcurrentlyAsync(
+            int numActions,
+            Action<AcceleratorStream, int> action) =>
+            ProcessConcurrentlyAsync(null, numActions, action);
+
+        /// <summary>
+        /// Browser-safe async counterpart of
+        /// <see cref="ProcessConcurrently(AcceleratorStream?, int,
+        /// Action{AcceleratorStream, int})"/>. The synchronous overload ends each stream with
+        /// <c>Synchronize()</c>, which is a no-op on Wasm/WebGL and only flushes on WebGPU, so
+        /// it returns before the submitted work has actually completed on the browser
+        /// backends. This version submits the work and then awaits every stream's real async
+        /// drain (<c>SynchronizeAsync</c>), so completion is guaranteed on every backend; on
+        /// desktop the per-stream drains still overlap.
+        /// </summary>
+        /// <param name="stream">The current accelerator stream.</param>
+        /// <param name="numActions">The number of actions to submit.</param>
+        /// <param name="action">The action to invoke on each stream to submit work.</param>
+        public async Task ProcessConcurrentlyAsync(
+            AcceleratorStream? stream,
+            int numActions,
+            Action<AcceleratorStream, int> action)
+        {
+            if (numActions < 0)
+                throw new ArgumentOutOfRangeException(nameof(numActions));
+            if (numActions == 0)
+                return;
+            if (action == null)
+                throw new ArgumentOutOfRangeException(nameof(action));
+
+            if (stream != null && numActions == 1 && MaxNumConcurrentStreams == 1)
+            {
+                // Use the given stream to process the single action request
+                action(stream, 0);
+                await stream.SynchronizeAsync().ConfigureAwait(false);
+                return;
+            }
+
+            // Drain the incoming stream before fanning out
+            if (stream != null)
+                await stream.SynchronizeAsync().ConfigureAwait(false);
+
+            int numActionsPerStream = XMath.DivRoundUp(
+                numActions,
+                MaxNumConcurrentStreams);
+            var actionStride = new Stride2D.DenseY(numActionsPerStream);
+
+            // Submit work on every stream (submission is cheap), then await all real drains.
+            var drains = new Task[MaxNumConcurrentStreams];
+            for (int i = 0; i < MaxNumConcurrentStreams; ++i)
+            {
+                var currentStream = streams[i];
+                using (currentStream.BindScoped())
+                {
+                    for (int j = 0; j < numActionsPerStream; ++j)
+                    {
+                        int actionIndex = actionStride.ComputeElementIndex((i, j));
+                        if (actionIndex >= numActions)
+                            break;
+                        action(currentStream, actionIndex);
+                    }
+                }
+                drains[i] = currentStream.SynchronizeAsync();
+            }
+            await Task.WhenAll(drains).ConfigureAwait(false);
+        }
+
         #endregion
 
         #region IDisposable

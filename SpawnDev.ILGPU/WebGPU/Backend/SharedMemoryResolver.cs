@@ -109,6 +109,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private readonly List<DynamicSharedOverrideInfo> _dynamicOverrides = new();
 
         /// <summary>
+        /// WGSL variable names of shared (workgroup) arrays whose IR element type is
+        /// <c>bool</c> but which are declared as <c>array&lt;i32, N&gt;</c> instead.
+        /// WGSL forbids <c>bool</c> in the <c>workgroup</c> address space (bool has no
+        /// defined size/footprint), so a <c>var&lt;workgroup&gt; array&lt;bool, N&gt;</c>
+        /// declaration fails Tint validation — the whole pipeline then silently fails to
+        /// create and the kernel never runs (e.g. ILGPU.Algorithms.UniqueKernel's
+        /// <c>SharedMemory.Allocate&lt;bool&gt;</c>). These arrays store 0/1 as i32; the
+        /// kernel generator's LoadElementAddress/Load/Store convert at each access site.
+        /// </summary>
+        public HashSet<string> BoolRemappedVars { get; } = new();
+
+        /// <summary>
         /// Creates a SharedMemoryResolver pre-populated with shared allocations from the backend context.
         /// </summary>
         /// <param name="sharedAllocations">Static shared memory allocations from the backend context.</param>
@@ -123,6 +135,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 var name = $"shared_{sharedIdx}";
                 var wgslType = typeGenerator[alloca.ElementType];
+                // bool is illegal in the workgroup address space — store as i32 (0/1) and
+                // convert at the access sites (see BoolRemappedVars docs above).
+                if (wgslType == "bool")
+                {
+                    wgslType = "i32";
+                    BoolRemappedVars.Add(name);
+                }
                 int entryCount = (int)alloca.ArraySize;
                 var declaration = $"var<workgroup> {name} : array<{wgslType}, {entryCount}>;";
                 _entries[alloca.Alloca] = (name, declaration);

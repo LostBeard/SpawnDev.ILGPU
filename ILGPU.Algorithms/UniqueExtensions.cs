@@ -13,6 +13,7 @@ using ILGPU.Algorithms.ComparisonOperations;
 using ILGPU.Algorithms.Resources;
 using ILGPU.Runtime;
 using System;
+using System.Threading.Tasks;
 
 namespace ILGPU.Algorithms
 {
@@ -130,8 +131,16 @@ namespace ILGPU.Algorithms
             LongIndex1D dataLength)
             where T : unmanaged
         {
-            // 1 int for SequentialGroupExecutor.
-            return 1;
+            // 1 int for the SequentialGroupExecutor, but TempViewManager rounds every
+            // allocation UP to the next 256-byte (64-int) boundary so sub-view offsets satisfy
+            // WebGPU's minStorageBufferOffsetAlignment. CreateUnique's launcher then does
+            // `temp.SubView(0, viewManager.NumInts)` with that padded count, so callers must
+            // allocate the PADDED size or the sub-view overruns ("Sub view out of range" —
+            // a Release-active Trace.Assert). Returning the unpadded 1 made every Unique call
+            // under-allocate temp on all backends (latent because no Unique test existed).
+            const long alignmentInInts = 256 / sizeof(int); // 64
+            // ceil(1 / 64) * 64 == 64 for the single executor int.
+            return (1 + alignmentInInts - 1) / alignmentInInts * alignmentInInts;
         }
 
         /// <summary>
@@ -214,6 +223,10 @@ namespace ILGPU.Algorithms
             where T : unmanaged
             where TComparisonOperation : struct, IComparisonOperation<T>
         {
+            // The final CopyToCPU is a synchronous GPU->CPU readback: stale on Wasm and
+            // throws on WebGPU/WebGL. Fail loud there and direct callers to UniqueAsync
+            // instead of silently returning a wrong length.
+            accelerator.EnsureSyncReadbackSupported("UniqueAsync");
             using var output = accelerator.Allocate1D<long>(1);
             using var temp = accelerator.Allocate1D<int>(
                 accelerator.ComputeUniqueTempStorageSize<T>(input.Length));
@@ -225,6 +238,39 @@ namespace ILGPU.Algorithms
             long result = 0L;
             output.View.CopyToCPU(stream, ref result, 1);
             return result;
+        }
+
+        /// <summary>
+        /// Removes consecutive duplicate elements in a supplied input view, awaiting the
+        /// backend's real async drain before reading the new length back. This is the
+        /// browser-safe form of
+        /// <see cref="Unique{T, TComparisonOperation}(Accelerator, AcceleratorStream,
+        /// ArrayView{T})"/>: correct on Wasm (drains in-flight worker kernels first) and
+        /// does not throw on WebGPU/WebGL.
+        /// </summary>
+        /// <typeparam name="T">The input view element type.</typeparam>
+        /// <typeparam name="TComparisonOperation">The comparison operation.</typeparam>
+        /// <param name="accelerator">The accelerator.</param>
+        /// <param name="stream">The accelerator stream.</param>
+        /// <param name="input">The input view.</param>
+        /// <returns>The new/valid length of the input view.</returns>
+        public static async Task<long> UniqueAsync<T, TComparisonOperation>(
+            this Accelerator accelerator,
+            AcceleratorStream stream,
+            ArrayView<T> input)
+            where T : unmanaged
+            where TComparisonOperation : struct, IComparisonOperation<T>
+        {
+            using var output = accelerator.Allocate1D<long>(1);
+            using var temp = accelerator.Allocate1D<int>(
+                accelerator.ComputeUniqueTempStorageSize<T>(input.Length));
+            accelerator.CreateUnique<T, TComparisonOperation>()(
+                stream,
+                input,
+                output.View,
+                temp.View);
+            var result = await output.View.CopyToCPUAsync(stream).ConfigureAwait(false);
+            return result[0];
         }
 
         #endregion
