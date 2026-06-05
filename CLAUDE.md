@@ -100,7 +100,7 @@ node -e "const d=JSON.parse(require('fs').readFileSync('path/to/latest.json','ut
 These apply everywhere, not just one directory:
 
 - **No backend-specific kernel variants.** NEVER create backend-specific copies of algorithm kernels (e.g., `WasmRadixSortKernel1`) to work around bugs. The same kernel must work on all 6 backends. Fix bugs in the codegen, dispatch, or memory management — not by duplicating the algorithm. Only acceptable if it is absolutely IMPOSSIBLE to fix any other way.
-- **Blazor WASM is single-threaded** — all async, no blocking calls
+- **Blazor WASM is single-threaded** — all async, no blocking calls. The browser backends (WebGPU/WebGL/Wasm) are async-only at the GPU->CPU boundary: a sync GPU->CPU readback (`CopyToCPU`/`GetAsArray1D`) THROWS, `Synchronize()` only FLUSHES the queued work WITHOUT waiting (use `await SynchronizeAsync()` when you need it finished - it is NOT a no-op and NOT a deadlock), and blocking the thread on async work (`.Result`/`.Wait()`) DEADLOCKS. Full contract + per-method reference: [`Docs/async.md`](Docs/async.md).
 - **T4 Templates in `ILGPU/`** — check for `.tt` before editing `.cs`. Generated files are silently overwritten.
 - **Device loss detection** — WebGPU: `device.lost` promise. WebGL: `webglcontextlost` event. Guards on dispatch/synchronize. Intentional disposal filtered out.
 

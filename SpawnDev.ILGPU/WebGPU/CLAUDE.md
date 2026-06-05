@@ -8,8 +8,7 @@ Transpiles ILGPU IR → WGSL shaders. Dispatches via `WebGPUAccelerator`.
 - `Backend/WGSLEmulationLibrary.cs` — i64/f64 emulation functions with per-function trimming
 - `Backend/SharedMemoryResolver.cs` — alloca→workgroup var matching, WGSL emission
 - `Backend/UniformityAnalyzer.cs` — loop classification, PHI tracing, barrier detection
-- `WebGPUAccelerator.cs` — dispatch, bind groups, buffer management, device loss monitoring
-- `WebGPUStream.cs` — deferred encode + flush (batched submission)
+- `WebGPUAccelerator.cs` — dispatch, bind groups (+ opt-in bind-group cache via `WebGPUBackend.EnableBindGroupCaching`), buffer management, device loss monitoring, and the nested `WebGPUStream` class (deferred encode + flush / batched submission — it is NOT a separate file)
 - `WebGPUBackend.cs` — WGSLRegistry, WGSLDiagnostics, WGSLDumpPath, pre-validation
 
 ## Hard Constraints

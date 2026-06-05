@@ -4,8 +4,8 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.11</Version>
-		<PackageReleaseNotes>v4.9.11: Math.Clamp now works in kernels on all 6 backends (frontend remap to throw-free IntrinsicMath.Clamp); async browser parity (overridable SynchronizeAsync/CopyToCPUAsync core virtuals + real ReduceAsync drain), MemSetToZeroAsync, Wasm TensorView+Half struct-param dispatch, WebGL nested-struct hoisted init, opt-in Wasm host-buffer race detector. Bundles forks 2.0.8.</PackageReleaseNotes>
+		<Version>4.9.12-local.1</Version>
+		<PackageReleaseNotes>v4.9.12-local.1 (local dev): opt-in WebGPU bind-group cache - WebGPUBackend.EnableBindGroupCaching + WebGPUAccelerator.ClearBindGroupCache()/BindGroupCacheHits/BindGroupCacheMisses; reuses GPUBindGroups across identical-signature (fixed-shape decode) dispatches to cut the per-step GPU floor, keyed on buffer object identity. Default OFF. v4.9.11: Math.Clamp now works in kernels on all 6 backends (frontend remap to throw-free IntrinsicMath.Clamp); async browser parity (overridable SynchronizeAsync/CopyToCPUAsync core virtuals + real ReduceAsync drain), MemSetToZeroAsync, Wasm TensorView+Half struct-param dispatch, WebGL nested-struct hoisted init, opt-in Wasm host-buffer race detector. Bundles forks 2.0.8.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>

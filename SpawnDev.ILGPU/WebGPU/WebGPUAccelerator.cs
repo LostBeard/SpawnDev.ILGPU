@@ -119,6 +119,153 @@ namespace SpawnDev.ILGPU.WebGPU
 
         #endregion
 
+        #region Bind-Group Cache (opt-in: WebGPUBackend.EnableBindGroupCaching)
+
+        // For fixed-shape workloads (e.g. ML fixed-shape decode) the same kernels re-dispatch over
+        // the same buffers every step. Recreating + disposing a GPUBindGroup per dispatch is the
+        // dominant per-step GPU cost (the browser revalidates each freshly-created bind group).
+        // This cache keys on the (pipeline + data-buffer bindings) signature and reuses the
+        // GPUBindGroup across dispatches. The per-dispatch scalar/lock params buffers have
+        // non-stable identity (freshly allocated, or pooled LIFO), so a cached entry OWNS a stable
+        // scalar/lock buffer set and rewrites their contents on each hit. Correctness is inherent:
+        // a bind group binds BUFFERS, not their contents. Default OFF; cleared via
+        // ClearBindGroupCache(). Per-accelerator instance state (bind groups are device-specific);
+        // WebGPU runs only in the single-threaded browser, so no locking is required.
+        private readonly Dictionary<BindGroupCacheKey, BindGroupCacheEntry> _bindGroupCache = new();
+
+        private long _bindGroupCacheHits;
+        private long _bindGroupCacheMisses;
+
+        /// <summary>Bind-group cache hits since the last clear. Diagnostic / perf telemetry.</summary>
+        public long BindGroupCacheHits => _bindGroupCacheHits;
+
+        /// <summary>Bind-group cache misses since the last clear. Diagnostic / perf telemetry.</summary>
+        public long BindGroupCacheMisses => _bindGroupCacheMisses;
+
+        /// <summary>
+        /// One binding slot in a cached bind group's signature: which slot, which buffer (by the
+        /// REFERENCE IDENTITY of its backing memory-buffer object), and the bound sub-range.
+        /// Compared by reference-equality on the buffer object so two dispatches over the SAME
+        /// buffer instances (the fixed-shape decode loop reuses buffer instances across steps)
+        /// produce the same key, while DIFFERENT buffers never collide.
+        ///
+        /// NOTE: <see cref="global::ILGPU.Runtime.MemoryBuffer.NativePtr"/> is deliberately NOT
+        /// used here - WebGPU device buffers have no native CPU pointer, so NativePtr is not
+        /// unique per buffer and keying on it caused different buffers to false-hit the cache and
+        /// bind the wrong GPU memory (caught by BindGroupCache_DifferentBuffersMiss). Object
+        /// identity is unique per buffer AND stable across decode-step reuse.
+        /// </summary>
+        private readonly struct BindGroupBinding : IEquatable<BindGroupBinding>
+        {
+            public readonly uint Binding;
+            public readonly object Buffer;
+            public readonly ulong Offset;
+            public readonly ulong Size;
+
+            public BindGroupBinding(uint binding, object buffer, ulong offset, ulong size)
+            {
+                Binding = binding;
+                Buffer = buffer;
+                Offset = offset;
+                Size = size;
+            }
+
+            public bool Equals(BindGroupBinding other) =>
+                Binding == other.Binding && ReferenceEquals(Buffer, other.Buffer) &&
+                Offset == other.Offset && Size == other.Size;
+
+            public override bool Equals(object? obj) => obj is BindGroupBinding b && Equals(b);
+
+            public override int GetHashCode() =>
+                System.HashCode.Combine(
+                    Binding,
+                    System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(Buffer),
+                    Offset, Size);
+        }
+
+        /// <summary>
+        /// Cache key for a reusable bind group: the compiled shader/pipeline identity plus the
+        /// ordered DATA-buffer bindings. The owned scalar/lock buffers are deliberately excluded
+        /// from the key (they have stable identity per entry), so only data-buffer identity,
+        /// offset, or size variation forces a rebuild.
+        /// </summary>
+        private readonly struct BindGroupCacheKey : IEquatable<BindGroupCacheKey>
+        {
+            public readonly object Pipeline;          // WebGPUComputeShader instance (stable via shader cache)
+            public readonly BindGroupBinding[] Bindings;
+
+            public BindGroupCacheKey(object pipeline, BindGroupBinding[] bindings)
+            {
+                Pipeline = pipeline;
+                Bindings = bindings;
+            }
+
+            public bool Equals(BindGroupCacheKey other)
+            {
+                if (!ReferenceEquals(Pipeline, other.Pipeline)) return false;
+                if (Bindings.Length != other.Bindings.Length) return false;
+                for (int i = 0; i < Bindings.Length; i++)
+                    if (!Bindings[i].Equals(other.Bindings[i])) return false;
+                return true;
+            }
+
+            public override bool Equals(object? obj) => obj is BindGroupCacheKey k && Equals(k);
+
+            public override int GetHashCode()
+            {
+                var hc = new System.HashCode();
+                hc.Add(System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(Pipeline));
+                for (int i = 0; i < Bindings.Length; i++) hc.Add(Bindings[i]);
+                return hc.ToHashCode();
+            }
+        }
+
+        /// <summary>
+        /// A cached bind group plus the stable scalar/lock buffers it owns. The bind group binds
+        /// these owned buffers; their contents are rewritten on each cache hit (a bind group
+        /// references buffers, not their contents). Released when the cache is cleared.
+        /// </summary>
+        private sealed class BindGroupCacheEntry
+        {
+            public GPUBindGroup BindGroup = null!;
+            public GPUBuffer? ScalarBuffer;          // cache-owned _scalar_params (256B), rewritten per hit
+            public List<GPUBuffer>? LockBuffers;     // cache-owned i64-spinlock buffers (256B each), zeroed per hit
+
+            public void DisposeResources()
+            {
+                try { BindGroup?.Dispose(); } catch { }
+                if (ScalarBuffer != null)
+                {
+                    try { ScalarBuffer.Destroy(); ScalarBuffer.Dispose(); } catch { }
+                }
+                if (LockBuffers != null)
+                {
+                    foreach (var b in LockBuffers)
+                    {
+                        try { b.Destroy(); b.Dispose(); } catch { }
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// Releases every cached <see cref="GPUBindGroup"/> and the stable scalar/lock buffers
+        /// those entries own, and resets the hit/miss counters. Call when the buffer set backing
+        /// the cached dispatches changes (e.g. fixed-shape generation teardown), AFTER a
+        /// <c>Synchronize</c> so no batch is in flight referencing a cached group. No-op when the
+        /// cache is empty (bind-group caching never enabled).
+        /// </summary>
+        public void ClearBindGroupCache()
+        {
+            foreach (var entry in _bindGroupCache.Values)
+                entry.DisposeResources();
+            _bindGroupCache.Clear();
+            _bindGroupCacheHits = 0;
+            _bindGroupCacheMisses = 0;
+        }
+
+        #endregion
+
         #region Dispatch Log
 
         /// <summary>
@@ -784,6 +931,45 @@ namespace SpawnDev.ILGPU.WebGPU
                 }
                 // Use expandedArgs list directly as indexable span to avoid ToArray()
                 var effectiveArgsCount = expandedArgs.Count;
+
+                // ── BIND-GROUP CACHE (opt-in: WebGPUBackend.EnableBindGroupCaching) ──────────
+                // For fixed-shape re-feed the same kernel re-dispatches over the same buffers
+                // every step. Reuse the GPUBindGroup keyed on (pipeline + data-buffer bindings)
+                // instead of recreating + disposing it per dispatch (the per-step GPU floor).
+                // v1 excludes coalesce + i64-spinlock kernels (their per-dispatch buffers
+                // complicate ownership) - they fall back to the uncached path. A cached entry
+                // owns a stable scalar buffer whose 256B contents are rewritten each hit (a bind
+                // group binds buffers, not their contents). Cache lives on the owning accelerator.
+                bool bgUseCache = WebGPUBackend.EnableBindGroupCaching
+                    && !compiledKernel.HasCoalesceGroups
+                    && !compiledKernel.HasI64Spinlocks;
+                BindGroupCacheKey bgCacheKey = default;
+                bool bgCacheHit = false;
+                BindGroupCacheEntry? bgCachedEntry = null;
+                GPUBuffer? bgOwnedScalarBuffer = null;
+                List<GPUBuffer>? bgOwnedLockBuffers = null;
+                if (bgUseCache)
+                {
+                    var bgKeyBindings = new List<BindGroupBinding>(expandedArgs.Count);
+                    for (int bi = 0; bi < expandedArgs.Count; bi++)
+                    {
+                        if (expandedArgs[bi] is IArrayView bav)
+                        {
+                            var bcontig = bav as IContiguousArrayView;
+                            if (bcontig == null)
+                            {
+                                var brc = GetOrCreateReflectionCache(bav.GetType());
+                                bcontig = (brc.BaseViewProperty != null ? brc.BaseViewProperty.GetValue(bav) : bav) as IContiguousArrayView;
+                            }
+                            if (bcontig?.Buffer != null)
+                                bgKeyBindings.Add(new BindGroupBinding(
+                                    (uint)bi, bcontig.Buffer,
+                                    (ulong)bcontig.IndexInBytes, (ulong)bcontig.LengthInBytes));
+                        }
+                    }
+                    bgCacheKey = new BindGroupCacheKey(shader, bgKeyBindings.ToArray());
+                    bgCacheHit = webGpuAccel._bindGroupCache.TryGetValue(bgCacheKey, out bgCachedEntry);
+                }
 
                 // Build packed scalar lookup mapping effectiveArgs index → ScalarPackingEntry.
                 //
@@ -1597,8 +1783,19 @@ namespace SpawnDev.ILGPU.WebGPU
                         }
                     }
 
-                    var packedBuffer = GetPooledScalarBuffer(device);
-                    scalarBuffersToReturn.Add(packedBuffer);
+                    // Bind-group cache: a cached entry OWNS a stable scalar buffer whose contents
+                    // we rewrite on each hit; otherwise use the normal per-dispatch pooled/fresh
+                    // buffer. (A bind group binds buffers, not their contents.)
+                    GPUBuffer packedBuffer;
+                    if (bgCacheHit)
+                        packedBuffer = bgCachedEntry!.ScalarBuffer!;
+                    else if (bgUseCache)
+                        packedBuffer = bgOwnedScalarBuffer = CreateScalarBuffer(device);
+                    else
+                    {
+                        packedBuffer = GetPooledScalarBuffer(device);
+                        scalarBuffersToReturn.Add(packedBuffer);
+                    }
                     device.Queue.WriteBuffer(packedBuffer, 0, packedData);
 
                     entries.Add(new GPUBindGroupEntry
@@ -1761,13 +1958,34 @@ namespace SpawnDev.ILGPU.WebGPU
                     }
                 }
 
-                var bindGroupDesc = new GPUBindGroupDescriptor
+                GPUBindGroup bindGroup;
+                if (bgCacheHit)
                 {
-                    Layout = shader.BindGroupLayout!,
-                    Entries = entries.ToArray()
-                };
+                    // Reuse the cached bind group; its owned scalar buffer was rewritten above.
+                    bindGroup = bgCachedEntry!.BindGroup;
+                    webGpuAccel._bindGroupCacheHits++;
+                }
+                else
+                {
+                    var bindGroupDesc = new GPUBindGroupDescriptor
+                    {
+                        Layout = shader.BindGroupLayout!,
+                        Entries = entries.ToArray()
+                    };
 
-                var bindGroup = device.CreateBindGroup(bindGroupDesc);
+                    bindGroup = device.CreateBindGroup(bindGroupDesc);
+
+                    if (bgUseCache)
+                    {
+                        webGpuAccel._bindGroupCache[bgCacheKey] = new BindGroupCacheEntry
+                        {
+                            BindGroup = bindGroup,
+                            ScalarBuffer = bgOwnedScalarBuffer,
+                            LockBuffers = bgOwnedLockBuffers
+                        };
+                        webGpuAccel._bindGroupCacheMisses++;
+                    }
+                }
 
                 uint workX = 1, workY = 1, workZ = 1;
 
@@ -1833,7 +2051,11 @@ namespace SpawnDev.ILGPU.WebGPU
                     _dispatchLog.Dequeue();
 
                 // Defer resource cleanup until the batch is flushed
-                webGpuStream.DeferBindGroupDisposal(bindGroup);
+                // Cached bind groups (hit or miss) are owned by the cache, not the batch - they
+                // outlive the flush, so don't defer-dispose them. Their owned scalar buffers
+                // likewise stay out of scalarBuffersToReturn (never pooled/destroyed at flush).
+                if (!bgUseCache)
+                    webGpuStream.DeferBindGroupDisposal(bindGroup);
                 foreach (var buffer in scalarBuffersToReturn)
                     webGpuStream.DeferScalarReturn(buffer);
                 scalarBuffersToReturn.Clear();

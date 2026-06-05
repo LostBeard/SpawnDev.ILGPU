@@ -151,6 +151,25 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public static bool EnableBufferPooling { get; set; } = false;
 
         /// <summary>
+        /// When true, kernel dispatches with an identical (pipeline + data-buffer bindings)
+        /// signature reuse a cached <c>GPUBindGroup</c> instead of recreating and disposing one
+        /// every dispatch. The cache entry owns a stable scalar/lock buffer set whose 256-byte
+        /// contents are rewritten on each hit, so correctness is unaffected - a bind group binds
+        /// buffers, not their contents. Default OFF.
+        ///
+        /// Opt in for fixed-shape workloads (e.g. ML fixed-shape decode), where the same kernels
+        /// re-dispatch over the same buffers every step: the hit rate approaches 100% after the
+        /// first step and eliminates the per-dispatch <c>createBindGroup</c> + <c>destroy</c>
+        /// churn that dominates the per-step GPU floor. Safe reuse assumes the consumer
+        /// <c>Synchronize</c>s between successive dispatches of the same signature (the fixed-shape
+        /// decode loop syncs every step), so an owned scalar buffer is never rewritten while a
+        /// prior dispatch still reads it. Call <see cref="WebGPUAccelerator.ClearBindGroupCache"/>
+        /// when the backing buffer set changes (e.g. generation teardown) to release cached groups
+        /// and their owned buffers.
+        /// </summary>
+        public static bool EnableBindGroupCaching { get; set; } = false;
+
+        /// <summary>
         /// When set, every compiled shader is auto-written to {WGSLDumpPath}/{KernelName}.wgsl.
         /// Desktop only — ignored in Blazor WASM (use console.log instead).
         /// </summary>

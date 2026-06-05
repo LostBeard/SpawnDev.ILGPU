@@ -262,6 +262,16 @@ namespace ILGPU.Runtime
         /// <summary>
         /// Synchronizes pending operations.
         /// </summary>
+        /// <remarks>
+        /// On desktop backends (CPU, CUDA, OpenCL) this BLOCKS until all submitted work has
+        /// finished. On the single-threaded browser backends (WebGPU, WebGL, Wasm) it instead
+        /// FLUSHES/submits the queued work to the GPU - it starts the work - and returns
+        /// immediately WITHOUT waiting for it to complete. So on those backends it is neither a
+        /// no-op (it submits a real command batch) nor a blocking wait. When you need the work to
+        /// have actually FINISHED on a browser backend (before a host readback, or before
+        /// disposing buffers a pending dispatch still references), <c>await</c>
+        /// <see cref="SynchronizeAsync"/> instead.
+        /// </remarks>
         public void Synchronize()
         {
             Bind(); SynchronizeInternal();
@@ -282,7 +292,7 @@ namespace ILGPU.Runtime
         /// for backends whose <see cref="Synchronize"/> blocks until the queue drains
         /// (CUDA, OpenCL, CPU). Single-threaded browser backends (Wasm, WebGPU,
         /// WebGL) cannot block-wait — their synchronous <see cref="Synchronize"/> is a
-        /// non-blocking flush / no-op — so they MUST override this to await their real
+        /// non-blocking flush that submits the queued work without waiting (it is NOT a no-op) — so they MUST override this to await their real
         /// drain (worker dispatch completion, queue.OnSubmittedWorkDone, GL fence).
         /// Algorithm and consumer code that needs a host-visible result after an
         /// unawaited dispatch must <c>await</c> this rather than calling the
