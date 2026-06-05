@@ -79,9 +79,9 @@ namespace ILGPU
         public static readonly Half Zero = new Half(0x0);
 
         /// <summary>
-        /// Represents a positive zero <see cref="Half"/> value.
+        /// Represents the value one (1.0).
         /// </summary>
-        public static readonly Half One = new Half(0x1);
+        public static readonly Half One = new Half(0x3C00);
 
         #endregion
 

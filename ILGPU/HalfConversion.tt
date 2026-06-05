@@ -83,9 +83,10 @@ namespace ILGPU
         public static readonly Half Zero = new Half(<#= Assemble(false, 0, 0) #>);
 
         /// <summary>
-        /// Represents a positive zero <see cref="Half"/> value.
+        /// Represents the value one (1.0). (The biased exponent for 2^0 is the exponent
+        /// bias = (1 &lt;&lt; (ExponentBits - 1)) - 1 = 15, with a zero mantissa = raw 0x3C00.)
         /// </summary>
-        public static readonly Half One = new Half(<#= Assemble(false, 0, 1) #>);
+        public static readonly Half One = new Half(<#= Assemble(false, (1 << (ExponentBits - 1)) - 1, 0) #>);
 
         #endregion
 
