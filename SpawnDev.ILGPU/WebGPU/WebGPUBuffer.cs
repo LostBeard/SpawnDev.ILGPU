@@ -164,6 +164,28 @@ namespace SpawnDev.ILGPU.WebGPU
         }
 
         /// <summary>
+        /// Awaits the GPU→CPU readback map (<c>staging.MapAsync(Read)</c>), timing the wait into
+        /// <see cref="WebGPUBackend.ProfileReadbackWaitMs"/> when <see cref="WebGPUBackend.EnableDispatchProfiling"/>
+        /// is on. This is the readback GPU-wait surface — distinct from <c>SynchronizeAsync</c>'s
+        /// <c>OnSubmittedWorkDone</c> drain — so a profiled step accounts for ALL GPU-wait, not just the sync
+        /// drain (a decode whose wait hides here reads ~0 in <see cref="WebGPUBackend.ProfileSyncWaitMs"/>).
+        /// </summary>
+        private static async Task ProfiledMapReadAsync(GPUBuffer stagingBuffer)
+        {
+            if (WebGPUBackend.EnableDispatchProfiling)
+            {
+                var profSw = System.Diagnostics.Stopwatch.StartNew();
+                await stagingBuffer.MapAsync(GPUMapMode.Read);
+                WebGPUBackend.ProfileReadbackWaitMs += profSw.Elapsed.TotalMilliseconds;
+                WebGPUBackend.ProfileReadbackWaitCount++;
+            }
+            else
+            {
+                await stagingBuffer.MapAsync(GPUMapMode.Read);
+            }
+        }
+
+        /// <summary>
         /// Copies data from the GPU buffer to a host array asynchronously.
         /// Allocates and returns a new T[] array.
         /// For hot-path rendering loops, prefer the overload that accepts a destination array
@@ -236,7 +258,7 @@ namespace SpawnDev.ILGPU.WebGPU
             Accelerator.Queue?.Submit(_submitArray);
 
             // Map, read into caller's destination array, unmap
-            await _cachedStagingBuffer.MapAsync(GPUMapMode.Read);
+            await ProfiledMapReadAsync(_cachedStagingBuffer);
             var mappedRange = _cachedStagingBuffer.GetMappedRange();
             if (mappedRange != null)
             {
@@ -301,7 +323,7 @@ namespace SpawnDev.ILGPU.WebGPU
             Accelerator.Queue?.Submit(_submitArray);
 
             // Map, read into caller's destination array, unmap
-            await _cachedStagingBuffer.MapAsync(GPUMapMode.Read);
+            await ProfiledMapReadAsync(_cachedStagingBuffer);
             Uint8Array result = default!;
             try
             {
@@ -379,7 +401,7 @@ namespace SpawnDev.ILGPU.WebGPU
             Accelerator.Queue?.Submit(_submitArray);
 
             // Map, read as TDest into destination array, unmap
-            await _cachedStagingBuffer.MapAsync(GPUMapMode.Read);
+            await ProfiledMapReadAsync(_cachedStagingBuffer);
             var mappedRange = _cachedStagingBuffer.GetMappedRange();
             if (mappedRange != null)
             {

@@ -170,26 +170,45 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public static bool EnableBindGroupCaching { get; set; } = false;
 
         /// <summary>
-        /// Diagnostic (default OFF). When true, <see cref="WebGPUAcceleratorExtensions.SynchronizeAsync"/>
-        /// accumulates the wall-time spent in <c>queue.OnSubmittedWorkDone()</c> (the GPU-drain wait)
-        /// into <see cref="ProfileSyncWaitMs"/> and increments <see cref="ProfileSyncWaitCount"/>. Lets a
-        /// consumer split a step's wall-time into GPU-wait vs .NET-side build/submit, to find where the
-        /// per-step time actually goes (e.g. ML fixed-shape decode). Reset with
+        /// Diagnostic (default OFF). When true, the WebGPU backend accumulates the wall-time spent in
+        /// BOTH GPU-wait surfaces, so a profiled step accounts for ALL GPU-wait rather than just one slice:
+        /// <list type="bullet">
+        /// <item><description><see cref="WebGPUAcceleratorExtensions.SynchronizeAsync"/>'s
+        /// <c>queue.OnSubmittedWorkDone()</c> drain → <see cref="ProfileSyncWaitMs"/> / <see cref="ProfileSyncWaitCount"/>.</description></item>
+        /// <item><description>The GPU→CPU readback <c>staging.MapAsync(Read)</c> wait inside
+        /// <see cref="WebGPUBuffer{T}"/>'s <c>CopyToHostAsync</c> family → <see cref="ProfileReadbackWaitMs"/> / <see cref="ProfileReadbackWaitCount"/>.</description></item>
+        /// </list>
+        /// These two surfaces are distinct: when a decode's GPU-wait hides in logits/shape readbacks
+        /// (the <c>mapAsync</c> is queued behind prior work) it lands in <see cref="ProfileReadbackWaitMs"/> and
+        /// reads ~0 in <see cref="ProfileSyncWaitMs"/>. Capturing both lets a consumer split a step's wall-time
+        /// into total-GPU-wait vs .NET-side build/submit and have the slices SUM TO THE MEASURED TOTAL — naming
+        /// a bottleneck from only one surface is the partial-profile trap. Reset with
         /// <see cref="ResetDispatchProfiling"/> before the step you want to measure.
         /// </summary>
         public static bool EnableDispatchProfiling { get; set; } = false;
 
-        /// <summary>Cumulative ms spent in <c>queue.OnSubmittedWorkDone()</c> while <see cref="EnableDispatchProfiling"/> is on.</summary>
+        /// <summary>Cumulative ms spent in <c>queue.OnSubmittedWorkDone()</c> (the sync-drain GPU-wait surface) while <see cref="EnableDispatchProfiling"/> is on.</summary>
         public static double ProfileSyncWaitMs;
 
         /// <summary>Number of <c>OnSubmittedWorkDone()</c> GPU drains while <see cref="EnableDispatchProfiling"/> is on.</summary>
         public static long ProfileSyncWaitCount;
 
-        /// <summary>Resets the dispatch-profiling counters (<see cref="ProfileSyncWaitMs"/>, <see cref="ProfileSyncWaitCount"/>).</summary>
+        /// <summary>Cumulative ms spent in the GPU→CPU readback <c>staging.MapAsync(Read)</c> wait (the OTHER GPU-wait
+        /// surface, distinct from <see cref="ProfileSyncWaitMs"/>) while <see cref="EnableDispatchProfiling"/> is on.</summary>
+        public static double ProfileReadbackWaitMs;
+
+        /// <summary>Number of GPU→CPU readback <c>MapAsync(Read)</c> waits while <see cref="EnableDispatchProfiling"/> is on.</summary>
+        public static long ProfileReadbackWaitCount;
+
+        /// <summary>Resets ALL dispatch-profiling counters — both the sync-drain (<see cref="ProfileSyncWaitMs"/>,
+        /// <see cref="ProfileSyncWaitCount"/>) and the readback (<see cref="ProfileReadbackWaitMs"/>,
+        /// <see cref="ProfileReadbackWaitCount"/>) surfaces.</summary>
         public static void ResetDispatchProfiling()
         {
             ProfileSyncWaitMs = 0;
             ProfileSyncWaitCount = 0;
+            ProfileReadbackWaitMs = 0;
+            ProfileReadbackWaitCount = 0;
         }
 
         /// <summary>
