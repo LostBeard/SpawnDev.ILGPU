@@ -53,6 +53,35 @@ public interface IBrowserMemoryBuffer
 
 ---
 
+## ILGPU — Generic Math (f16 kernels)
+
+```csharp
+using ILGPU;
+```
+
+Write one generic kernel over the numeric/weight type instead of dedicated per-type kernels. See the
+[Generic-Math f16 Kernels](generic-math-f16.md) guide for worked examples.
+
+### NumericConvert
+
+Transpilable generic numeric converts. (The C# `float.CreateTruncating<T>` etc. fail to lower in kernels
+— they inspect `typeof(T)`.) Each call monomorphizes to the concrete per-type GPU convert.
+
+| Method | Return | Description |
+|--------|--------|-------------|
+| `NumericConvert.ToFloat32<T>(T value)` | `float` | Widens a generic numeric value to `float` inside a kernel; lowers to the concrete `(float)T` cast (`(float)Half`, identity for `float`, `(float)int`, ...). `where T : INumberBase<T>` |
+| `NumericConvert.ToFloat64<T>(T value)` | `double` | Widens a generic numeric value to `double` (same, targeting `double`) |
+
+### Half
+
+`ILGPU.Half` implements `INumber<Half>` and `ISignedNumber<Half>` (C# 11 generic math), so generic-math
+kernels (`where T : INumber<T>`) work over Half — operators (`+ - * / %`, comparisons, `++`/`--`),
+identities (`T.One`, `T.Zero`), and methods (`T.Abs`, `T.Clamp`, `T.Min`, `T.Max`, `T.CopySign`,
+`T.Sign`, the `T.Is*` predicates) lower to Half's FP32 intrinsics on all six backends. Use `ILGPU.Half`,
+not `System.Half`, in kernel signatures.
+
+---
+
 ## SpawnDev.ILGPU.Rendering
 
 Canvas rendering API — presents an ILGPU pixel buffer to an HTML `<canvas>` using the most efficient path for each backend.
