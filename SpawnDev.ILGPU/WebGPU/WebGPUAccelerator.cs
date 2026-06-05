@@ -133,6 +133,13 @@ namespace SpawnDev.ILGPU.WebGPU
         // WebGPU runs only in the single-threaded browser, so no locking is required.
         private readonly Dictionary<BindGroupCacheKey, BindGroupCacheEntry> _bindGroupCache = new();
 
+        // Recur-only eviction: a signature is cached only on its SECOND sighting. Keys seen exactly
+        // once live here (cheap - no GPU resources) until they recur or the cache is cleared, so
+        // single-use dispatches never accumulate live GPUBindGroups. This bounds the cache to
+        // genuinely-reused signatures and is the guard against the unbounded-growth / WebGPU
+        // framework-error UI seen when a low-hit-rate workload cached every one-shot dispatch.
+        private readonly HashSet<BindGroupCacheKey> _bindGroupSeen = new();
+
         private long _bindGroupCacheHits;
         private long _bindGroupCacheMisses;
 
@@ -141,6 +148,14 @@ namespace SpawnDev.ILGPU.WebGPU
 
         /// <summary>Bind-group cache misses since the last clear. Diagnostic / perf telemetry.</summary>
         public long BindGroupCacheMisses => _bindGroupCacheMisses;
+
+        /// <summary>
+        /// Number of bind groups currently held in the cache. Under recur-only eviction this stays
+        /// bounded to genuinely-reused signatures (a one-shot dispatch is recorded in the seen-set but
+        /// never cached), so it stays ~0 for a workload with no repeated (pipeline + buffer-binding)
+        /// signatures - the guard against unbounded growth.
+        /// </summary>
+        public int BindGroupCacheEntryCount => _bindGroupCache.Count;
 
         /// <summary>
         /// One binding slot in a cached bind group's signature: which slot, which buffer (by the
@@ -260,6 +275,7 @@ namespace SpawnDev.ILGPU.WebGPU
             foreach (var entry in _bindGroupCache.Values)
                 entry.DisposeResources();
             _bindGroupCache.Clear();
+            _bindGroupSeen.Clear();
             _bindGroupCacheHits = 0;
             _bindGroupCacheMisses = 0;
         }
@@ -945,6 +961,9 @@ namespace SpawnDev.ILGPU.WebGPU
                     && !compiledKernel.HasI64Spinlocks;
                 BindGroupCacheKey bgCacheKey = default;
                 bool bgCacheHit = false;
+                // Recur-only: a miss caches only if this signature was seen before (2nd+ sighting).
+                // True on a hit or a recurring miss; false on a first-sight miss or when caching is off.
+                bool bgWillCache = bgUseCache;
                 BindGroupCacheEntry? bgCachedEntry = null;
                 GPUBuffer? bgOwnedScalarBuffer = null;
                 List<GPUBuffer>? bgOwnedLockBuffers = null;
@@ -969,6 +988,12 @@ namespace SpawnDev.ILGPU.WebGPU
                     }
                     bgCacheKey = new BindGroupCacheKey(shader, bgKeyBindings.ToArray());
                     bgCacheHit = webGpuAccel._bindGroupCache.TryGetValue(bgCacheKey, out bgCachedEntry);
+                    if (!bgCacheHit)
+                        // Recur-only: cache a signature only on its 2nd+ sighting. First sight ->
+                        // record the key (cheap, no GPU resources) and take the throwaway path so a
+                        // one-shot dispatch never parks a live bind group in the cache. Add() returns
+                        // false when the key was already present (i.e. this is a recurring signature).
+                        bgWillCache = !webGpuAccel._bindGroupSeen.Add(bgCacheKey);
                 }
 
                 // Build packed scalar lookup mapping effectiveArgs index → ScalarPackingEntry.
@@ -1789,7 +1814,7 @@ namespace SpawnDev.ILGPU.WebGPU
                     GPUBuffer packedBuffer;
                     if (bgCacheHit)
                         packedBuffer = bgCachedEntry!.ScalarBuffer!;
-                    else if (bgUseCache)
+                    else if (bgWillCache)
                         packedBuffer = bgOwnedScalarBuffer = CreateScalarBuffer(device);
                     else
                     {
@@ -1975,7 +2000,12 @@ namespace SpawnDev.ILGPU.WebGPU
 
                     bindGroup = device.CreateBindGroup(bindGroupDesc);
 
+                    // Count every active-cache miss for accurate hit-rate telemetry, but only STORE
+                    // the group on a recurring signature (recur-only eviction) - a first-sight miss
+                    // is thrown away (deferred-disposed below) so one-shot dispatches don't accumulate.
                     if (bgUseCache)
+                        webGpuAccel._bindGroupCacheMisses++;
+                    if (bgWillCache)
                     {
                         webGpuAccel._bindGroupCache[bgCacheKey] = new BindGroupCacheEntry
                         {
@@ -1983,7 +2013,6 @@ namespace SpawnDev.ILGPU.WebGPU
                             ScalarBuffer = bgOwnedScalarBuffer,
                             LockBuffers = bgOwnedLockBuffers
                         };
-                        webGpuAccel._bindGroupCacheMisses++;
                     }
                 }
 
@@ -2050,11 +2079,13 @@ namespace SpawnDev.ILGPU.WebGPU
                 while (_dispatchLog.Count > MaxDispatchLogSize)
                     _dispatchLog.Dequeue();
 
-                // Defer resource cleanup until the batch is flushed
-                // Cached bind groups (hit or miss) are owned by the cache, not the batch - they
-                // outlive the flush, so don't defer-dispose them. Their owned scalar buffers
-                // likewise stay out of scalarBuffersToReturn (never pooled/destroyed at flush).
-                if (!bgUseCache)
+                // Defer resource cleanup until the batch is flushed.
+                // A bind group that went INTO the cache (a hit, or a recurring miss we just stored)
+                // is owned by the cache - it outlives the flush, so don't defer-dispose it, and its
+                // owned scalar buffer stays out of scalarBuffersToReturn. A first-sight miss under
+                // recur-only caching was NOT stored, so it's a throwaway and must be deferred like
+                // the uncached path.
+                if (!bgWillCache)
                     webGpuStream.DeferBindGroupDisposal(bindGroup);
                 foreach (var buffer in scalarBuffersToReturn)
                     webGpuStream.DeferScalarReturn(buffer);

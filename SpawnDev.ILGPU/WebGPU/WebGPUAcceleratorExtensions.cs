@@ -30,7 +30,17 @@ namespace SpawnDev.ILGPU.WebGPU
             var queue = accelerator.NativeAccelerator.Queue;
             if (queue != null)
             {
-                await queue.OnSubmittedWorkDone();
+                if (Backend.WebGPUBackend.EnableDispatchProfiling)
+                {
+                    var profSw = System.Diagnostics.Stopwatch.StartNew();
+                    await queue.OnSubmittedWorkDone();
+                    Backend.WebGPUBackend.ProfileSyncWaitMs += profSw.Elapsed.TotalMilliseconds;
+                    Backend.WebGPUBackend.ProfileSyncWaitCount++;
+                }
+                else
+                {
+                    await queue.OnSubmittedWorkDone();
+                }
             }
             // Drain pending CheckShaderAsync background tasks. If the dispatch we just
             // flushed compiled a shader that fails validation, CheckShaderAsync queues
@@ -54,7 +64,17 @@ namespace SpawnDev.ILGPU.WebGPU
             var queue = accelerator.Queue;
             if (queue != null)
             {
-                await queue.OnSubmittedWorkDone();
+                if (Backend.WebGPUBackend.EnableDispatchProfiling)
+                {
+                    var profSw = System.Diagnostics.Stopwatch.StartNew();
+                    await queue.OnSubmittedWorkDone();
+                    Backend.WebGPUBackend.ProfileSyncWaitMs += profSw.Elapsed.TotalMilliseconds;
+                    Backend.WebGPUBackend.ProfileSyncWaitCount++;
+                }
+                else
+                {
+                    await queue.OnSubmittedWorkDone();
+                }
             }
             // See note above on the WebGPUAccelerator overload — drain pending shader
             // validation tasks then surface any queued errors at THIS call site.

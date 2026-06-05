@@ -170,6 +170,29 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public static bool EnableBindGroupCaching { get; set; } = false;
 
         /// <summary>
+        /// Diagnostic (default OFF). When true, <see cref="WebGPUAcceleratorExtensions.SynchronizeAsync"/>
+        /// accumulates the wall-time spent in <c>queue.OnSubmittedWorkDone()</c> (the GPU-drain wait)
+        /// into <see cref="ProfileSyncWaitMs"/> and increments <see cref="ProfileSyncWaitCount"/>. Lets a
+        /// consumer split a step's wall-time into GPU-wait vs .NET-side build/submit, to find where the
+        /// per-step time actually goes (e.g. ML fixed-shape decode). Reset with
+        /// <see cref="ResetDispatchProfiling"/> before the step you want to measure.
+        /// </summary>
+        public static bool EnableDispatchProfiling { get; set; } = false;
+
+        /// <summary>Cumulative ms spent in <c>queue.OnSubmittedWorkDone()</c> while <see cref="EnableDispatchProfiling"/> is on.</summary>
+        public static double ProfileSyncWaitMs;
+
+        /// <summary>Number of <c>OnSubmittedWorkDone()</c> GPU drains while <see cref="EnableDispatchProfiling"/> is on.</summary>
+        public static long ProfileSyncWaitCount;
+
+        /// <summary>Resets the dispatch-profiling counters (<see cref="ProfileSyncWaitMs"/>, <see cref="ProfileSyncWaitCount"/>).</summary>
+        public static void ResetDispatchProfiling()
+        {
+            ProfileSyncWaitMs = 0;
+            ProfileSyncWaitCount = 0;
+        }
+
+        /// <summary>
         /// When set, every compiled shader is auto-written to {WGSLDumpPath}/{KernelName}.wgsl.
         /// Desktop only — ignored in Blazor WASM (use console.log instead).
         /// </summary>
