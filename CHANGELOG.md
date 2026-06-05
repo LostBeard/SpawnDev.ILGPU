@@ -2,11 +2,29 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
-## Forks 2.0.9 (2026-06-05) - `ILGPU.Half` implements `INumber<Half>` (generic math) + `Half.One` fix
+## 4.9.12 (2026-06-05) - generic-math f16 kernels: `INumber<Half>` + transpilable `NumericConvert` + `Half.One` fix
 
-`SpawnDev.ILGPU.Fork 2.0.9` and `SpawnDev.ILGPU.Algorithms.Fork 2.0.9` (these carry the `ILGPU/`
-core changes below). Wrapper `SpawnDev.ILGPU` is `4.9.12-local.8` on the local feed; a nuget.org
-wrapper release referencing the 2.0.9 forks follows.
+Bundles forks **SpawnDev.ILGPU.Fork 2.0.10** and **SpawnDev.ILGPU.Algorithms.Fork 2.0.10** (these carry
+the `ILGPU/` core changes below - consumers take all three packages together). Together these two
+additions let one generic kernel (`MatMul<TW> where TW : INumber<TW>`, `TW = float | Half`) replace the
+per-weight-type dedicated kernels: the operators bind via `INumber<Half>`, and the body widens the
+generic weight to float for fp32 accumulation via `NumericConvert.ToFloat32`.
+
+### `NumericConvert.ToFloat32<T>` / `ToFloat64<T>` - transpilable generic numeric converts
+
+The C# 11 generic-math converts (`float.CreateTruncating<T>(x)`, `CreateChecked`, ...) inspect
+`typeof(T)` internally to dispatch, which the ILGPU frontend cannot lower - they throw
+`NotSupportedException("Class type 'System.Type' is not supported")` on **all 6 backends** (including the
+`float` specialization and CPU/CUDA; it is a frontend/IR rejection, not a transpiler quirk). That blocked
+generic kernels from widening a generic numeric weight to float for fp32/fp64 accumulation.
+
+`NumericConvert.ToFloat32<T>(T)` / `ToFloat64<T>(T)` (in `ILGPU`) are frontend convert-intrinsics: the
+frontend intercepts each call and emits the concrete per-type GPU convert for the instantiated `T` (the
+same `(float)Half` / identity-for-`float` / `(float)int` cast ILGPU already lowers via `[ConvertIntrinisc]`),
+with no `typeof`. So a generic `K<Half>` monomorphizes to the exact same shader/machine code as a
+hand-written half kernel. Verified on all 6 backends via `NumericConvert_GenericWeightKernel_Transpiles`,
+which runs the same generic kernel source with `TW = Half` (Half->float convert) and `TW = float`
+(identity), FP32-reference exact.
 
 ### `ILGPU.Half` now implements `INumber<Half>` / `ISignedNumber<Half>` (C# 11 generic math)
 

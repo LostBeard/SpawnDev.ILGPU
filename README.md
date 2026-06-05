@@ -9,7 +9,11 @@ Write parallel compute code in C# and let the library pick the best available ba
 
 ## Recent Highlights
 
-**4.9.10 (current):** Wasm residual large-sort race fix. `Group.Broadcast` codegen now uses a per-group atomic tag handshake (writer publishes value + group tag; readers wait for tag match before loading) to prevent stale shared-slot consumption under full-sweep churn and heavy CPU contention. Verified with two clean full Wasm sweeps (459/0/4 each) and two concurrent FO76 contention sweeps (1664/0/149 each).
+**4.9.12 (current):** Generic-math f16 kernels - one generic kernel (`MatMul<TW> where TW : INumber<TW>`, `TW = float | Half`) now replaces per-weight-type dedicated kernels. `ILGPU.Half` implements `INumber<Half>` / `ISignedNumber<Half>` so the operators bind to Half's transpilable FP32 `[MathIntrinsic]` path on all 6 backends (no `System.Half` `BitCast`), and `NumericConvert.ToFloat32<T>` / `ToFloat64<T>` are transpilable generic converts (the C# `float.CreateTruncating<T>` fails to lower - it inspects `typeof`) so the kernel body can widen the generic weight to float for fp32 accumulation. Also fixes a latent `Half.One` bug (was `0x1` == epsilon, not `1.0` == `0x3C00`, which made `(Half)true` produce epsilon in the bool->Half conversion). Bundles forks 2.0.10.
+
+**4.9.11:** `Math.Clamp` now compiles and runs in kernels on all 6 backends (IL-frontend remap to the throw-free `IntrinsicMath.Clamp`, the same path `Math.Min`/`Max`/`Abs` use). Async browser parity - overridable `SynchronizeAsync`/`CopyToCPUAsync` core primitives that actually drain in-flight work.
+
+**4.9.10:** Wasm residual large-sort race fix. `Group.Broadcast` codegen now uses a per-group atomic tag handshake (writer publishes value + group tag; readers wait for tag match before loading) to prevent stale shared-slot consumption under full-sweep churn and heavy CPU contention. Verified with two clean full Wasm sweeps (459/0/4 each) and two concurrent FO76 contention sweeps (1664/0/149 each).
 
 **4.9.9:** New backend-agnostic `CopyFromAsync` extension (`ArrayView<T>` / `ArrayView1D<T,TStride>` / `MemoryBuffer1D<T,TStride>`) - the async mirror of `CopyFrom`, draining pending Wasm worker dispatches before the copy (no-op on other backends). WebGPU scalar-slot drift fix for kernels with body-struct + trailing-scalar params (unblocks ML TensorView migration). WebGL GPU→GPU `CopyTo`/`CopyFrom` stale-CPU-side fix. Wasm `wait32`/`notify` barriers re-confirmed to race on V8 - pure-spin stays, gated default-off re-test harness retained.
 
