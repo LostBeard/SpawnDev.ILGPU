@@ -114,8 +114,10 @@ namespace SpawnDev.ILGPU.WebGPU
             "powerPreference",
         };
 
-        // Shader cache: key is WGSL source, value is compiled shader
-        private readonly Dictionary<string, WebGPUComputeShader> _shaderCache = new();
+        // Shader cache: key is (WGSL source, override-constants signature), value is compiled shader.
+        // The composite key avoids allocating a full-WGSL-length string copy per lookup (the old
+        // $"{wgsl}\n__CONSTANTS__:..." concat ran on every dispatch).
+        private readonly Dictionary<(string Wgsl, string Constants), WebGPUComputeShader> _shaderCache = new();
 
         /// <summary>
         /// Constructs a new WebGPU accelerator from a WebGPUDevice (adapter-based, needs InitializeAsync).
@@ -474,14 +476,16 @@ namespace SpawnDev.ILGPU.WebGPU
             if (!WebGPUBackend.EnableShaderCaching)
                 return CreateComputeShader(wgslSource, entryPoint, overrideConstants);
 
-            // Build cache key: WGSL source + sorted override constants
-            string cacheKey = wgslSource;
+            // Build cache key: (WGSL source, sorted override-constants signature). Using a composite
+            // key instead of concatenating the constants onto the WGSL avoids allocating a full
+            // WGSL-length string copy on every dispatch (constants string is small / "" when none).
+            string constantsKey = "";
             if (overrideConstants != null && overrideConstants.Count > 0)
             {
-                var constantsKey = string.Join(",",
+                constantsKey = string.Join(",",
                     overrideConstants.OrderBy(kv => kv.Key).Select(kv => $"{kv.Key}={kv.Value}"));
-                cacheKey = $"{wgslSource}\n__CONSTANTS__:{constantsKey}";
             }
+            var cacheKey = (wgslSource, constantsKey);
 
             if (_shaderCache.TryGetValue(cacheKey, out var cached))
             {

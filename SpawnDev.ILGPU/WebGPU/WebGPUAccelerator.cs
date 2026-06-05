@@ -30,10 +30,8 @@ namespace SpawnDev.ILGPU.WebGPU
             new(@"const workgroup_size : vec3<u32> = vec3<u32>\(\d+u, \d+u, \d+u\);",
                 RegexOptions.Compiled);
 
-        // @workgroup_size(x) — first dimension only (for dispatch log)
-        private static readonly Regex s_workgroupSizeSimplePattern =
-            new(@"@workgroup_size\((\d+)",
-                RegexOptions.Compiled);
+        // (The per-dispatch dispatch-log @workgroup_size parse now reads the memoized
+        //  WebGPUCompiledKernel.CompiledWorkgroupSize instead of a regex.)
 
         #endregion
 
@@ -826,14 +824,15 @@ namespace SpawnDev.ILGPU.WebGPU
                 int reqY = kcWg.GroupDim.Y;
                 int reqZ = kcWg.GroupDim.Z;
 
-                var wgMatch = s_workgroupSizePattern.Match(wgslSource);
-                if (wgMatch.Success)
+                // Use the memoized compiled @workgroup_size (parsed once) instead of a per-dispatch
+                // full-WGSL regex. Only when it differs from the dispatch's GroupDim — i.e. the kernel
+                // was loaded without a matching KernelSpecialization (rare) — fall back to the regex to
+                // get the exact matched text needed for the source patch.
+                var (compiledX, compiledY, compiledZ) = compiledKernel.CompiledWorkgroupSize;
+                if (compiledX > 0 && (compiledX != reqX || compiledY != reqY || compiledZ != reqZ))
                 {
-                    int compiledX = int.Parse(wgMatch.Groups[1].Value);
-                    int compiledY = wgMatch.Groups[2].Success ? int.Parse(wgMatch.Groups[2].Value) : 1;
-                    int compiledZ = wgMatch.Groups[3].Success ? int.Parse(wgMatch.Groups[3].Value) : 1;
-
-                    if (compiledX != reqX || compiledY != reqY || compiledZ != reqZ)
+                    var wgMatch = s_workgroupSizePattern.Match(wgslSource);
+                    if (wgMatch.Success)
                     {
                         wasPatched = true;
                         // Always log workgroup_size patching as a warning — this indicates
@@ -2078,11 +2077,13 @@ namespace SpawnDev.ILGPU.WebGPU
                 pass.End();
                 webGpuStream.IncrementPassCount();
 
-                // Log dispatch for post-mortem debugging
+                // Log dispatch for post-mortem debugging. Use the memoized compiled @workgroup_size
+                // (or the patched GroupDim.X when this dispatch patched it) instead of a per-dispatch
+                // full-WGSL regex.
                 var dispatchKernelName = compiledKernel.EntryPoint.MethodInfo?.Name ?? "unknown";
-                int dispatchWgSize = 0;
-                var wgSizeMatch = s_workgroupSizeSimplePattern.Match(wgslSource);
-                if (wgSizeMatch.Success) dispatchWgSize = int.Parse(wgSizeMatch.Groups[1].Value);
+                int dispatchWgSize = wasPatched
+                    ? ((KernelConfig)dimension).GroupDim.X
+                    : compiledKernel.CompiledWorkgroupSize.X;
                 _dispatchLog.Enqueue(new DispatchRecord(
                     dispatchKernelName, dispatchWgSize, workX, workY, workZ,
                     compiledKernel.ExpectedBindingCount, wasPatched, DateTime.UtcNow));

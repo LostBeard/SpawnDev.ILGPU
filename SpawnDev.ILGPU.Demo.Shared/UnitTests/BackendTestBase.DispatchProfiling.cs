@@ -149,6 +149,12 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task DispatchProfiling_CpuProloguePhases_FixedShapeRepeat() => await RunEmulatedTest(async accelerator =>
         {
+            // WebGPU-only: the CPU-prologue phase counters only accumulate in the WebGPU dispatch path,
+            // so the heavy 256-dispatch loop measures nothing on other backends (and times out the slow
+            // Wasm lane). Skip cleanly elsewhere.
+            if (accelerator is not WebGPUAccelerator)
+                throw new UnsupportedTestException("WebGPU-only CPU-prologue phase measurement.");
+
             const int N = 4096;
             const int Dispatches = 256;
             var src = new float[N];
@@ -220,6 +226,11 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task DispatchProfiling_SyncDrainOverhead_Floor() => await RunEmulatedTest(async accelerator =>
         {
+            // WebGPU-only: only the WebGPU SynchronizeAsync path records ProfileSyncWait*, so this
+            // 64-drain loop measures nothing on other backends (and burdens the slow Wasm lane).
+            if (accelerator is not WebGPUAccelerator)
+                throw new UnsupportedTestException("WebGPU-only sync-drain overhead measurement.");
+
             const int Syncs = 64;
             var src = new float[1] { 1f };
             var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, float, float>(

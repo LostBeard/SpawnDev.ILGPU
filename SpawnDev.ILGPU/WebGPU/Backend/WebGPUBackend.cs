@@ -1124,6 +1124,31 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         public string WGSLSource { get; }
 
+        private (int X, int Y, int Z)? _compiledWorkgroupSize;
+
+        private static readonly System.Text.RegularExpressions.Regex s_compiledWorkgroupSizePattern =
+            new(@"@workgroup_size\((\d+)(?:\s*,\s*(\d+))?(?:\s*,\s*(\d+))?\)",
+                System.Text.RegularExpressions.RegexOptions.Compiled);
+
+        /// <summary>
+        /// The <c>@workgroup_size</c> baked into <see cref="WGSLSource"/> at compile time, parsed ONCE
+        /// and memoized. The dispatch path uses this instead of re-running a full-WGSL regex on every
+        /// dispatch (the workgroup-patch compare and the dispatch-log record) — the size is constant for
+        /// a compiled kernel. Returns (0,0,0) if no <c>@workgroup_size</c> is present in the WGSL.
+        /// </summary>
+        public (int X, int Y, int Z) CompiledWorkgroupSize =>
+            _compiledWorkgroupSize ??= ParseCompiledWorkgroupSize(WGSLSource);
+
+        private static (int X, int Y, int Z) ParseCompiledWorkgroupSize(string wgsl)
+        {
+            var m = s_compiledWorkgroupSizePattern.Match(wgsl);
+            if (!m.Success) return (0, 0, 0);
+            int x = int.Parse(m.Groups[1].Value);
+            int y = m.Groups[2].Success ? int.Parse(m.Groups[2].Value) : 1;
+            int z = m.Groups[3].Success ? int.Parse(m.Groups[3].Value) : 1;
+            return (x, y, z);
+        }
+
         /// <summary>
         /// Gets the dynamic shared memory override constant metadata.
         /// Empty list if no dynamic shared memory is used.
