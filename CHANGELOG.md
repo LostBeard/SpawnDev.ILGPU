@@ -2,6 +2,38 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## Forks 2.0.9 (2026-06-05) - `ILGPU.Half` implements `INumber<Half>` (generic math) + `Half.One` fix
+
+`SpawnDev.ILGPU.Fork 2.0.9` and `SpawnDev.ILGPU.Algorithms.Fork 2.0.9` (these carry the `ILGPU/`
+core changes below). Wrapper `SpawnDev.ILGPU` is `4.9.12-local.8` on the local feed; a nuget.org
+wrapper release referencing the 2.0.9 forks follows.
+
+### `ILGPU.Half` now implements `INumber<Half>` / `ISignedNumber<Half>` (C# 11 generic math)
+
+A consumer building f16-native weights hit "generic-math kernels fail everywhere with `BitCast`".
+Root cause: `ILGPU.Half` implemented only `IEquatable`/`IComparable`, **not** `INumber<Half>`. So a
+generic-math kernel (`where T : INumber<T>`) over Half could not bind to the kernel-native type and
+was forced onto `System.Half`, whose `INumber` members lower to a `BitCast` that fails codegen
+across backends.
+
+Fix: `ILGPU.Half` now implements `INumber<Half>` + `ISignedNumber<Half>`. The existing FP32-based
+`[MathIntrinsic]`/`[CompareIntrinisc]` operators (`+ - * /`, comparisons, `Abs`, the `Is*`
+predicates) satisfy most members; the rest (`%`, `++`, `--`, unary `+`, identities,
+`Clamp`/`CopySign`/`Max`/`Min`/`Sign`, conversions, parse/format) delegate to the transpilable FP32
+path. The frontend already resolves static-abstract generic-math dispatch to Half's concrete
+intrinsic operators, so generic-math kernels transpile with **no `BitCast`** - verified 9/9 on every
+backend (WebGPU/WebGL/Wasm/CUDA/OpenCL/CPU) with the standard `where T : INumber<T>` constraint via
+`GenericMathHalf_Transpiles` (operators + `T.One` + `T.Zero` + `T.Abs` + `T.Clamp`, FP32 reference).
+
+### `Half.One` was epsilon (`0x1`), not 1.0 (`0x3C00`)
+
+Surfaced by the above: `HalfConversion.tt` generated `One = new Half(Assemble(false, 0, 1))` - the
+same args as `Epsilon` (the doc comment was even copy-pasted from `Zero`: "positive zero"). The only
+use is the bool->Half conversion in `IR/Construction/Convert.cs` (`true ? Half.One : Half.Zero`), so
+**`(Half)true` produced epsilon instead of 1.0**. Fixed in the `.tt` source
+(`Assemble(false, (1 << (ExponentBits - 1)) - 1, 0)` = `0x3C00`) and the regenerated `.cs`. Full PMT
+sweep 3137 pass / 0 fail / 207 skip - zero regressions.
+
 ## 4.9.11 (2026-05-31) - Math.Clamp in kernels on all backends + async browser parity
 
 Bundles forks **SpawnDev.ILGPU.Fork 2.0.8** and **SpawnDev.ILGPU.Algorithms.Fork 2.0.8** (both
