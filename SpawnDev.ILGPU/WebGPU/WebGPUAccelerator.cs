@@ -280,6 +280,101 @@ namespace SpawnDev.ILGPU.WebGPU
 
         #endregion
 
+        #region Shader-Resolution Cache (WebGPUBackend.EnableShaderResolveCache, default ON)
+
+        // Caches the resolved compute shader per (compiled-kernel identity + dispatch-config signature) so
+        // a re-dispatch of the same kernel at the same config skips GetOrCreateComputeShader — and its
+        // O(WGSL-length) shader-cache content HASH — every dispatch. The shader resolution is a pure
+        // function of (compiled kernel, dispatch config); the key below captures EVERY config input that
+        // feeds it (see BuildShaderResolveKey), with the compiled-kernel identity capturing everything else
+        // (WGSL, entry point, dynamic-shared overrides, IsExplicitlyGrouped). So a hit returns the exact
+        // shader the resolve would have produced — complete by construction, no wrong-shader risk. The cache
+        // holds REFERENCES to shaders owned by the native accelerator's _shaderCache, so it adds no GPU
+        // resources and needs no eviction. Per-accelerator (shaders are device-specific).
+        private readonly Dictionary<ShaderResolveKey, WebGPUComputeShader> _shaderResolveCache = new();
+        private long _shaderResolveCacheHits;
+        private long _shaderResolveCacheMisses;
+
+        /// <summary>Number of dispatches that reused a cached resolved shader (skipped GetOrCreateComputeShader + its O(WGSL) hash).</summary>
+        public long ShaderResolveCacheHits => _shaderResolveCacheHits;
+
+        /// <summary>Number of dispatches that resolved + cached a shader (first sight of a (kernel, config)).</summary>
+        public long ShaderResolveCacheMisses => _shaderResolveCacheMisses;
+
+        // Identity of a shader resolution. Captures the compiled kernel (which fixes the WGSL, entry point,
+        // dynamic-shared overrides, and IsExplicitlyGrouped) plus the dispatch-config inputs that change the
+        // resolved shader: the auto-grouped _ilgpu_user_dim (= userDim), the explicit GroupDim (drives the
+        // @workgroup_size patch), and the dynamic-shared-memory element count/size. Equality is reference
+        // identity on the kernel (RuntimeHelpers hash) + value equality on the config fields.
+        private readonly struct ShaderResolveKey : IEquatable<ShaderResolveKey>
+        {
+            public readonly object Kernel;
+            public readonly uint UserDim;
+            public readonly int GroupX, GroupY, GroupZ, SmNumElements, SmElementSize;
+
+            public ShaderResolveKey(object kernel, uint userDim, int gx, int gy, int gz, int smNum, int smElem)
+            {
+                Kernel = kernel; UserDim = userDim;
+                GroupX = gx; GroupY = gy; GroupZ = gz;
+                SmNumElements = smNum; SmElementSize = smElem;
+            }
+
+            public bool Equals(ShaderResolveKey o) =>
+                ReferenceEquals(Kernel, o.Kernel) && UserDim == o.UserDim &&
+                GroupX == o.GroupX && GroupY == o.GroupY && GroupZ == o.GroupZ &&
+                SmNumElements == o.SmNumElements && SmElementSize == o.SmElementSize;
+
+            public override bool Equals(object? obj) => obj is ShaderResolveKey k && Equals(k);
+
+            public override int GetHashCode() => System.HashCode.Combine(
+                System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(Kernel),
+                UserDim, GroupX, GroupY, GroupZ, SmNumElements, SmElementSize);
+        }
+
+        // Builds the resolution key from (compiled kernel, dispatch dimension). MUST mirror RunKernel's
+        // resolution inputs EXACTLY: the _ilgpu_user_dim uint product (auto-grouped only), the KernelConfig
+        // GroupDim (workgroup patch), and the dynamic-shared element count/size. Keep in lock-step with the
+        // "Build override constants" + workgroup-patch blocks in RunKernel.
+        private static ShaderResolveKey BuildShaderResolveKey(WebGPUCompiledKernel ck, object dimension)
+        {
+            uint userDim = 0;
+            if (!ck.EntryPoint.IsExplicitlyGrouped)
+            {
+                if (dimension is Index1D i1d) userDim = (uint)i1d.X;
+                else if (dimension is Index2D i2d) userDim = (uint)(i2d.X * i2d.Y);
+                else if (dimension is Index3D i3d) userDim = (uint)(i3d.X * i3d.Y * i3d.Z);
+                else if (dimension is LongIndex1D l1d) userDim = (uint)l1d.X;
+                else if (dimension is LongIndex2D l2d) userDim = (uint)(l2d.X * l2d.Y);
+                else if (dimension is LongIndex3D l3d) userDim = (uint)(l3d.X * l3d.Y * l3d.Z);
+            }
+            int gx = 0, gy = 0, gz = 0, smNum = 0, smElem = 0;
+            if (dimension is KernelConfig kc)
+            {
+                gx = kc.GroupDim.X; gy = kc.GroupDim.Y; gz = kc.GroupDim.Z;
+                if (ck.HasDynamicSharedMemory && kc.UsesDynamicSharedMemory)
+                {
+                    var smc = kc.SharedMemoryConfig;
+                    smNum = smc.NumElements;
+                    smElem = smc.ElementSize;
+                }
+            }
+            return new ShaderResolveKey(ck, userDim, gx, gy, gz, smNum, smElem);
+        }
+
+        /// <summary>
+        /// Clears the per-(kernel, config) shader-resolution cache and resets its hit/miss counters. The
+        /// cache only holds references to shaders owned by the native accelerator's shader cache, so this
+        /// frees no GPU resources — it just drops the fast-path lookup (e.g. for a test's clean slate).
+        /// </summary>
+        public void ClearShaderResolveCache()
+        {
+            _shaderResolveCache.Clear();
+            _shaderResolveCacheHits = 0;
+            _shaderResolveCacheMisses = 0;
+        }
+
+        #endregion
+
         #region Dispatch Log
 
         /// <summary>
@@ -862,7 +957,32 @@ namespace SpawnDev.ILGPU.WebGPU
                 }
             }
 
-            var shader = nativeAccel.GetOrCreateComputeShader(wgslSource, "main", overrideConstants);
+            // Resolve the compute shader. The result is a pure function of (compiled kernel, dispatch
+            // config), so cache it per (kernel identity + config signature) and skip GetOrCreateComputeShader
+            // — and its O(WGSL-length) content-hash lookup — on re-dispatch (every high-dispatch workload).
+            // The override-build + workgroup-patch above are now O(1)/memoized, so they're left to run; the
+            // cached shader equals what GetOrCreateComputeShader(wgslSource, overrideConstants) would return
+            // for this config (the key captures every resolution input — complete by construction).
+            WebGPUComputeShader shader;
+            if (WebGPUBackend.EnableShaderResolveCache)
+            {
+                var resolveKey = BuildShaderResolveKey(compiledKernel, dimension);
+                if (webGpuAccel._shaderResolveCache.TryGetValue(resolveKey, out var cachedShader))
+                {
+                    shader = cachedShader;
+                    webGpuAccel._shaderResolveCacheHits++;
+                }
+                else
+                {
+                    shader = nativeAccel.GetOrCreateComputeShader(wgslSource, "main", overrideConstants);
+                    webGpuAccel._shaderResolveCache[resolveKey] = shader;
+                    webGpuAccel._shaderResolveCacheMisses++;
+                }
+            }
+            else
+            {
+                shader = nativeAccel.GetOrCreateComputeShader(wgslSource, "main", overrideConstants);
+            }
             var device = nativeAccel.NativeDevice!;
             if (_prof) _profTsShader = System.Diagnostics.Stopwatch.GetTimestamp(); // end shader-resolve phase
 

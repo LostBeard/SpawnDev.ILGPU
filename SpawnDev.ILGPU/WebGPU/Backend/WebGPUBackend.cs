@@ -170,6 +170,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public static bool EnableBindGroupCaching { get; set; } = false;
 
         /// <summary>
+        /// When true (DEFAULT), the WebGPU dispatch path caches the resolved compute shader per
+        /// (compiled-kernel identity + dispatch-config signature), so a re-dispatch of the same kernel
+        /// at the same config skips <c>GetOrCreateComputeShader</c> — and therefore its O(WGSL-length)
+        /// shader-cache content HASH — every dispatch. The shader resolution is a pure function of
+        /// (compiled kernel, dispatch config); the cache key captures every config input that feeds it
+        /// (the auto-grouped <c>_ilgpu_user_dim</c> = userDim, the explicit <c>GroupDim</c> that drives
+        /// the <c>@workgroup_size</c> patch, and the dynamic-shared-memory element count/size), with the
+        /// compiled kernel identity capturing everything else (WGSL, entry point, dynamic-shared overrides).
+        /// So a hit returns the exact shader the resolution would have produced — complete by construction.
+        /// The cache holds REFERENCES to shaders already owned by the native accelerator's shader cache,
+        /// so it adds no GPU resources and needs no eviction. Kill-switch: set false to fall back to the
+        /// per-dispatch resolve (e.g. to isolate a suspected shader mismatch). Telemetry:
+        /// <see cref="WebGPUAccelerator.ShaderResolveCacheHits"/> / <see cref="WebGPUAccelerator.ShaderResolveCacheMisses"/>.
+        /// </summary>
+        public static bool EnableShaderResolveCache { get; set; } = true;
+
+        /// <summary>
         /// Diagnostic (default OFF). When true, the WebGPU backend accumulates the wall-time spent in
         /// BOTH GPU-wait surfaces, so a profiled step accounts for ALL GPU-wait rather than just one slice:
         /// <list type="bullet">
