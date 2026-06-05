@@ -114,5 +114,100 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 WebGPUBackend.ResetDispatchProfiling();
             }
         });
+
+        // Kernel with several ArrayView params + scalars + a sizable straight-line body so the
+        // generated WGSL is non-trivial. The shader-resolve phase cost (workgroup regex + the
+        // overrideConstants string-concat + the full-WGSL-string shader-cache lookup) is O(WGSL
+        // length), so a tiny kernel would under-represent it. Auto-grouped (sets _ilgpu_user_dim),
+        // matching how the decode dispatches elementwise/matmul nodes. Not bit-identical to GPT-2.
+        static void CpuProlog_BigBodyKernel(
+            Index1D idx,
+            ArrayView<float> a, ArrayView<float> b, ArrayView<float> c, ArrayView<float> outp,
+            float s0, float s1, float s2)
+        {
+            float va = a[idx], vb = b[idx], vc = c[idx];
+            float t0 = va * s0 + vb * s1 - vc * s2;
+            float t1 = t0 * t0 + va - vb;
+            float t2 = t1 * s0 - t0 * s1 + vc;
+            float t3 = t2 + t1 * t0 - va * vc;
+            float t4 = t3 * s2 + t2 - t1;
+            float t5 = t4 * t4 - t3 + s0 * s1;
+            float t6 = t5 + t4 * s2 - t3 * va;
+            float t7 = t6 * t5 - t4 + vb * vc;
+            float t8 = t7 + t6 * s0 - t5 * s1;
+            float t9 = t8 * t7 + t6 - s2 * va;
+            outp[idx] = t0 + t1 + t2 + t3 + t4 + t5 + t6 + t7 + t8 + t9;
+        }
+
+        // Directly measures the per-dispatch CPU prologue split (shader-resolve / arg-build / encode)
+        // by re-dispatching ONE fixed-shape kernel many times — the fixed-shape decode pattern. Turns
+        // the (forward − GPU-wait − readback) RESIDUAL from Tuvok's measurement into directly-measured
+        // slices so the prologue fix targets the real dominant phase, not an assumed one
+        // (feedback-dont-name-bottleneck-from-partial-profile). WebGPU-only counters; kernel runs cross-backend.
+        // Emits a grep-able ===CPUPHASES=== line via Console.WriteLine (NOT Console.Error — that trips
+        // #blazor-error-ui per feedback-console-error-writeline-triggers-blazor-error-ui).
+        [TestMethod]
+        public async Task DispatchProfiling_CpuProloguePhases_FixedShapeRepeat() => await RunEmulatedTest(async accelerator =>
+        {
+            const int N = 4096;
+            const int Dispatches = 256;
+            var src = new float[N];
+            for (int i = 0; i < N; i++) src[i] = i * 0.001f;
+
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<float>, float, float, float>(
+                CpuProlog_BigBodyKernel);
+
+            var webgpu = accelerator as WebGPUAccelerator;
+            using var a = accelerator.Allocate1D(src);
+            using var b = accelerator.Allocate1D(src);
+            using var c = accelerator.Allocate1D(src);
+            using var outp = accelerator.Allocate1D<float>(N);
+
+            // Warm up once (shader compile + first-dispatch costs) so the measured window is steady-state.
+            k((Index1D)N, a.View, b.View, c.View, outp.View, 1.1f, 2.2f, 3.3f);
+            await accelerator.SynchronizeAsync();
+
+            WebGPUBackend.EnableDispatchProfiling = true;
+            try
+            {
+                WebGPUBackend.ResetDispatchProfiling();
+                for (int d = 0; d < Dispatches; d++)
+                {
+                    k((Index1D)N, a.View, b.View, c.View, outp.View, 1.1f, 2.2f, 3.3f);
+                    if ((d & 31) == 31) await accelerator.SynchronizeAsync(); // flush every 32, like the decode loop
+                }
+                await accelerator.SynchronizeAsync();
+
+                if (webgpu != null)
+                {
+                    long n = WebGPUBackend.ProfileCpuDispatchCount;
+                    double sr = WebGPUBackend.ProfileCpuShaderResolveMs;
+                    double ab = WebGPUBackend.ProfileCpuArgBuildMs;
+                    double bg = WebGPUBackend.ProfileCpuBindGroupMs;
+                    double en = WebGPUBackend.ProfileCpuEncodeMs;
+                    double tot = sr + ab + bg + en;
+                    // Permanent green form uses Console.WriteLine (stdout — PMT doesn't surface it, harmless).
+                    // For an AD-HOC measurement, flip this to Console.Error.WriteLine: stderr IS PMT-captured,
+                    // but it trips #blazor-error-ui so the test goes red while the data still prints
+                    // (feedback-console-error-writeline-triggers-blazor-error-ui).
+                    Console.WriteLine(
+                        $"===CPUPHASES=== dispatches={n} totalCpuMs={tot:F1} perDispatchMs={(n > 0 ? tot / n : 0):F4} | " +
+                        $"shaderResolveMs={sr:F1} ({(tot > 0 ? 100 * sr / tot : 0):F0}%) " +
+                        $"argPrepMs={ab:F1} ({(tot > 0 ? 100 * ab / tot : 0):F0}%) " +
+                        $"bindGroupMs={bg:F1} ({(tot > 0 ? 100 * bg / tot : 0):F0}%) " +
+                        $"encodeMs={en:F1} ({(tot > 0 ? 100 * en / tot : 0):F0}%)");
+
+                    if (n < Dispatches)
+                        throw new Exception($"CpuProloguePhases: expected >= {Dispatches} profiled dispatches, got {n} — the CPU-phase timers did not fire.");
+                    if (sr < 0 || ab < 0 || en < 0)
+                        throw new Exception($"CpuProloguePhases: negative phase ms (sr={sr}, ab={ab}, en={en}).");
+                }
+            }
+            finally
+            {
+                WebGPUBackend.EnableDispatchProfiling = false;
+                WebGPUBackend.ResetDispatchProfiling();
+            }
+        });
     }
 }

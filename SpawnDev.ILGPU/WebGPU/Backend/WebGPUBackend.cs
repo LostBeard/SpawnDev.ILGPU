@@ -200,15 +200,53 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// <summary>Number of GPU→CPU readback <c>MapAsync(Read)</c> waits while <see cref="EnableDispatchProfiling"/> is on.</summary>
         public static long ProfileReadbackWaitCount;
 
-        /// <summary>Resets ALL dispatch-profiling counters — both the sync-drain (<see cref="ProfileSyncWaitMs"/>,
-        /// <see cref="ProfileSyncWaitCount"/>) and the readback (<see cref="ProfileReadbackWaitMs"/>,
-        /// <see cref="ProfileReadbackWaitCount"/>) surfaces.</summary>
+        // ── CPU-prologue phase timers (the per-dispatch .NET build/submit work in RunKernel) ──
+        // The GPU-wait surfaces above measure where the GPU blocks; these measure where the CPU
+        // spends time BUILDING each dispatch. Their sum across a step is the directly-measured CPU
+        // prologue cost — the slice that shows up as the (forward − GPU-wait − readback) RESIDUAL in
+        // a consumer's step timing. Splitting it into phases turns that residual into measured slices
+        // and points at which phase to optimize (e.g. fixed-shape decode re-runs a byte-identical
+        // prologue every step). All accumulate only while <see cref="EnableDispatchProfiling"/> is on.
+
+        /// <summary>Cumulative ms in the per-dispatch SHADER-RESOLVE phase (override-constant build,
+        /// runtime <c>@workgroup_size</c> regex patch, and <c>GetOrCreateComputeShader</c> lookup) — O(WGSL length),
+        /// constant for a fixed (kernel + config). While <see cref="EnableDispatchProfiling"/> is on.</summary>
+        public static double ProfileCpuShaderResolveMs;
+
+        /// <summary>Cumulative ms in the per-dispatch ARG-PREP phase (arg flatten/expand, per-view reflection,
+        /// scalar packing, bind-group ENTRY build, and storage-aliasing check) — O(args/bindings), but NOT the
+        /// <c>CreateBindGroup</c> call itself (that is <see cref="ProfileCpuBindGroupMs"/>). While <see cref="EnableDispatchProfiling"/> is on.</summary>
+        public static double ProfileCpuArgBuildMs;
+
+        /// <summary>Cumulative ms in the per-dispatch BIND-GROUP-RESOLVE phase (the cache-hit lookup or
+        /// <c>device.CreateBindGroup</c> + workgroup-count math) — splits the JS-interop bind-group cost out of
+        /// <see cref="ProfileCpuArgBuildMs"/> so the CPU arg-processing vs the GPU object creation are separated.
+        /// While <see cref="EnableDispatchProfiling"/> is on.</summary>
+        public static double ProfileCpuBindGroupMs;
+
+        /// <summary>Cumulative ms in the per-dispatch ENCODE phase (compute-pass encode + dispatch-record bookkeeping).
+        /// While <see cref="EnableDispatchProfiling"/> is on.</summary>
+        public static double ProfileCpuEncodeMs;
+
+        /// <summary>Number of dispatches that recorded CPU-prologue phase timings while <see cref="EnableDispatchProfiling"/> is on.</summary>
+        public static long ProfileCpuDispatchCount;
+
+        /// <summary>Resets ALL dispatch-profiling counters — the sync-drain (<see cref="ProfileSyncWaitMs"/>,
+        /// <see cref="ProfileSyncWaitCount"/>) and readback (<see cref="ProfileReadbackWaitMs"/>,
+        /// <see cref="ProfileReadbackWaitCount"/>) GPU-wait surfaces AND the CPU-prologue phase timers
+        /// (<see cref="ProfileCpuShaderResolveMs"/>, <see cref="ProfileCpuArgBuildMs"/>,
+        /// <see cref="ProfileCpuEncodeMs"/>, <see cref="ProfileCpuDispatchCount"/>).</summary>
         public static void ResetDispatchProfiling()
         {
             ProfileSyncWaitMs = 0;
             ProfileSyncWaitCount = 0;
             ProfileReadbackWaitMs = 0;
             ProfileReadbackWaitCount = 0;
+            ProfileCpuShaderResolveMs = 0;
+            ProfileCpuArgBuildMs = 0;
+            ProfileCpuBindGroupMs = 0;
+            ProfileCpuEncodeMs = 0;
+            ProfileCpuDispatchCount = 0;
         }
 
         /// <summary>

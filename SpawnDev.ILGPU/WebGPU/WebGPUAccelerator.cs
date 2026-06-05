@@ -753,6 +753,12 @@ namespace SpawnDev.ILGPU.WebGPU
             var webGpuKernel = (WebGPUKernel)kernel;
             var compiledKernel = webGpuKernel.CompiledKernel;
 
+            // CPU-prologue profiling (gated; default OFF). Marks split the per-dispatch CPU build into
+            // shader-resolve / arg-build / encode phases — see WebGPUBackend.ProfileCpu*Ms. ts0 = entry.
+            bool _prof = WebGPUBackend.EnableDispatchProfiling;
+            long _profTs0 = _prof ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+            long _profTsShader = 0L, _profTsBind = 0L, _profTsArgs = 0L;
+
             if ((WebGPUBackend.DiagnosticFlags & WGSLDiagnostics.Dispatch) != 0)
             {
                 WebGPUBackend.Log($"\n[WebGPU] ---- WGSL for dispatch ----");
@@ -859,6 +865,7 @@ namespace SpawnDev.ILGPU.WebGPU
 
             var shader = nativeAccel.GetOrCreateComputeShader(wgslSource, "main", overrideConstants);
             var device = nativeAccel.NativeDevice!;
+            if (_prof) _profTsShader = System.Diagnostics.Stopwatch.GetTimestamp(); // end shader-resolve phase
 
             // Track scalar buffers for pool return (reuse list to avoid per-frame allocation)
             _reusableScalarReturnList ??= new List<GPUBuffer>();
@@ -1983,6 +1990,7 @@ namespace SpawnDev.ILGPU.WebGPU
                     }
                 }
 
+                if (_prof) _profTsBind = System.Diagnostics.Stopwatch.GetTimestamp(); // end arg-prep phase, begin bind-group resolve
                 GPUBindGroup bindGroup;
                 if (bgCacheHit)
                 {
@@ -2058,6 +2066,8 @@ namespace SpawnDev.ILGPU.WebGPU
 
                 if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU] Dispatching: ({workX}, {workY}, {workZ})");
 
+                if (_prof) _profTsArgs = System.Diagnostics.Stopwatch.GetTimestamp(); // end arg-build phase, begin encode
+
                 // Use the stream's shared encoder for batched submission
                 var webGpuStream = stream as WebGPUStream ?? (WebGPUStream)webGpuAccel.DefaultStream;
                 var encoder = webGpuStream.GetOrCreateEncoder();
@@ -2098,6 +2108,19 @@ namespace SpawnDev.ILGPU.WebGPU
                     foreach (var cBuf in coalescedBuffersToDestroyAfterDispatch)
                         webGpuStream.DeferCoalesceBufferDestroy(cBuf);
                     coalescedBuffersToDestroyAfterDispatch.Clear();
+                }
+
+                // CPU-prologue profiling: record this dispatch's phase split (encode phase includes the
+                // post-encode dispatch-record bookkeeping). Only reached on the success path.
+                if (_prof)
+                {
+                    long _profTsEnd = System.Diagnostics.Stopwatch.GetTimestamp();
+                    double _profF = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                    WebGPUBackend.ProfileCpuShaderResolveMs += (_profTsShader - _profTs0) * _profF;
+                    WebGPUBackend.ProfileCpuArgBuildMs += (_profTsBind - _profTsShader) * _profF;
+                    WebGPUBackend.ProfileCpuBindGroupMs += (_profTsArgs - _profTsBind) * _profF;
+                    WebGPUBackend.ProfileCpuEncodeMs += (_profTsEnd - _profTsArgs) * _profF;
+                    WebGPUBackend.ProfileCpuDispatchCount++;
                 }
             }
             catch (Exception ex)
