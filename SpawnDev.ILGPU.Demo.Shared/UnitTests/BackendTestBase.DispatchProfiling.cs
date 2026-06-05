@@ -209,5 +209,54 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 WebGPUBackend.ResetDispatchProfiling();
             }
         });
+
+        // Measures the per-drain OnSubmittedWorkDone round-trip overhead FLOOR: a trivial 1-element
+        // kernel + one SynchronizeAsync, repeated, so each drain waits on ~no GPU work → the measured
+        // time is ~pure round-trip. Disambiguates the real decode's ~43% sync-drain (~60ms/drain over
+        // ~71 drains): if the floor is small, that 60ms is GPU EXECUTION (lever = fewer/bigger dispatches
+        // = kernel fusion) and batching more before the drain won't help; if the floor is large, the
+        // round-trip dominates and sync-frequency batching helps. One-off measurement: emits via
+        // Console.Error (PMT-captured, trips #blazor-error-ui → red, data prints).
+        [TestMethod]
+        public async Task DispatchProfiling_SyncDrainOverhead_Floor() => await RunEmulatedTest(async accelerator =>
+        {
+            const int Syncs = 64;
+            var src = new float[1] { 1f };
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, float, float>(
+                BindGroupCache_ScaleAddKernel);
+            var webgpu = accelerator as WebGPUAccelerator;
+            using var input = accelerator.Allocate1D(src);
+            using var output = accelerator.Allocate1D<float>(1);
+
+            k((Index1D)1, input.View, output.View, 2f, 1f); // warmup
+            await accelerator.SynchronizeAsync();
+
+            WebGPUBackend.EnableDispatchProfiling = true;
+            try
+            {
+                WebGPUBackend.ResetDispatchProfiling();
+                for (int i = 0; i < Syncs; i++)
+                {
+                    k((Index1D)1, input.View, output.View, 2f, 1f);
+                    await accelerator.SynchronizeAsync(); // one drain per trivial dispatch
+                }
+                if (webgpu != null)
+                {
+                    double ms = WebGPUBackend.ProfileSyncWaitMs;
+                    long n = WebGPUBackend.ProfileSyncWaitCount;
+                    // Permanent green form: Console.WriteLine (stdout, harmless in PMT). Flip to
+                    // Console.Error for an ad-hoc stderr-captured read (red test). Measured floor
+                    // 2026-06-05: ~0.6-1.1ms/drain → the real decode's ~60ms/drain is ~98% GPU execution.
+                    Console.WriteLine($"===SYNCDRAIN=== drains={n} totalMs={ms:F1} perDrainOverheadMs={(n > 0 ? ms / n : 0):F3}");
+                    if (n < Syncs)
+                        throw new Exception($"SyncDrainOverhead: expected >= {Syncs} drains, got {n}.");
+                }
+            }
+            finally
+            {
+                WebGPUBackend.EnableDispatchProfiling = false;
+                WebGPUBackend.ResetDispatchProfiling();
+            }
+        });
     }
 }
