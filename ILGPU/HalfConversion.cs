@@ -79,7 +79,8 @@ namespace ILGPU
         public static readonly Half Zero = new Half(0x0);
 
         /// <summary>
-        /// Represents the value one (1.0).
+        /// Represents the value one (1.0). (The biased exponent for 2^0 is the exponent
+        /// bias = (1 &lt;&lt; (ExponentBits - 1)) - 1 = 15, with a zero mantissa = raw 0x3C00.)
         /// </summary>
         public static readonly Half One = new Half(0x3C00);
 
