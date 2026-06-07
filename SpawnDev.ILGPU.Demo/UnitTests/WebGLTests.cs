@@ -687,18 +687,10 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
 
         // --- Tests9: Diagnostic scan + boundary tests ---
-        [TestMethod]
-        public new async Task GlobalInclusiveScan256Test() =>
-            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
-        [TestMethod]
-        public new async Task GlobalInclusiveScan320Test() =>
-            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
-        [TestMethod]
-        public new async Task GlobalInclusiveScan8000Test() =>
-            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
-        [TestMethod]
-        public new async Task GlobalInclusiveScan4160Test() =>
-            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        // GlobalInclusiveScan* now RUN on WebGL: accelerator.CreateScan is emulated via a
+        // Hillis-Steele multi-pass scan (ScanExtensions.CreateWebGLHillisSteeleScan) — no shared
+        // memory / barriers / atomics (draw-call boundary = global barrier). GroupExtensions.Scan
+        // (in-kernel group scan) is separate and still unsupported on WebGL.
         [TestMethod]
         public new async Task RadixSortBoundary16KTest() =>
             throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");

@@ -1323,13 +1323,129 @@ namespace ILGPU.Algorithms
                     CreateWebGPUMultiPassScan<T, TStrideIn, TStrideOut, TScanOperation>(
                         accelerator,
                         kind),
-                // WebGL and others: use standard multi-pass scan
+                // WebGL: no shared memory / barriers / atomics, so the group-based multi-pass scan
+                // can't run. Emulate with a Hillis-Steele multi-pass scan — each step is an
+                // element-wise kernel (out[i] = i>=d ? op(in[i-d], in[i]) : in[i]) and the draw-call
+                // boundary between steps IS the global barrier. log2(N) steps, ping-pong buffers.
+                AcceleratorType.WebGL =>
+                    CreateWebGLHillisSteeleScan<T, TStrideIn, TStrideOut, TScanOperation>(
+                        accelerator,
+                        kind),
+                // Others: use standard multi-pass scan
                 _ =>
                     CreateMultiPassScan<T, TStrideIn, TStrideOut, TScanOperation>(
                         accelerator,
                         kind),
             };
         }
+
+        #region WebGL Hillis-Steele Multi-Pass Scan (shared-mem/barrier/atomic-free emulation)
+
+        // input (possibly strided) -> dense working buffer.
+        private static void WebGLScanCopyIn<T, TStrideIn>(
+            Index1D index,
+            ArrayView1D<T, TStrideIn> input,
+            ArrayView1D<T, Stride1D.Dense> output)
+            where T : unmanaged
+            where TStrideIn : struct, IStride1D =>
+            output[index.X] = input[index.X];
+
+        // One Hillis-Steele step: out[i] = (i >= d) ? op(in[i-d], in[i]) : in[i].
+        // Reads only the previous pass's buffer (src); the draw-call boundary is the barrier.
+        private static void WebGLScanStep<T, TScanOperation>(
+            Index1D index,
+            ArrayView1D<T, Stride1D.Dense> src,
+            ArrayView1D<T, Stride1D.Dense> dst,
+            int d)
+            where T : unmanaged
+            where TScanOperation : struct, IScanReduceOperation<T>
+        {
+            int i = index.X;
+            if (i >= d)
+            {
+                TScanOperation op = default;
+                dst[i] = op.Apply(src[i - d], src[i]); // (earlier, later) — order-preserving
+            }
+            else
+                dst[i] = src[i];
+        }
+
+        // Inclusive result -> user output (dense -> possibly strided).
+        private static void WebGLScanCopyOut<T, TStrideOut>(
+            Index1D index,
+            ArrayView1D<T, Stride1D.Dense> inclusive,
+            ArrayView1D<T, TStrideOut> output)
+            where T : unmanaged
+            where TStrideOut : struct, IStride1D =>
+            output[index.X] = inclusive[index.X];
+
+        // Inclusive -> exclusive: shift right, lane 0 gets identity.
+        private static void WebGLScanExclusiveShift<T, TScanOperation, TStrideOut>(
+            Index1D index,
+            ArrayView1D<T, Stride1D.Dense> inclusive,
+            ArrayView1D<T, TStrideOut> output)
+            where T : unmanaged
+            where TScanOperation : struct, IScanReduceOperation<T>
+            where TStrideOut : struct, IStride1D
+        {
+            int i = index.X;
+            TScanOperation op = default;
+            output[i] = i == 0 ? op.Identity : inclusive[i - 1];
+        }
+
+        private static Scan<T, TStrideIn, TStrideOut> CreateWebGLHillisSteeleScan<
+            T, TStrideIn, TStrideOut, TScanOperation>(
+            Accelerator accelerator,
+            ScanKind kind)
+            where T : unmanaged
+            where TStrideIn : struct, IStride1D
+            where TStrideOut : struct, IStride1D
+            where TScanOperation : struct, IScanReduceOperation<T>
+        {
+            var copyIn = accelerator.LoadAutoGroupedKernel<
+                Index1D, ArrayView1D<T, TStrideIn>, ArrayView1D<T, Stride1D.Dense>>(
+                WebGLScanCopyIn<T, TStrideIn>);
+            var step = accelerator.LoadAutoGroupedKernel<
+                Index1D, ArrayView1D<T, Stride1D.Dense>, ArrayView1D<T, Stride1D.Dense>, int>(
+                WebGLScanStep<T, TScanOperation>);
+            var copyOut = accelerator.LoadAutoGroupedKernel<
+                Index1D, ArrayView1D<T, Stride1D.Dense>, ArrayView1D<T, TStrideOut>>(
+                WebGLScanCopyOut<T, TStrideOut>);
+            var exclusiveShift = accelerator.LoadAutoGroupedKernel<
+                Index1D, ArrayView1D<T, Stride1D.Dense>, ArrayView1D<T, TStrideOut>>(
+                WebGLScanExclusiveShift<T, TScanOperation, TStrideOut>);
+
+            return (stream, input, output, temp) =>
+            {
+                if (!input.IsValid)
+                    throw new ArgumentNullException(nameof(input));
+                int n = (int)input.Length;
+                if (n < 1)
+                    return;
+
+                // Two dense ping-pong buffers replace shared memory.
+                using var bufA = accelerator.Allocate1D<T>(n);
+                using var bufB = accelerator.Allocate1D<T>(n);
+
+                copyIn(stream, n, input, bufA.View);
+
+                var src = bufA;
+                var dst = bufB;
+                for (int d = 1; d < n; d <<= 1)
+                {
+                    step(stream, n, src.View, dst.View, d);
+                    var tmp = src; src = dst; dst = tmp;
+                }
+
+                // src now holds the inclusive scan.
+                if (kind == ScanKind.Inclusive)
+                    copyOut(stream, n, src.View, output);
+                else
+                    exclusiveShift(stream, n, src.View, output);
+            };
+        }
+
+        #endregion
 
         /// <summary>
         /// Creates a new specialized scan provider that has its own cache.
