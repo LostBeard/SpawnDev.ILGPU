@@ -13,6 +13,7 @@ Compiles ILGPU IR → WebAssembly binary. Dispatches via Web Workers with Shared
 
 ## Hard Constraints
 - **Blazor WASM is single-threaded** — all async, no blocking. `stream.Synchronize()` is a no-op.
+- **Groups are 1D only — a 2D/3D group (`KernelConfig` with `Index2D`/`Index3D` GroupDim) TRAPS "remainder by zero" (2026-06-07).** The kernel ABI plumbs only ONE group dim (`groupDimX`), and the dispatch passes `groupDimX = groupSize` (the *total*). `GroupIndexValue` codegen then computes `gridDimX = dimX / groupDimX`; for a 2D group `groupDimX`(=total, e.g. 256) > `dimX`(=GridDim.X*GroupDim.X, e.g. 112) so `gridDimX = 0` → `Grid.IdxX = linearGridIdx % 0` traps in `WasmAccelerator.DispatchToWorkers`. 1D groups are fine (`GroupDim.X == groupSize`). **Write tiled kernels with a 1D group of `TILE*TILE` + manual 2D index derivation** (`tx = Group.IdxX / TILE; ty = Group.IdxX % TILE`), exactly like `SpawnDev.ILGPU.ML/MatMulKernel.TiledMatMulImpl`. Proper 2D-group support = plumb real per-dim `GroupDim.X/Y/Z` through dispatch + rework the globalIdx→(grid,group,local) decomposition (deferred — no consumer; all tiled kernels use 1D).
 
 ## Async drain + readback — core virtuals (2026-05-29)
 
