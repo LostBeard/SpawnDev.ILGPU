@@ -743,15 +743,11 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             throw new UnsupportedTestException("WebGL: SubView aliasing not supported (single-pass vertex shader architecture)");
 
         // --- Tests6: New diagnostic RadixSort/Scan tests ---
-        [TestMethod]
-        public new async Task AlgorithmRadixSortNonPairsFloatTest() =>
-            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
-        [TestMethod]
-        public new async Task AlgorithmRadixSortNonPairsIntTest() =>
-            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
-        [TestMethod]
-        public new async Task RadixSortMinimalPatternsTest() =>
-            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+        // AlgorithmRadixSortNonPairsFloatTest now RUNS on WebGL via the scatter-based 1-bit-split radix
+        // sort (float keys -> R32F render-target scatter + AscendingFloat ExtractRadixBits ordering).
+        // AlgorithmRadixSortNonPairsIntTest now RUNS on WebGL via the scatter-based 1-bit-split radix
+        // sort (CreateWebGLScatterRadixSort + the render-points-to-texture scatter primitive).
+        // RadixSortMinimalPatternsTest now RUNS on WebGL (keys-only CreateRadixSort).
         // RadixSortCounterScanTest now RUNS on WebGL: it uses accelerator.CreateScan (inclusive),
         // emulated via the Hillis-Steele multi-pass scan.
 

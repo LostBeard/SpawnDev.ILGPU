@@ -1180,6 +1180,16 @@ namespace ILGPU.Algorithms
                     ErrorMessages.NotSupportedNumberOfRadixSortBits);
             }
 
+            // WebGL: transform feedback is gather-only — no in-kernel scatter and limited loop
+            // codegen (a gather + in-kernel binary search hangs the GL context). Use the backend's
+            // render-points-to-texture SCATTER primitive (IScatterProvider): per bit, extract the bit,
+            // exclusive-scan the flags, compute each element's stable 1-bit-split destination
+            // element-wise, then SCATTER. No in-kernel loop, no shared memory.
+            if (accelerator.AcceleratorType == AcceleratorType.WebGL &&
+                accelerator is IScatterProvider scatterProvider)
+                return CreateWebGLScatterRadixSort<T, TStride, TRadixSortOperation>(
+                    accelerator, scatterProvider);
+
             if (accelerator.AcceleratorType == AcceleratorType.CPU)
             {
                 var pass1Kernel = accelerator.LoadKernel<CPUPass1KernelDelegate<T,
@@ -1384,6 +1394,105 @@ namespace ILGPU.Algorithms
                 };
             }
         }
+
+        #region WebGL scatter-based Radix Sort (stable 1-bit split via IScatterProvider; no in-kernel loop)
+
+        private static void WebGLScatterRadixCopyIn<T, TStride>(
+            Index1D index, ArrayView1D<T, TStride> input, ArrayView1D<T, Stride1D.Dense> output)
+            where T : unmanaged
+            where TStride : struct, IStride1D =>
+            output[index.X] = input[index.X];
+
+        private static void WebGLScatterRadixCopyOut<T, TStride>(
+            Index1D index, ArrayView1D<T, Stride1D.Dense> input, ArrayView1D<T, TStride> output)
+            where T : unmanaged
+            where TStride : struct, IStride1D =>
+            output[index.X] = input[index.X];
+
+        private static void WebGLScatterRadixExtractBit<T, TRadixSortOperation>(
+            Index1D index, ArrayView1D<T, Stride1D.Dense> keys,
+            ArrayView1D<int, Stride1D.Dense> flags, int bit)
+            where T : unmanaged
+            where TRadixSortOperation : struct, IRadixSortOperation<T>
+        {
+            TRadixSortOperation op = default;
+            flags[index.X] = op.ExtractRadixBits(keys[index.X], bit, 1);
+        }
+
+        // dest[i] = stable 1-bit-split target: zeros (flag 0) keep their order first, then ones.
+        // onePrefix = exclusive scan of flags (# ones before i); totalFalse from the last element.
+        // Element-wise (no loop) — sidesteps WebGL's vertex-shader loop-codegen wall.
+        private static void WebGLScatterRadixComputeDest(
+            Index1D index, ArrayView1D<int, Stride1D.Dense> flags,
+            ArrayView1D<int, Stride1D.Dense> onePrefix, ArrayView1D<int, Stride1D.Dense> dest, int n)
+        {
+            int i = index.X;
+            int totalOnes = onePrefix[n - 1] + flags[n - 1];
+            int totalFalse = n - totalOnes;
+            dest[i] = flags[i] == 0 ? (i - onePrefix[i]) : (totalFalse + onePrefix[i]);
+        }
+
+        private static string WebGLScatterValueType<T>() where T : unmanaged =>
+            typeof(T) == typeof(float) || typeof(T) == typeof(double) ? "float"
+            : typeof(T) == typeof(uint) || typeof(T) == typeof(ulong) ? "uint"
+            : "int";
+
+        private static RadixSort<T, TStride> CreateWebGLScatterRadixSort<
+            T, TStride, TRadixSortOperation>(Accelerator accelerator, IScatterProvider scatter)
+            where T : unmanaged
+            where TStride : struct, IStride1D
+            where TRadixSortOperation : struct, IRadixSortOperation<T>
+        {
+            var copyIn = accelerator.LoadAutoGroupedKernel<
+                Index1D, ArrayView1D<T, TStride>, ArrayView1D<T, Stride1D.Dense>>(
+                WebGLScatterRadixCopyIn<T, TStride>);
+            var copyOut = accelerator.LoadAutoGroupedKernel<
+                Index1D, ArrayView1D<T, Stride1D.Dense>, ArrayView1D<T, TStride>>(
+                WebGLScatterRadixCopyOut<T, TStride>);
+            var extractBit = accelerator.LoadAutoGroupedKernel<
+                Index1D, ArrayView1D<T, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int>(
+                WebGLScatterRadixExtractBit<T, TRadixSortOperation>);
+            var computeDest = accelerator.LoadAutoGroupedKernel<
+                Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
+                ArrayView1D<int, Stride1D.Dense>, int>(WebGLScatterRadixComputeDest);
+            var exclusiveScan = accelerator.CreateScan<
+                int, Stride1D.Dense, Stride1D.Dense, AddInt32>(ScanKind.Exclusive);
+
+            int numBits = default(TRadixSortOperation).NumBits;
+            string valueType = WebGLScatterValueType<T>();
+
+            return (stream, view, temp) =>
+            {
+                int n = (int)view.Length;
+                if (n <= 1)
+                    return;
+
+                using var keysA = accelerator.Allocate1D<T>(n);
+                using var keysB = accelerator.Allocate1D<T>(n);
+                using var flags = accelerator.Allocate1D<int>(n);
+                using var onePrefix = accelerator.Allocate1D<int>(n);
+                using var dest = accelerator.Allocate1D<int>(n);
+                using var scanTemp = accelerator.Allocate1D<int>(1); // WebGL scan ignores temp
+
+                copyIn(stream, n, view, keysA.View);
+
+                var src = keysA;
+                var dst = keysB;
+                for (int bit = 0; bit < numBits; bit++)
+                {
+                    extractBit(stream, n, src.View, flags.View, bit);
+                    exclusiveScan(stream, flags.View, onePrefix.View, scanTemp.View);
+                    computeDest(stream, n, flags.View, onePrefix.View, dest.View, n);
+                    // dst[dest[i]] = src[i] (GPU-side render-to-texture scatter; stays GPU-resident)
+                    scatter.Scatter(dst.View, src.View, dest.View, n, valueType);
+                    var tmp = src; src = dst; dst = tmp;
+                }
+
+                copyOut(stream, n, src.View, view);
+            };
+        }
+
+        #endregion
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static void VerifyArguments<T, TStride, TRadixSortOperation>(

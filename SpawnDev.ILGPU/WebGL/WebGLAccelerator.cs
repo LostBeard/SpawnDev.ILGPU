@@ -24,7 +24,8 @@ namespace SpawnDev.ILGPU.WebGL
     /// WebGL2 accelerator implementation for ILGPU.
     /// All GL calls are offloaded to a dedicated Web Worker for main-thread responsiveness.
     /// </summary>
-    public class WebGLAccelerator : KernelAccelerator<WebGLCompiledKernel, WebGLKernel>
+    public class WebGLAccelerator : KernelAccelerator<WebGLCompiledKernel, WebGLKernel>,
+        global::ILGPU.Algorithms.IScatterProvider
     {
         /// <summary>Last GLSL source dispatched to the worker. Captured for diagnostics.</summary>
         public static string? LastGeneratedGLSL { get; private set; }
