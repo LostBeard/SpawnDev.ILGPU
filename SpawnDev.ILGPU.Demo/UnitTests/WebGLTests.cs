@@ -769,9 +769,8 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod]
         public new async Task RadixSortMinimalPatternsTest() =>
             throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
-        [TestMethod]
-        public new async Task RadixSortCounterScanTest() =>
-            throw new UnsupportedTestException("WebGL: requires shared memory + barriers");
+        // RadixSortCounterScanTest now RUNS on WebGL: it uses accelerator.CreateScan (inclusive),
+        // emulated via the Hillis-Steele multi-pass scan.
 
         // --- Tests8: RadixSort position diagnostic ---
         [TestMethod]
