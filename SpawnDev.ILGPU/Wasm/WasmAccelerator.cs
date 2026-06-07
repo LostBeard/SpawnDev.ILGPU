@@ -482,6 +482,16 @@ namespace SpawnDev.ILGPU.Wasm
                     ? Math.Max(1, (totalItems + groupSize - 1) / groupSize)
                     : totalItems;
 
+                // Real per-dimension group sizes so the kernel can decompose the linear thread/group
+                // ids into per-dimension Group.Idx / Grid.Idx (2D/3D groups, mirroring the CPU backend).
+                // An explicit KernelConfig carries GroupDim; auto-grouped (Index) launches are 1D.
+                int realGroupDimX = groupSize, realGroupDimY = 1;
+                if (dimension is KernelConfig groupConfig)
+                {
+                    realGroupDimX = Math.Max(1, groupConfig.GroupDim.X);
+                    realGroupDimY = Math.Max(1, groupConfig.GroupDim.Y);
+                }
+
                 // Extract dynamic shared memory size from KernelConfig
                 int dynamicSharedElements = 0;
                 if (dimension is KernelConfig kConfig)
@@ -1488,7 +1498,7 @@ namespace SpawnDev.ILGPU.Wasm
                 await DispatchToWorkers(
                     totalItems, gridDimX, gridDimY, scratchBase, scratchPerThread,
                     sharedMemBase, barrierBase, fenceSlot, yieldStateRegionBase, compiledKernel,
-                    groupSize, numGroups,
+                    groupSize, numGroups, realGroupDimX, realGroupDimY,
                     flatArgs, compiledKernel.WasmBinary,
                     wasmMemory, memoryBuffer, bufferOffsets, bufferInfos, bufferRanges,
                     writtenBufferIndices, traceFoundAnyBufferWrite, hostWriteSnapshot,
@@ -1600,6 +1610,8 @@ namespace SpawnDev.ILGPU.Wasm
             WasmCompiledKernel compiledKernel,
             int groupSize,
             int numGroups,
+            int realGroupDimX,
+            int realGroupDimY,
             List<string> flatArgs,
             byte[] wasmBytes,
             JSObject wasmMemory,
@@ -1652,7 +1664,7 @@ namespace SpawnDev.ILGPU.Wasm
             var workerScript = BuildWasmWorkerScript(
                 gridDimX, gridDimY, scratchBase, scratchPerThread,
                 sharedMemBase, barrierBase, fenceSlot,
-                groupSize, numGroups, hasBarriers, argStr,
+                groupSize, numGroups, realGroupDimX, realGroupDimY, hasBarriers, argStr,
                 dynamicSharedElements, workerCount, phaseCount,
                 maxYieldIters,
                 // Zero region covers shared memory + barrier counters only.
@@ -1969,7 +1981,7 @@ namespace SpawnDev.ILGPU.Wasm
         private static string BuildWasmWorkerScript(
             int gridDimX, int gridDimY, int scratchBase, int scratchPerThread,
             int sharedMemBase, int barrierBase, int fenceSlot,
-            int groupSize, int numGroups, bool hasBarriers,
+            int groupSize, int numGroups, int realGroupDimX, int realGroupDimY, bool hasBarriers,
             string argStr,
             int dynamicSharedLength = 0,
             int workerCount = 1,
@@ -2038,7 +2050,7 @@ namespace SpawnDev.ILGPU.Wasm
                 sb.AppendLine($"    const MAX_YIELD_ITERS = {maxYieldIters};");
                 sb.AppendLine("    while (true) {");
                 sb.AppendLine("      try {");
-                sb.Append($"        dispatcher(threadStart, threadEnd, {numGroups}, {groupSize}, {gridDimX}, {gridDimY}, {scratchBase}, {scratchPerThread}, {sharedMemBase}, {barrierBase}, {dynamicSharedLength}, {zeroRegionSize}, {workerCount}, {fenceSlot}, yieldStateAddr, resumeMode");
+                sb.Append($"        dispatcher(threadStart, threadEnd, {numGroups}, {groupSize}, {gridDimX}, {gridDimY}, {scratchBase}, {scratchPerThread}, {sharedMemBase}, {barrierBase}, {dynamicSharedLength}, {zeroRegionSize}, {workerCount}, {fenceSlot}, yieldStateAddr, resumeMode, {realGroupDimX}, {realGroupDimY}");
                 if (argStr.Length > 0)
                 {
                     sb.Append(", ");
@@ -2077,9 +2089,11 @@ namespace SpawnDev.ILGPU.Wasm
                 sb.AppendLine("    const myScratch = d.myScratch;");
                 sb.AppendLine();
                 sb.AppendLine("    for (let i = startIdx; i < endIdx; i++) {");
-                // For non-barrier kernels: pass groupSize so Grid.IdxX/Y can decompose correctly
-                // Each worker gets its own scratch region (myScratch) to prevent races.
-                sb.Append($"      kernel(i, {gridDimX}, {gridDimY}, myScratch, {groupSize}, i % {groupSize}, 0, 0, 0, 0");
+                // For non-barrier kernels: pass groupSize (groupDimX) + realGroupDimX/Y so
+                // Grid.IdxX/Y and Group.IdxX/Y decompose correctly. Auto-grouped launches are 1D
+                // (realGroupDimX == groupSize, realGroupDimY == 1).
+                // Trailing zeros = sharedMemBase, barrierBase, dynamicSharedLen, phase.
+                sb.Append($"      kernel(i, {gridDimX}, {gridDimY}, myScratch, {groupSize}, i % {groupSize}, 0, 0, 0, 0, {realGroupDimX}, {realGroupDimY}");
                 if (argStr.Length > 0)
                 {
                     sb.Append(", ");

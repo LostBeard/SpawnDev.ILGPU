@@ -723,7 +723,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         {
             // Dispatcher params: 11 system + N user (same user params as kernel)
             // Kernel params: 10 system (globalIdx..phase) + N user
-            int kernelSystemParams = 10; // globalIdx, dimX, dimY, scratch, groupDimX, tid, sharedMem, barrier, dynShared, phase
+            int kernelSystemParams = 12; // globalIdx, dimX, dimY, scratch, groupDimX, tid, sharedMem, barrier, dynShared, phase, realGroupDimX, realGroupDimY
             int userParamCount = kernelParamTypes.Length - kernelSystemParams;
 
             // Dispatcher system params
@@ -744,7 +744,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             dispParamTypes.Add(WasmOpCodes.I32); // 13: fenceBase (for inter-worker atomic barriers)
             dispParamTypes.Add(WasmOpCodes.I32); // 14: yieldStateAddr (per-worker 16-byte buffer for spin-yield save/restore)
             dispParamTypes.Add(WasmOpCodes.I32); // 15: resumeMode (0=fresh, 1=resume from saved state at yieldStateAddr)
-            int dispSystemParams = 16;
+            dispParamTypes.Add(WasmOpCodes.I32); // 16: realGroupDimX (per-dim group size X, for 2D/3D group decomposition)
+            dispParamTypes.Add(WasmOpCodes.I32); // 17: realGroupDimY (per-dim group size Y; Z derived in-kernel)
+            int dispSystemParams = 18;
 
             // Add user params (same types as kernel's user params)
             for (int i = kernelSystemParams; i < kernelParamTypes.Length; i++)
@@ -972,6 +974,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalGet(code, 10);
             // phase
             WasmModuleBuilder.EmitLocalGet(code, pPhase);
+            // realGroupDimX / realGroupDimY (dispatcher params 16/17) — per-dim group sizes
+            WasmModuleBuilder.EmitLocalGet(code, 16);
+            WasmModuleBuilder.EmitLocalGet(code, 17);
             // user args (pass through from dispatcher params)
             for (int i = 0; i < userParamCount; i++)
                 WasmModuleBuilder.EmitLocalGet(code, (uint)(dispSystemParams + i));

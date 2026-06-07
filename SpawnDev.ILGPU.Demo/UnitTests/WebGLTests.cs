@@ -681,6 +681,15 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task FusedFFN_RegBlockedErfGELU_Correct() =>
             throw new UnsupportedTestException("WebGL: register-blocked GEMM requires shared memory + barriers (vertex shaders have neither)");
 
+        // --- 2D/3D group decomposition: WebGL's vertex-shader compute model has no workgroup
+        //     shared memory and does not support the 2D group/barrier semantics these exercise ---
+        [TestMethod]
+        public new async Task Group2D_IndexDecomposition_Correct() =>
+            throw new UnsupportedTestException("WebGL: no workgroup model for 2D group index decomposition (vertex-shader compute)");
+        [TestMethod]
+        public new async Task Group2D_SharedMemBarrier_Correct() =>
+            throw new UnsupportedTestException("WebGL: no shared memory + barriers (vertex-shader compute)");
+
         // --- Tests8: Shared memory aliasing regression tests ---
         [TestMethod]
         public new async Task SharedMemoryDualSameSizeTest() =>

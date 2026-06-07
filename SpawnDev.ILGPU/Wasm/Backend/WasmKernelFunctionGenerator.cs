@@ -154,9 +154,26 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         // === Group execution params (for shared memory + barrier support) ===
 
         /// <summary>
-        /// Wasm local index for group dimension X (number of threads in workgroup).
+        /// Wasm local index for group SIZE (total threads in workgroup = GroupDim.X*Y*Z).
+        /// NOTE: despite the name, this carries the total group size, not GroupDim.X. The
+        /// per-dimension group sizes are <see cref="_realGroupDimXLocal"/> / <see cref="_realGroupDimYLocal"/>.
+        /// The total is what the barrier last-thread check and group-id (globalIdx/groupSize)
+        /// computations need, so this stays = groupSize. Do not repurpose it to GroupDim.X.
         /// </summary>
         private uint _groupDimXLocal;
+
+        /// <summary>
+        /// Wasm local index for the REAL GroupDim.X (threads per workgroup in X). Used to
+        /// decompose the linear thread id / linear group id into per-dimension Group.Idx /
+        /// Grid.Idx so 2D/3D groups work (mirrors the CPU backend). For 1D groups == groupSize.
+        /// </summary>
+        private uint _realGroupDimXLocal;
+
+        /// <summary>
+        /// Wasm local index for the REAL GroupDim.Y (threads per workgroup in Y). 1 for 1D groups.
+        /// GroupDim.Z is derived in-kernel as groupSize / (GroupDim.X * GroupDim.Y).
+        /// </summary>
+        private uint _realGroupDimYLocal;
 
         /// <summary>
         /// Wasm local index for thread index within the workgroup.
@@ -435,17 +452,26 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             _phaseParamLocal = _nextLocalIndex++;
             _paramCount++;
 
+            // Real per-dimension group sizes (for 2D/3D group decomposition). Appended after the
+            // original system params so user-param indices shift uniformly with _paramCount.
+            _realGroupDimXLocal = _nextLocalIndex++;
+            _paramCount++;
+            _realGroupDimYLocal = _nextLocalIndex++;
+            _paramCount++;
+
             FuncParamTypes.Clear();
             FuncParamTypes.Add(WasmOpCodes.I32); // globalIdx
             FuncParamTypes.Add(WasmOpCodes.I32); // dimX
             FuncParamTypes.Add(WasmOpCodes.I32); // dimY
             FuncParamTypes.Add(WasmOpCodes.I32); // scratchBase
-            FuncParamTypes.Add(WasmOpCodes.I32); // groupDimX
+            FuncParamTypes.Add(WasmOpCodes.I32); // groupDimX (= total groupSize)
             FuncParamTypes.Add(WasmOpCodes.I32); // threadIdX
             FuncParamTypes.Add(WasmOpCodes.I32); // sharedMemBase
             FuncParamTypes.Add(WasmOpCodes.I32); // barrierBase
             FuncParamTypes.Add(WasmOpCodes.I32); // dynamicSharedLength
             FuncParamTypes.Add(WasmOpCodes.I32); // phaseId (fiber dispatch)
+            FuncParamTypes.Add(WasmOpCodes.I32); // realGroupDimX
+            FuncParamTypes.Add(WasmOpCodes.I32); // realGroupDimY
 
             // Helper's IR parameters
             var parameters = Method.Parameters;
@@ -542,18 +568,27 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             _phaseParamLocal = _nextLocalIndex++;
             _paramCount++;
 
+            // Real per-dimension group sizes (for 2D/3D group decomposition). Appended after the
+            // original system params so user-param indices shift uniformly with _paramCount.
+            _realGroupDimXLocal = _nextLocalIndex++;
+            _paramCount++;
+            _realGroupDimYLocal = _nextLocalIndex++;
+            _paramCount++;
+
             // FuncParamTypes tracks Wasm type signatures for the module builder
             FuncParamTypes.Clear();
             FuncParamTypes.Add(WasmOpCodes.I32); // param 0: globalIdx
             FuncParamTypes.Add(WasmOpCodes.I32); // param 1: dimX
             FuncParamTypes.Add(WasmOpCodes.I32); // param 2: dimY
             FuncParamTypes.Add(WasmOpCodes.I32); // param 3: scratchBase
-            FuncParamTypes.Add(WasmOpCodes.I32); // param 4: groupDimX
+            FuncParamTypes.Add(WasmOpCodes.I32); // param 4: groupDimX (= total groupSize)
             FuncParamTypes.Add(WasmOpCodes.I32); // param 5: threadIdX
             FuncParamTypes.Add(WasmOpCodes.I32); // param 6: sharedMemBase
             FuncParamTypes.Add(WasmOpCodes.I32); // param 7: barrierBase
             FuncParamTypes.Add(WasmOpCodes.I32); // param 8: dynamicSharedLength
             FuncParamTypes.Add(WasmOpCodes.I32); // param 9: phaseId (fiber dispatch)
+            FuncParamTypes.Add(WasmOpCodes.I32); // param 10: realGroupDimX
+            FuncParamTypes.Add(WasmOpCodes.I32); // param 11: realGroupDimY
 
             // CRITICAL: Determine if param 0 is the implicit index parameter.
             // IndexType is unreliable: ILGPU overrides it to KernelConfig for ALL kernels
@@ -3079,6 +3114,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         }
                         WasmModuleBuilder.EmitLocalGet(Code, _dynamicSharedLengthLocal);
                         WasmModuleBuilder.EmitLocalGet(Code, helperPhaseLocal);
+                        WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimXLocal);
+                        WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimYLocal);
                         for (int i = 0; i < targetMethod.Parameters.Count && i < methodCall.Nodes.Length; i++)
                             EmitGetLocal(methodCall.Nodes[i].Resolve());
 
@@ -3188,6 +3225,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     }
                     WasmModuleBuilder.EmitLocalGet(Code, _dynamicSharedLengthLocal);
                     WasmModuleBuilder.EmitLocalGet(Code, _phaseParamLocal);
+                    WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimXLocal);
+                    WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimYLocal);
                     for (int i = 0; i < targetMethod.Parameters.Count && i < methodCall.Nodes.Length; i++)
                         EmitGetLocal(methodCall.Nodes[i].Resolve());
 
@@ -3400,49 +3439,83 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public override void GenerateCode(GroupIndexValue value)
         {
             var target = AllocateLocal(value);
-            // threadIdX = thread's index within the workgroup
-            WasmModuleBuilder.EmitLocalGet(Code, _threadIdXLocal);
+            // l = threadIdX (linear thread index within the workgroup). Decompose into the
+            // per-dimension Group.Idx using the real per-dim group sizes (X-fastest, like CPU/CUDA).
+            // For 1D groups realGroupDimX == groupSize and realGroupDimY == 1, so this reduces to
+            // Group.IdxX = l, Group.IdxY = Group.IdxZ = 0.
+            if (value.Dimension == DeviceConstantDimension3D.X)
+            {
+                // Group.IdxX = l % GroupDim.X
+                WasmModuleBuilder.EmitLocalGet(Code, _threadIdXLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimXLocal);
+                Code.Add(WasmOpCodes.I32RemU);
+            }
+            else if (value.Dimension == DeviceConstantDimension3D.Y)
+            {
+                // Group.IdxY = (l / GroupDim.X) % GroupDim.Y
+                WasmModuleBuilder.EmitLocalGet(Code, _threadIdXLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimXLocal);
+                Code.Add(WasmOpCodes.I32DivU);
+                WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimYLocal);
+                Code.Add(WasmOpCodes.I32RemU);
+            }
+            else // Z
+            {
+                // Group.IdxZ = l / (GroupDim.X * GroupDim.Y)
+                WasmModuleBuilder.EmitLocalGet(Code, _threadIdXLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimXLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimYLocal);
+                Code.Add(WasmOpCodes.I32Mul);
+                Code.Add(WasmOpCodes.I32DivU);
+            }
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
         public override void GenerateCode(GridIndexValue value)
         {
             var target = AllocateLocal(value);
-            // linearGridIdx = globalIdx / groupDimX
-            // For 2D/3D grids, decompose into X/Y/Z using gridDimX = dimX / groupDimX
+            // g = globalIdx / groupSize (linear group index; _groupDimXLocal carries the TOTAL group
+            // size). Decompose into per-dimension Grid.Idx using gridDim per axis = dim / realGroupDim
+            // (X-fastest). For 1D launches gridDimX = numGroups and gridDimY == 1.
             if (value.Dimension == DeviceConstantDimension3D.X)
             {
-                // Grid.IdxX = linearGridIdx % gridDimX = (globalIdx / groupDimX) % (dimX / groupDimX)
+                // Grid.IdxX = g % gridDimX,  gridDimX = dimX / realGroupDimX
                 WasmModuleBuilder.EmitLocalGet(Code, _globalIdxLocal);
-                WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
-                Code.Add(WasmOpCodes.I32DivU); // linearGridIdx
+                WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);   // groupSize
+                Code.Add(WasmOpCodes.I32DivU); // g
                 WasmModuleBuilder.EmitLocalGet(Code, _dimXLocal);
-                WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimXLocal);
                 Code.Add(WasmOpCodes.I32DivU); // gridDimX
-                Code.Add(WasmOpCodes.I32RemU); // linearGridIdx % gridDimX
+                Code.Add(WasmOpCodes.I32RemU);
             }
             else if (value.Dimension == DeviceConstantDimension3D.Y)
             {
-                // Grid.IdxY = linearGridIdx / gridDimX = (globalIdx / groupDimX) / (dimX / groupDimX)
+                // Grid.IdxY = (g / gridDimX) % gridDimY,  gridDimY = dimY / realGroupDimY
                 WasmModuleBuilder.EmitLocalGet(Code, _globalIdxLocal);
                 WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
-                Code.Add(WasmOpCodes.I32DivU); // linearGridIdx
+                Code.Add(WasmOpCodes.I32DivU); // g
                 WasmModuleBuilder.EmitLocalGet(Code, _dimXLocal);
-                WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimXLocal);
                 Code.Add(WasmOpCodes.I32DivU); // gridDimX
-                Code.Add(WasmOpCodes.I32DivU); // linearGridIdx / gridDimX
+                Code.Add(WasmOpCodes.I32DivU); // g / gridDimX
+                WasmModuleBuilder.EmitLocalGet(Code, _dimYLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimYLocal);
+                Code.Add(WasmOpCodes.I32DivU); // gridDimY
+                Code.Add(WasmOpCodes.I32RemU);
             }
             else // Z
             {
-                // Grid.IdxZ = linearGridIdx / (gridDimX * gridDimY)
+                // Grid.IdxZ = g / (gridDimX * gridDimY)
                 WasmModuleBuilder.EmitLocalGet(Code, _globalIdxLocal);
                 WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
-                Code.Add(WasmOpCodes.I32DivU); // linearGridIdx
+                Code.Add(WasmOpCodes.I32DivU); // g
                 WasmModuleBuilder.EmitLocalGet(Code, _dimXLocal);
-                WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimXLocal);
                 Code.Add(WasmOpCodes.I32DivU); // gridDimX
                 WasmModuleBuilder.EmitLocalGet(Code, _dimYLocal);
-                Code.Add(WasmOpCodes.I32Mul); // gridDimX * dimY
+                WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimYLocal);
+                Code.Add(WasmOpCodes.I32DivU); // gridDimY
+                Code.Add(WasmOpCodes.I32Mul);  // gridDimX * gridDimY
                 Code.Add(WasmOpCodes.I32DivU);
             }
             WasmModuleBuilder.EmitLocalSet(Code, target);
@@ -3451,19 +3524,41 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public override void GenerateCode(GroupDimensionValue value)
         {
             var target = AllocateLocal(value);
-            // groupDimX = number of threads per workgroup
-            WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
+            // Per-dimension group size. X/Y are passed; Z = groupSize / (X * Y).
+            if (value.Dimension == DeviceConstantDimension3D.X)
+                WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimXLocal);
+            else if (value.Dimension == DeviceConstantDimension3D.Y)
+                WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimYLocal);
+            else // Z = groupSize / (GroupDim.X * GroupDim.Y)
+            {
+                WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal); // groupSize
+                WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimXLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimYLocal);
+                Code.Add(WasmOpCodes.I32Mul);
+                Code.Add(WasmOpCodes.I32DivU);
+            }
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
         public override void GenerateCode(GridDimensionValue value)
         {
             var target = AllocateLocal(value);
-            // gridDim = dimX / groupDimX (number of workgroups)
-            // dimX is totalThreads (numGroups * groupSize), passed by dispatch.
-            WasmModuleBuilder.EmitLocalGet(Code, _dimXLocal);
-            WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
-            Code.Add(WasmOpCodes.I32DivU);
+            // gridDim per axis = (total threads in axis) / (group size in axis).
+            // dimX/dimY are totalThreads per axis (GridDim*GroupDim), passed by dispatch.
+            if (value.Dimension == DeviceConstantDimension3D.X)
+            {
+                WasmModuleBuilder.EmitLocalGet(Code, _dimXLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimXLocal);
+                Code.Add(WasmOpCodes.I32DivU);
+            }
+            else if (value.Dimension == DeviceConstantDimension3D.Y)
+            {
+                WasmModuleBuilder.EmitLocalGet(Code, _dimYLocal);
+                WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimYLocal);
+                Code.Add(WasmOpCodes.I32DivU);
+            }
+            else // Z: no dimZ is plumbed (only dimX/dimY) → grid Z extent is 1
+                WasmModuleBuilder.EmitI32Const(Code, 1);
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
