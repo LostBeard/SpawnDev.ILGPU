@@ -107,5 +107,59 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                         $"2D group shared-mem reduce wrong for group {g}: expected {expected} got {got[g]} " +
                         $"(collision => 2D Group.Idx decomposition or barrier-path bug).");
         });
+
+        // --- 3D group decomposition (backs the "2D/3D groups" claim) ---
+        const int G3Dx = 4, G3Dy = 2, G3Dz = 2;   // 4*2*2 = 16 threads (<= CPU 64-thread cap)
+        const int G3DGx = 2, G3DGy = 3;            // 2D grid of 3D groups
+
+        static void Group3DProbeKernel(ArrayView<int> idxOut, ArrayView<int> dimOut, int cols, int rows)
+        {
+            // Map (grid, group) to a unique global cell using all 3 group dims (Z folded into the row).
+            int col = Grid.IdxX * G3Dx + Group.IdxX;
+            int row = (Grid.IdxY * G3Dz + Group.IdxZ) * G3Dy + Group.IdxY;
+            int idx = row * cols + col;
+            idxOut[idx] = Group.IdxX * 1000000 + Group.IdxY * 10000 + Group.IdxZ * 100 + Grid.IdxX * 10 + Grid.IdxY;
+            dimOut[idx] = Group.DimX * 1000000 + Group.DimY * 10000 + Group.DimZ * 100;
+        }
+
+        [TestMethod]
+        public async Task Group3D_IndexDecomposition_Correct() => await RunTest(async accelerator =>
+        {
+            int cols = G3DGx * G3Dx;            // 2*4 = 8
+            int rows = G3DGy * G3Dz * G3Dy;     // 3*2*2 = 12
+            int total = rows * cols;
+
+            using var idxBuf = accelerator.Allocate1D<int>(total);
+            using var dimBuf = accelerator.Allocate1D<int>(total);
+
+            var kern = accelerator.LoadStreamKernel<ArrayView<int>, ArrayView<int>, int, int>(Group3DProbeKernel);
+            kern(new KernelConfig(new Index3D(G3DGx, G3DGy, 1), new Index3D(G3Dx, G3Dy, G3Dz)),
+                idxBuf.View, dimBuf.View, cols, rows);
+            await accelerator.SynchronizeAsync();
+
+            var idx = await idxBuf.CopyToHostAsync<int>();
+            var dim = await dimBuf.CopyToHostAsync<int>();
+
+            int expectedDim = G3Dx * 1000000 + G3Dy * 10000 + G3Dz * 100;
+            for (int gridY = 0; gridY < G3DGy; gridY++)
+                for (int gz = 0; gz < G3Dz; gz++)
+                    for (int gy = 0; gy < G3Dy; gy++)
+                        for (int gridX = 0; gridX < G3DGx; gridX++)
+                            for (int gx = 0; gx < G3Dx; gx++)
+                            {
+                                int col = gridX * G3Dx + gx;
+                                int row = (gridY * G3Dz + gz) * G3Dy + gy;
+                                int cell = row * cols + col;
+                                int expIdx = gx * 1000000 + gy * 10000 + gz * 100 + gridX * 10 + gridY;
+                                if (idx[cell] != expIdx)
+                                    throw new Exception(
+                                        $"3D group decomposition wrong at cell({row},{col}): expected {expIdx} " +
+                                        $"(gx={gx},gy={gy},gz={gz},gridX={gridX},gridY={gridY}) got {idx[cell]}.");
+                                if (dim[cell] != expectedDim)
+                                    throw new Exception(
+                                        $"3D group DIM wrong at cell({row},{col}): expected {expectedDim} " +
+                                        $"(GroupDim {G3Dx}x{G3Dy}x{G3Dz}) got {dim[cell]}.");
+                            }
+        });
     }
 }

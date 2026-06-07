@@ -689,6 +689,9 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod]
         public new async Task Group2D_SharedMemBarrier_Correct() =>
             throw new UnsupportedTestException("WebGL: no shared memory + barriers (vertex-shader compute)");
+        [TestMethod]
+        public new async Task Group3D_IndexDecomposition_Correct() =>
+            throw new UnsupportedTestException("WebGL: no workgroup model for 3D group index decomposition (vertex-shader compute)");
 
         // --- Tests8: Shared memory aliasing regression tests ---
         [TestMethod]
