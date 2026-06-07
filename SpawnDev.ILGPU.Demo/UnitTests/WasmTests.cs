@@ -445,12 +445,8 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         // TRULY UNSUPPORTED — browser/Wasm hardware limitations (2)
         // ═══════════════════════════════════════════════════════════════
 
-        [TestMethod]
-        public new async Task SubgroupShuffleTest() =>
-            throw new UnsupportedTestException("Wasm: no subgroup support in browser WebAssembly");
-        [TestMethod]
-        public new async Task ReduceMinMaxTest() =>
-            throw new UnsupportedTestException("Wasm: Warp.Shuffle requires subgroup support");
+        // SubgroupShuffleTest + ReduceMinMaxTest now RUN on Wasm: Warp.Shuffle / SubWarpShuffle are
+        // emulated via shared memory + barriers (WarpSize=8, EmitWarpShuffle in WasmKernelFunctionGenerator).
 
         // Body-struct ArrayView coalesce tests (added 2026-05-03 alongside the WebGPU
         // binding-count coalesce fix). Wasm body-struct decomp many-field bug FIXED

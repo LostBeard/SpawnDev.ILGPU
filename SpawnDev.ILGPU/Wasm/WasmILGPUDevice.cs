@@ -61,7 +61,7 @@ namespace SpawnDev.ILGPU.Wasm
         {
             HardwareConcurrency = GetHardwareConcurrency();
             Name = $"WebAssembly Compute ({HardwareConcurrency} cores)";
-            WarpSize = 1;
+            WarpSize = WasmBackend.WasmWarpSize; // emulated warp (shared-mem shuffle); mirrors CPU's 8
             // 256 threads/group enables single-group for most algorithm kernels
             // (RadixSort up to 256 elements, DualScan, etc.) while keeping the
             // fiber dispatch overhead manageable (threads run sequentially per phase).

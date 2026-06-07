@@ -1002,6 +1002,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         count++;
                     else if (value is global::ILGPU.IR.Values.Broadcast)
                         count += 2;
+                    else if (value is global::ILGPU.IR.Values.ShuffleOperation)
+                        count += 2; // Warp.Shuffle emulation = publish + reuse-guard barriers
                     else if (value is global::ILGPU.IR.Values.MethodCall call)
                     {
                         // Recursively count barriers in registered sub-helpers only.
@@ -1043,7 +1045,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             {
                 foreach (var entry in blocks.First())
                 {
-                    if (entry.Value is global::ILGPU.IR.Values.Barrier || entry.Value is global::ILGPU.IR.Values.Broadcast)
+                    if (entry.Value is global::ILGPU.IR.Values.Barrier || entry.Value is global::ILGPU.IR.Values.Broadcast || entry.Value is global::ILGPU.IR.Values.ShuffleOperation)
                     { singleBlockHasBarriers = true; break; }
                     if (entry.Value is MethodCall mc)
                     {
@@ -1152,6 +1154,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         directBarriers += 1;
                     else if (entry.Value is global::ILGPU.IR.Values.Broadcast)
                         directBarriers += 2; // before + after barriers
+                    else if (entry.Value is global::ILGPU.IR.Values.ShuffleOperation)
+                        directBarriers += 2; // publish + reuse-guard barriers
                     else if (!_isHelperFunction && entry.Value is MethodCall mc1)
                     {
                         if (_generatorArgs.HelperBarrierCounts.TryGetValue(mc1.Target, out int hbc1) && hbc1 > 0)
@@ -1210,6 +1214,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 {
                     if (entry.Value is global::ILGPU.IR.Values.Barrier) count += 1;
                     else if (entry.Value is global::ILGPU.IR.Values.Broadcast) count += 2;
+                    else if (entry.Value is global::ILGPU.IR.Values.ShuffleOperation) count += 2;
                     else if (!_isHelperFunction && entry.Value is global::ILGPU.IR.Values.Store st2
                         && st2.Value.Resolve().Type is StructureType
                         && st2.Target.Resolve().Type is AddressSpaceType ast2
@@ -3562,6 +3567,28 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        // Emulated warp/subgroup support. Wasm has no hardware warps; a "warp" is WasmWarpSize
+        // consecutive lanes of the linear thread id. LaneIdx = threadIdX % WarpSize, and WarpIdx /
+        // IsFirstLane / IsLastLane derive from LaneIdx + WarpSize in IL (Warp.cs). Warp.Shuffle is
+        // emulated via shared memory + a barrier (see GenerateCode(WarpShuffle)). The base
+        // WasmCodeGenerator emits the WarpSize=1 / LaneIdx=0 stubs; these overrides make them real.
+        public override void GenerateCode(WarpSizeValue value)
+        {
+            var target = AllocateLocal(value);
+            WasmModuleBuilder.EmitI32Const(Code, WasmBackend.WasmWarpSize);
+            WasmModuleBuilder.EmitLocalSet(Code, target);
+        }
+
+        public override void GenerateCode(LaneIdxValue value)
+        {
+            var target = AllocateLocal(value);
+            // LaneIdx = threadIdX % WarpSize
+            WasmModuleBuilder.EmitLocalGet(Code, _threadIdXLocal);
+            WasmModuleBuilder.EmitI32Const(Code, WasmBackend.WasmWarpSize);
+            Code.Add(WasmOpCodes.I32RemU);
+            WasmModuleBuilder.EmitLocalSet(Code, target);
+        }
+
         public override void GenerateCode(DynamicMemoryLengthValue value)
         {
             // Dynamic shared memory length = element count (passed at dispatch time via kernel param 8)
@@ -4274,6 +4301,134 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             _broadcastCounter++;
             if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Broadcast] Broadcast #{_broadcastCounter - 1}: slot offset={broadcastSlotOffset}, barriers={barrier1},{barrier2}");
+        }
+
+        // Real Warp.Shuffle / SubWarpShuffle emulation (Wasm has no hardware warps). Mirrors the
+        // Broadcast emulation + the WebGPU shared-memory shuffle: EVERY lane writes its value into a
+        // per-lane shared slot (indexed by the linear thread id), a barrier publishes all writes, then
+        // each lane reads the slot of (warpBase + sourceLane). 'Origin' is already the resolved absolute
+        // source lane (the frontend lowers Down/Up/Xor into it — see ILGPU Warp.cs), so we don't branch
+        // on ShuffleKind; we mask it into the warp (origin % WarpSize) for bounds-safety. Two barriers
+        // (publish + reuse-guard) — counted as 2 in the barrier scans, same as Broadcast.
+        public override void GenerateCode(WarpShuffle shuffle) => EmitWarpShuffle(shuffle);
+        public override void GenerateCode(SubWarpShuffle shuffle) => EmitWarpShuffle(shuffle);
+
+        private void EmitWarpShuffle(ShuffleOperation shuffle)
+        {
+            var wasmType = GetWasmType(shuffle);
+            var target = AllocateLocal(shuffle, wasmType);
+            var source = shuffle.Variable.Resolve();
+            var origin = shuffle.Origin.Resolve();
+
+            const int maxLanes = 256; // Wasm MaxNumThreadsPerGroup; slot per lane of the linear thread id
+            int slotSize = wasmType switch
+            {
+                WasmOpCodes.I64 => 8,
+                WasmOpCodes.F64 => 8,
+                _ => 4
+            };
+            int valueSlotSize = (slotSize + 3) & ~3;
+            int slotBase = _sharedMemorySize;
+            _sharedMemorySize += maxLanes * valueSlotSize;
+            _hasBarriers = true;
+
+            int warpSize = WasmBackend.WasmWarpSize;
+
+            // ── Step 1: shared[slotBase + threadIdX*valueSlotSize] = source (every lane, atomic) ──
+            WasmModuleBuilder.EmitLocalGet(Code, _sharedMemBaseLocal);
+            if (slotBase > 0)
+            {
+                WasmModuleBuilder.EmitI32Const(Code, slotBase);
+                Code.Add(WasmOpCodes.I32Add);
+            }
+            WasmModuleBuilder.EmitLocalGet(Code, _threadIdXLocal);
+            WasmModuleBuilder.EmitI32Const(Code, valueSlotSize);
+            Code.Add(WasmOpCodes.I32Mul);
+            Code.Add(WasmOpCodes.I32Add); // addr = sharedMemBase + slotBase + threadIdX*valueSlotSize
+            EmitGetLocal(source);
+            switch (wasmType)
+            {
+                case WasmOpCodes.F32:
+                    Code.Add(WasmOpCodes.I32ReinterpretF32);
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore);
+                    Code.Add(0x02); Code.Add(0x00);
+                    break;
+                case WasmOpCodes.F64:
+                    Code.Add(WasmOpCodes.I64ReinterpretF64);
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I64AtomicStore);
+                    Code.Add(0x03); Code.Add(0x00);
+                    break;
+                case WasmOpCodes.I64:
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I64AtomicStore);
+                    Code.Add(0x03); Code.Add(0x00);
+                    break;
+                default: // I32
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore);
+                    Code.Add(0x02); Code.Add(0x00);
+                    break;
+            }
+
+            // ── Step 2: publish barrier ──
+            int barrier1 = _barrierCounter++;
+            EmitBarrier(barrier1);
+
+            // ── Step 3: srcLane = (threadIdX / warpSize)*warpSize + (origin % warpSize); read its slot ──
+            var srcLaneLocal = AllocateNewLocal(WasmOpCodes.I32);
+            WasmModuleBuilder.EmitLocalGet(Code, _threadIdXLocal);
+            WasmModuleBuilder.EmitI32Const(Code, warpSize);
+            Code.Add(WasmOpCodes.I32DivU); // WarpIdx
+            WasmModuleBuilder.EmitI32Const(Code, warpSize);
+            Code.Add(WasmOpCodes.I32Mul);  // warpBase
+            EmitGetLocal(origin);
+            WasmModuleBuilder.EmitI32Const(Code, warpSize);
+            Code.Add(WasmOpCodes.I32RemU); // origin % warpSize (in-warp, bounds-safe)
+            Code.Add(WasmOpCodes.I32Add);  // warpBase + maskedLane
+            WasmModuleBuilder.EmitLocalSet(Code, srcLaneLocal);
+
+            WasmModuleBuilder.EmitLocalGet(Code, _sharedMemBaseLocal);
+            if (slotBase > 0)
+            {
+                WasmModuleBuilder.EmitI32Const(Code, slotBase);
+                Code.Add(WasmOpCodes.I32Add);
+            }
+            WasmModuleBuilder.EmitLocalGet(Code, srcLaneLocal);
+            WasmModuleBuilder.EmitI32Const(Code, valueSlotSize);
+            Code.Add(WasmOpCodes.I32Mul);
+            Code.Add(WasmOpCodes.I32Add); // addr = sharedMemBase + slotBase + srcLane*valueSlotSize
+            switch (wasmType)
+            {
+                case WasmOpCodes.F32:
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad);
+                    Code.Add(0x02); Code.Add(0x00);
+                    Code.Add(WasmOpCodes.F32ReinterpretI32);
+                    break;
+                case WasmOpCodes.F64:
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I64AtomicLoad);
+                    Code.Add(0x03); Code.Add(0x00);
+                    Code.Add(WasmOpCodes.F64ReinterpretI64);
+                    break;
+                case WasmOpCodes.I64:
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I64AtomicLoad);
+                    Code.Add(0x03); Code.Add(0x00);
+                    break;
+                default: // I32
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad);
+                    Code.Add(0x02); Code.Add(0x00);
+                    break;
+            }
+            WasmModuleBuilder.EmitLocalSet(Code, target);
+
+            // ── Step 4: reuse-guard barrier (prevent a later shuffle overwriting before all reads) ──
+            int barrier2 = _barrierCounter++;
+            EmitBarrier(barrier2);
         }
 
         /// <summary>

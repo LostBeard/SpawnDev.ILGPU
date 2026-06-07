@@ -45,6 +45,16 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public static bool VerboseLogging { get; set; } = false;
 
         /// <summary>
+        /// Emulated warp/subgroup size for the Wasm backend. Wasm has no hardware warps, so a "warp"
+        /// is an emulated lane group: <see cref="ILGPU.Warp.LaneIdx"/> = threadIdX % WasmWarpSize,
+        /// <see cref="ILGPU.Warp.WarpIdx"/> = threadIdX / WasmWarpSize, and Warp.Shuffle exchanges via
+        /// shared memory + a barrier (see the WarpShuffle codegen). Mirrors the CPU backend's default
+        /// warp size (8) so Wasm and CPU share identical warp structure (bit-identical warp reductions).
+        /// SINGLE SOURCE OF TRUTH: WasmILGPUDevice.WarpSize and the WarpSize/LaneIdx codegen both use this.
+        /// </summary>
+        public const int WasmWarpSize = 8;
+
+        /// <summary>
         /// DIAGNOSTIC RE-TEST HARNESS (default false — leave it false in production).
         /// When true, the DISPATCHER phase barrier and group barrier (in
         /// <see cref="GeneratePhaseDispatcher"/>) emit <c>memory.atomic.notify</c>
