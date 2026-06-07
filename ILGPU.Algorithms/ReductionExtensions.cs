@@ -138,6 +138,15 @@ namespace ILGPU.Algorithms
             where TStride : struct, IStride1D
             where TReduction : struct, IScanReduceOperation<T>
         {
+            // WebGL has no shared memory / barriers / atomics, so the grid-stride
+            // ReductionImplementation (which needs an atomic cross-workgroup combine)
+            // cannot run. Emulate the reduction as a multi-pass tree instead: each pass
+            // is a trivial element-wise kernel (out[i] = op(in[2i], in[2i+1])) and the
+            // draw-call boundary between passes IS the global barrier. log2(N) passes,
+            // ping-pong buffers replace shared memory. No atomics required.
+            if (accelerator.AcceleratorType == AcceleratorType.WebGL)
+                return CreateWebGLMultiPassReduction<T, TStride, TReduction>(accelerator);
+
             var initializer = accelerator.CreateInitializer<T, Stride1D.Dense>();
             var reductionKernel = accelerator.LoadGridStrideKernel<
                 ReductionImplementation<T, TStride, TReduction>>();
@@ -165,6 +174,107 @@ namespace ILGPU.Algorithms
                         output));
             };
         }
+
+        #region WebGL Multi-Pass Reduction (shared-mem/atomic-free emulation)
+
+        // Pass 1: reduce the (possibly strided) source into a dense temp.
+        // out[i] = op(in[2i], in[2i+1]); the lone tail element (2i+1 >= inSize) passes through.
+        private static void WebGLReducePairFirst<T, TStride, TReduction>(
+            Index1D index,
+            ArrayView1D<T, TStride> input,
+            ArrayView1D<T, Stride1D.Dense> output,
+            int inSize)
+            where T : unmanaged
+            where TStride : struct, IStride1D
+            where TReduction : struct, IScanReduceOperation<T>
+        {
+            int i = index.X;
+            int a = 2 * i;
+            int b = a + 1;
+            T va = input[a];
+            TReduction reduction = default;
+            output[i] = b < inSize ? reduction.Apply(va, input[b]) : va;
+        }
+
+        // Final 1-element copy (reduced value -> user output). Element-wise, WebGL-safe.
+        private static void WebGLCopyOne<T>(
+            Index1D index,
+            ArrayView1D<T, Stride1D.Dense> src,
+            ArrayView<T> dst)
+            where T : unmanaged =>
+            dst[index.X] = src[index.X];
+
+        // Passes 2..n: dense -> dense ping-pong.
+        private static void WebGLReducePair<T, TReduction>(
+            Index1D index,
+            ArrayView1D<T, Stride1D.Dense> input,
+            ArrayView1D<T, Stride1D.Dense> output,
+            int inSize)
+            where T : unmanaged
+            where TReduction : struct, IScanReduceOperation<T>
+        {
+            int i = index.X;
+            int a = 2 * i;
+            int b = a + 1;
+            T va = input[a];
+            TReduction reduction = default;
+            output[i] = b < inSize ? reduction.Apply(va, input[b]) : va;
+        }
+
+        private static Reduction<T, TStride> CreateWebGLMultiPassReduction<T, TStride, TReduction>(
+            Accelerator accelerator)
+            where T : unmanaged
+            where TStride : struct, IStride1D
+            where TReduction : struct, IScanReduceOperation<T>
+        {
+            var firstPass = accelerator.LoadAutoGroupedKernel<
+                Index1D, ArrayView1D<T, TStride>, ArrayView1D<T, Stride1D.Dense>, int>(
+                WebGLReducePairFirst<T, TStride, TReduction>);
+            var densePass = accelerator.LoadAutoGroupedKernel<
+                Index1D, ArrayView1D<T, Stride1D.Dense>, ArrayView1D<T, Stride1D.Dense>, int>(
+                WebGLReducePair<T, TReduction>);
+            var copyOne = accelerator.LoadAutoGroupedKernel<
+                Index1D, ArrayView1D<T, Stride1D.Dense>, ArrayView<T>>(WebGLCopyOne<T>);
+
+            return (stream, input, output) =>
+            {
+                if (!input.IsValid)
+                    throw new ArgumentNullException(nameof(input));
+                if (input.Length < 1)
+                    throw new ArgumentOutOfRangeException(nameof(input));
+                if (!output.IsValid)
+                    throw new ArgumentNullException(nameof(output));
+                if (output.Length < 1)
+                    throw new ArgumentOutOfRangeException(nameof(output));
+                output = output.SubView(0, 1);
+
+                int n = (int)input.Length;
+                int firstOut = (n + 1) / 2; // >= 1
+                // Two ping-pong buffers, each large enough for the largest intermediate (firstOut).
+                using var bufA = accelerator.Allocate1D<T>(firstOut);
+                using var bufB = accelerator.Allocate1D<T>(firstOut);
+
+                // Pass 1: strided source -> bufA (firstOut elements).
+                firstPass(stream, firstOut, input, bufA.View, n);
+
+                int size = firstOut;
+                var src = bufA;
+                var dst = bufB;
+                while (size > 1)
+                {
+                    int outSize = (size + 1) / 2;
+                    densePass(stream, outSize,
+                        src.View.SubView(0, size), dst.View.SubView(0, outSize), size);
+                    var tmp = src; src = dst; dst = tmp;
+                    size = outSize;
+                }
+
+                // src.View[0] holds the reduced value; copy it into the user's output slot.
+                copyOne(stream, 1, src.View.SubView(0, 1), output);
+            };
+        }
+
+        #endregion
 
         #endregion
 

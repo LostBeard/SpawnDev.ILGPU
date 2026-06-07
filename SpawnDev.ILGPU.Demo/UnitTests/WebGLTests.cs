@@ -80,13 +80,9 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task ReduceMinMaxTest() =>
             throw new UnsupportedTestException("WebGL: no float atomics or warp shuffle in vertex shaders");
 
-        [TestMethod]
-        public new async Task ILGPUReduceTest() =>
-            throw new UnsupportedTestException("WebGL: GroupExtensions.Reduce requires shared memory + barriers + atomics, unsupported in vertex shaders");
-
-        [TestMethod]
-        public new async Task ILGPUReduceAsyncTest() =>
-            throw new UnsupportedTestException("WebGL: GroupExtensions.Reduce requires shared memory + barriers + atomics, unsupported in vertex shaders");
+        // ILGPUReduceTest / ILGPUReduceAsyncTest now RUN on WebGL: accelerator.Reduce is emulated
+        // via a multi-pass tree reduction (ReductionExtensions.CreateWebGLMultiPassReduction) — no
+        // shared memory / barriers / atomics needed (draw-call boundary = global barrier).
 
         [TestMethod]
         public new async Task MemSetToZeroAsyncTest() =>
@@ -100,29 +96,12 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task SharedBoolMemoryTest() =>
             throw new UnsupportedTestException("WebGL: shared memory + barriers unsupported in vertex shaders");
 
-        [TestMethod]
-        public new async Task ILGPUReduceFloatTest() =>
-            throw new UnsupportedTestException("WebGL: GroupExtensions.Reduce unsupported in vertex shaders");
-
-        [TestMethod]
-        public new async Task ILGPUReduceDoubleTest() =>
-            throw new UnsupportedTestException("WebGL: GroupExtensions.Reduce unsupported in vertex shaders");
-
-        [TestMethod]
-        public new async Task ILGPUReduceLongTest() =>
-            throw new UnsupportedTestException("WebGL: GroupExtensions.Reduce unsupported in vertex shaders");
-
-        [TestMethod]
-        public new async Task ILGPUReduceUIntTest() =>
-            throw new UnsupportedTestException("WebGL: GroupExtensions.Reduce unsupported in vertex shaders");
-
-        [TestMethod]
-        public new async Task ILGPUReduceULongTest() =>
-            throw new UnsupportedTestException("WebGL: GroupExtensions.Reduce unsupported in vertex shaders");
+        // ILGPUReduce{Float,Double,Long,UInt,ULong}Test now RUN on WebGL via the multi-pass
+        // tree reduction (see ILGPUReduceTest note above).
 
         [TestMethod]
         public new async Task ILGPUReduceHalfTest() =>
-            throw new UnsupportedTestException("WebGL: accelerator.Reduce requires atomics in the cross-workgroup combine step; WebGL 2.0 vertex shaders have no atomic operations. See Docs/atomic-operations.md for the per-backend matrix.");
+            throw new UnsupportedTestException("WebGL: Half reduce widens to f32 then narrows; multi-pass float reduce works but the Half widen/narrow path on WebGL is not yet validated (follow-up).");
 
         // Body-struct ArrayView coalesce tests — Wasm fix shipped 2026-05-04
         // (`WasmKernelFunctionGenerator.IsViewType`). WebGL needs separate
