@@ -1125,6 +1125,20 @@ namespace ILGPU.Algorithms
             where TValueStride : struct, IStride1D
             where TRadixSortOperation : struct, IRadixSortOperation<TKey>
         {
+            // WebGL: gather-only transform feedback. Sort the pairs by SCATTER (the struct-packed
+            // gather/scatter pairs path needs a multi-field scatter). Compute each element's stable
+            // 1-bit-split destination from the keys, then scatter BOTH keys and values by that dest.
+            // The scalar scatter handles 4-byte renderable types (int/uint/float -> R32I/R32UI/R32F);
+            // 8-byte keys/values (long/double) and packed Half need a multi-texel scatter (follow-up),
+            // so only take this path when both are 4-byte non-Half.
+            if (accelerator.AcceleratorType == AcceleratorType.WebGL &&
+                accelerator is IScatterProvider scatterProviderPairs &&
+                Interop.SizeOf<TKey>() == 4 && Interop.SizeOf<TValue>() == 4 &&
+                typeof(TKey) != typeof(Half) && typeof(TValue) != typeof(Half))
+                return CreateWebGLScatterRadixSortPairs<
+                    TKey, TKeyStride, TValue, TValueStride, TRadixSortOperation>(
+                    accelerator, scatterProviderPairs);
+
             var radixSortPairs = accelerator.CreateRadixSortPairs<
                 TKey,
                 TKeyStride,
@@ -1489,6 +1503,80 @@ namespace ILGPU.Algorithms
                 }
 
                 copyOut(stream, n, src.View, view);
+            };
+        }
+
+        // Key-value variant: compute the split destination from the KEYS, then scatter both keys and
+        // values by that same dest so they stay aligned. 4-byte key+value only (guarded at the call site).
+        private static RadixSortPairs<TKey, TKeyStride, TValue, TValueStride>
+            CreateWebGLScatterRadixSortPairs<TKey, TKeyStride, TValue, TValueStride, TRadixSortOperation>(
+            Accelerator accelerator, IScatterProvider scatter)
+            where TKey : unmanaged
+            where TKeyStride : struct, IStride1D
+            where TValue : unmanaged
+            where TValueStride : struct, IStride1D
+            where TRadixSortOperation : struct, IRadixSortOperation<TKey>
+        {
+            var copyInKeys = accelerator.LoadAutoGroupedKernel<
+                Index1D, ArrayView1D<TKey, TKeyStride>, ArrayView1D<TKey, Stride1D.Dense>>(
+                WebGLScatterRadixCopyIn<TKey, TKeyStride>);
+            var copyOutKeys = accelerator.LoadAutoGroupedKernel<
+                Index1D, ArrayView1D<TKey, Stride1D.Dense>, ArrayView1D<TKey, TKeyStride>>(
+                WebGLScatterRadixCopyOut<TKey, TKeyStride>);
+            var copyInVals = accelerator.LoadAutoGroupedKernel<
+                Index1D, ArrayView1D<TValue, TValueStride>, ArrayView1D<TValue, Stride1D.Dense>>(
+                WebGLScatterRadixCopyIn<TValue, TValueStride>);
+            var copyOutVals = accelerator.LoadAutoGroupedKernel<
+                Index1D, ArrayView1D<TValue, Stride1D.Dense>, ArrayView1D<TValue, TValueStride>>(
+                WebGLScatterRadixCopyOut<TValue, TValueStride>);
+            var extractBit = accelerator.LoadAutoGroupedKernel<
+                Index1D, ArrayView1D<TKey, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int>(
+                WebGLScatterRadixExtractBit<TKey, TRadixSortOperation>);
+            var computeDest = accelerator.LoadAutoGroupedKernel<
+                Index1D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>,
+                ArrayView1D<int, Stride1D.Dense>, int>(WebGLScatterRadixComputeDest);
+            var exclusiveScan = accelerator.CreateScan<
+                int, Stride1D.Dense, Stride1D.Dense, AddInt32>(ScanKind.Exclusive);
+
+            int numBits = default(TRadixSortOperation).NumBits;
+            string keyType = WebGLScatterValueType<TKey>();
+            string valType = WebGLScatterValueType<TValue>();
+
+            return (stream, keys, values, tempView) =>
+            {
+                int n = (int)keys.Length;
+                if (n <= 1)
+                    return;
+
+                using var keysA = accelerator.Allocate1D<TKey>(n);
+                using var keysB = accelerator.Allocate1D<TKey>(n);
+                using var valsA = accelerator.Allocate1D<TValue>(n);
+                using var valsB = accelerator.Allocate1D<TValue>(n);
+                using var flags = accelerator.Allocate1D<int>(n);
+                using var onePrefix = accelerator.Allocate1D<int>(n);
+                using var dest = accelerator.Allocate1D<int>(n);
+                using var scanTemp = accelerator.Allocate1D<int>(1);
+
+                copyInKeys(stream, n, keys, keysA.View);
+                copyInVals(stream, n, values, valsA.View);
+
+                var kSrc = keysA;
+                var kDst = keysB;
+                var vSrc = valsA;
+                var vDst = valsB;
+                for (int bit = 0; bit < numBits; bit++)
+                {
+                    extractBit(stream, n, kSrc.View, flags.View, bit);
+                    exclusiveScan(stream, flags.View, onePrefix.View, scanTemp.View);
+                    computeDest(stream, n, flags.View, onePrefix.View, dest.View, n);
+                    scatter.Scatter(kDst.View, kSrc.View, dest.View, n, keyType);
+                    scatter.Scatter(vDst.View, vSrc.View, dest.View, n, valType);
+                    var kt = kSrc; kSrc = kDst; kDst = kt;
+                    var vt = vSrc; vSrc = vDst; vDst = vt;
+                }
+
+                copyOutKeys(stream, n, kSrc.View, keys);
+                copyOutVals(stream, n, vSrc.View, values);
             };
         }
 

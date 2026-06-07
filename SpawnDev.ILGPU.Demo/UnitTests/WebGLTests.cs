@@ -519,13 +519,9 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task AlgorithmAllReduceTest() =>
             throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
 
-        [TestMethod]
-        public new async Task AlgorithmRadixSortPairsTest() =>
-            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
-
-        [TestMethod]
-        public new async Task AlgorithmRadixSortNonPow2Test() =>
-            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        // AlgorithmRadixSortPairsTest now RUNS on WebGL via the scatter-based dual-scatter pairs sort
+        // (32-bit key+value: dest computed from keys, keys+values scattered by the same dest).
+        // AlgorithmRadixSortNonPow2Test now RUNS on WebGL (scatter-based pairs sort, non-pow2 size).
 
         [TestMethod]
         public new async Task AlgorithmExclusiveScanVaryingTest() =>
@@ -535,17 +531,10 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task AlgorithmScanWithBoundariesTest() =>
             throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
 
-        [TestMethod]
-        public new async Task AlgorithmRadixSortDescendingTest() =>
-            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        // AlgorithmRadixSortDescendingTest now RUNS on WebGL (scatter-based pairs sort, DescendingFloat).
+        // AlgorithmRadixSortLargeTest now RUNS on WebGL (scatter-based pairs sort, n=2048).
 
-        [TestMethod]
-        public new async Task AlgorithmRadixSortLargeTest() =>
-            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
-
-        [TestMethod]
-        public new async Task AlgorithmRadixSortPairsIntTest() =>
-            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        // AlgorithmRadixSortPairsIntTest now RUNS on WebGL (scatter-based pairs sort, int key+value).
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsDoubleTest() =>
             throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
@@ -560,7 +549,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsUIntTest() =>
-            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+            throw new UnsupportedTestException("WebGL: scatter-based radix sort works, but ExtractRadixBits<uint> high bits (8-31) don't extract on WebGL — a uint dynamic-shift GLSL codegen issue, separate from the scatter. Keys 256..1 sort by low byte only (256 -> [0]). int/float keys sort correctly. Tracked follow-up: uint >> dynamic-amount codegen.");
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsHalfTest() =>
             throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
