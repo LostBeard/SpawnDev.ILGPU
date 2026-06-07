@@ -410,6 +410,60 @@ namespace SpawnDev.ILGPU.WebGL
         }
 
         /// <summary>
+        /// GPGPU scatter: dst[destIndex[i]] = src[i] for i in [0, n). WebGL2 transform feedback is
+        /// gather-only, so scatter is done by rasterizing one GL_POINT per element at the destination
+        /// texel and writing the value in the fragment shader (see glWorker.js handleScatter). The
+        /// result lives in the destination's GPU TEXTURE (zero-copy — the next op reads it directly);
+        /// the destination's CPU mirror is marked stale and refreshed lazily only on host readback.
+        /// dst/src must share the element type; destIndex is int. Building block for WebGL RadixSort.
+        /// </summary>
+        internal void WorkerScatter(
+            WebGLMemoryBuffer destination,
+            WebGLMemoryBuffer source,
+            WebGLMemoryBuffer destIndex,
+            int count)
+        {
+            if (_glWorker == null)
+                throw new InvalidOperationException("GL worker not initialized");
+            EnsureBufferInWorker(destination, destination.GlslType);
+            EnsureBufferInWorker(source, source.GlslType);
+            EnsureBufferInWorker(destIndex, destIndex.GlslType);
+            _glWorker.PostMessage(new
+            {
+                type = "scatter",
+                dstBufferId = destination.WorkerBufferId,
+                srcBufferId = source.WorkerBufferId,
+                destBufferId = destIndex.WorkerBufferId,
+                n = count
+            });
+        }
+
+        /// <summary>
+        /// Public GPGPU scatter over ILGPU views/buffers: destination[destIndex[i]] = source[i] for
+        /// i in [0, count). destination and source must share the element type; destIndex is int.
+        /// The result lives in the destination's GPU texture (zero-copy); a later CopyToHostAsync
+        /// refreshes the CPU mirror lazily. Building block for a WebGL multi-pass RadixSort.
+        /// </summary>
+        public void Scatter(object destination, object source, object destIndex, int count,
+            string valueGlslType = "int")
+        {
+            var dst = GetWebGLMemoryBuffer(destination)
+                ?? throw new ArgumentException("Scatter: destination is not a WebGL buffer/view", nameof(destination));
+            var src = GetWebGLMemoryBuffer(source)
+                ?? throw new ArgumentException("Scatter: source is not a WebGL buffer/view", nameof(source));
+            var idx = GetWebGLMemoryBuffer(destIndex)
+                ?? throw new ArgumentException("Scatter: destIndex is not a WebGL buffer/view", nameof(destIndex));
+            // The scattered values render into a color-renderable texture of the matching type
+            // (R32I/R32UI in core WebGL2; R32F needs EXT_color_buffer_float). A buffer only ever used
+            // in scatter (never a kernel dispatch) keeps the default GlslType "float"; set the real
+            // types so the worker allocates the right texture format. Dest indices are always int.
+            dst.GlslType = valueGlslType;
+            src.GlslType = valueGlslType;
+            idx.GlslType = "int";
+            WorkerScatter(dst, src, idx, count);
+        }
+
+        /// <summary>
         /// Requests readback of a specific buffer from the GL worker and returns a Uint8Array view.
         /// This is the only path for GPU→CPU data transfer.
         /// </summary>

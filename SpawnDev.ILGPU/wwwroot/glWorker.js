@@ -27,6 +27,10 @@ self.onmessage = function (e) {
             gl = canvas.getContext('webgl2');
             if (!gl) {
                 console.error('[GLWorker] INIT FAILED: Could not create WebGL2 context');
+            } else {
+                // Required to render to R32F/RGBA32F color attachments (GPGPU scatter of float buffers).
+                // Integer formats (R32I/R32UI) are color-renderable in core WebGL2 without this.
+                gl.getExtension('EXT_color_buffer_float');
             }
             // Monitor context loss/restoration
             canvas.addEventListener('webglcontextlost', function (ev) {
@@ -75,8 +79,129 @@ self.onmessage = function (e) {
         case 'blitBuffer':
             handleBlitBuffer(msg);
             break;
+
+        case 'scatter':
+            try {
+                handleScatter(msg);
+            } catch (err) {
+                console.error('[GLWorker] scatter error:', err.message, err.stack);
+                self.postMessage({ done: false, dispatchId: msg.dispatchId, error: err.message + '\n' + err.stack });
+            }
+            break;
     }
 };
+
+// ---- GPGPU scatter (render points to a texture; dst[destIdx[i]] = src[i]) ----
+// WebGL2 transform feedback is gather-only (an invocation writes only its own output slot).
+// Scatter writes to a COMPUTED position by rasterizing one GL_POINT per element at the dest texel
+// and letting the fragment shader write the value to the dst texture (the render target). This stays
+// GPU-side: the result lives in the dst buffer's texture; we mark the CPU mirror stale and read it
+// back lazily only if the host actually reads the buffer (handleReadbackBuffer).
+const scatterPrograms = {}; // glslType -> { program, locs }
+let scatterFBO = null;
+
+function getOrCompileScatterProgram(glslType) {
+    if (scatterPrograms[glslType]) return scatterPrograms[glslType];
+    const isInt = glslType === 'int';
+    const isUint = glslType === 'uint';
+    const samp = isInt ? 'isampler2D' : isUint ? 'usampler2D' : 'sampler2D';
+    const valType = isInt ? 'int' : isUint ? 'uint' : 'float';
+    const vs = `#version 300 es
+precision highp float; precision highp int;
+uniform highp ${samp} u_src;
+uniform highp isampler2D u_dest;
+uniform int u_srcTileW; uniform int u_destTileW; uniform int u_dstW; uniform int u_dstH;
+flat out ${valType} v_val;
+void main() {
+    int i = gl_VertexID;
+    int sx = i % u_srcTileW; int sy = i / u_srcTileW;
+    ${valType} val = texelFetch(u_src, ivec2(sx, sy), 0).r;
+    int di = i % u_destTileW; int dj = i / u_destTileW;
+    int dest = texelFetch(u_dest, ivec2(di, dj), 0).r;
+    int tx = dest % u_dstW; int ty = dest / u_dstW;
+    float ndcx = (float(tx) + 0.5) / float(u_dstW) * 2.0 - 1.0;
+    float ndcy = (float(ty) + 0.5) / float(u_dstH) * 2.0 - 1.0;
+    gl_Position = vec4(ndcx, ndcy, 0.0, 1.0);
+    gl_PointSize = 1.0;
+    v_val = val;
+}`;
+    const vec4Type = isInt ? 'ivec4' : isUint ? 'uvec4' : 'vec4';
+    const zero = isInt ? '0' : isUint ? '0u' : '0.0';
+    const fs = `#version 300 es
+precision highp float; precision highp int;
+flat in ${valType} v_val;
+layout(location = 0) out highp ${vec4Type} o_val;
+void main() { o_val = ${vec4Type}(v_val, ${zero}, ${zero}, ${zero}); }`;
+
+    function compile(type, src) {
+        const s = gl.createShader(type);
+        gl.shaderSource(s, src); gl.compileShader(s);
+        if (!gl.getShaderParameter(s, gl.COMPILE_STATUS))
+            throw new Error('[scatter ' + glslType + '] shader compile: ' + gl.getShaderInfoLog(s) + '\n' + src);
+        return s;
+    }
+    const program = gl.createProgram();
+    gl.attachShader(program, compile(gl.VERTEX_SHADER, vs));
+    gl.attachShader(program, compile(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(program);
+    if (!gl.getProgramParameter(program, gl.LINK_STATUS))
+        throw new Error('[scatter ' + glslType + '] link: ' + gl.getProgramInfoLog(program));
+    const locs = {
+        u_src: gl.getUniformLocation(program, 'u_src'),
+        u_dest: gl.getUniformLocation(program, 'u_dest'),
+        u_srcTileW: gl.getUniformLocation(program, 'u_srcTileW'),
+        u_destTileW: gl.getUniformLocation(program, 'u_destTileW'),
+        u_dstW: gl.getUniformLocation(program, 'u_dstW'),
+        u_dstH: gl.getUniformLocation(program, 'u_dstH'),
+    };
+    const entry = { program, locs };
+    scatterPrograms[glslType] = entry;
+    return entry;
+}
+
+function handleScatter(msg) {
+    const { dstBufferId, srcBufferId, destBufferId, n } = msg;
+    while (gl.getError() !== 0) { }
+    const dst = bufferRegistry[dstBufferId];
+    const src = bufferRegistry[srcBufferId];
+    const dest = bufferRegistry[destBufferId];
+    if (!dst || !src || !dest) throw new Error('scatter: unknown buffer(s)');
+
+    const glslType = dst.glslType || 'float';
+    const sp = getOrCompileScatterProgram(glslType);
+    gl.useProgram(sp.program);
+
+    gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, src.texture); gl.uniform1i(sp.locs.u_src, 0);
+    gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, dest.texture); gl.uniform1i(sp.locs.u_dest, 1);
+    gl.uniform1i(sp.locs.u_srcTileW, src.width);
+    gl.uniform1i(sp.locs.u_destTileW, dest.width);
+    gl.uniform1i(sp.locs.u_dstW, dst.width);
+    gl.uniform1i(sp.locs.u_dstH, dst.height);
+
+    // Render directly into the dst buffer's texture (the next op reads this — zero-copy).
+    if (!scatterFBO) scatterFBO = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, scatterFBO);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, dst.texture, 0);
+    const fbStatus = gl.checkFramebufferStatus(gl.FRAMEBUFFER);
+    if (fbStatus !== gl.FRAMEBUFFER_COMPLETE) {
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        throw new Error('scatter: incomplete FBO status=' + fbStatus + ' glslType=' + glslType +
+            ' (R32F render targets need EXT_color_buffer_float; R32I/R32UI are core-renderable)');
+    }
+    gl.drawBuffers([gl.COLOR_ATTACHMENT0]);
+    gl.viewport(0, 0, dst.width, dst.height);
+    gl.disable(gl.RASTERIZER_DISCARD);
+    gl.disable(gl.BLEND);          // blending is illegal for integer color buffers
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.SCISSOR_TEST);
+    gl.disable(gl.CULL_FACE);
+    gl.colorMask(true, true, true, true);
+    gl.drawArrays(gl.POINTS, 0, n);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+
+    // Result lives in dst.texture (zero-copy); refresh the CPU mirror lazily on host readback.
+    dst.dataStale = true;
+}
 
 // ---- Buffer Registry Operations ----
 
@@ -143,6 +268,25 @@ function handleUploadBuffer(msg) {
         entry.data.fill(0, srcData.length);
     }
     uploadTextureData(entry.texture, entry);
+    entry.dataStale = false; // CPU mirror + GPU texture now consistent
+}
+
+// Lazily refresh the CPU mirror (entry.data) from the GPU texture when it was last written by a
+// scatter (render-to-texture) and not yet read back. This is the ONLY readPixels — intermediate
+// scatter results stay GPU-side and are never read back.
+function ensureCpuFresh(entry) {
+    if (!entry || !entry.dataStale) return;
+    if (!scatterFBO) scatterFBO = gl.createFramebuffer();
+    gl.bindFramebuffer(gl.FRAMEBUFFER, scatterFBO);
+    gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, entry.texture, 0);
+    const total = entry.width * entry.height;
+    let format, type, view;
+    if (entry.glslType === 'int') { format = gl.RED_INTEGER; type = gl.INT; view = new Int32Array(entry.data.buffer, 0, total); }
+    else if (entry.glslType === 'uint') { format = gl.RED_INTEGER; type = gl.UNSIGNED_INT; view = new Uint32Array(entry.data.buffer, 0, total); }
+    else { format = gl.RED; type = gl.FLOAT; view = new Float32Array(entry.data.buffer, 0, total); }
+    gl.readPixels(0, 0, entry.width, entry.height, format, type, view);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    entry.dataStale = false;
 }
 
 function handleReadbackBuffer(msg) {
@@ -152,6 +296,7 @@ function handleReadbackBuffer(msg) {
         self.postMessage({ type: 'readbackResult', requestId, bufferId, error: 'unknown bufferId' });
         return;
     }
+    ensureCpuFresh(entry); // pull a scattered result back to the CPU mirror only when actually read
     // Create a copy of the data to transfer back
     const copy = new ArrayBuffer(entry.byteSize);
     new Uint8Array(copy).set(new Uint8Array(entry.data.buffer, 0, entry.byteSize));
@@ -182,6 +327,7 @@ function handleCopyBuffer(msg) {
         console.error('[GLWorker] copyBuffer: unknown bufferId(s)', srcBufferId, dstBufferId);
         return;
     }
+    ensureCpuFresh(srcEntry); // a scattered source must be pulled back before a CPU-side copy
     const srcOff = srcByteOffset | 0;
     const dstOff = dstByteOffset | 0;
     const len = byteLength | 0;
@@ -197,6 +343,7 @@ function handleCopyBuffer(msg) {
     // Push the new bytes to the destination texture so subsequent kernel
     // dispatches reading via texelFetch see the updated values.
     uploadTextureData(dstEntry.texture, dstEntry);
+    dstEntry.dataStale = false; // CPU mirror + GPU texture now consistent
 }
 
 // ---- Shader Compilation ----
