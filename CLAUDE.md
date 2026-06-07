@@ -203,12 +203,13 @@ var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>>(
 | Sub-word types | Yes | Yes | Yes | Yes | Yes | Yes |
 | CopyFromJS | Yes | Yes | Yes | N/A | N/A | N/A |
 | ILGPU Algorithms | Yes | No | Yes | Yes | Yes | Yes |
-| Subgroups | Yes* | No | No | Yes | Yes* | N/A |
+| Subgroups | Yes* | No | Emulated***** | Yes | Yes* | N/A |
 | f64 native | No (emulated) | No (emulated) | Yes | Yes | Yes | Yes |
 | i64 native | No (emulated) | No (emulated) | Yes | Yes | Yes | Yes |
 | f16 native | Native or emulated** | No (emulated)*** | No (emulated) | Yes | Native or emulated**** | Yes |
 
 *Subgroups: WebGPU requires browser support + adapter feature. OpenCL: device-dependent.
+*****Wasm subgroups are EMULATED (no hardware warps): `WarpSize = 8` (mirrors CPU), `Warp.Shuffle`/`SubWarpShuffle` lower to a shared-memory exchange (write per-lane slot → barrier → read source-lane slot) — see `WasmBackend.WasmWarpSize` + `EmitWarpShuffle` in `WasmKernelFunctionGenerator.cs`. `LaneIdx = threadIdX % WarpSize`; `WarpIdx`/`IsFirstLane` derive in IL. Algorithm-layer warp Reduce/Scan route through `WasmWarpExtensions` (also shared-memory). Verified vs the CPU oracle (`SubgroupShuffleTest`, `ReduceMinMaxTest`). Fixed 2026-06-07 (`116c789`).
 **WebGPU f16: native WGSL `f16` when the adapter exposes `shader-f16`, otherwise emulated in WGSL via `_f16_to_f32` / `_f32_to_f16` helpers with f32 arithmetic + packed u16 storage. `Capabilities.Float16` always true; `Capabilities.Float16Native` distinguishes. Emulation is lossless.
 ***WebGL f16: emulated via `_f16_to_f32` / `_f32_to_f16` GLSL helpers. Load through `texelFetch` on R32I + bit-extract, store through Transform Feedback uint. Algorithm-family Half tests (RadixSort/Scan/Reduce) continue to skip (WebGL has no shared memory/barriers); the 5 non-algorithm Half tests run. `Capabilities.Float16Native` always false on WebGL.
 ****OpenCL f16: native `half` type when `cl_khr_fp16` is available; emulated via `vload_half` / `vstore_half` (OpenCL built-ins that work without the extension) + f32 arithmetic otherwise. `Capabilities.Float16` always true on OpenCL; `Capabilities.Float16Native` reflects the `cl_khr_fp16` extension and selects the codegen path.
