@@ -667,6 +667,14 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task AlgorithmGroupReduceHalfTest() =>
             throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
 
+        // --- Fused FFN: tiled version needs shared memory + barriers (v0 per-element form still runs) ---
+        [TestMethod]
+        public new async Task FusedFFN_TiledLinearGELU_Correct() =>
+            throw new UnsupportedTestException("WebGL: tiled GEMM requires shared memory + barriers (vertex shaders have neither)");
+        [TestMethod]
+        public new async Task FusedFFN_TiledErfGELU_Correct() =>
+            throw new UnsupportedTestException("WebGL: tiled GEMM requires shared memory + barriers (vertex shaders have neither)");
+
         // --- Tests8: Shared memory aliasing regression tests ---
         [TestMethod]
         public new async Task SharedMemoryDualSameSizeTest() =>
