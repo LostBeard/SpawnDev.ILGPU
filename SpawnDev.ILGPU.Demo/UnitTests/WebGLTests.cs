@@ -674,6 +674,12 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod]
         public new async Task FusedFFN_TiledErfGELU_Correct() =>
             throw new UnsupportedTestException("WebGL: tiled GEMM requires shared memory + barriers (vertex shaders have neither)");
+        [TestMethod]
+        public new async Task FusedFFN_RegBlockedTanhGELU_Correct() =>
+            throw new UnsupportedTestException("WebGL: register-blocked GEMM requires shared memory + barriers (vertex shaders have neither)");
+        [TestMethod]
+        public new async Task FusedFFN_RegBlockedErfGELU_Correct() =>
+            throw new UnsupportedTestException("WebGL: register-blocked GEMM requires shared memory + barriers (vertex shaders have neither)");
 
         // --- Tests8: Shared memory aliasing regression tests ---
         [TestMethod]
