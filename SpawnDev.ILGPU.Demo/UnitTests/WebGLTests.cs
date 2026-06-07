@@ -103,31 +103,14 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task ILGPUReduceHalfTest() =>
             throw new UnsupportedTestException("WebGL: Half reduce widens to f32 then narrows; multi-pass float reduce works but the Half widen/narrow path on WebGL is not yet validated (follow-up).");
 
-        // Body-struct ArrayView coalesce tests — Wasm fix shipped 2026-05-04
-        // (`WasmKernelFunctionGenerator.IsViewType`). WebGL needs separate
-        // codegen infrastructure: a multi-view body-struct kernel parameter
-        // must decompose into per-field sampler uniforms (one isampler2D per
-        // ArrayView field) + per-field offset/length uniforms + a struct-aware
-        // GetField that maps each field to its sampler. Currently the GLSL
-        // codegen path emits `uniform struct_X u_param2` which is invalid in
-        // GLSL ES 3.0 because samplers cannot be struct members. Same shape
-        // as the WebGL "no atomics in vertex shaders" gate (Rule 1.a — the
-        // capability is genuinely unavailable on this backend without a
-        // separate multi-hour codegen change). Task #25 tracks the WebGL
-        // multi-view body-struct codegen workstream. Until that lands, gating
-        // these three cases on WebGL with a sharp technical reason.
-        [TestMethod]
-        public new async Task BodyStruct_12ArrayViewInt_CoalesceTest() =>
-            throw new UnsupportedTestException("WebGL: multi-view body-struct kernel param needs per-field sampler decomposition + struct-aware GetField codegen (samplers can't be struct members in GLSL ES 3.0). Task #25 tracks the WebGL infrastructure work.");
-        [TestMethod]
-        public new async Task BodyStruct_MixedIntFloatCoalesceTest() =>
-            throw new UnsupportedTestException("WebGL: multi-view body-struct kernel param needs per-field sampler decomposition. Task #25.");
-        [TestMethod]
-        public new async Task BodyStruct_VariableLengthCoalesceTest() =>
-            throw new UnsupportedTestException("WebGL: multi-view body-struct kernel param needs per-field sampler decomposition. Task #25.");
-        [TestMethod]
-        public new async Task BodyStruct_12ArrayViewInt_PerFieldDiagnostic() =>
-            throw new UnsupportedTestException("WebGL: multi-view body-struct kernel param needs per-field sampler decomposition. Task #25.");
+        // Body-struct ArrayView coalesce tests (Task #25) — now RUN on WebGL. The GLSL backend
+        // already has the multi-view body-struct codegen (ScanBodyStructParams /
+        // EmitBodyStructDeclarations in GLSLKernelFunctionGenerator): each ArrayView field of a
+        // body-struct param decomposes into its own per-field sampler (u_param{N}_f{M}) with a
+        // struct-aware GetField redirect, so samplers are never emitted as struct members. The skip
+        // was stale (infra built, tests never re-enabled). BodyStruct_12ArrayViewInt_CoalesceTest /
+        // _PerFieldDiagnostic / MixedIntFloatCoalesceTest / VariableLengthCoalesceTest all pass on
+        // WebGL vs the CPU oracle.
 
         // Tests23 bisection cases — both the LoopUnrolling Shl trip-count bug
         // (rc.6) and the WebGL signed-shift / signed-compare codegen issues are
