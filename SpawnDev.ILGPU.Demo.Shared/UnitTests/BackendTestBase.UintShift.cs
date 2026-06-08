@@ -80,6 +80,39 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
         });
 
+        // Does ExtractRadixBits<long> (AscendingInt64) transpile + work on WebGL's emulated i64? This
+        // is the make-or-break for 64-bit RadixSort on WebGL (task #10). out[i] = bit `shift` of key[i].
+        static void Int64ExtractRadixBitsKernel(
+            Index1D index, ArrayView<long> input, ArrayView<int> output, int shift)
+        {
+            AscendingInt64 op = default;
+            output[index.X] = op.ExtractRadixBits(input[index.X], shift, 1);
+        }
+
+        [TestMethod]
+        public async Task Int64ExtractRadixBitsTest() => await RunTest(async accelerator =>
+        {
+            var input = new long[] { 256L, 1L, -1L, 0x1_0000_0000L, long.MinValue, long.MaxValue, 0L };
+            using var inBuf = accelerator.Allocate1D(input);
+            using var outBuf = accelerator.Allocate1D<int>(input.Length);
+            var kern = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<long>, ArrayView<int>, int>(Int64ExtractRadixBitsKernel);
+            AscendingInt64 op = default;
+            foreach (int shift in new[] { 0, 8, 31, 32, 40, 63 })
+            {
+                kern((Index1D)input.Length, inBuf.View, outBuf.View, shift);
+                await accelerator.SynchronizeAsync();
+                var got = await outBuf.CopyToHostAsync<int>();
+                for (int i = 0; i < input.Length; i++)
+                {
+                    int expected = op.ExtractRadixBits(input[i], shift, 1);
+                    if (got[i] != expected)
+                        throw new Exception(
+                            $"ExtractRadixBits<long>(0x{input[i]:X}, {shift}, 1) expected {expected} got {got[i]}");
+                }
+            }
+        });
+
         // Full uint KEYS-ONLY radix sort. Isolates the uint keys sort from the pairs value-handling.
         [TestMethod]
         public async Task UintKeysOnlyRadixSortTest() => await RunTest(async accelerator =>

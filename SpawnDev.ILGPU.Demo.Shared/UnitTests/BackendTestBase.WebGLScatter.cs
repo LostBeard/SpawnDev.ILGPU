@@ -82,5 +82,42 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                         $"(R32UI scatter truncation -> uint radix sorts by low bits.)");
             }
         });
+
+        // Multi-texel scatter (componentsPerElement=2): a long/double is i64/f64-emulated as two texels
+        // per element [lo,hi]. Scatter must move BOTH texels to dest*2 and dest*2+1. Building block for
+        // 64-bit-key RadixSort (task #10). Verify a full 64-bit reverse permutation, incl. hi-word bits.
+        [TestMethod]
+        public async Task WebGLScatter_Int64MultiTexel_Correct() => await RunTest(async accelerator =>
+        {
+            var webgl = accelerator as global::SpawnDev.ILGPU.WebGL.WebGLAccelerator;
+            if (webgl == null)
+                throw new UnsupportedTestException("Scatter is a WebGL-specific primitive.");
+
+            long[] src =
+            {
+                0x1122334455667788L, 256L, -1L, long.MinValue, long.MaxValue,
+                1L, 0L, unchecked((long)0xABCDEF0123456789L),
+            };
+            int n = src.Length;
+            var dest = new int[n];
+            for (int i = 0; i < n; i++) dest[i] = n - 1 - i; // reverse
+
+            using var srcBuf = accelerator.Allocate1D(src);
+            using var destBuf = accelerator.Allocate1D(dest);
+            using var dstBuf = accelerator.Allocate1D<long>(n);
+
+            // long is stored as 2 uint texels (lo,hi); cpe=2, type "uint" (R32UI).
+            webgl.Scatter(dstBuf.View, srcBuf.View, destBuf.View, n, "uint", 2);
+            var result = await dstBuf.CopyToHostAsync<long>();
+
+            for (int j = 0; j < n; j++)
+            {
+                long expected = src[n - 1 - j];
+                if (result[j] != expected)
+                    throw new Exception(
+                        $"WebGL int64 multi-texel scatter wrong at [{j}]: expected 0x{expected:X16} " +
+                        $"got 0x{result[j]:X16} (cpe=2 lo/hi texel mapping bug).");
+            }
+        });
     }
 }

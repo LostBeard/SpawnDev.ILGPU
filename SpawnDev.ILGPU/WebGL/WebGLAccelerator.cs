@@ -422,7 +422,8 @@ namespace SpawnDev.ILGPU.WebGL
             WebGLMemoryBuffer destination,
             WebGLMemoryBuffer source,
             WebGLMemoryBuffer destIndex,
-            int count)
+            int count,
+            int componentsPerElement = 1)
         {
             if (_glWorker == null)
                 throw new InvalidOperationException("GL worker not initialized");
@@ -435,7 +436,8 @@ namespace SpawnDev.ILGPU.WebGL
                 dstBufferId = destination.WorkerBufferId,
                 srcBufferId = source.WorkerBufferId,
                 destBufferId = destIndex.WorkerBufferId,
-                n = count
+                n = count,
+                cpe = componentsPerElement // 1 for 32-bit, 2 for i64/f64 (two texels per element)
             });
         }
 
@@ -446,7 +448,7 @@ namespace SpawnDev.ILGPU.WebGL
         /// refreshes the CPU mirror lazily. Building block for a WebGL multi-pass RadixSort.
         /// </summary>
         public void Scatter(object destination, object source, object destIndex, int count,
-            string valueGlslType = "int")
+            string valueGlslType = "int", int componentsPerElement = 1)
         {
             var dst = GetWebGLMemoryBuffer(destination)
                 ?? throw new ArgumentException("Scatter: destination is not a WebGL buffer/view", nameof(destination));
@@ -458,10 +460,12 @@ namespace SpawnDev.ILGPU.WebGL
             // (R32I/R32UI in core WebGL2; R32F needs EXT_color_buffer_float). A buffer only ever used
             // in scatter (never a kernel dispatch) keeps the default GlslType "float"; set the real
             // types so the worker allocates the right texture format. Dest indices are always int.
+            // componentsPerElement = 2 for i64/f64 (stored as two texels per element); the worker
+            // scatters n*cpe texels, mapping int-slot j -> element j/cpe at destIndex[element]*cpe + j%cpe.
             dst.GlslType = valueGlslType;
             src.GlslType = valueGlslType;
             idx.GlslType = "int";
-            WorkerScatter(dst, src, idx, count);
+            WorkerScatter(dst, src, idx, count, componentsPerElement);
         }
 
         /// <summary>

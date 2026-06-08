@@ -110,14 +110,19 @@ function getOrCompileScatterProgram(glslType) {
 precision highp float; precision highp int;
 uniform highp ${samp} u_src;
 uniform highp isampler2D u_dest;
-uniform int u_srcTileW; uniform int u_destTileW; uniform int u_dstW; uniform int u_dstH;
+uniform int u_srcTileW; uniform int u_destTileW; uniform int u_dstW; uniform int u_dstH; uniform int u_cpe;
 flat out ${valType} v_val;
 void main() {
+    // i is the int-SLOT index (0..n*cpe-1). cpe=1 -> one texel per element (32-bit). cpe=2 -> two
+    // texels per element (i64/f64 stored as [lo,hi] pairs): element = i/cpe, component = i%cpe.
     int i = gl_VertexID;
     int sx = i % u_srcTileW; int sy = i / u_srcTileW;
     ${valType} val = texelFetch(u_src, ivec2(sx, sy), 0).r;
-    int di = i % u_destTileW; int dj = i / u_destTileW;
-    int dest = texelFetch(u_dest, ivec2(di, dj), 0).r;
+    int element = i / u_cpe;
+    int comp = i - element * u_cpe;
+    int di = element % u_destTileW; int dj = element / u_destTileW;
+    int destElem = texelFetch(u_dest, ivec2(di, dj), 0).r;
+    int dest = destElem * u_cpe + comp;
     int tx = dest % u_dstW; int ty = dest / u_dstW;
     float ndcx = (float(tx) + 0.5) / float(u_dstW) * 2.0 - 1.0;
     float ndcy = (float(ty) + 0.5) / float(u_dstH) * 2.0 - 1.0;
@@ -153,6 +158,7 @@ void main() { o_val = ${vec4Type}(v_val, ${zero}, ${zero}, ${zero}); }`;
         u_destTileW: gl.getUniformLocation(program, 'u_destTileW'),
         u_dstW: gl.getUniformLocation(program, 'u_dstW'),
         u_dstH: gl.getUniformLocation(program, 'u_dstH'),
+        u_cpe: gl.getUniformLocation(program, 'u_cpe'),
     };
     const entry = { program, locs };
     scatterPrograms[glslType] = entry;
@@ -161,6 +167,7 @@ void main() { o_val = ${vec4Type}(v_val, ${zero}, ${zero}, ${zero}); }`;
 
 function handleScatter(msg) {
     const { dstBufferId, srcBufferId, destBufferId, n } = msg;
+    const cpe = msg.cpe || 1; // texels per element: 1 for 32-bit, 2 for i64/f64
     while (gl.getError() !== 0) { }
     const dst = bufferRegistry[dstBufferId];
     const src = bufferRegistry[srcBufferId];
@@ -177,6 +184,7 @@ function handleScatter(msg) {
     gl.uniform1i(sp.locs.u_destTileW, dest.width);
     gl.uniform1i(sp.locs.u_dstW, dst.width);
     gl.uniform1i(sp.locs.u_dstH, dst.height);
+    gl.uniform1i(sp.locs.u_cpe, cpe);
 
     // Render directly into the dst buffer's texture (the next op reads this — zero-copy).
     if (!scatterFBO) scatterFBO = gl.createFramebuffer();
@@ -196,7 +204,7 @@ function handleScatter(msg) {
     gl.disable(gl.SCISSOR_TEST);
     gl.disable(gl.CULL_FACE);
     gl.colorMask(true, true, true, true);
-    gl.drawArrays(gl.POINTS, 0, n);
+    gl.drawArrays(gl.POINTS, 0, n * cpe); // n*cpe int-slots (one point per texel)
     gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 
     // Result lives in dst.texture (zero-copy); refresh the CPU mirror lazily on host readback.

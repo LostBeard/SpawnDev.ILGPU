@@ -23,9 +23,11 @@ namespace ILGPU.Algorithms
         /// Scatters <paramref name="source"/> into <paramref name="destination"/> using
         /// <paramref name="destIndex"/> (int indices). <paramref name="destination"/> and
         /// <paramref name="source"/> share the element type named by <paramref name="valueGlslType"/>
-        /// ("int", "uint", or "float"). Arguments are ILGPU views/buffers (passed as object to keep
-        /// this interface backend-agnostic).
+        /// ("int", "uint", or "float"). <paramref name="componentsPerElement"/> is the number of
+        /// 32-bit texels per element (1 for 32-bit types, 2 for i64/f64 stored as [lo,hi] pairs).
+        /// Arguments are ILGPU views/buffers (passed as object to keep this interface backend-agnostic).
         /// </summary>
-        void Scatter(object destination, object source, object destIndex, int count, string valueGlslType);
+        void Scatter(object destination, object source, object destIndex, int count, string valueGlslType,
+            int componentsPerElement = 1);
     }
 }

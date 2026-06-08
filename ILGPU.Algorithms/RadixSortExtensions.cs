@@ -1128,12 +1128,13 @@ namespace ILGPU.Algorithms
             // WebGL: gather-only transform feedback. Sort the pairs by SCATTER (the struct-packed
             // gather/scatter pairs path needs a multi-field scatter). Compute each element's stable
             // 1-bit-split destination from the keys, then scatter BOTH keys and values by that dest.
-            // The scalar scatter handles 4-byte renderable types (int/uint/float -> R32I/R32UI/R32F);
-            // 8-byte keys/values (long/double) and packed Half need a multi-texel scatter (follow-up),
-            // so only take this path when both are 4-byte non-Half.
+            // Handles 4-byte (int/uint/float -> R32I/R32UI/R32F) AND 8-byte (long/double, i64/f64
+            // emulated as two uint texels -> componentsPerElement=2) key/value types. Packed Half is
+            // sub-word and still needs separate handling, so it's excluded here.
             if (accelerator.AcceleratorType == AcceleratorType.WebGL &&
                 accelerator is IScatterProvider scatterProviderPairs &&
-                Interop.SizeOf<TKey>() == 4 && Interop.SizeOf<TValue>() == 4 &&
+                (Interop.SizeOf<TKey>() == 4 || Interop.SizeOf<TKey>() == 8) &&
+                (Interop.SizeOf<TValue>() == 4 || Interop.SizeOf<TValue>() == 8) &&
                 typeof(TKey) != typeof(Half) && typeof(TValue) != typeof(Half))
                 return CreateWebGLScatterRadixSortPairs<
                     TKey, TKeyStride, TValue, TValueStride, TRadixSortOperation>(
@@ -1448,13 +1449,18 @@ namespace ILGPU.Algorithms
 
         // Scatter glsl-type for the radix working buffers. MUST match how the WebGL backend represents
         // these buffers in normal kernel dispatches (GLSLKernelFunctionGenerator.GetBufferElementType):
-        // Int32 (both int AND uint) -> "int" (R32I), Float32 -> "float" (R32F). A uint buffer is R32I,
-        // so the scatter must use the R32I (int) program too — using "uint" (R32UI) here makes the
-        // scatter's usampler read R32I-allocated keys as garbage (uint radix sorted by low bits only).
-        // Bits are preserved in R32I (bit-level); the unsigned ORDER comes from ExtractRadixBits<uint>.
+        //   Float32 -> "float" (R32F);  Int32 (int AND uint) -> "int" (R32I);
+        //   Int64 (long/ulong) AND Float64 (double) -> "uint" (R32UI), emulated as TWO uint texels.
+        // Using the wrong program makes the scatter's sampler read mismatched-format buffers as garbage
+        // (this was the uint bug: "uint"/R32UI read R32I keys). Bits are preserved; unsigned/float ORDER
+        // comes from ExtractRadixBits. 64-bit types pair with componentsPerElement=2 (see WebGLScatterCpe).
         private static string WebGLScatterValueType<T>() where T : unmanaged =>
-            typeof(T) == typeof(float) || typeof(T) == typeof(double) ? "float"
+            typeof(T) == typeof(float) ? "float"
+            : typeof(T) == typeof(double) || typeof(T) == typeof(long) || typeof(T) == typeof(ulong) ? "uint"
             : "int";
+
+        // Texels per element for the scatter: 8-byte i64/f64 are emulated as two 32-bit texels.
+        private static int WebGLScatterCpe<T>() where T : unmanaged => Interop.SizeOf<T>() == 8 ? 2 : 1;
 
         private static RadixSort<T, TStride> CreateWebGLScatterRadixSort<
             T, TStride, TRadixSortOperation>(Accelerator accelerator, IScatterProvider scatter)
@@ -1546,6 +1552,8 @@ namespace ILGPU.Algorithms
             int numBits = default(TRadixSortOperation).NumBits;
             string keyType = WebGLScatterValueType<TKey>();
             string valType = WebGLScatterValueType<TValue>();
+            int keyCpe = WebGLScatterCpe<TKey>();
+            int valCpe = WebGLScatterCpe<TValue>();
 
             return (stream, keys, values, tempView) =>
             {
@@ -1574,8 +1582,8 @@ namespace ILGPU.Algorithms
                     extractBit(stream, n, kSrc.View, flags.View, bit);
                     exclusiveScan(stream, flags.View, onePrefix.View, scanTemp.View);
                     computeDest(stream, n, flags.View, onePrefix.View, dest.View, n);
-                    scatter.Scatter(kDst.View, kSrc.View, dest.View, n, keyType);
-                    scatter.Scatter(vDst.View, vSrc.View, dest.View, n, valType);
+                    scatter.Scatter(kDst.View, kSrc.View, dest.View, n, keyType, keyCpe);
+                    scatter.Scatter(vDst.View, vSrc.View, dest.View, n, valType, valCpe);
                     var kt = kSrc; kSrc = kDst; kDst = kt;
                     var vt = vSrc; vSrc = vDst; vDst = vt;
                 }
