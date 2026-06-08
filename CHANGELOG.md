@@ -2,6 +2,45 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.15 (2026-06-08) - `MemoryPressure.AllocateWithReclaim` pressure-aware allocation helper
+
+Bundles forks **SpawnDev.ILGPU.Fork 2.0.13** and **SpawnDev.ILGPU.Algorithms.Fork 2.0.13**.
+
+`accelerator.AllocateWithReclaim(allocate, reclaim, describeState)` performs a device allocation that
+recovers from running out of device memory: it runs the `allocate` thunk, and if it throws (a device
+out-of-memory surfaces as a backend-specific exception - a CUDA error, an OpenCL error, a WebGPU/JS
+device error - NOT a single .NET `OutOfMemoryException`, so the catch is broad), it flushes pending GPU
+work via `Synchronize` (so a buffer the reclaim is about to dispose is not still referenced by an
+in-flight dispatch under WebGPU/WebGL command-encoder semantics), invokes `reclaim` to free reclaimable
+device memory (returning the bytes freed), and retries once; if the retry still fails it throws with the
+reclaimed amount and the caller's diagnostic context (the original failure as the inner exception).
+
+It is the flush -> reclaim -> retry **mechanism** only; the eviction **policy** - which buffers are safe
+to free (e.g. a pool's Returned-but-not-live buffers, never the live working set or weights) - stays in
+the caller's `reclaim` callback, so a pool composes this in without surrendering its own size-bucketing,
+naming, or per-dtype tracking. It pairs with `CopyFromStreamAsync` (4.9.14) for bounded streaming of large
+assets to the accelerator.
+
+## 4.9.14 (2026-06-08) - `CopyFromStreamAsync`: stream a `Stream` into a GPU buffer (zero-copy on the browser)
+
+Bundles forks **SpawnDev.ILGPU.Fork 2.0.12** and **SpawnDev.ILGPU.Algorithms.Fork 2.0.12**. New dependency
+on **SpawnDev.BlazorJS 3.5.12** (for `IJSReadStream`); the core default path is BlazorJS-independent.
+
+`view.CopyFromStreamAsync(stream)` (typed `ArrayView<T>` / `ArrayView1D` extension, default-stream and
+explicit-stream overloads) streams exactly `view.Length * sizeof(T)` bytes from a `Stream` into the buffer
+in chunks (16 MiB default), throwing `EndOfStreamException` if the stream ends early (a truncated asset
+surfaces instead of silently zero-padding). The core default (`MemoryBuffer.CopyFromStreamRawAsync`, the
+write-side mirror of `CopyToRawAsync`) genuinely awaits `Stream.ReadExactlyAsync` into a pooled buffer and
+copies each chunk - so on Cuda/OpenCL/CPU a model streaming off disk or the network no longer blocks a
+thread on a synchronous read.
+
+On the browser backends, when the source is a `SpawnDev.BlazorJS.Toolbox.IJSReadStream` (e.g. a
+`BlobStream`, `ArrayBufferStream`, or `SpawnDev.WebTorrent.TorrentReadStream`) the data is read as a JS
+`Uint8Array` and uploaded via `IBrowserMemoryBuffer.CopyFromJS` without ever entering the .NET/WASM managed
+heap. WebGPU honors the `queue.writeBuffer` 4-byte rule (fp32 and even-count `Half` uploads, and the 16 MiB
+chunk, are already 4-aligned; an odd-count `ArrayView<Half>` falls back to the managed padded path). A
+plain `.NET Stream` always works via the managed path.
+
 ## 4.9.13 (2026-06-08) - WebGL `Half` RadixSort + cross-backend sub-word sign-extension fix + WebGL group-op guard
 
 Bundles forks **SpawnDev.ILGPU.Fork 2.0.11** and **SpawnDev.ILGPU.Algorithms.Fork 2.0.11** (the `ILGPU.Algorithms/`
