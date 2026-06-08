@@ -113,6 +113,112 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
         });
 
+        // DIAGNOSTIC 1: isolate FloatAsInt(Half) - does it return the 16-bit f16 RawValue (NOT the 32-bit
+        // f32 bit pattern of the widened value)? Splits the ExtractRadixBits<Half> failure into its parts.
+        static void HalfRawBitsKernel(
+            Index1D index, ArrayView<global::ILGPU.Half> input, ArrayView<int> output)
+        {
+            output[index.X] = (int)(uint)Interop.FloatAsInt(input[index.X]);
+        }
+
+        [TestMethod]
+        public async Task HalfRawBitsTest() => await RunTest(async accelerator =>
+        {
+            if (!accelerator.Capabilities.Float16)
+                throw new UnsupportedTestException("Float16 not supported on this device");
+            var input = new global::ILGPU.Half[]
+            {
+                (global::ILGPU.Half)1.0f, (global::ILGPU.Half)(-1.0f),
+                (global::ILGPU.Half)256.0f, (global::ILGPU.Half)(-256.0f),
+            };
+            using var inBuf = accelerator.Allocate1D(input);
+            using var outBuf = accelerator.Allocate1D<int>(input.Length);
+            var kern = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<global::ILGPU.Half>, ArrayView<int>>(HalfRawBitsKernel);
+            kern((Index1D)input.Length, inBuf.View, outBuf.View);
+            await accelerator.SynchronizeAsync();
+            var got = await outBuf.CopyToHostAsync<int>();
+            for (int i = 0; i < input.Length; i++)
+            {
+                int expected = (int)(uint)Interop.FloatAsInt(input[i]);
+                if (got[i] != expected)
+                    throw new Exception(
+                        $"FloatAsInt(Half {(float)input[i]}) expected 0x{expected:X4} got 0x{got[i]:X4}");
+            }
+        });
+
+        // DIAGNOSTIC 2: isolate the sub-word sign-extension the ones-complement mask depends on:
+        // ((uint)((short)ushortBits >> 15)) & 0xFFFF - must be 0xFFFF when bit 15 is set, else 0. No Half
+        // involved. If this fails on a backend, the radix bug is the (short) sign-extend, not FloatAsInt.
+        static void ShortSignExtendKernel(
+            Index1D index, ArrayView<ushort> input, ArrayView<int> output)
+        {
+            output[index.X] = (int)(((uint)((short)input[index.X] >> 15)) & 0xFFFFu);
+        }
+
+        [TestMethod]
+        public async Task HalfSignExtendShiftTest() => await RunTest(async accelerator =>
+        {
+            var input = new ushort[] { 0x0001, 0x7FFF, 0x8000, 0xBC00, 0xFFFF, 0x3C00 };
+            using var inBuf = accelerator.Allocate1D(input);
+            using var outBuf = accelerator.Allocate1D<int>(input.Length);
+            var kern = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<ushort>, ArrayView<int>>(ShortSignExtendKernel);
+            kern((Index1D)input.Length, inBuf.View, outBuf.View);
+            await accelerator.SynchronizeAsync();
+            var got = await outBuf.CopyToHostAsync<int>();
+            for (int i = 0; i < input.Length; i++)
+            {
+                int expected = (int)(((uint)((short)input[i] >> 15)) & 0xFFFFu);
+                if (got[i] != expected)
+                    throw new Exception(
+                        $"(short)0x{input[i]:X4} >> 15 sign-extend expected 0x{expected:X} got 0x{got[i]:X}");
+            }
+        });
+
+        // Does ExtractRadixBits<Half> (AscendingHalf) transpile + work on WebGL's emulated f16? This is
+        // the make-or-break for Half RadixSort on WebGL (task #13). Half is emulated as a GLSL `float`,
+        // so FloatAsInt(Half) must compress back to the 16-bit f16 pattern (_f32_to_f16) instead of
+        // taking floatBitsToInt of the widened f32. Includes NEGATIVE Halves to exercise the sign-bit
+        // flip + ones-complement-mask path (the (short)bits >> 15 sign extension). CPU op is the oracle.
+        static void HalfExtractRadixBitsKernel(
+            Index1D index, ArrayView<global::ILGPU.Half> input, ArrayView<int> output, int shift)
+        {
+            AscendingHalf op = default;
+            output[index.X] = op.ExtractRadixBits(input[index.X], shift, 1);
+        }
+
+        [TestMethod]
+        public async Task HalfExtractRadixBitsTest() => await RunTest(async accelerator =>
+        {
+            if (!accelerator.Capabilities.Float16)
+                throw new UnsupportedTestException("Float16 not supported on this device");
+            var input = new global::ILGPU.Half[]
+            {
+                (global::ILGPU.Half)1.0f, (global::ILGPU.Half)256.0f, (global::ILGPU.Half)0.5f,
+                global::ILGPU.Half.Zero, (global::ILGPU.Half)(-1.0f), (global::ILGPU.Half)(-256.0f),
+                (global::ILGPU.Half)(-0.5f), (global::ILGPU.Half)65504.0f, // 65504 = Half.MaxValue
+            };
+            using var inBuf = accelerator.Allocate1D(input);
+            using var outBuf = accelerator.Allocate1D<int>(input.Length);
+            var kern = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<global::ILGPU.Half>, ArrayView<int>, int>(HalfExtractRadixBitsKernel);
+            AscendingHalf op = default;
+            foreach (int shift in new[] { 0, 4, 8, 10, 12, 15 })
+            {
+                kern((Index1D)input.Length, inBuf.View, outBuf.View, shift);
+                await accelerator.SynchronizeAsync();
+                var got = await outBuf.CopyToHostAsync<int>();
+                for (int i = 0; i < input.Length; i++)
+                {
+                    int expected = op.ExtractRadixBits(input[i], shift, 1);
+                    if (got[i] != expected)
+                        throw new Exception(
+                            $"ExtractRadixBits<Half>({(float)input[i]}, {shift}, 1) expected {expected} got {got[i]}");
+                }
+            }
+        });
+
         // Full uint KEYS-ONLY radix sort. Isolates the uint keys sort from the pairs value-handling.
         [TestMethod]
         public async Task UintKeysOnlyRadixSortTest() => await RunTest(async accelerator =>

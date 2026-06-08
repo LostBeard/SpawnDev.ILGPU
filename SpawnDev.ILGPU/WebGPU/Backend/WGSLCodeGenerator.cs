@@ -1712,6 +1712,20 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFFFi)" : $"extractBits({castExpr}, 0u, 16u)";
                     else if (dstBasicType == BasicValueType.Int8)
                         castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFi)" : $"extractBits({castExpr}, 0u, 8u)";
+                    else
+                    {
+                        // Widening from a SUB-WORD source (Int16/Int8) to a wider int: re-extend the
+                        // low bits per SourceUnsigned. The source may be zero-extended from an
+                        // unsigned sub-word load or a `(short)`/`(sbyte)` reinterpret the core IR
+                        // elided (short/ushort share BasicValueType.Int16). Mirrors the
+                        // WGSLKernelFunctionGenerator override; see that comment for the radix case.
+                        bool isSourceUnsigned = (value.Flags & ConvertFlags.SourceUnsigned) == ConvertFlags.SourceUnsigned;
+                        var srcBasicType = value.Value.BasicValueType;
+                        if (srcBasicType == BasicValueType.Int16)
+                            castExpr = isSourceUnsigned ? $"({castExpr} & 0xFFFFi)" : $"extractBits({castExpr}, 0u, 16u)";
+                        else if (srcBasicType == BasicValueType.Int8)
+                            castExpr = isSourceUnsigned ? $"({castExpr} & 0xFFi)" : $"extractBits({castExpr}, 0u, 8u)";
+                    }
                 }
                 AppendLine($"{target} = {castExpr};");
             }

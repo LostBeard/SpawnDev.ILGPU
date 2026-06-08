@@ -6703,6 +6703,26 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFFFi)" : $"extractBits({castExpr}, 0u, 16u)";
                 else if (dstBasicType == BasicValueType.Int8)
                     castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFi)" : $"extractBits({castExpr}, 0u, 8u)";
+                else
+                {
+                    // Widening from a SUB-WORD source (Int16/Int8) to a wider int (i32). The source
+                    // lives in an i32 but may be zero-extended - it came from an unsigned sub-word
+                    // load, or from a `(short)`/`(sbyte)` signedness reinterpret that the core IR
+                    // ELIDES (short and ushort share BasicValueType.Int16). C# sign-extends
+                    // short->int and zero-extends ushort->int; SourceUnsigned carries which. Re-
+                    // extend the low bits so the high bits are correct. Concretely PopArithmeticArgs
+                    // promotes the `(short)` operand of `(short)Interop.FloatAsInt(half) >> 15`
+                    // (AscendingHalf's ones-complement mask) to i32 via THIS convert; without the
+                    // re-extension `>> 15` saw a zero-extended value and returned 0 instead of
+                    // 0xFFFF for negative Halves. extractBits on a signed i32 sign-extends.
+                    // Idempotent for already-extended values; desktop backends never reach here.
+                    bool isWidenSrcUnsigned = (value.Flags & ConvertFlags.SourceUnsigned) == ConvertFlags.SourceUnsigned;
+                    var srcBasicType = value.Value.BasicValueType;
+                    if (srcBasicType == BasicValueType.Int16)
+                        castExpr = isWidenSrcUnsigned ? $"({castExpr} & 0xFFFFi)" : $"extractBits({castExpr}, 0u, 16u)";
+                    else if (srcBasicType == BasicValueType.Int8)
+                        castExpr = isWidenSrcUnsigned ? $"({castExpr} & 0xFFi)" : $"extractBits({castExpr}, 0u, 8u)";
+                }
             }
             AppendLine($"{prefix}{target} = {castExpr};");
         }

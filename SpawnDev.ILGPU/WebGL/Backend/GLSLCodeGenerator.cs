@@ -1463,6 +1463,17 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
+        // Sign-extend the low 16/8 bits of a 32-bit GLSL int WITHOUT shifting a bit into the sign
+        // position. The obvious `(x << 16) >> 16` is UNDEFINED BEHAVIOR in GLSL ES 3.0 when bit 15
+        // is set: `0x8000 << 16 == 0x80000000` overflows a signed int, and ANGLE/drivers may return
+        // 0 instead of the expected value (this is why `(short)0x8000 >> 15` returned 0x1 on WebGL).
+        // The `(v ^ signbit) - signbit` idiom is fully defined: mask to width, flip the sign bit,
+        // subtract it back. e.g. 0x8000 -> (0 - 0x8000) = 0xFFFF8000; 0x7FFF -> (0xFFFF - 0x8000) = 0x7FFF.
+        protected static string SignExtend16(string expr) =>
+            $"(((({expr}) & 0xFFFF) ^ 0x8000) - 0x8000)";
+        protected static string SignExtend8(string expr) =>
+            $"(((({expr}) & 0xFF) ^ 0x80) - 0x80)";
+
         public virtual void GenerateCode(ConvertValue value)
         {
             var target = Load(value);
@@ -1486,9 +1497,32 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 bool isTargetUnsigned = (value.Flags & ConvertFlags.TargetUnsigned) == ConvertFlags.TargetUnsigned;
                 var dstBasicType = value.Type.BasicValueType;
                 if (dstBasicType == BasicValueType.Int16)
-                    castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFFF)" : $"(({castExpr} << 16) >> 16)";
+                    castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFFF)" : SignExtend16(castExpr);
                 else if (dstBasicType == BasicValueType.Int8)
-                    castExpr = isTargetUnsigned ? $"({castExpr} & 0xFF)" : $"(({castExpr} << 24) >> 24)";
+                    castExpr = isTargetUnsigned ? $"({castExpr} & 0xFF)" : SignExtend8(castExpr);
+                else
+                {
+                    // Widening from a SUB-WORD source (Int16/Int8) to a wider int (Int32). The
+                    // source lives in a 32-bit register but may be zero-extended - it came from an
+                    // unsigned sub-word load, or from a `(short)`/`(sbyte)` signedness reinterpret
+                    // that the core IR ELIDES (short and ushort share BasicValueType.Int16, so
+                    // node.Type == targetType and the convert is dropped). C# sign-extends
+                    // short->int and zero-extends ushort->int; the convert's SourceUnsigned flag
+                    // carries which. Re-extend the low bits so the high bits are correct.
+                    //
+                    // Concretely: `(short)Interop.FloatAsInt(half) >> 15` (AscendingHalf's
+                    // ones-complement mask) - PopArithmeticArgs promotes the `(short)` operand to
+                    // Int32 via THIS convert before the shift; without the re-extension the value
+                    // stayed zero-extended and `>> 15` returned 0 instead of 0xFFFF for negative
+                    // Halves on all browser backends. Idempotent for already-correctly-extended
+                    // values; desktop backends use native sub-word registers and never reach here.
+                    bool isSourceUnsigned = (value.Flags & ConvertFlags.SourceUnsigned) == ConvertFlags.SourceUnsigned;
+                    var srcBasicType = value.Value.BasicValueType;
+                    if (srcBasicType == BasicValueType.Int16)
+                        castExpr = isSourceUnsigned ? $"({castExpr} & 0xFFFF)" : SignExtend16(castExpr);
+                    else if (srcBasicType == BasicValueType.Int8)
+                        castExpr = isSourceUnsigned ? $"({castExpr} & 0xFF)" : SignExtend8(castExpr);
+                }
             }
             AppendLine($"{target} = {castExpr};");
         }
@@ -2084,6 +2118,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // emulation helper f64_to_ieee754_bits -> uvec2(lo, hi) instead.
             if (Backend.EnableF64Emulation && value.Value.BasicValueType == BasicValueType.Float64)
                 AppendLine($"{target} = f64_to_ieee754_bits({source});");
+            else if (value.Value.BasicValueType == BasicValueType.Float16)
+                // Emulated Half is a GLSL `float` (f32-widened), NOT the IEEE f16 bit pattern. Using
+                // floatBitsToInt on it yields the 32-bit f32 bits, mismatching the 16-bit ushort target
+                // that FloatAsInt(Half) (= Half.RawValue) promises (e.g. ExtractRadixBits<Half>'s
+                // FloatAsInt). Compress back to the 16-bit f16 pattern via the emulation helper. Parallel
+                // to the Float64 case above.
+                AppendLine($"{target} = int(_f32_to_f16({source}));");
             else
                 AppendLine($"{target} = floatBitsToInt({source});");
         }
@@ -2095,6 +2136,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // Reverse: reconstruct the emulated f64 (Dekker vec2 / Ozaki vec4) from the IEEE uvec2 bits.
             if (Backend.EnableF64Emulation && value.BasicValueType == BasicValueType.Float64)
                 AppendLine($"{target} = f64_from_ieee754_bits({source}.x, {source}.y);");
+            else if (value.BasicValueType == BasicValueType.Float16)
+                // Reverse: expand a 16-bit f16 bit pattern (held in the low 16 bits of the int source)
+                // into the emulated Half = GLSL `float`. intBitsToFloat would interpret the pattern as
+                // 32-bit f32 bits, which is wrong. Parallel to the Float64 case above.
+                AppendLine($"{target} = _f16_to_f32(uint({source}));");
             else
                 AppendLine($"{target} = intBitsToFloat({source});");
         }

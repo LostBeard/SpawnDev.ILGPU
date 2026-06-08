@@ -1116,6 +1116,45 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         Code.Add(WasmOpCodes.I32Extend8S);
                     }
                 }
+                else
+                {
+                    // Widening from a SUB-WORD source (Int16/Int8) to a wider int (Int32). The
+                    // (srcWasm=i32, dstWasm=i32) switch above emits no opcode, so the source value
+                    // passes through unchanged - but it may be zero-extended (unsigned sub-word
+                    // load, or a `(short)`/`(sbyte)` reinterpret the core IR elides since short and
+                    // ushort share BasicValueType.Int16). Re-extend the low bits per SourceUnsigned
+                    // so the high bits are correct: PopArithmeticArgs promotes the `(short)` operand
+                    // of `(short)Interop.FloatAsInt(half) >> 15` (AscendingHalf's ones-complement
+                    // mask) to i32 via THIS convert before the shift; without the re-extension the
+                    // `>> 15` saw a zero-extended value and returned 0 instead of 0xFFFF for
+                    // negative Halves. Idempotent for already-extended values; desktop backends use
+                    // native sub-word registers and never reach this codegen.
+                    var srcBasicType = value.Value.BasicValueType;
+                    if (srcBasicType == BasicValueType.Int16)
+                    {
+                        if (isSourceUnsigned)
+                        {
+                            WasmModuleBuilder.EmitI32Const(Code, 0xFFFF);
+                            Code.Add(WasmOpCodes.I32And);
+                        }
+                        else
+                        {
+                            Code.Add(WasmOpCodes.I32Extend16S);
+                        }
+                    }
+                    else if (srcBasicType == BasicValueType.Int8)
+                    {
+                        if (isSourceUnsigned)
+                        {
+                            WasmModuleBuilder.EmitI32Const(Code, 0xFF);
+                            Code.Add(WasmOpCodes.I32And);
+                        }
+                        else
+                        {
+                            Code.Add(WasmOpCodes.I32Extend8S);
+                        }
+                    }
+                }
             }
 
             WasmModuleBuilder.EmitLocalSet(Code, target);

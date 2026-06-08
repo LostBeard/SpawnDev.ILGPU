@@ -3935,9 +3935,27 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 bool isTargetUnsigned = (value.Flags & ConvertFlags.TargetUnsigned) == ConvertFlags.TargetUnsigned;
                 var dstBasicType = value.Type.BasicValueType;
                 if (dstBasicType == BasicValueType.Int16)
-                    castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFFF)" : $"(({castExpr} << 16) >> 16)";
+                    castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFFF)" : SignExtend16(castExpr);
                 else if (dstBasicType == BasicValueType.Int8)
-                    castExpr = isTargetUnsigned ? $"({castExpr} & 0xFF)" : $"(({castExpr} << 24) >> 24)";
+                    castExpr = isTargetUnsigned ? $"({castExpr} & 0xFF)" : SignExtend8(castExpr);
+                else
+                {
+                    // Widening from a SUB-WORD source (Int16/Int8) to a wider int (Int32). The
+                    // source may be zero-extended - from an unsigned sub-word load, or a
+                    // `(short)`/`(sbyte)` signedness reinterpret the core IR ELIDES (short and
+                    // ushort share BasicValueType.Int16). C# sign-extends short->int and
+                    // zero-extends ushort->int; SourceUnsigned carries which. Re-extend the low
+                    // bits so the high bits are correct - PopArithmeticArgs promotes the `(short)`
+                    // operand of `(short)Interop.FloatAsInt(half) >> 15` (AscendingHalf's
+                    // ones-complement mask) to Int32 via THIS convert before the shift; without it
+                    // `>> 15` saw a zero-extended value and returned 0 instead of 0xFFFF for
+                    // negative Halves. Idempotent for already-extended values; desktop unaffected.
+                    var srcBasicType = value.Value.BasicValueType;
+                    if (srcBasicType == BasicValueType.Int16)
+                        castExpr = isSourceUnsigned ? $"({castExpr} & 0xFFFF)" : SignExtend16(castExpr);
+                    else if (srcBasicType == BasicValueType.Int8)
+                        castExpr = isSourceUnsigned ? $"({castExpr} & 0xFF)" : SignExtend8(castExpr);
+                }
             }
             EmitHoistedOrTypedAssignment(value, target, castExpr);
         }

@@ -546,9 +546,12 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         // (uint maps to "int" in GetBufferElementType), so the scatter must use the R32I program too —
         // WebGLScatterValueType now maps uint -> "int" to match (was "uint"/R32UI -> usampler read
         // R32I keys as garbage -> low-bit-only sort). Bits preserved in R32I; order via ExtractRadixBits.
-        [TestMethod]
-        public new async Task AlgorithmRadixSortPairsHalfTest() =>
-            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+        // AlgorithmRadixSortPairsHalfTest now RUNS on WebGL: Half is sub-word (2-per-texel packed) so the
+        // whole-texel scatter can't move an individual Half - it sorts via an unpacked f32 working buffer
+        // (the proven "float" R32F scatter path), deriving the radix bit through the canonical
+        // ExtractRadixBits<Half>. Also required a GLSL FloatAsInt/IntAsFloat fix so FloatAsInt(Half)
+        // compresses to the 16-bit f16 pattern (_f32_to_f16) instead of taking floatBitsToInt of the
+        // widened f32 (parallel to the earlier f64 FloatAsInt fix).
         [TestMethod]
         public new async Task AlgorithmExclusiveScanFloatTest() =>
             throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
