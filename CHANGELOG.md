@@ -2,6 +2,58 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.9.13 (2026-06-08) - WebGL `Half` RadixSort + cross-backend sub-word sign-extension fix + WebGL group-op guard
+
+Bundles forks **SpawnDev.ILGPU.Fork 2.0.11** and **SpawnDev.ILGPU.Algorithms.Fork 2.0.11** (the `ILGPU.Algorithms/`
+RadixSort change ships in the Algorithms.Fork package; consumers take all three together). The `ILGPU/` core
+is unchanged in this release - the fork version is bumped only to keep the four-package bundle in sync.
+
+### `RadixSort` with `Half` keys on WebGL - the last unsupported key type
+
+`accelerator.CreateRadixSort<Half, ...>()` / `CreateRadixSortPairs<Half, int, ...>()` now run on WebGL, so all
+of `int / uint / float / long / double / Half` sort on every browser backend (keys-only and pairs, ascending and
+descending, power-of-two and arbitrary counts, up to 4M elements).
+
+`Half` is sub-word: the WebGL backend packs two `Half` values per `R32I` texel, and the render-to-texture GPGPU
+scatter (added in 4.9.x for the other WebGL key types) writes whole 32-bit texels, so it cannot move an individual
+`Half`. The new path (`CreateWebGLScatterRadixSortHalf` / `...PairsHalfKey`) sorts via an **unpacked f32 working
+representation** (one element per `R32F` texel - the proven float scatter path): copy-in widens each `Half` to f32
+(lossless - f16 is a strict subset of f32), the f32 values are scattered, the radix bit is derived through the
+canonical `ExtractRadixBits<Half>`, and copy-out narrows back to `Half`.
+
+### Cross-backend sub-word signed-reinterpret sign-extension fix (WGSL / GLSL / Wasm)
+
+Adding `Half` RadixSort surfaced a years-old, silently-wrong bug on **all three browser backends**. ILGPU's type
+system collapses signed and unsigned sub-word integers into one `BasicValueType` (`short` and `ushort` are both
+`Int16`; `sbyte`/`byte` are both `Int8`), so a signedness-reinterpret cast - `(short)someUshort`, `(ushort)someShort`,
+and the `Int8` analogues - has `node.Type == targetType` and the IR **elides the `conv.i2`/`conv.u2` as an
+identity conversion**. On desktop (CPU/Cuda/OpenCL) this is harmless because sub-word values live in native 16/8-bit
+registers, but the three browser backends hold them zero/sign-extended in a 32-bit register, and the widening
+promotion (`Int16 -> Int32`, done when a sub-word value is used in arithmetic) was emitted as identity - so the
+sign extension was never applied. This silently corrupted the high bits whenever an unsigned sub-word value was
+reinterpreted as signed; concretely it broke `AscendingHalf.ExtractRadixBits`'s `(short)bits >> 15` ones-complement
+mask, making `Half` RadixSort wrong for **negative** values (the prior positive-only Half test masked it).
+
+Fix: the WGSL (`WGSLKernelFunctionGenerator` + base `WGSLCodeGenerator`), GLSL (`GLSLKernelFunctionGenerator` +
+base `GLSLCodeGenerator`), and Wasm (`WasmCodeGenerator`) `ConvertValue` codegen now re-extend a sub-word **source**
+when widening to a wider integer (per the `SourceUnsigned` flag), not only when narrowing to a sub-word **target**.
+The WebGL sign-extension uses `((x & 0xFFFF) ^ 0x8000) - 0x8000` (and the `0xFF`/`0x80` form for `Int8`) instead of
+`(x << 16) >> 16`, because shifting a bit into the sign position is **undefined behavior in GLSL ES 3.0** (`0x8000 << 16`
+overflows the signed int; ANGLE returned 0). Also fixed WebGL `FloatAsInt(Half)` to compress to the 16-bit f16 bit
+pattern via `_f32_to_f16` (parallel to the existing f64 `f64_to_ieee754_bits` fix) instead of `floatBitsToInt` of
+the f32-widened value. Desktop backends are unaffected.
+
+### WebGL in-kernel group/warp scan & reduce now throw instead of returning silent zeros
+
+`GroupExtensions.ExclusiveScan` / `InclusiveScan` / `AllReduce` / `Reduce` (and the `WarpExtensions` equivalents)
+need the group's threads to share memory within one dispatch. WebGL's Transform-Feedback vertex shaders have no
+shared workgroup memory and no barriers, so these are structurally impossible in-kernel - and the WebGL codegen had
+been silently lowering them to `= 0` (the "Unmapped" method-call stub), so a consumer calling them on WebGL got 0
+for every thread with no error. The codegen now **throws `UnsupportedKernelFeatureException`** for these ops (the
+message points at the host `accelerator.CreateScan` / `CreateReduce`, which orchestrate multiple dispatches with the
+draw-call boundary as the barrier and **do** work on WebGL, and at `RequiresSharedMemory` on `AcceleratorRequirements`),
+mirroring the existing atomic/barrier "no silent garbage" guards.
+
 ## 4.9.12 (2026-06-05) - generic-math f16 kernels: `INumber<Half>` + transpilable `NumericConvert` + `Half.One` fix
 
 Bundles forks **SpawnDev.ILGPU.Fork 2.0.10** and **SpawnDev.ILGPU.Algorithms.Fork 2.0.10** (these carry

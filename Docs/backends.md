@@ -16,7 +16,7 @@ SpawnDev.ILGPU supports multiple backends for running ILGPU kernels. In the brow
 | **Group.Barrier()** | ✅ | ❌ | ✅ |
 | **Dynamic Shared Memory** | ✅ | ❌ | ✅ |
 | **Atomics** | ✅ | ❌ | ✅ |
-| **ILGPU Algorithms** | ✅ RadixSort, Scan, Reduce, Histogram | ❌ | ✅ RadixSort, Scan, Reduce, Histogram |
+| **ILGPU Algorithms** | ✅ RadixSort, Scan, Reduce, Histogram | ⚠️ Host RadixSort (all key types incl. Half) + Scan + Reduce (multi-dispatch); no in-kernel group ops | ✅ RadixSort, Scan, Reduce, Histogram |
 | **64-bit (f64/i64)** | ✅ Emulated | ✅ Emulated | ✅ Native |
 | **Browser support** | Chrome/Edge 113+ | All modern browsers | All modern browsers |
 
@@ -228,6 +228,17 @@ Buffers persist as **GPU-resident textures** in the worker. Kernel dispatch send
 - **No atomics** — not available in the vertex shader stage  
 - **No barriers** — no workgroup synchronization
 - **No sync GPU→CPU** — `CopyTo`/`CopyToCPU`/`GetAsArray1D` throw `NotSupportedException`. Use `CopyToHostAsync`. GPU→GPU `CopyFrom` works.
+- **No in-kernel group/warp ops** - `Group.ExclusiveScan`/`InclusiveScan`/`AllReduce`/`Reduce` and the `Warp` equivalents need shared memory + barriers, which the vertex-shader model lacks. Calling them in a kernel throws `UnsupportedKernelFeatureException` at compile time (rather than silently returning 0). Use the host-level algorithms below instead, or declare `RequiresSharedMemory = true` on `AcceleratorRequirements` to filter WebGL at selection time.
+
+### ILGPU Algorithms
+
+Despite having no shared memory, atomics, or barriers, WebGL supports the **host-level** algorithm extensions via shared-memory-free multi-dispatch emulation (the draw-call boundary between passes acts as the global barrier):
+
+- **`RadixSort`** - `CreateRadixSort` / `CreateRadixSortPairs`, all key types (`int`/`uint`/`float`/`long`/`double`/`Half`), keys-only and pairs, ascending/descending, power-of-two and arbitrary counts, up to 4M elements. Uses a render-to-texture GPGPU scatter (1-bit stable split per pass); `Half` keys sort via an unpacked-f32 working representation since the whole-texel scatter can't move a sub-texel `Half`.
+- **`CreateScan`** - Hillis-Steele multi-pass scan (log2(N) element-wise passes, ping-pong buffers).
+- **`CreateReduce`** - multi-pass pairwise reduction.
+
+These are used the same way as on desktop backends. (The in-kernel `GroupExtensions` group/warp scan & reduce above are a *different*, unsupported API - those throw.)
 
 ### Browser Support
 
