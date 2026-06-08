@@ -680,21 +680,17 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         // RadixSortDescending2MTest now RUNS on WebGL (int+int scatter-based pairs sort, n=2^21).
         // The following large int+int descending sorts now RUN on WebGL (scatter-based pairs sort;
         // the test's GPU verify falls back to a CPU verify on WebGL since WebGL has no atomics).
-        [TestMethod]
-        public new async Task RadixSortDescending4MTest() =>
-            throw new UnsupportedTestException("WebGL: scatter-based radix sort is CORRECT at 4M (1.4M/2M pass), but a single 4M sort (32 bits x multi-pass over 16MB textures) sits at/over Playwright's 30s budget on WebGL — flaky. Perf ceiling, not correctness. Tracked.");
+        // RadixSortDescending4MTest now RUNS on WebGL: the base test carries [TestMethod(Timeout=240000)]
+        // (the large 4M sort needs more than the 30s default, like Wasm), so no WebGL override is needed.
         [TestMethod]
         public new async Task RadixSortHeavyDuplicateKeysTest() =>
             await base.RadixSortHeavyDuplicateKeysTest();
         [TestMethod]
         public new async Task RadixSortDescendingOddCountTest() =>
             await base.RadixSortDescendingOddCountTest();
-        [TestMethod]
-        public new async Task RadixSortAscending1_4MTest() =>
-            await base.RadixSortAscending1_4MTest();
-        [TestMethod]
-        public new async Task RadixSortSpawnSceneSimulationTest() =>
-            throw new UnsupportedTestException("WebGL: each 1.4M sort is correct (RadixSortDescending1_4M passes), but this runs 3 frames x 1.4M sorts which exceeds Playwright's 30s budget on WebGL multi-pass. Perf ceiling, not correctness. Tracked.");
+        // RadixSortAscending1_4MTest + RadixSortSpawnSceneSimulationTest now RUN on WebGL via the base
+        // methods (no override) so they inherit the base [TestMethod(Timeout=240000/300000)] — the large
+        // WebGL multi-pass sorts need more than the 30s default (like Wasm). Both verified passing.
 
         // --- Tests9: Diagnostic isolation tests ---
         [TestMethod]

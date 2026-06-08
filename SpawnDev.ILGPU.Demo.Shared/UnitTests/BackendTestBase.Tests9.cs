@@ -378,7 +378,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         /// quantized camera-to-splat depth values in [0..10000000].
         /// Verifies descending order and full index integrity.
         /// </summary>
-        [TestMethod]
+        [TestMethod(Timeout = 240000)]
         public async Task RadixSortDescending1_4MTest() => await RunTest(async accelerator =>
         {
             int n = 1_393_167; // SpawnScene exact count
@@ -585,7 +585,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         /// scale larger than SpawnScene's typical count but below the 4M failure
         /// threshold. Catches buffer sizing and workgroup dispatch issues.
         /// </summary>
-        [TestMethod]
+        [TestMethod(Timeout = 240000)]
         public async Task RadixSortDescending2MTest() => await RunTest(async accelerator =>
         {
             int n = 2_097_152; // 2^21
@@ -628,7 +628,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         /// a data corruption bug at this buffer size (likely workgroup dispatch
         /// overflow, temp buffer underallocation, or histogram aliasing).
         /// </summary>
-        [TestMethod]
+        [TestMethod(Timeout = 240000)]
         public async Task RadixSortDescending4MTest() => await RunTest(async accelerator =>
         {
             int n = 4_194_304; // 2^22
@@ -759,7 +759,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         /// test fails, the bug is in the DescendingInt32 bit-flip logic rather
         /// than in the general radix sort infrastructure.
         /// </summary>
-        [TestMethod]
+        [TestMethod(Timeout = 240000)]
         public async Task RadixSortAscending1_4MTest() => await RunTest(async accelerator =>
         {
             int n = 1_393_167;
@@ -812,7 +812,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         /// new depth values and sentinel patterns, then re-sorts. Verifies order,
         /// index integrity, and correct sentinel boundary after each frame.
         /// </summary>
-        [TestMethod]
+        [TestMethod(Timeout = 300000)]
         public async Task RadixSortSpawnSceneSimulationTest() => await RunTest(async accelerator =>
         {
             int n = 1_393_167;
