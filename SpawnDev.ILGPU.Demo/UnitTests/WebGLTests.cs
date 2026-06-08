@@ -547,9 +547,10 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsLongOffsetTest() =>
             throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
-        [TestMethod]
-        public new async Task AlgorithmRadixSortPairsUIntTest() =>
-            throw new UnsupportedTestException("WebGL: scatter-based radix sort works, but ExtractRadixBits<uint> high bits (8-31) don't extract on WebGL — a uint dynamic-shift GLSL codegen issue, separate from the scatter. Keys 256..1 sort by low byte only (256 -> [0]). int/float keys sort correctly. Tracked follow-up: uint >> dynamic-amount codegen.");
+        // AlgorithmRadixSortPairsUIntTest now RUNS on WebGL: the uint keys' working buffers are R32I
+        // (uint maps to "int" in GetBufferElementType), so the scatter must use the R32I program too —
+        // WebGLScatterValueType now maps uint -> "int" to match (was "uint"/R32UI -> usampler read
+        // R32I keys as garbage -> low-bit-only sort). Bits preserved in R32I; order via ExtractRadixBits.
         [TestMethod]
         public new async Task AlgorithmRadixSortPairsHalfTest() =>
             throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
@@ -651,12 +652,9 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod]
         public new async Task ExclusiveScanWithSharedMemoryTest() =>
             throw new UnsupportedTestException("WebGL: no shared memory in vertex shaders");
-        [TestMethod]
-        public new async Task RadixSortPairsIndexIntegrityTest() =>
-            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
-        [TestMethod]
-        public new async Task RadixSortPairsDescendingIndexIntegrityTest() =>
-            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+        // RadixSortPairsIndexIntegrityTest + Descending variant now RUN on WebGL (int pairs, n=16384,
+        // scatter-based radix; they verify on the CPU via CopyToHost so no atomics are needed). No
+        // WebGL override -> the base [TestMethod] methods run via inheritance.
 
         // --- Tests9: Diagnostic scan + boundary tests ---
         // GlobalInclusiveScan* now RUN on WebGL: accelerator.CreateScan is emulated via a
@@ -733,9 +731,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod]
         public new async Task RadixSortPositionDiagnosticTest() =>
             throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
-        [TestMethod]
-        public new async Task RadixSort100KBenchmarkTest() =>
-            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + barriers");
+        // RadixSort100KBenchmarkTest now RUNS on WebGL (int keys-only, n=64, scatter-based radix, CPU verify).
 
         // --- Tests10: SharedMemoryResolver stress tests ---
         [TestMethod]

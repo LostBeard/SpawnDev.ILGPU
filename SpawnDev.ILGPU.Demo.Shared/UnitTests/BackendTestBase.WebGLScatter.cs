@@ -50,5 +50,37 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                         $"result=[{string.Join(",", result)}] (render-points-to-texture scatter bug).");
             }
         });
+
+        // The R32UI scatter program (usampler / uvec4) is exercised by RadixSort<uint>; verify it
+        // scatters HIGH-BIT uint values (>2^23, >2^31) without truncation — a uint-scatter truncation
+        // would make a uint radix sort order by low bits only.
+        [TestMethod]
+        public async Task WebGLScatter_UintHighBits_Correct() => await RunTest(async accelerator =>
+        {
+            var webgl = accelerator as global::SpawnDev.ILGPU.WebGL.WebGLAccelerator;
+            if (webgl == null)
+                throw new UnsupportedTestException("Scatter is a WebGL-specific primitive.");
+
+            uint[] src = { 256u, 0x100u, 0xFF00u, 0x01000000u, 0x80000000u, 0xFFFFFFFFu, 1u, 0u };
+            int n = src.Length;
+            var dest = new int[n];
+            for (int i = 0; i < n; i++) dest[i] = n - 1 - i; // reverse
+
+            using var srcBuf = accelerator.Allocate1D(src);
+            using var destBuf = accelerator.Allocate1D(dest);
+            using var dstBuf = accelerator.Allocate1D<uint>(n);
+
+            webgl.Scatter(dstBuf.View, srcBuf.View, destBuf.View, n, "uint");
+            var result = await dstBuf.CopyToHostAsync<uint>();
+
+            for (int j = 0; j < n; j++)
+            {
+                uint expected = src[n - 1 - j];
+                if (result[j] != expected)
+                    throw new Exception(
+                        $"WebGL uint scatter wrong at [{j}]: expected 0x{expected:X} got 0x{result[j]:X}. " +
+                        $"(R32UI scatter truncation -> uint radix sorts by low bits.)");
+            }
+        });
     }
 }

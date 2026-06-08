@@ -1446,9 +1446,14 @@ namespace ILGPU.Algorithms
             dest[i] = flags[i] == 0 ? (i - onePrefix[i]) : (totalFalse + onePrefix[i]);
         }
 
+        // Scatter glsl-type for the radix working buffers. MUST match how the WebGL backend represents
+        // these buffers in normal kernel dispatches (GLSLKernelFunctionGenerator.GetBufferElementType):
+        // Int32 (both int AND uint) -> "int" (R32I), Float32 -> "float" (R32F). A uint buffer is R32I,
+        // so the scatter must use the R32I (int) program too — using "uint" (R32UI) here makes the
+        // scatter's usampler read R32I-allocated keys as garbage (uint radix sorted by low bits only).
+        // Bits are preserved in R32I (bit-level); the unsigned ORDER comes from ExtractRadixBits<uint>.
         private static string WebGLScatterValueType<T>() where T : unmanaged =>
             typeof(T) == typeof(float) || typeof(T) == typeof(double) ? "float"
-            : typeof(T) == typeof(uint) || typeof(T) == typeof(ulong) ? "uint"
             : "int";
 
         private static RadixSort<T, TStride> CreateWebGLScatterRadixSort<
