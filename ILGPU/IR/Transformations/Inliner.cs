@@ -79,8 +79,36 @@ namespace ILGPU.IR.Transformations
         /// living inside ILGPU's own assembly are NOT subject to this budget — their
         /// explicit attribute is the user's signal that the cost is intentional.
         /// (2026-05-06 follow-up to `tuvok-rc28-codecs-still-52K-locals-2026-05-06.md`.)
+        ///
+        /// Tunable static (default 16,384): a pathological kernel that still emits too many locals at
+        /// 16,384 IL (≈ up to ~49K Wasm locals at 3× expansion, near wabt's 50K cap) can be bounded
+        /// harder by lowering this; measure with <see cref="CumulativeBudgetSkipCount"/>. Measured
+        /// 2026-06-05: at 16,384 the budget never fires for normal kernels (RadixSort etc.), so lowering
+        /// it only affects deep-inline trees. NOT a per-thread setting — set it once at startup.
         /// </summary>
-        private const int CumulativeInlinedILBudget = 16384;
+        public static int CumulativeInlinedILBudget = 16384;
+
+        /// <summary>
+        /// Diagnostic counter: the number of marked-<see cref="MethodFlags.Inline"/> calls the cumulative-IL
+        /// budget has DECLINED to inline (left as ordinary function calls) across all transformations in the
+        /// process. Stays 0 unless the budget actually fires — i.e. a kernel's post-inline IL would exceed
+        /// <see cref="CumulativeInlinedILBudget"/>. Lets a consumer observe whether the budget affects normal
+        /// kernels at all (it should be 0 for everything except pathological deep-inline trees, e.g. the VP9
+        /// entropy walker) and tune the budget. Process-global; not reset automatically.
+        /// </summary>
+        public static long CumulativeBudgetSkipCount;
+
+        /// <summary>Diagnostic: high-water mark of cumulativeInlinedIL across all passes (a process-global
+        /// max, so it survives kernel/IR caching — the first compile of a deep-inline kernel sets it).</summary>
+        public static int MaxCumulativeInlinedIL;
+
+        /// <summary>Diagnostic: count of marked-Inline calls whose target ILInstructionCount was 0 — the
+        /// budget can NOT bound these (the `targetIL &gt; 0` guard skips them), so if this is large the
+        /// ILInstructionCount is not reaching the inliner.</summary>
+        public static long InlineCallsZeroIL;
+
+        /// <summary>Diagnostic: count of marked-Inline calls whose target ILInstructionCount was &gt; 0.</summary>
+        public static long InlineCallsNonZeroIL;
 
         #endregion
 
@@ -179,15 +207,19 @@ namespace ILGPU.IR.Transformations
                 if (!call.Target.HasFlags(MethodFlags.ForceInline))
                 {
                     int targetIL = call.Target.ILInstructionCount;
+                    if (targetIL > 0) InlineCallsNonZeroIL++; else InlineCallsZeroIL++;
                     if (targetIL > 0 &&
                         cumulativeInlinedIL + targetIL > CumulativeInlinedILBudget)
                     {
                         // Budget exhausted for this call — leave it as a call.
                         // Don't bail the whole pass: a later, smaller call in
                         // the same block might still fit.
+                        CumulativeBudgetSkipCount++;
                         continue;
                     }
                     cumulativeInlinedIL += targetIL;
+                    if (cumulativeInlinedIL > MaxCumulativeInlinedIL)
+                        MaxCumulativeInlinedIL = cumulativeInlinedIL;
                 }
 
                 var blockBuilder = builder[currentBlock];

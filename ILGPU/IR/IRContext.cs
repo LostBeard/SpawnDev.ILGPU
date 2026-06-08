@@ -423,7 +423,19 @@ namespace ILGPU.IR
                 var declared = Declare_Sync(entry.Declaration, out bool created);
                 targetMapping.Add(entry, declared);
                 if (created)
+                {
+                    // Preserve the per-method IL instruction count across import. It is set ONCE at
+                    // the frontend (Inliner.SetupInliningAttributes) and lives OUTSIDE the Declaration,
+                    // so without this copy every specialized/extracted method (kernels are specialized
+                    // via ExtractToContext -> Import) carries ILInstructionCount==0. That makes the
+                    // Inliner's CumulativeInlinedILBudget INERT: targetIL==0 short-circuits the budget
+                    // check, so a recursive helper tree inlines unbounded into a single emitted function
+                    // (the VP9 entropy-walker: 761KB / 52,012 Wasm locals, past wabt's 50K cap). The
+                    // MethodFlags.Inline decision already survives import via the Declaration; this makes
+                    // the cost bookkeeping survive too so the budget can actually fire.
+                    declared.ILInstructionCount = entry.ILInstructionCount;
                     methodsToRebuild.Add(entry);
+                }
             }
 
             // Rebuild all functions while using the created mapping
