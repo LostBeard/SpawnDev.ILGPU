@@ -539,12 +539,9 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         // a multi-texel (cpe=2) key scatter — i64 is emulated as two uint texels; ExtractRadixBits<long>
         // works through the i64 emulation. DOUBLE-key pairs stay skipped below (f64 ExtractRadixBits has
         // an ivec2->uvec2 GLSL codegen mismatch — separate codegen fix; the multi-texel scatter is fine).
-        [TestMethod]
-        public new async Task AlgorithmRadixSortPairsDoubleTest() =>
-            throw new UnsupportedTestException("WebGL: multi-texel scatter works, but ExtractRadixBits<double> hits an ivec2->uvec2 GLSL compile error in the f64-emulation codegen (long/i64 path works). Tracked codegen follow-up.");
-        [TestMethod]
-        public new async Task AlgorithmRadixSortPairsDoubleOffsetTest() =>
-            throw new UnsupportedTestException("WebGL: f64 ExtractRadixBits ivec2->uvec2 GLSL codegen mismatch (same as PairsDouble). Tracked.");
+        // DOUBLE-key pairs now RUN on WebGL: FloatAsIntCast on an emulated f64 now uses
+        // f64_to_ieee754_bits (uvec2 IEEE bits) instead of floatBitsToInt (ivec2 of wrong Dekker bits),
+        // fixing the ivec2->uvec2 compile error AND giving ExtractRadixBits<double> the correct bits.
         // AlgorithmRadixSortPairsUIntTest now RUNS on WebGL: the uint keys' working buffers are R32I
         // (uint maps to "int" in GetBufferElementType), so the scatter must use the R32I program too —
         // WebGLScatterValueType now maps uint -> "int" to match (was "uint"/R32UI -> usampler read

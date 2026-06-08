@@ -2078,14 +2078,25 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         {
             var target = Load(value); var source = Load(value.Value);
             Declare(target);
-            AppendLine($"{target} = floatBitsToInt({source});");
+            // Emulated f64 is a Dekker vec2 (or Ozaki vec4) — NOT the IEEE 754 bit pattern. Using
+            // floatBitsToInt on it yields an ivec2 of the WRONG (Dekker) bits and mismatches the
+            // uvec2 ulong target (e.g. ExtractRadixBits<double>'s FloatAsInt). Convert via the
+            // emulation helper f64_to_ieee754_bits -> uvec2(lo, hi) instead.
+            if (Backend.EnableF64Emulation && value.Value.BasicValueType == BasicValueType.Float64)
+                AppendLine($"{target} = f64_to_ieee754_bits({source});");
+            else
+                AppendLine($"{target} = floatBitsToInt({source});");
         }
 
         public virtual void GenerateCode(IntAsFloatCast value)
         {
             var target = Load(value); var source = Load(value.Value);
             Declare(target);
-            AppendLine($"{target} = intBitsToFloat({source});");
+            // Reverse: reconstruct the emulated f64 (Dekker vec2 / Ozaki vec4) from the IEEE uvec2 bits.
+            if (Backend.EnableF64Emulation && value.BasicValueType == BasicValueType.Float64)
+                AppendLine($"{target} = f64_from_ieee754_bits({source}.x, {source}.y);");
+            else
+                AppendLine($"{target} = intBitsToFloat({source});");
         }
 
         // Atomics & Barriers — not supported in WebGL2 vertex shaders.
