@@ -84,6 +84,41 @@ public static class GpuTestVerify
     //  Public API
     // ═══════════════════════════════════════════════════════════
 
+    // WebGL has no atomics, so the GPU verify kernels (Atomic.Add/Exchange) can't run there.
+    // Compute the same (orderViolations, duplicates, outOfRange, trackingErrors) tuple on the CPU.
+    // The sort under test still runs entirely on the GPU; only verification reads back.
+    static async Task<(int orderViolations, int duplicates, int outOfRange, int trackingErrors)>
+        VerifySortOnCpuAsync(
+            MemoryBuffer1D<int, Stride1D.Dense> keysBuf,
+            MemoryBuffer1D<int, Stride1D.Dense> valuesBuf,
+            int n,
+            MemoryBuffer1D<int, Stride1D.Dense>? originalKeysBuf,
+            bool descending)
+    {
+        var keys = await keysBuf.CopyToHostAsync<int>();
+        var values = await valuesBuf.CopyToHostAsync<int>();
+        int order = 0, dup = 0, oor = 0, track = 0;
+        for (int i = 1; i < n; i++)
+            if (descending ? keys[i] > keys[i - 1] : keys[i] < keys[i - 1]) order++;
+        var seen = new bool[n];
+        for (int i = 0; i < n; i++)
+        {
+            int v = values[i];
+            if (v < 0 || v >= n) oor++;
+            else { if (seen[v]) dup++; seen[v] = true; }
+        }
+        if (originalKeysBuf != null)
+        {
+            var orig = await originalKeysBuf.CopyToHostAsync<int>();
+            for (int i = 0; i < n; i++)
+            {
+                int oi = values[i];
+                if (oi >= 0 && oi < n && keys[i] != orig[oi]) track++;
+            }
+        }
+        return (order, dup, oor, track);
+    }
+
     /// <summary>
     /// Verify descending sort order and index integrity on GPU.
     /// Returns (orderViolations, duplicates, outOfRange, trackingErrors).
@@ -96,6 +131,9 @@ public static class GpuTestVerify
             int n,
             MemoryBuffer1D<int, Stride1D.Dense>? originalKeysBuf = null)
     {
+        if (accelerator.AcceleratorType == AcceleratorType.WebGL)
+            return await VerifySortOnCpuAsync(keysBuf, valuesBuf, n, originalKeysBuf, descending: true);
+
         using var orderViolations = accelerator.Allocate1D(new int[] { 0 });
         using var integrityViolations = accelerator.Allocate1D(new int[] { 0, 0 });
         using var seenBuf = accelerator.Allocate1D<int>(n);
@@ -143,6 +181,9 @@ public static class GpuTestVerify
             int n,
             MemoryBuffer1D<int, Stride1D.Dense>? originalKeysBuf = null)
     {
+        if (accelerator.AcceleratorType == AcceleratorType.WebGL)
+            return await VerifySortOnCpuAsync(keysBuf, valuesBuf, n, originalKeysBuf, descending: false);
+
         using var orderViolations = accelerator.Allocate1D(new int[] { 0 });
         using var integrityViolations = accelerator.Allocate1D(new int[] { 0, 0 });
         using var seenBuf = accelerator.Allocate1D<int>(n);
@@ -220,6 +261,14 @@ public static class GpuTestVerify
         int n,
         int sentinel = int.MinValue)
     {
+        if (accelerator.AcceleratorType == AcceleratorType.WebGL)
+        {
+            var data = await buffer.CopyToHostAsync<int>();
+            int c = 0;
+            for (int i = 0; i < n; i++) if (data[i] != sentinel) c++;
+            return c;
+        }
+
         using var count = accelerator.Allocate1D(new int[] { 0 });
 
         var kernel = accelerator.LoadAutoGroupedStreamKernel<

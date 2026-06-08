@@ -198,42 +198,8 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 
             try
             {
-                // WebGL has no atomics, so GpuTestVerify.VerifyDescendingSort (Atomic.Exchange/Add)
-                // can't run there. The sort itself works on WebGL (scatter-based radix); verify on CPU.
-                if (accelerator.AcceleratorType == AcceleratorType.WebGL)
-                {
-                    var wglKeys = await keysBuf.CopyToHostAsync();
-                    var wglVals = await valuesBuf.CopyToHostAsync();
-                    int[]? wglOrig = originalKeys
-                        ?? (origBuf != null ? await origBuf.CopyToHostAsync() : null);
-
-                    for (int i = 1; i < n; i++)
-                        if (wglKeys[i] > wglKeys[i - 1])
-                            throw new Exception(
-                                $"{testName} (WebGL CPU verify): descending order violation at [{i}]: " +
-                                $"{wglKeys[i - 1]} < {wglKeys[i]}");
-
-                    if (wglOrig != null)
-                    {
-                        var seen = new bool[n];
-                        for (int i = 0; i < n; i++)
-                        {
-                            int v = wglVals[i];
-                            if (v < 0 || v >= n)
-                                throw new Exception($"{testName} (WebGL CPU verify): value out of range at [{i}]: {v}");
-                            if (seen[v])
-                                throw new Exception($"{testName} (WebGL CPU verify): duplicate value {v} at [{i}]");
-                            seen[v] = true;
-                            if (wglOrig[v] != wglKeys[i])
-                                throw new Exception(
-                                    $"{testName} (WebGL CPU verify): value-tracking error at [{i}]: " +
-                                    $"originalKeys[{v}]={wglOrig[v]} != sortedKey={wglKeys[i]}");
-                        }
-                    }
-
-                    return; // the finally disposes origBuf
-                }
-
+                // On WebGL (no atomics) GpuTestVerify.VerifyDescendingSort falls back to a CPU verify
+                // internally (the sort itself still runs on the GPU). All other backends verify on GPU.
                 var (orderViolations, duplicates, outOfRange, trackingErrors) =
                     await GpuTestVerify.VerifyDescendingSort(accelerator, keysBuf, valuesBuf, n, origBuf);
 
