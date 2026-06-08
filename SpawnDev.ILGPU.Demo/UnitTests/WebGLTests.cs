@@ -663,39 +663,32 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         // Hillis-Steele multi-pass scan (ScanExtensions.CreateWebGLHillisSteeleScan) — no shared
         // memory / barriers / atomics (draw-call boundary = global barrier). GroupExtensions.Scan
         // (in-kernel group scan) is separate and still unsupported on WebGL.
-        [TestMethod]
-        public new async Task RadixSortBoundary16KTest() =>
-            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
-        [TestMethod]
-        public new async Task RadixSortBoundary20KTest() =>
-            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+        // RadixSortBoundary16KTest / 20KTest now RUN on WebGL (int+int scatter-based pairs sort).
 
         [TestMethod]
         public new async Task RadixSortThresholdProbeTest() =>
             throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
 
         // --- Tests9: Large-scale RadixSort stress tests ---
-        [TestMethod]
-        public new async Task RadixSortDescending1_4MTest() =>
-            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+        // RadixSortDescending1_4MTest now RUNS on WebGL (int+int scatter-based pairs sort, n=1.39M).
         [TestMethod]
         public new async Task RadixSortDescendingWithSentinelsTest() =>
             throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
         [TestMethod]
         public new async Task RadixSortRepeatedResortTest() =>
-            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
-        [TestMethod]
-        public new async Task RadixSortDescending2MTest() =>
-            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+            await base.RadixSortRepeatedResortTest();
+        // RadixSortDescending2MTest now RUNS on WebGL (int+int scatter-based pairs sort, n=2^21).
+        // The following large int+int descending sorts now RUN on WebGL (scatter-based pairs sort;
+        // the test's GPU verify falls back to a CPU verify on WebGL since WebGL has no atomics).
         [TestMethod]
         public new async Task RadixSortDescending4MTest() =>
-            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+            await base.RadixSortDescending4MTest();
         [TestMethod]
         public new async Task RadixSortHeavyDuplicateKeysTest() =>
-            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+            await base.RadixSortHeavyDuplicateKeysTest();
         [TestMethod]
         public new async Task RadixSortDescendingOddCountTest() =>
-            throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
+            await base.RadixSortDescendingOddCountTest();
         [TestMethod]
         public new async Task RadixSortAscending1_4MTest() =>
             throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
