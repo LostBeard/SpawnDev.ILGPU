@@ -552,9 +552,53 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         // ExtractRadixBits<Half>. Also required a GLSL FloatAsInt/IntAsFloat fix so FloatAsInt(Half)
         // compresses to the 16-bit f16 pattern (_f32_to_f16) instead of taking floatBitsToInt of the
         // widened f32 (parallel to the earlier f64 FloatAsInt fix).
+        // The Algorithm{Exclusive,Inclusive}Scan* / AllReduce* / GroupReduce* tests below use IN-KERNEL
+        // GroupExtensions ops (Group.ExclusiveScan / InclusiveScan / AllReduce / Reduce), which require
+        // the group's threads to share memory within one dispatch - WebGL's Transform-Feedback vertex
+        // model has no shared workgroup memory or barriers, so they are STRUCTURALLY impossible in-kernel
+        // and stay skipped. (Host-level accelerator.CreateScan/CreateReduce DO work on WebGL via
+        // multi-dispatch - exercised by RadixSort.) Previously WebGL silently codegen'd these group ops
+        // as `= 0` (the "Unmapped" stub) -> consumers got silent wrong results; the codegen now THROWS
+        // UnsupportedKernelFeatureException instead. This test locks that protection in.
+        // Local probe kernel (the base ExclusiveScanFloatKernel is private static, not visible here).
+        static void GroupScanProbeKernel(Index1D index, ArrayView<float> input, ArrayView<float> output)
+        {
+            int gid = Grid.GlobalIndex.X;
+            output[gid] = global::ILGPU.Algorithms.GroupExtensions
+                .ExclusiveScan<float, global::ILGPU.Algorithms.ScanReduceOperations.AddFloat>(input[gid]);
+        }
+
+        [TestMethod]
+        public async Task WebGLGroupScanThrowsUnsupportedTest() => await RunTest(async accelerator =>
+        {
+            if (accelerator.AcceleratorType != AcceleratorType.WebGL)
+                throw new UnsupportedTestException("WebGL-only: verifies the WebGL group-op codegen guard");
+            int groupSize = Math.Min(64, accelerator.Device.MaxNumThreadsPerGroup);
+            using var inBuf = accelerator.Allocate1D<float>(groupSize);
+            using var outBuf = accelerator.Allocate1D<float>(groupSize);
+            bool threw = false;
+            try
+            {
+                var kern = accelerator.LoadStreamKernel<Index1D, ArrayView<float>, ArrayView<float>>(
+                    GroupScanProbeKernel);
+                kern(new KernelConfig(1, groupSize), (Index1D)groupSize, inBuf.View, outBuf.View);
+                await accelerator.SynchronizeAsync();
+            }
+            catch (Exception ex) when (
+                ex.ToString().Contains(nameof(global::SpawnDev.ILGPU.UnsupportedKernelFeatureException)))
+            {
+                // The kernel loader may wrap the codegen exception, so match it anywhere in the chain.
+                threw = true;
+            }
+            if (!threw)
+                throw new Exception(
+                    "WebGL in-kernel group ExclusiveScan must throw UnsupportedKernelFeatureException " +
+                    "(no silent-zero), but it did not.");
+        });
+
         [TestMethod]
         public new async Task AlgorithmExclusiveScanFloatTest() =>
-            throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");
+            throw new UnsupportedTestException("WebGL: in-kernel group scan needs shared memory + barriers; use host CreateScan");
         [TestMethod]
         public new async Task AlgorithmExclusiveScanLongTest() =>
             throw new UnsupportedTestException("WebGL: algorithm tests require shared memory + barriers");

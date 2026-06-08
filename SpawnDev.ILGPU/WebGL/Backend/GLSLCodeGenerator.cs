@@ -2075,6 +2075,29 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 return;
             }
 
+            // In-kernel GROUP/WARP scan & reduce intrinsics (Group.ExclusiveScan / InclusiveScan /
+            // AllReduce / Reduce and the warp variants) require the group's threads to communicate
+            // within a single dispatch - i.e. shared memory + barriers. WebGL's Transform-Feedback
+            // vertex model has neither (each invocation is independent, no shared workgroup storage),
+            // so these are STRUCTURALLY impossible in-kernel. Falling through to the silent-zero stub
+            // below would make `GroupExtensions.ExclusiveScan(...)` return 0 for every thread -
+            // exactly the "silent zeros that users trust as correct" failure the atomic/barrier paths
+            // above refuse. Throw a typed, actionable error instead. (Host-level CreateScan /
+            // CreateReduce DO work on WebGL - they orchestrate multiple dispatches with the draw-call
+            // boundary as the barrier and global ping-pong buffers - so consumers should use those.)
+            var unmappedName = methodCall.Target.Name ?? string.Empty;
+            if (unmappedName.Contains("Scan") || unmappedName.Contains("Reduce"))
+            {
+                throw new SpawnDev.ILGPU.UnsupportedKernelFeatureException(
+                    feature: $"in-kernel group/warp op '{unmappedName}'",
+                    backend: global::ILGPU.Runtime.AcceleratorType.WebGL,
+                    remediation: "WebGL2 Transform-Feedback vertex shaders have no shared workgroup " +
+                        "memory or barriers, so in-kernel group/warp scan & reduce cannot run. Use the " +
+                        "host-level accelerator.CreateScan(...) / CreateReduce(...) (multi-dispatch, " +
+                        "WebGL-supported), or declare RequiresSharedMemory = true on " +
+                        "AcceleratorRequirements to filter WebGL at selection time.");
+            }
+
             AppendLine($"// Call: {methodCall.Target.Name} (Unmapped)");
             AppendLine($"{target} = {target.Type}(0);");
         }
