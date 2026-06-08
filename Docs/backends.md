@@ -77,8 +77,8 @@ using var accelerator = context.GetPreferredDevice(preferCPU: false)
 
 // ... load kernel, dispatch ...
 
-accelerator.Synchronize();  // Blocking — safe on desktop, deadlocks in browser
-var results = bufC.GetAsArray1D();  // Synchronous readback
+accelerator.Synchronize();  // Desktop: blocks until GPU done. Browser: only FLUSHES (dispatches) the queue, does NOT wait and does NOT deadlock — use `await accelerator.SynchronizeAsync()` to await completion
+var results = bufC.GetAsArray1D();  // Synchronous readback — desktop only (sync GPU->CPU read THROWS on browser; use `await bufC.CopyToHostAsync()`)
 ```
 
 ### Capability-Gated Selection

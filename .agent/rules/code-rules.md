@@ -130,7 +130,7 @@ When asked to fix bugs in `WGSLCodeGenerator` or `WGSLKernelFunctionGenerator`:
 
 ### SynchronizeAsync vs Synchronize
 - **ALWAYS use `await accelerator.SynchronizeAsync()`** instead of `accelerator.Synchronize()` with the WebGPU backend.
-- The synchronous `Synchronize()` method will cause a deadlock in Blazor WASM because the single-threaded environment cannot block while waiting for GPU completion.
+- The synchronous `Synchronize()` does NOT deadlock in Blazor WASM. It FLUSHES (dispatches/submits) the queued GPU work and returns immediately WITHOUT waiting for GPU completion. Use `await accelerator.SynchronizeAsync()` when you need the GPU work to actually FINISH (e.g. before a readback); a plain `Synchronize()` followed by a synchronous read returns stale/not-yet-computed data. (What DOES deadlock is blocking on async work via `.Result`/`.Wait()` — never do that.)
 - This applies to all code using `WebGPUAccelerator` in Blazor WASM.
 
 ### Data Retrieval Pattern
