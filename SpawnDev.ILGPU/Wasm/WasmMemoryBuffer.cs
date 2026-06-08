@@ -12,6 +12,7 @@ using global::ILGPU;
 using global::ILGPU.Runtime;
 using SpawnDev.BlazorJS;
 using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.BlazorJS.Toolbox;
 
 namespace SpawnDev.ILGPU.Wasm
 {
@@ -343,6 +344,30 @@ namespace SpawnDev.ILGPU.Wasm
             using var u8 = new Uint8Array(
                 SharedBuffer, (int)sourceOffsetInBytes, (int)lengthInBytes);
             return u8.ReadBytes();
+        }
+
+        /// <inheritdoc/>
+        /// <remarks>
+        /// Wasm <see cref="CopyFromJS(TypedArray, long)"/> is a JS-to-JS SharedArrayBuffer write
+        /// (no 4-byte-alignment rule), so an <see cref="IJSReadStream"/> source uploads zero-copy -
+        /// the bytes never enter the .NET/WASM managed heap. A plain .NET <see cref="System.IO.Stream"/>
+        /// falls back to the managed base implementation.
+        /// </remarks>
+        protected override System.Threading.Tasks.Task CopyFromStreamRawAsync(
+            AcceleratorStream stream,
+            System.IO.Stream source,
+            long targetOffsetInBytes,
+            long lengthInBytes,
+            int chunkSizeInBytes,
+            System.Threading.CancellationToken cancellationToken)
+        {
+            if (source is IJSReadStream js)
+                return BrowserStreamUpload.CopyFromJSReadStreamAsync(
+                    this, js, targetOffsetInBytes, lengthInBytes, LengthInBytes,
+                    chunkSizeInBytes, cancellationToken);
+            return base.CopyFromStreamRawAsync(
+                stream, source, targetOffsetInBytes, lengthInBytes,
+                chunkSizeInBytes, cancellationToken);
         }
 
         public async Task<Uint8Array> CopyToHostUint8ArrayAsync(long sourceByteOffset = 0, long? copyBytes = null)

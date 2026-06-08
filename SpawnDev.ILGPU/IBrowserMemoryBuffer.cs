@@ -1,7 +1,60 @@
 ﻿using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.BlazorJS.Toolbox;
+using System;
+using System.IO;
+using System.Threading;
+using System.Threading.Tasks;
 
 namespace SpawnDev.ILGPU
 {
+    /// <summary>
+    /// Shared helper for the browser <c>MemoryBuffer.CopyFromStreamRawAsync</c> overrides:
+    /// streams an <see cref="IJSReadStream"/> into a browser GPU buffer chunk-by-chunk via
+    /// <see cref="IBrowserMemoryBuffer.CopyFromJS(TypedArray, long)"/>, keeping the bytes JS-side
+    /// (never entering the .NET/WASM managed heap). Reads EXACTLY <paramref name="lengthInBytes"/>;
+    /// throws <see cref="EndOfStreamException"/> if the stream ends early.
+    /// </summary>
+    internal static class BrowserStreamUpload
+    {
+        public static async Task CopyFromJSReadStreamAsync(
+            IBrowserMemoryBuffer buffer,
+            IJSReadStream source,
+            long targetOffsetInBytes,
+            long lengthInBytes,
+            long bufferLengthInBytes,
+            int chunkSizeInBytes,
+            CancellationToken cancellationToken)
+        {
+            if (lengthInBytes < 0)
+                throw new ArgumentOutOfRangeException(nameof(lengthInBytes));
+            if (chunkSizeInBytes <= 0)
+                throw new ArgumentOutOfRangeException(nameof(chunkSizeInBytes));
+            if (targetOffsetInBytes < 0 ||
+                targetOffsetInBytes + lengthInBytes > bufferLengthInBytes)
+                throw new ArgumentOutOfRangeException(nameof(targetOffsetInBytes));
+            if (lengthInBytes == 0)
+                return;
+
+            long remaining = lengthInBytes;
+            long destOffset = targetOffsetInBytes;
+            while (remaining > 0)
+            {
+                int want = (int)Math.Min((long)chunkSizeInBytes, remaining);
+                using var u8 = await source
+                    .ReadUint8ArrayAsync(want, cancellationToken)
+                    .ConfigureAwait(false);
+                long got = u8?.Length ?? 0;
+                if (got < want)
+                    throw new EndOfStreamException(
+                        $"Stream ended after {lengthInBytes - remaining + got} of " +
+                        $"{lengthInBytes} bytes; CopyFromStreamAsync requires the exact length.");
+                buffer.CopyFromJS(u8, destOffset);
+                destOffset += want;
+                remaining -= want;
+            }
+        }
+    }
+
     /// <summary>
     /// Defines a contract for managing a memory buffer in a browser environment and provides asynchronous methods to
     /// copy its contents to a host-side Uint8Array.

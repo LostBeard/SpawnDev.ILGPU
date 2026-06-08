@@ -12,9 +12,12 @@
 using ILGPU.Resources;
 using ILGPU.Runtime.CPU;
 using System;
+using System.Buffers;
 using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
+using System.IO;
 using System.Runtime.CompilerServices;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace ILGPU.Runtime
@@ -191,6 +194,91 @@ namespace ILGPU.Runtime
                 lengthInBytes);
             CopyTo(stream, sourceOffsetInBytes, cpuBuffer.AsRawArrayView());
             return result;
+        }
+
+        /// <summary>
+        /// The default chunk size (16 MiB) used by
+        /// <see cref="CopyFromStreamRawAsync"/> and the
+        /// <c>ArrayView&lt;T&gt;.CopyFromStreamAsync</c> extension when none is specified.
+        /// Large enough to fully amortize the per-transfer fixed cost (browser JS interop,
+        /// queue submit), small enough that a multi-GB upload never spikes a multi-GB
+        /// intermediate allocation.
+        /// </summary>
+        public const int DefaultStreamChunkSizeInBytes = 16 * 1024 * 1024;
+
+        /// <summary>
+        /// Asynchronously streams <paramref name="lengthInBytes"/> bytes from a
+        /// <see cref="Stream"/> into this buffer at <paramref name="targetOffsetInBytes"/>,
+        /// in chunks, awaiting the source's async reads.
+        /// </summary>
+        /// <remarks>
+        /// This is the overridable async Stream-&gt;GPU upload hook (the write-side mirror of
+        /// <see cref="CopyToRawAsync"/>). The default implementation genuinely awaits
+        /// <see cref="Stream.ReadExactlyAsync(Memory{byte}, CancellationToken)"/> into a pooled
+        /// buffer and copies each chunk via <see cref="CopyFrom(AcceleratorStream, in ArrayView{byte}, long)"/>
+        /// - so on CUDA / OpenCL / CPU a model streaming off disk or the network no longer blocks
+        /// a thread on a synchronous read (unlike the older async paths that just wrapped a sync
+        /// call). It is correct on every backend, including the browser backends via the managed
+        /// hop. Browser backends override this to take a fast path when the source is a
+        /// <c>SpawnDev.BlazorJS.Toolbox.IJSReadStream</c>: the data is read as a JS
+        /// <c>Uint8Array</c> and uploaded via <c>IBrowserMemoryBuffer.CopyFromJS</c> without ever
+        /// entering the .NET/WASM managed heap. Reads EXACTLY <paramref name="lengthInBytes"/>
+        /// bytes - a stream that ends early throws <see cref="EndOfStreamException"/> (a truncated
+        /// asset surfaces instead of silently zero-padding). Prefer the typed
+        /// <c>ArrayView&lt;T&gt;.CopyFromStreamAsync</c> extension over calling this directly.
+        /// </remarks>
+        /// <param name="stream">The accelerator stream the chunk copies are issued on.</param>
+        /// <param name="source">The byte source. Read sequentially from its current position.</param>
+        /// <param name="targetOffsetInBytes">The destination byte offset within this buffer.</param>
+        /// <param name="lengthInBytes">The exact number of bytes to read and upload.</param>
+        /// <param name="chunkSizeInBytes">The per-chunk transfer size.</param>
+        /// <param name="cancellationToken">Cancels the in-flight reads.</param>
+        protected internal virtual async Task CopyFromStreamRawAsync(
+            AcceleratorStream stream,
+            Stream source,
+            long targetOffsetInBytes,
+            long lengthInBytes,
+            int chunkSizeInBytes,
+            CancellationToken cancellationToken)
+        {
+            if (source is null)
+                throw new ArgumentNullException(nameof(source));
+            if (lengthInBytes < 0)
+                throw new ArgumentOutOfRangeException(nameof(lengthInBytes));
+            if (chunkSizeInBytes <= 0)
+                throw new ArgumentOutOfRangeException(nameof(chunkSizeInBytes));
+            if (targetOffsetInBytes < 0 ||
+                targetOffsetInBytes + lengthInBytes > LengthInBytes)
+                throw new ArgumentOutOfRangeException(nameof(targetOffsetInBytes));
+            if (lengthInBytes == 0)
+                return;
+
+            long remaining = lengthInBytes;
+            long destOffset = targetOffsetInBytes;
+            int bufferSize = (int)Math.Min((long)chunkSizeInBytes, remaining);
+            byte[] chunk = ArrayPool<byte>.Shared.Rent(bufferSize);
+            try
+            {
+                while (remaining > 0)
+                {
+                    int want = (int)Math.Min((long)bufferSize, remaining);
+                    // Reads exactly `want` bytes; throws EndOfStreamException on early EOF.
+                    await source
+                        .ReadExactlyAsync(chunk.AsMemory(0, want), cancellationToken)
+                        .ConfigureAwait(false);
+                    using var cpuBuffer = CPUMemoryBuffer.Create(
+                        Accelerator,
+                        ref chunk[0],
+                        want);
+                    CopyFrom(stream, cpuBuffer.AsRawArrayView(), destOffset);
+                    destOffset += want;
+                    remaining -= want;
+                }
+            }
+            finally
+            {
+                ArrayPool<byte>.Shared.Return(chunk);
+            }
         }
 
         /// <summary>

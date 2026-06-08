@@ -1,6 +1,7 @@
 using global::ILGPU;
 using global::ILGPU.Runtime;
 using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.BlazorJS.Toolbox;
 using System.Runtime.InteropServices;
 
 namespace SpawnDev.ILGPU.WebGPU.Backend
@@ -124,6 +125,38 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             using var u8 = await NativeBuffer.CopyToHostUint8ArrayAsync(
                 sourceOffsetInBytes, lengthInBytes);
             return u8.ReadBytes();
+        }
+
+        /// <inheritdoc/>
+        /// <remarks>
+        /// Zero-copy upload from an <see cref="IJSReadStream"/> via
+        /// <see cref="CopyFromJS(TypedArray, long)"/> (queue.writeBuffer) when the transfer is
+        /// 4-byte aligned - which fp32 and even-count <c>ArrayView&lt;Half&gt;</c> uploads always are,
+        /// and the default 16MiB chunk preserves. WebGPU's writeBuffer REQUIRES the destination
+        /// offset and the byte count to be 4-byte multiples, so a non-4-aligned upload (e.g. an
+        /// odd-count <c>ArrayView&lt;Half&gt;</c> = 2 mod 4 bytes) falls back to the managed base path,
+        /// which pads to the buffer's 4-byte-padded allocation. (Mirrors ML's
+        /// even-count -&gt; CopyFromJS / odd -&gt; byte[] gate.) A plain .NET
+        /// <see cref="System.IO.Stream"/> also takes the base path.
+        /// </remarks>
+        protected override System.Threading.Tasks.Task CopyFromStreamRawAsync(
+            AcceleratorStream stream,
+            System.IO.Stream source,
+            long targetOffsetInBytes,
+            long lengthInBytes,
+            int chunkSizeInBytes,
+            System.Threading.CancellationToken cancellationToken)
+        {
+            if (source is IJSReadStream js &&
+                (targetOffsetInBytes & 3L) == 0L &&
+                (lengthInBytes & 3L) == 0L &&
+                (chunkSizeInBytes & 3) == 0)
+                return BrowserStreamUpload.CopyFromJSReadStreamAsync(
+                    this, js, targetOffsetInBytes, lengthInBytes, LengthInBytes,
+                    chunkSizeInBytes, cancellationToken);
+            return base.CopyFromStreamRawAsync(
+                stream, source, targetOffsetInBytes, lengthInBytes,
+                chunkSizeInBytes, cancellationToken);
         }
 
         protected override void MemSet(AcceleratorStream stream, byte value, in ArrayView<byte> view)

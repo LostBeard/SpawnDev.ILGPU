@@ -1,6 +1,7 @@
 using global::ILGPU;
 using global::ILGPU.Runtime;
 using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.BlazorJS.Toolbox;
 using System.Runtime.InteropServices;
 
 namespace SpawnDev.ILGPU.WebGL.Backend
@@ -162,6 +163,30 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             using var u8 = await accel.ReadbackAndGetUint8ArrayAsync(
                 this, sourceOffsetInBytes, lengthInBytes);
             return u8.ReadBytes();
+        }
+
+        /// <inheritdoc/>
+        /// <remarks>
+        /// WebGL <see cref="CopyFromJS(TypedArray, long)"/> writes into the CPU-side backing array
+        /// (uploaded to the GL texture on next dispatch) - no 4-byte-alignment rule - so an
+        /// <see cref="IJSReadStream"/> source uploads without entering the .NET managed heap. A plain
+        /// .NET <see cref="System.IO.Stream"/> falls back to the managed base implementation.
+        /// </remarks>
+        protected override System.Threading.Tasks.Task CopyFromStreamRawAsync(
+            AcceleratorStream stream,
+            System.IO.Stream source,
+            long targetOffsetInBytes,
+            long lengthInBytes,
+            int chunkSizeInBytes,
+            System.Threading.CancellationToken cancellationToken)
+        {
+            if (source is IJSReadStream js)
+                return BrowserStreamUpload.CopyFromJSReadStreamAsync(
+                    this, js, targetOffsetInBytes, lengthInBytes, LengthInBytes,
+                    chunkSizeInBytes, cancellationToken);
+            return base.CopyFromStreamRawAsync(
+                stream, source, targetOffsetInBytes, lengthInBytes,
+                chunkSizeInBytes, cancellationToken);
         }
 
         protected override void CopyTo(

@@ -16,8 +16,10 @@ using ILGPU.Runtime.CPU;
 using ILGPU.Util;
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Threading.Tasks;
 
 namespace ILGPU.Runtime
@@ -977,6 +979,108 @@ namespace ILGPU.Runtime
             where T : unmanaged
             where TStride : struct, IStride1D =>
             source.BaseView.CopyToCPUAsync(stream);
+
+        /// <summary>
+        /// Asynchronously streams the bytes of <paramref name="source"/> into
+        /// <paramref name="target"/> (exactly <c>target.Length * sizeof(T)</c> bytes), in
+        /// chunks, awaiting the stream's async reads. This is the backend-agnostic, browser-safe
+        /// upload: it routes through <see cref="MemoryBuffer.CopyFromStreamRawAsync"/>. On
+        /// CUDA / OpenCL / CPU it awaits <c>Stream.ReadExactlyAsync</c> (so a model off disk or
+        /// network does not block a thread); on the browser backends, if <paramref name="source"/>
+        /// is a <c>SpawnDev.BlazorJS.Toolbox.IJSReadStream</c> the data goes JS -&gt; GPU without
+        /// entering the managed heap (the override checks). A stream that ends before
+        /// <c>target.Length * sizeof(T)</c> bytes throws <see cref="EndOfStreamException"/> rather
+        /// than silently zero-padding the tail.
+        /// </summary>
+        /// <typeparam name="T">The element type.</typeparam>
+        /// <param name="target">The destination view (filled exactly).</param>
+        /// <param name="source">The byte source, read from its current position.</param>
+        /// <param name="stream">The accelerator stream the chunk copies are issued on.</param>
+        /// <param name="chunkSizeInBytes">Per-chunk transfer size; defaults to
+        /// <see cref="MemoryBuffer.DefaultStreamChunkSizeInBytes"/> (16 MiB).</param>
+        /// <param name="cancellationToken">Cancels the in-flight reads.</param>
+        [NotInsideKernel]
+        public static Task CopyFromStreamAsync<T>(
+            this ArrayView<T> target,
+            Stream source,
+            AcceleratorStream stream,
+            int chunkSizeInBytes = MemoryBuffer.DefaultStreamChunkSizeInBytes,
+            CancellationToken cancellationToken = default)
+            where T : unmanaged
+        {
+            var contig = (IContiguousArrayView)target;
+            var buffer = contig.Buffer
+                ?? throw new InvalidOperationException(
+                    "ArrayView has no backing buffer.");
+            long countElems = target.Length;
+            if (countElems == 0)
+                return Task.CompletedTask;
+            int elementSize = ((IArrayView)target).ElementSize;
+            long byteOffset = contig.IndexInBytes;
+            long byteCount = countElems * elementSize;
+            return buffer.CopyFromStreamRawAsync(
+                stream,
+                source,
+                byteOffset,
+                byteCount,
+                chunkSizeInBytes,
+                cancellationToken);
+        }
+
+        /// <summary>
+        /// <see cref="ArrayView1D{T, TStride}"/> overload of
+        /// <see cref="CopyFromStreamAsync{T}(ArrayView{T}, Stream, AcceleratorStream, int, CancellationToken)"/>.
+        /// </summary>
+        [NotInsideKernel]
+        public static Task CopyFromStreamAsync<T, TStride>(
+            this ArrayView1D<T, TStride> target,
+            Stream source,
+            AcceleratorStream stream,
+            int chunkSizeInBytes = MemoryBuffer.DefaultStreamChunkSizeInBytes,
+            CancellationToken cancellationToken = default)
+            where T : unmanaged
+            where TStride : struct, IStride1D =>
+            target.BaseView.CopyFromStreamAsync(
+                source, stream, chunkSizeInBytes, cancellationToken);
+
+        /// <summary>
+        /// Convenience overload of
+        /// <see cref="CopyFromStreamAsync{T}(ArrayView{T}, Stream, AcceleratorStream, int, CancellationToken)"/>
+        /// that issues the copies on the backing accelerator's default stream.
+        /// </summary>
+        [NotInsideKernel]
+        public static Task CopyFromStreamAsync<T>(
+            this ArrayView<T> target,
+            Stream source,
+            int chunkSizeInBytes = MemoryBuffer.DefaultStreamChunkSizeInBytes,
+            CancellationToken cancellationToken = default)
+            where T : unmanaged
+        {
+            var contig = (IContiguousArrayView)target;
+            var buffer = contig.Buffer
+                ?? throw new InvalidOperationException(
+                    "ArrayView has no backing buffer.");
+            return target.CopyFromStreamAsync(
+                source,
+                buffer.Accelerator.DefaultStream,
+                chunkSizeInBytes,
+                cancellationToken);
+        }
+
+        /// <summary>
+        /// <see cref="ArrayView1D{T, TStride}"/> default-stream convenience overload of
+        /// <see cref="CopyFromStreamAsync{T}(ArrayView{T}, Stream, int, CancellationToken)"/>.
+        /// </summary>
+        [NotInsideKernel]
+        public static Task CopyFromStreamAsync<T, TStride>(
+            this ArrayView1D<T, TStride> target,
+            Stream source,
+            int chunkSizeInBytes = MemoryBuffer.DefaultStreamChunkSizeInBytes,
+            CancellationToken cancellationToken = default)
+            where T : unmanaged
+            where TStride : struct, IStride1D =>
+            target.BaseView.CopyFromStreamAsync(
+                source, chunkSizeInBytes, cancellationToken);
 
         /// <summary>
         /// Async, browser-safe equivalent of
