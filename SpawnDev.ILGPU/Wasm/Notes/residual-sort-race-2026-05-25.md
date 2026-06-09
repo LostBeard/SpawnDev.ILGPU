@@ -1251,3 +1251,32 @@ struct serialization (FlattenCLRStruct / StructFields, NativePtr patching set-to
 how the scan harness's gridDimX bug was caught). This is bounded, careful work — do it as a focused build, not
 rushed. Everything is staged: `realkernels\{pass1,scan,pass2}.wasm` + `sig.mjs` + the dispatch sequence/args
 documented above. Next session starts here.
+
+## 2026-06-09 (Geordi): ONE new finding — all-1s input MASKS the boundary race (use per-tile-distinct). Real-vs-artifact UNRESOLVED.
+**Keep this; it's the only non-redundant thing from a session that otherwise re-tread prior work (re-added the
+ca20808 broadcast tag; nearly re-ran the lines 30-41 oversubscription tests — DON'T).**
+
+**Finding:** every previous "isolated scan is clean" result (including this session's first Node runs) used
+ALL-1s input. That CANNOT detect a tile-boundary race: every tile of 1s sums to GROUP_SIZE(256), so a stale
+boundary read from the wrong tile returns the right value by accident. With PER-TILE-DISTINCT input
+(`input[i] = 1 + (floor(i/256) % 251)`, adjacent tiles differ by 1 so tile sums differ by 256), a stale carry
+becomes a VISIBLE `delta = -256` block displacement — the exact "block displacement by k" production signature.
+
+**Pure-Node repro (`<outer>\wasm-scan-repro\run-real-scan.mjs`, per-tile-distinct + int32 CPU ref):** the REAL
+emitted SingleGroupScanKernel, single-group MULTI-TILE carry, fires at HEAVY oversubscription:
+- 1 worker: 0 (cross-worker). 16 workers: 0 (barely oversub). **48 workers: ~3% rounds (6/200), delta -256.**
+  64 workers / 256 tiles: more. The constant slot for ~12% at 50 rounds was a LUCKY STREAK (real rate ~3%).
+- A per-INSTANCE broadcast tag (vs ca20808's constant group-index tag) did NOT fix it → it's NOT `[1]` (the
+  Group.Broadcast). In the scan-only repro that leaves `[0]` (the scan's internal cross-worker boundary read,
+  `scanResults[DimX-1]`), NOT `[2]` (the radix line-747 direct read, which isn't in a pure scan).
+
+**THE CONTRADICTION (unresolved — do NOT spend money re-deriving; resolve deliberately):** lines 30-41 already
+showed 48-worker 4× oversubscription on the production yield-park barrier = ~6M reads, 0 stale → "barrier
+visibility REFUTED." That was a SYNTHETIC barrier test AND tested CROSS-GROUP reuse — NOT the single-group
+multi-tile scan carry with per-tile-distinct values. So either (a) my Node harness's hand-ported
+spin-yield/resume loop has a bug (artifact), or (b) the real multi-tile scan carry genuinely races where the
+synthetic test didn't look. **The single decisive test:** run the REAL Wasm backend scan, per-tile-distinct
+input, WorkerCount=48, ~120 iters, on the PMT Wasm lane (no FO76 needed). Staged as
+`WasmTests.Wasm_MultiTileScan_Oversub48_PerTileDistinct` (reverted from the tree pending budget — TJ pays for
+PMT runs out of grocery money; get an explicit go before running it). If it fails → repro real, fix `[0]`;
+if clean → Node harness artifact, distrust the Node repro.
