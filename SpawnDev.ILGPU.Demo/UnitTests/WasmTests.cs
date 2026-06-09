@@ -32,6 +32,54 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             return (context, accelerator);
         }
 
+        // DECISIVE real-vs-harness test (2026-06-09, Geordi). The pure-Node repro
+        // (wasm-scan-repro/run-real-scan.mjs) catches a "delta -GROUP_SIZE" stale-boundary error in the
+        // single-group MULTI-TILE inclusive scan at WorkerCount=48 — but ONLY with PER-TILE-DISTINCT input
+        // (all-1s masks it: every tile sums to GROUP_SIZE, so a stale boundary read returns the right value
+        // by accident). This runs the SAME scenario on the REAL Wasm backend with its OWN oversubscribed
+        // accelerator (WorkerCount=48). If it FAILS here, the Node repro is REAL and the scan's cross-worker
+        // boundary read ([0]) is the residual large-sort race; if clean, the Node harness has a resume bug.
+        // Prior team's CrossGroupScanReuseDetector tested CROSS-GROUP reuse — a DIFFERENT path. No FO76.
+        [TestMethod(Timeout = 600000)]
+        public async Task Wasm_MultiTileScan_Oversub48_PerTileDistinct()
+        {
+            var builder = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm();
+            using var ctx = builder.ToContext();
+            using var acc = await ctx.CreateWasmAcceleratorAsync(new WasmBackendOptions { WorkerCount = 48 });
+
+            const int groupSize = 256, n = 16384, iters = 120;
+            var input = new int[n];
+            for (int i = 0; i < n; i++) input[i] = 1 + ((i / groupSize) % 251);
+            var cpuRef = new int[n];
+            int a = 0;
+            for (int i = 0; i < n; i++) { a = unchecked(a + input[i]); cpuRef[i] = a; }
+
+            using var inBuf = acc.Allocate1D(input);
+            using var outBuf = acc.Allocate1D<int>(n);
+            var tempSize = acc.ComputeScanTempStorageSize<int>(n);
+            using var tempBuf = acc.Allocate1D<int>(tempSize);
+            var scan = acc.CreateScan<int, Stride1D.Dense, Stride1D.Dense,
+                global::ILGPU.Algorithms.ScanReduceOperations.AddInt32>(ScanKind.Inclusive);
+
+            int badRuns = 0, totalMism = 0, firstIter = -1, firstIdx = -1, firstGot = 0, firstExp = 0;
+            for (int it = 0; it < iters; it++)
+            {
+                scan(acc.DefaultStream, inBuf.View, outBuf.View, tempBuf.View.AsContiguous());
+                await acc.SynchronizeAsync();
+                var r = await outBuf.CopyToHostAsync<int>();
+                int mism = 0;
+                for (int i = 0; i < n; i++)
+                    if (r[i] != cpuRef[i]) { if (mism == 0 && badRuns == 0) { firstIter = it; firstIdx = i; firstGot = r[i]; firstExp = cpuRef[i]; } mism++; }
+                if (mism > 0) { badRuns++; totalMism += mism; }
+            }
+            System.Console.WriteLine($"===MULTITILE48=== n={n} iters={iters} WorkerCount=48 badRuns={badRuns} totalMism={totalMism}");
+            if (badRuns > 0)
+                throw new System.Exception(
+                    $"REAL-BACKEND multi-tile scan @WorkerCount=48 CORRUPTS: {badRuns}/{iters} runs, {totalMism} mismatches. " +
+                    $"First @iter {firstIter} idx {firstIdx} (tile {firstIdx / groupSize}): got {firstGot}, expected {firstExp}, " +
+                    $"delta {firstGot - firstExp}. Node repro is REAL; [0] scan cross-worker boundary read is the residual race.");
+        }
+
         // Verifies the opt-in host-buffer race DETECTOR (WasmMemoryBuffer.DetectHostBufferRaces).
         // RunKernel registers the per-buffer in-flight intent SYNCHRONOUSLY at queue time, so a
         // synchronous host read on the same JS turn (no await between dispatch and read) always

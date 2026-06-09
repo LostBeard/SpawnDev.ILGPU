@@ -1280,3 +1280,26 @@ input, WorkerCount=48, ~120 iters, on the PMT Wasm lane (no FO76 needed). Staged
 `WasmTests.Wasm_MultiTileScan_Oversub48_PerTileDistinct` (reverted from the tree pending budget — TJ pays for
 PMT runs out of grocery money; get an explicit go before running it). If it fails → repro real, fix `[0]`;
 if clean → Node harness artifact, distrust the Node repro.
+
+## 2026-06-09 (Geordi) — DECISIVE: bug is REAL on the real backend; reuse-guard barrier RULED OUT.
+1. **Repro VALIDATED on the REAL Wasm backend** (not a Node-harness artifact): new
+   `WasmTests.Wasm_MultiTileScan_Oversub48_PerTileDistinct` (its own WorkerCount=48 accelerator,
+   per-tile-distinct input, 120 iters) FAILED on the PMT Wasm lane: **6/120 runs, delta -256, tile
+   boundary** — same signature as the Node repro. The pure-Node `run-real-scan.mjs` (per-tile-distinct,
+   48 workers) is therefore a TRUE, cheap, validated repro of the residual large-sort race. Use it.
+2. **Reuse-guard barrier on `scanResults` = RULED OUT.** Hypothesis (from a research-agent audit): the
+   scan's `scanResults` shared slot lacks the publish+reuse-guard barrier pair that `Group.Broadcast` and
+   `Warp.Shuffle` carry. Added `Group.Barrier()` after the boundary reads in BOTH
+   `WasmGroupExtensions.InclusiveScanWithBoundaries` + `ExclusiveScanWithBoundaries` (kernel barriers
+   8 -> 10, confirmed in the re-emitted wasm). Node repro STILL FAILS 5/200, identical delta -256.
+   REVERTED (adds 2 barriers/scan of perf cost, fixes nothing). The strict barrier structure was already
+   covered by the next tile's A+B workspace barriers + max-one-phase-lag, exactly as the agent's caveat
+   predicted.
+3. **Therefore the residual is NOT a missing sync POINT** — it survives extra barriers. It is an
+   **integer-tile (GROUP_SIZE=256) phase/fiber-state SKEW**: under heavy yielding one tid ends up one
+   tile behind when it reads/writes shared scan state (or the loop-carried `leftBoundary` accumulator is
+   restored stale across a barrier yield). Matches the two open CLAUDE.md suspects: "V8 pure-spin
+   linear-memory ordering under heavy yielding, OR a kernel-side fiber state-save gap." Next: audit the
+   fiber save/restore of loop-carried locals (`leftBoundary`, loop `i`, `_stateLocal`) across the
+   tile-loop barrier yield in the emitted kernel; instrument the Node repro to see if `leftBoundary` is
+   restored one tile stale. NO new PMT runs needed — the Node repro is the iterate loop.
