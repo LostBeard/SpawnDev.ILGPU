@@ -6,6 +6,10 @@ using SpawnDev.UnitTesting;
 
 try
 {
+    // Offline Wasm compile dump (H8 shared-alloca audit). No browser, no dispatch.
+    if (args.Length > 0 && args[0] == "wasm-dump")
+        return await WasmCompileDump.Run();
+
     var services = new ServiceCollection();
     services.AddPlatformCrypto();
     services.AddSingleton<SpawnDev.WebTorrent.WebTorrentClient>();

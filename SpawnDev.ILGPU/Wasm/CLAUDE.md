@@ -9,7 +9,11 @@ Compiles ILGPU IR → WebAssembly binary. Dispatches via Web Workers with Shared
 - `Backend/WasmModuleBuilder.cs` — Wasm binary format builder (sections, types, functions)
 - `WasmAccelerator.cs` — dispatch to workers, buffer management, struct serialization
 - `WasmMemoryBuffer.cs` — SharedArrayBuffer-backed memory, zero-copy sharing
-- `WasmILGPUDevice.cs` — device config (MaxNumThreadsPerGroup=64)
+- `WasmILGPUDevice.cs` — device config (`MaxNumThreadsPerGroup = 256`, `MaxGroupSize = (256,1,1)`). NOTE: an earlier version of this line said 64 — that was stale; the device has set 256 (verified `WasmILGPUDevice.cs:68-69` + offline compile dump 2026-06-09). RadixSortKernel1's `scanMemory` is `int[groupSize*UnrollFactor]` = `int[1024]` at groupSize 256, UnrollFactor 4.
+
+## Offline compile dump (desktop, no browser) — `wasm-dump`
+
+`SpawnDev.ILGPU.DemoConsole -- wasm-dump` compiles RadixSort kernels on the DESKTOP and prints the emitted shared-memory alloca table + flags any `GenerateCode(Alloca)` type+size fallback aliasing or offset overlap. Works because `WasmAccelerator.Create` wraps the `BlazorJSRuntime.JS` lookup in try/catch (defaults to 4 cores) and `CreateRadixSort*` compiles its kernels eagerly via `LoadKernel` BEFORE any dispatch — so the IL→wasm compile path runs fully offline (no workers, no Chromium, no dispatch). Reusable for any shared-memory layout audit. Source: `SpawnDev.ILGPU.DemoConsole/WasmCompileDump.cs`.
 
 ## Hard Constraints
 - **Blazor WASM is single-threaded** — all async, no blocking. `stream.Synchronize()` is a no-op.

@@ -987,3 +987,36 @@ contention. Points at the SCAN helper's cross-worker offset publication or the
 scan↔scatter phase boundary, not the group barrier and not memory ordering. Confirm with
 the throw-on-first repro's ROOT-displacement locations (group~i/256, localPos) before
 touching code. Do NOT add fences (Rule: find the logic race).
+
+## 2026-06-09 (Geordi, attempt #9): H8 (shared-mem alloca slot overlap) RULED OUT by direct measurement
+H8 was the last un-audited corpus suspect from attempt #8's handoff: "two distinct allocas
+colliding on an offset, OR fiber re-entry clobbering a live shared-mem slot." Audited it to ground.
+
+**Built an OFFLINE compile harness** (`SpawnDev.ILGPU.DemoConsole -- wasm-dump`,
+`WasmCompileDump.cs`): compiles the RadixSort kernels on the DESKTOP (no browser, no workers, no
+dispatch — `WasmAccelerator.Create` try/catches the JS lookup; `CreateRadixSort*` compiles eagerly
+via LoadKernel) with `WasmBackend.VerboseLogging=true`, captures the emitted `[Wasm-SharedMem]`
+alloca table, and flags any `GenerateCode(Alloca)` type+size FALLBACK aliasing or offset overlap.
+
+**Measured result (RadixSortKernel1, the barrier kernel, groupSize 256 / UnrollFactor 4):**
+- Exactly **2 distinct shared allocas**: `scanMemory` int[1024] @offset 0 (4096B); group-scan
+  scratch int[256] @offset 4096 (1024B). **Non-overlapping.**
+- **ZERO fallback matches** — every shared alloca resolves by its primary key `v_{Value.Id}` to a
+  distinct offset. The type+size fallback (the aliasing mechanism) never fires for these kernels.
+- The unrolled `GroupExtensions.ExclusiveScan` calls share ONE deduped scratch (int[256]), not
+  UnrollFactor copies. The "UnrollFactor inlined int[2048] scratches collide" sub-theory was WRONG.
+
+**Also ruled out by code reading this pass (same attempt):**
+- **Between-group shared zeroing race**: `zeroRegionSize = fenceSlot - sharedMemBase` covers the
+  FULL shared region + barrier slots (NOT under-counted), and the phase barrier gates EVERY phase
+  incl. the last, so worker-0's zeroing can't stomp a slow worker still in the final phase body.
+- **Per-thread scratch overflow**: each tid's scratch slot is owned by exactly one worker; an
+  undersized slot would corrupt the WorkerCount=1 path too — but that path is 4/4 clean.
+
+**Conclusion: the residual race is NOT a shared-memory alloca-layout bug.** H8 is dead. The standing
+strongest live lead remains the SCAN/BROADCAST cross-worker boundary publication (2026-05-25/26
+entries above: "wrong LEFT boundary" in ScanBroadcastIsolationTest), whose trigger is FULL-SWEEP
+cross-test accumulation, not within-test repetition.
+
+**Doc fix landed**: Wasm/CLAUDE.md said `MaxNumThreadsPerGroup=64`; the device actually sets 256
+(`WasmILGPUDevice.cs:68-69`, confirmed by the dump). The stale 64 had misled part of the H8 analysis.
