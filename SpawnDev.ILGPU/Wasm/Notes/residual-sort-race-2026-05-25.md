@@ -1064,3 +1064,27 @@ gap is excluded — it must be specific to the ≥2-worker yield/resume path und
 value) per tile to a buffer and compare a corrupted run's first wrong tile against the CPU
 oracle. ScanBroadcastIsolationTest is the fast within-test probe but is 0/300 scoped — the
 trigger is full-sweep cross-test accumulation, so the instrumented run must be the full sweep.
+
+## 2026-06-09 (Geordi): barrier MECHANISM cleared by pure-Node harness — bug is kernel logic, and wait/notify is NOT the V8 culprit
+Ran the existing pure-Node harness `<outer>\wasm-barrier-repro\run-scan-test.mjs` (hand-written
+scan-barrier MODEL, read-compute-write-barrier cycles; worker_threads + SAB; A/Bs spin vs wait32;
+no Chromium). Config 12 workers × 64 threads = 768, 150 phases, 4 rounds, oversubscribed on a
+12-core box:
+- **spin: PASS (0 violations / 4 rounds). wait32: PASS (0 violations / 4 rounds).**
+
+**Implications (evidence, not theory):**
+1. The barrier PATTERN itself is correct under BOTH spin and wait32, even oversubscribed with many
+   phases — matches `Research\01-wasm-memory-model-and-atomics.md` (the gen-barrier is correct by the
+   model). So the residual is NOT the barrier wait mechanism.
+2. **wait32 is NOT inherently broken on V8.** It passes a correct pattern in Node V8. So the
+   `wasm-waitnotify-still-races-2026-05-24.md` "V8 bug" verdict is very likely MIS-ATTRIBUTED — the
+   real-kernel wait/notify failures were the SAME kernel-protocol race, exposed worse by wait/notify
+   timing. This is the through-line: **fix the kernel-logic race → both barriers pass → wait/notify
+   viable → workers PARK instead of spin → the spin core-burn (the "rapes my PC" problem) is solved.**
+3. The model harness does NOT reproduce the bug because it does NOT model the buggy logic — the
+   multi-tile `ComputeTileScan` boundary carry via `Group.Broadcast`. **Next: extend the Node harness
+   to run the REAL generated scan kernel** (offline-compiled wasm + replicated single-group dispatch),
+   scan a large counter array, diff vs a JS prefix-sum oracle, oversubscribed — a cheap, controllable,
+   no-Chromium repro of the ACTUAL race. Then instrument per-tile leftBoundary to find the protocol gap.
+
+Full index of the corpus + reading order: `<repo>\SpawnDev.ILGPU\Wasm\RESEARCH-INDEX.md`.

@@ -2,6 +2,8 @@
 
 Compiles ILGPU IR → WebAssembly binary. Dispatches via Web Workers with SharedArrayBuffer.
 
+> **Hunting the residual large-sort race or working on notify/wait? START at [`RESEARCH-INDEX.md`](RESEARCH-INDEX.md)** — it locates the whole corpus (both git + outer-tree), flags what's current vs superseded, and states the current best understanding (the race is a kernel-protocol logic bug, NOT the barrier mechanism / NOT V8 — fixing it unblocks wait/notify → parked workers). Don't re-tread.
+
 ## Key Files
 - `Backend/WasmKernelFunctionGenerator.cs` — kernel codegen, parameter setup, helper functions
 - `Backend/WasmCodeGenerator.cs` — base IR visitor, GetField, Store, Atomic handlers
