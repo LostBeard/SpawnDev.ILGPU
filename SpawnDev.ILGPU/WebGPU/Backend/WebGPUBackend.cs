@@ -1156,6 +1156,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public (int X, int Y, int Z) CompiledWorkgroupSize =>
             _compiledWorkgroupSize ??= ParseCompiledWorkgroupSize(WGSLSource);
 
+        private bool? _usesGridIdxZ;
+        /// <summary>
+        /// True if the kernel reads Grid.IdxZ (emitted as the <c>// @uses_grid_idx_z</c> marker by the WGSL
+        /// generator). When true the kernel owns the Z dispatch dimension, so the dispatch path must NOT
+        /// fold an X-workgroup-count overflow (&gt; maxComputeWorkgroupsPerDimension) into Z. A 2D kernel
+        /// (Grid.IdxX/IdxY only) has no such marker → Z is free for the fold.
+        /// </summary>
+        public bool UsesGridIdxZ =>
+            _usesGridIdxZ ??= WGSLSource.Contains("// @uses_grid_idx_z");
+
         private static (int X, int Y, int Z) ParseCompiledWorkgroupSize(string wgsl)
         {
             var m = s_compiledWorkgroupSizePattern.Match(wgsl);

@@ -2161,6 +2161,25 @@ namespace SpawnDev.ILGPU.WebGPU
                         workX = 65535u;
                         workY = (totalWG + 65534u) / 65535u;
                     }
+                    // 2D grid (workY>1) with X over the per-dimension limit, Z FREE and not used by the
+                    // kernel: fold the X overflow into Z with an EXACT factorization (X*Z == origX, both
+                    // <= 65535) so Grid.DimX = num_workgroups.x*num_workgroups.z is exact (no padding /
+                    // bounds-check) and the WGSL multi-dim Grid.IdxX reconstructs via group_id.z. This is
+                    // the SD-Turbo 4096x4096 attention matmul case: GridDim (65536,5,1) -> (32768,5,2).
+                    else if (workX > 65535u && workZ == 1u && !compiledKernel.UsesGridIdxZ)
+                    {
+                        uint origX = workX;
+                        uint z = (origX + 65534u) / 65535u;            // min Z to bring X under the limit
+                        while (z <= 65535u && (origX % z != 0u || origX / z > 65535u)) z++;
+                        if (z > 65535u)
+                            throw new NotSupportedException(
+                                $"WebGPU/WebGL dispatch GridDim.X={origX} exceeds 65535 and has no exact 2D " +
+                                $"fold (no Z in [{(origX + 65534u) / 65535u}, 65535] divides it with X<=65535). " +
+                                "A padded fold with a kernel-prologue bounds-check is a tracked follow-up; " +
+                                "use a factorable GridDim.X for now.");
+                        workX = origX / z;
+                        workZ = z;
+                    }
                 }
                 else if (dimension is Index1D i1)
                 {
