@@ -1088,3 +1088,46 @@ no Chromium). Config 12 workers × 64 threads = 768, 150 phases, 4 rounds, overs
    no-Chromium repro of the ACTUAL race. Then instrument per-tile leftBoundary to find the protocol gap.
 
 Full index of the corpus + reading order: `<repo>\SpawnDev.ILGPU\Wasm\RESEARCH-INDEX.md`.
+
+## 2026-06-09 (Geordi): REAL-kernel pure-Node repro BUILT — isolated scan kernel is CLEAN; redirect to pipeline/growth
+Built a pure-Node worker_threads harness (`<outer>\wasm-scan-repro\run-real-scan.mjs`) that runs the
+ACTUAL generated `SingleGroupScanKernel` (emitted offline via `DemoConsole -- scan-emit`; byte-identical
+to RadixSort's counter scan: sharedMem=5120, barriers=8, scratchPerThread=2376). Faithfully replicates
+WasmAccelerator's barrier dispatch: full memory layout, per-worker fiber ranges (`fibersPerWorker =
+ceil(256/W)`), the dispatcher arg list, and the spin-yield/park(`Atomics.wait`)/resume loop. No Chromium,
+no Blazor, no FO76 — controllable worker count.
+
+**VALIDATION GATE PASSED:** 1 worker, N=256 (1 tile) and N=512 (2 tiles, exercises the broadcast
+boundary carry) → correct inclusive scan. So the harness is a faithful replica (a layout/ABI bug would
+corrupt even 1-worker output). (One bug found+fixed during bring-up: `gridDimX` is the TOTAL extent
+`numGroups*groupSize`, NOT the group count — passing 1 trapped `remainder by zero` in `Grid.IdxX %
+(dimX/realGroupDimX)`, the documented 2D-group trap.)
+
+**RESULT — the isolated scan kernel does NOT reproduce the race:**
+| N (tiles) | workers | rounds | JS-yields | violations |
+|-----------|---------|--------|-----------|-----------|
+| 16384 (64) | 8 | 30 | — | 0 |
+| 16384 (64) | 16 (oversub) | 30 | — | 0 |
+| 65536 (256) | 24 (2× oversub) | 40 | 495,184 | 0 |
+| 16384 (64) | 48 (4× oversub) | 100 | 951,703 | 0 |
+| 262144 (1024) | 16 | 30 (~30K tile carries) | 933,306 | **0** |
+
+Heavy contention, the spin-yield/park/resume path hammered (~1M yields), oversubscribed past cores —
+**0 violations across all configs.** A ~1.6%/sort intra-scan bug would have fired hundreds of times.
+
+**CONCLUSION (honest correction of the 2026-06-09 earlier entry):** the scan kernel is the only BARRIER
+kernel in a Wasm RadixSort, but its INTRA-DISPATCH scan/broadcast logic is **CLEAN** — it is NOT the
+residual bug. The "localized to the scan kernel" claim is **withdrawn**: being the only barrier kernel ≠
+being the bug. The residual requires the radix PIPELINE context that this isolated single-kernel,
+fixed-memory harness does NOT exercise:
+1. **Cross-dispatch counter handoff** — kernel1 (non-barrier presort) writes `counter[]`, the scan reads
+   it, kernel2 (non-barrier scatter) reads the scanned counter — across SEPARATE Wasm dispatches on a
+   reused worker pool. (My 2026-06-08 cross-dispatch micro-repro cleared *postMessage SAB visibility*,
+   but not the real multi-kernel buffer handoff.)
+2. **Memory-growth propagation lag** — `wasm-sharedarraybuffer-growth.md`: host grows the SAB between
+   dispatches; a reused worker lags seeing the new buffer. My harness uses FIXED memory + fresh workers
+   per round → does not exercise growth. **This is now the leading suspect.**
+
+**NEXT:** extend the harness to (a) persistent workers across multiple dispatches with a `memory.grow`
+between them (the growth-lag scenario), and/or (b) the full kernel1→scan→kernel2 counter handoff. Tools:
+`DemoConsole -- scan-emit` (emit kernels), `<outer>\wasm-scan-repro\run-real-scan.mjs` (extend).
