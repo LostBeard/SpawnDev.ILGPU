@@ -80,13 +80,20 @@ namespace ILGPU.IR.Transformations
         /// explicit attribute is the user's signal that the cost is intentional.
         /// (2026-05-06 follow-up to `tuvok-rc28-codecs-still-52K-locals-2026-05-06.md`.)
         ///
-        /// Tunable static (default 16,384): a pathological kernel that still emits too many locals at
-        /// 16,384 IL (≈ up to ~49K Wasm locals at 3× expansion, near wabt's 50K cap) can be bounded
-        /// harder by lowering this; measure with <see cref="CumulativeBudgetSkipCount"/>. Measured
-        /// 2026-06-05: at 16,384 the budget never fires for normal kernels (RadixSort etc.), so lowering
-        /// it only affects deep-inline trees. NOT a per-thread setting — set it once at startup.
+        /// Tunable static (default 2,048). The real constraint is the per-function EMITTED-locals
+        /// ceiling on Wasm/WebGPU/WebGL (~50K wasm locals at wabt; IL→locals expands ~10×); CUDA/
+        /// OpenCL/CPU have no such limit. Default chosen so the budget bounds pathological deep-inline
+        /// trees (the VP9 entropy walker: 52,012 → 32,841 Wasm locals at 2,048, clearing the 50K cap —
+        /// measured by Tuvok 2026-06-09) WITHOUT touching normal kernels. Measured 2026-06-09 via
+        /// `DemoConsole -- budget-check`: the heaviest ILGPU algorithm kernels (RadixSort int+pairs)
+        /// reach cumulativeInlinedIL = 230, Scan = 0 — 8× under 2,048, so `CumulativeBudgetSkipCount`
+        /// stays 0 for them at any budget ≥1,024 (no inlining change, no desktop perf regression). Only
+        /// deep-inline trees > ~2K IL are bounded. NOT a per-thread setting — set once at startup.
+        /// History: was 16,384 (never fired — the walker's cumulative IL is only 5,076; the 52K locals
+        /// are IL→locals expansion, not over-inlining), lowered to 2,048 once the import-copy fix made
+        /// ILInstructionCount actually reach the inliner.
         /// </summary>
-        public static int CumulativeInlinedILBudget = 16384;
+        public static int CumulativeInlinedILBudget = 2048;
 
         /// <summary>
         /// Diagnostic counter: the number of marked-<see cref="MethodFlags.Inline"/> calls the cumulative-IL

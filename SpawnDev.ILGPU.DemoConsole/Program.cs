@@ -6,6 +6,10 @@ using SpawnDev.UnitTesting;
 
 try
 {
+    // VP9 inliner budget tune: measure normal-kernel cumulative IL at a candidate budget.
+    if (args.Length > 0 && args[0] == "budget-check")
+        return BudgetCheck.Run(args.Length > 1 ? int.Parse(args[1]) : 2048);
+
     var services = new ServiceCollection();
     services.AddPlatformCrypto();
     services.AddSingleton<SpawnDev.WebTorrent.WebTorrentClient>();
