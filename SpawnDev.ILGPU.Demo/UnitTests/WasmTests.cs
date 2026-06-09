@@ -663,6 +663,10 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task RadixSortDescending2MTest() => await base.RadixSortDescending2MTest();
         [TestMethod(Timeout = 240000)]
         public new async Task RadixSortDescending4MTest() => await base.RadixSortDescending4MTest();
+        // Scan-in-context isolation under contention (2026-06-09, Geordi). Explicit Wasm override
+        // guarantees discovery + the 600s timeout for the 300-iteration high-trial loop.
+        [TestMethod(Timeout = 600000)]
+        public new async Task GlobalInclusiveScanHighTrialTest() => await base.GlobalInclusiveScanHighTrialTest();
         [TestMethod(Timeout = 240000)]
         public new async Task RadixSortAscending1_4MTest() => await base.RadixSortAscending1_4MTest();
 
