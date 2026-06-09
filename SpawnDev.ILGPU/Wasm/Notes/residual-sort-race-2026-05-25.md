@@ -1131,3 +1131,35 @@ fixed-memory harness does NOT exercise:
 **NEXT:** extend the harness to (a) persistent workers across multiple dispatches with a `memory.grow`
 between them (the growth-lag scenario), and/or (b) the full kernel1→scan→kernel2 counter handoff. Tools:
 `DemoConsole -- scan-emit` (emit kernels), `<outer>\wasm-scan-repro\run-real-scan.mjs` (extend).
+
+## 2026-06-09 (Geordi): memory-GROWTH-LAG hypothesis ELIMINATED on the real scan kernel
+Extended the Node repro to `<outer>\wasm-scan-repro\run-persistent-scan.mjs`: PERSISTENT message-driven
+workers (faithful port of `WorkerPool.WasmBootstrapScript` — per-kernel module cache, re-instantiate on
+`memory.buffer` swap), and a host loop of VARYING-N scan dispatches that force the shared
+`WebAssembly.Memory` to `grow()` between dispatches (re-sending wasmBytes, exactly like WasmAccelerator
+clearing `_initializedWorkersByKernel`). Oversubscribed (W=16 on 12 cores).
+- **200 dispatches, 3 real grows, ~520K JS-yields, module re-instantiation on every grow → 0 violations.**
+
+**GROWTH-LAG IS ELIMINATED** (the corpus's leading-but-unconfirmed suspect, `wasm-sharedarraybuffer-growth.md`).
+And it confirms the first-principles objection: SHARED memory grows IN PLACE (existing instances see it),
+dispatches are SERIALIZED (`RunKernelAsync` awaits `_pendingWork`), so a grow NEVER happens while a worker
+is mid-flight — there is no lag window to race. The Gemini-conversation "post-grow handshake" remediation
+is **not needed** (no bug to fix there).
+
+(Harness note: a varying-N sequence that SHRINKS must zero the reused working region `[scratchBase, end)`
+per dispatch — else a smaller dispatch's fence/arrival slots land on a larger dispatch's stale scratch and
+the barrier DEADLOCKS. That is a harness-fidelity artifact, not the backend bug; the backend zeroes scratch
+between dispatches (fiber-refactor note #8). Worth a separate check that the backend zeroes the fence/arrival
+region when reusing cached memory across DIFFERENT-layout dispatches — kernel1/scan/kernel2 in one sort have
+different fenceSlots over the same buffer base.)
+
+## STATUS: cheap-reproducible suspect space is EXHAUSTED CLEAN
+Ruled out by cheap Node/offline repro (no Chromium, no FO76): barrier mechanism (spin AND wait32),
+isolated scan kernel (1024 tiles / 48 workers / ~1M yields), memory-growth-lag, H8 alloca overlap,
+cross-dispatch postMessage SAB visibility (attempt 8). Plus prior: kernelId collision (fixed), group-fence
+(no-op). **The residual lives in full-pipeline INTEGRATION that component repros don't capture** — the only
+remaining realistic suspects are the multi-kernel kernel1→scan→kernel2 counter handoff under the REAL
+host orchestration (8 passes, temp ping-pong) and/or the fence-region-reuse-across-different-layouts noted
+above. Next: either the full radix pipeline in Node (emit 3 kernels + replicate host orchestration) OR a
+single targeted INSTRUMENTED real-backend scoped+oversubscribed run (TJ-sanctioned "when we really need
+contention") to catch the first wrong value + the worker/phase state at that point.
