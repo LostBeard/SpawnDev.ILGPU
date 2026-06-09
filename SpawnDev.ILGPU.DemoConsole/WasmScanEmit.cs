@@ -18,9 +18,9 @@ using SpawnDev.ILGPU.Wasm.Backend;
 /// </summary>
 internal static class WasmScanEmit
 {
-    public static async Task<int> Run(string outDir)
+    public static async Task<int> Run(string outDir, bool radix = false)
     {
-        Console.WriteLine($"=== Wasm scan-kernel emit -> {outDir} ===");
+        Console.WriteLine($"=== Wasm {(radix ? "radix" : "scan")}-kernel emit -> {outDir} ===");
         Directory.CreateDirectory(outDir);
 
         var captured = new List<(string name, byte[] bytes, string info)>();
@@ -47,12 +47,20 @@ internal static class WasmScanEmit
         // Compile the real inclusive scan. CreateScan eagerly LoadKernel-compiles (no dispatch).
         try
         {
-            var scan = accelerator.CreateScan<int, Stride1D.Dense, Stride1D.Dense, AddInt32>(ScanKind.Inclusive);
-            Console.WriteLine("[scan-emit] CreateScan<int,Dense,Dense,AddInt32>(Inclusive) compiled.");
+            if (radix)
+            {
+                var rs = accelerator.CreateRadixSort<int, Stride1D.Dense, ILGPU.Algorithms.RadixSortOperations.AscendingInt32>();
+                Console.WriteLine("[scan-emit] CreateRadixSort<int,Dense,AscendingInt32> compiled (pass1/scan/pass2).");
+            }
+            else
+            {
+                var scan = accelerator.CreateScan<int, Stride1D.Dense, Stride1D.Dense, AddInt32>(ScanKind.Inclusive);
+                Console.WriteLine("[scan-emit] CreateScan<int,Dense,Dense,AddInt32>(Inclusive) compiled.");
+            }
         }
         catch (Exception ex)
         {
-            Console.WriteLine($"[scan-emit] CreateScan compile note: {ex.GetType().Name}: {ex.Message}");
+            Console.WriteLine($"[scan-emit] compile note: {ex.GetType().Name}: {ex.Message}");
         }
 
         Console.WriteLine($"[scan-emit] captured {captured.Count} compiled kernel(s):");

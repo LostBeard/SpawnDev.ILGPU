@@ -14,6 +14,10 @@ try
     if (args.Length > 0 && args[0] == "scan-emit")
         return await WasmScanEmit.Run(args.Length > 1 ? args[1] : @"D:\users\tj\Projects\SpawnDev.ILGPU\wasm-scan-repro");
 
+    // Emit the real radix-sort kernels (pass1/scan/pass2) for the full-pipeline Node repro.
+    if (args.Length > 0 && args[0] == "radix-emit")
+        return await WasmScanEmit.Run(args.Length > 1 ? args[1] : @"D:\users\tj\Projects\SpawnDev.ILGPU\wasm-radix-repro", radix: true);
+
     var services = new ServiceCollection();
     services.AddPlatformCrypto();
     services.AddSingleton<SpawnDev.WebTorrent.WebTorrentClient>();

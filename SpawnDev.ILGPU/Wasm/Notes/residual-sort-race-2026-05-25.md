@@ -1163,3 +1163,53 @@ host orchestration (8 passes, temp ping-pong) and/or the fence-region-reuse-acro
 above. Next: either the full radix pipeline in Node (emit 3 kernels + replicate host orchestration) OR a
 single targeted INSTRUMENTED real-backend scoped+oversubscribed run (TJ-sanctioned "when we really need
 contention") to catch the first wrong value + the worker/phase state at that point.
+
+## 2026-06-09 (Geordi): FULL PMT sweep under sustained FO76 — CLEAN (3354/0/194), but STATISTICALLY MEANINGLESS
+TJ ran Fallout76 hard; I ran a FULL PMT sweep (`dotnet test PlaywrightMultiTest`, no filter). Phase A 31:32
+(513 CPU + 513 CUDA + 493 OpenCL + 1512 browser non-Wasm), then **Phase B Wasm lane: 515 tests isolated**
+under sustained contention. **Result: 3354 passed, 0 failed, 194 skipped.** The large RadixSort canaries
+(1.4M/2M/4M, HeavyDuplicate, Sentinels, RepeatedResort) AND `GlobalInclusiveScanHighTrial` all passed.
+
+**DO NOT read this as "fixed."** Per the statistical-discipline rule (this file, 2026-06-08 EOD: *"clean
+streaks under ~186 trials are nearly worthless — ONLY FAILURES are evidence"*): the residual is ~14%/sweep
+(group-fence-fixed rate). A clean sweep is the EXPECTED outcome ~86% of the time. Direct evidence it's still
+live: **yesterday's 4.9.15 full sweep CAUGHT it (1 fail = RadixSortDescending4M); today's didn't.** Classic
+intermittent. One clean run proves nothing.
+
+**CONCLUSION: the full-sweep + FO76 method is a DEAD END as a hunting tool** — ~35 min + a PC-rape per trial,
+~86% clean, so ~5-7 trials (~3 hrs FO76) to expect one hit, then no localization. Do NOT keep running full
+sweeps to hunt this. The disciplined path is the **full radix PIPELINE in Node** (kernel1→counter-scan→kernel2,
+oversubscribed, thousands of trials in a terminal, no Chromium/FO76) — the cheap component repros already
+cleared the scan/barrier/growth IN ISOLATION, so the bug is in the multi-kernel pipeline INTEGRATION +
+worker-pool/memory accumulation that only the full pipeline exercises. Building that repro next.
+
+**Useful asset found:** `RadixSortExtensions.cs:308` has a per-pass diagnostic hook (`counterView` = 4*numGroups
+bucket counts after each pass) — a cheap future path to verify the scan IN-PIPELINE on the real backend
+(capture pre-scan counter, compare scanned-counter vs CPU scan) if the Node pipeline repro proves too costly.
+
+## 2026-06-09 (Geordi): full-pipeline Node repro — FOUNDATION laid (`radix-emit`); building pass1→scan→pass2
+TJ: "find that tribble" + "do what you have to". The isolated scan was clean because it used all-1s input
+(NO counter handoff from pass1). The full pipeline's CROSS-KERNEL COUNTER HANDOFF (pass1 writes per-group
+bucket counts → scan reads/scans them → pass2 scatters using the scanned counter) is the untested suspect.
+Building a Node single-pass-pair repro of it.
+
+**`DemoConsole -- radix-emit`** (added) compiles `CreateRadixSort<int,Dense,AscendingInt32>` offline and
+dumps the 3 real kernels to `<outer>\wasm-radix-repro\`:
+- **kernel_1 (pass1):** params=14, userParams=2, **no barriers**, sharedMem=0 (presort, writes counter).
+- **kernel_2 (scan):** params=20, userParams=2, barriers=8, sharedMem=5120 (counter scan — ALREADY
+  replicated in `run-real-scan.mjs`).
+- **kernel_3 (pass2):** params=27, userParams=6, **no barriers**, sharedMem=0 (scatter via scanned counter).
+
+Per-pass dispatch sequence (`RadixSortExtensions.cs:1371-1434`, args are ALL ints+views, no structs):
+`init(counter,0) → pass1(input, counter, SpecializedValue<int>(groupDim), numVirtualGroups, paddedLen, bitIdx)
+→ inclusiveScan(counter→counter2, tempScan) → pass2(input, tempOut, counter2, numVirtualGroups, paddedLen, bitIdx)`.
+counter size = 4*numVirtualGroups (UnrollFactor=4). `paddedLen = DivRoundUp(N,groupDim)*groupDim`. pass1/pass2
+are NON-barrier → the simpler flat BuildWasmWorkerScript dispatch (no spin-yield), pass2 is `(gridDim,groupDim)`
+KernelConfig.
+
+**OPEN (next step):** the emitted `userParams` count (pass1=2, pass2=6) doesn't map 1:1 to the source kernel
+signatures (CPURadixSortKernel1 has 6 params) — need to resolve the EXACT runtime dispatch-arg marshalling
+(which path Wasm takes: CPU-path `CPUPass*KernelDelegate` @1248 vs GPU-path `Pass*KernelDelegate` @1330; SpecializedValue
+is baked at compile, so it's not a runtime arg) before the Node dispatch can be faithful. Validation gate (1 worker,
+small input → correct one-pass radix vs CPU reference) will catch any arg mistake. Tooling: `radix-emit` + extend
+`run-real-scan.mjs`'s dispatch into a 3-kernel pipeline harness (`run-radix-pipeline.mjs`).
