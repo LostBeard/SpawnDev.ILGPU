@@ -1233,3 +1233,21 @@ args + any baked constants BEFORE wiring the Node dispatch — a wrong arg map g
 resolved: build `run-radix-pipeline.mjs` (pass1 non-barrier dispatch → scan barrier dispatch [reuse run-real-scan
 logic] → pass2 non-barrier dispatch, with the counter handoff + persistent workers + oversubscription),
 validation-gate on a 1-worker small sort vs CPU reference, then hammer the handoff.
+
+## 2026-06-09 (Geordi): pass1 dispatch RESOLVED — it's STRUCT-PACKED (the crux of the Node pipeline build)
+Disassembled `realkernels\pass1.wasm` (`wasm2wat --enable-threads`, wasm2wat at
+`C:\Users\TJ\AppData\Roaming\npm\wasm2wat.ps1`). The exported `kernel` func (;24;) signature:
+`(param i32×12 [system] i64 i32) (result i32)`. So pass1's **2 user params = an i64 scalar + an i32 POINTER
+to a serialized struct** — the body does `local.get 13; i64.load` (field@0), `+8 i64.load` (field@8),
+`+24 i32.load` (field@24). This is the **struct-with-view serialization pattern** (Wasm CLAUDE.md: "CLR layout
+≠ IR layout; WasmParamInfo.StructFields + FlattenCLRStruct"): pass1 takes a packed struct {input view, counter
+view, scalars} by pointer, NOT flat view args. (scan + pass2 ARE flat-view: scan=2 dense views, pass2=3 views
++ 3 int scalars — those replicate easily.)
+
+**So the Node pipeline's one hard piece = faithfully serializing pass1's param struct in IR layout + patching
+the view NativePtrs to wasm offsets, then passing (i64 scalar, structPtr).** Reference: `WasmAccelerator.cs`
+struct serialization (FlattenCLRStruct / StructFields, NativePtr patching set-to-offset-then-restore-0). The
+1-worker-small-sort validation gate catches any layout mistake (iterate until output == CPU reference, exactly
+how the scan harness's gridDimX bug was caught). This is bounded, careful work — do it as a focused build, not
+rushed. Everything is staged: `realkernels\{pass1,scan,pass2}.wasm` + `sig.mjs` + the dispatch sequence/args
+documented above. Next session starts here.
