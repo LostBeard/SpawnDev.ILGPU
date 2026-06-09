@@ -4,7 +4,7 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.15</Version>
+		<Version>4.10.0-local.1</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
 		<PackageReleaseNotes>RadixSort now supports Half keys on WebGL (all key types sort on every browser backend). Fixed a cross-backend sub-word signed-reinterpret sign-extension bug that broke ExtractRadixBits&lt;Half&gt; for negative values on WebGPU/WebGL/Wasm. WebGL in-kernel group scan/reduce (GroupExtensions.ExclusiveScan/InclusiveScan/AllReduce) now throw UnsupportedKernelFeatureException instead of silently returning 0 (use the host CreateScan/CreateReduce). New CopyFromStreamAsync streams a .NET Stream into a GPU buffer in chunks, zero-copy on the browser backends when the source is an IJSReadStream. New MemoryPressure.AllocateWithReclaim pressure-aware allocation helper. Full per-version history with code samples: see CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>

@@ -10,6 +10,10 @@ try
     if (args.Length > 0 && args[0] == "wasm-dump")
         return await WasmCompileDump.Run();
 
+    // Offline WGSL generation probe (precompiled-shaders Layer 1). No device/browser.
+    if (args.Length > 0 && args[0] == "shader-gen")
+        return await ShaderGenDump.Run();
+
     // Emit the real generated inclusive-scan kernel(s) for the pure-Node repro harness.
     if (args.Length > 0 && args[0] == "scan-emit")
         return await WasmScanEmit.Run(args.Length > 1 ? args[1] : @"D:\users\tj\Projects\SpawnDev.ILGPU\wasm-scan-repro");
