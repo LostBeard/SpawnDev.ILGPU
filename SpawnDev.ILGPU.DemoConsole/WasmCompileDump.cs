@@ -97,6 +97,20 @@ internal static class WasmCompileDump
         var log = sw.ToString();
         var lines = log.Split('\n');
 
+        // Per-kernel info lines (WasmBackend logs one "Kernel params=... sharedMem=... barriers=..."
+        // per compiled kernel). Lets us attribute shared allocas to specific kernels and count how
+        // many kernels CreateRadixSort actually compiled.
+        var kernelInfoLines = new List<string>();
+        foreach (var raw in lines)
+        {
+            var l = raw.TrimEnd('\r').Trim();
+            if (l.StartsWith("Kernel params=") || l.Contains("sharedMem=") && l.Contains("barriers="))
+                kernelInfoLines.Add(l);
+        }
+        Console.WriteLine($"  compiled kernels (info lines): {kernelInfoLines.Count}");
+        foreach (var l in kernelInfoLines)
+            Console.WriteLine($"    [k] {l}");
+
         // Group the shared-mem alloca lines per kernel/helper compile and detect overlaps.
         // Lines look like:
         //   [Wasm-SharedMem] Static array alloca v_123: offset=0, size=8192, arrayLen=2048, elemSize=4

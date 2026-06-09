@@ -1020,3 +1020,47 @@ cross-test accumulation, not within-test repetition.
 
 **Doc fix landed**: Wasm/CLAUDE.md said `MaxNumThreadsPerGroup=64`; the device actually sets 256
 (`WasmILGPUDevice.cs:68-69`, confirmed by the dump). The stale 64 had misled part of the H8 analysis.
+
+## 2026-06-09 (Geordi, cont.): the barrier kernel in a Wasm RadixSort is the COUNTER SCAN, not kernel1 — race is its multi-tile boundary carry
+Used the offline `wasm-dump` harness (now prints per-kernel info lines) to attribute shared
+allocas to specific kernels. For `CreateRadixSort<int,DescendingInt32>`, THREE kernels compile:
+- kernel1 (presort): `params=14, sharedMem=0, barriers=0, hasBarriers=False` — Wasm uses the
+  CPU-STYLE no-barrier `CPURadixSortKernel1` (single-thread-per-group; its int[UnrollFactor]
+  scanMemory/addMemory are NOT shared allocas here). **No barriers, no shared mem.**
+- **scan (of the counter): `params=20, sharedMem=5120, barriers=8, hasBarriers=True, helpers=1`**
+  — the ONLY barrier kernel (production numbers, reverted build). 5120 = scan workspace int[1024]
+  @0 (4096B) + scanResults int[256]@4096 (1024B), exactly. TWO named shared allocas, distinct
+  sizes (1024 vs 256), **no overlap, no fallback**. The 8 barriers = pre-loop Scan (3: two
+  InclusiveScanImpl barriers + one scanResults-copy barrier) + tile-loop body {NextIteration
+  Broadcast (2) + Scan (3)} = 3+5. (Broadcast value+tag slots log as `[Wasm-Broadcast]`, not
+  `[Wasm-SharedMem]`, and live in the helper.)
+- kernel2 (scatter): `params=27, sharedMem=0, barriers=0` — no barriers, no shared mem.
+
+**Proof the int[1024] alloca is the SCAN WORKSPACE (not the radix scanMemory):** a controlled
+probe changed `InclusiveScanImplementation`'s `Allocate<T>(1024)` → 2048; the dump's first alloca
+tracked 1024→2048 and NO separate int[1024] appeared. So the radix `scanMemory` is absent from
+every barrier kernel. (Probe reverted.)
+
+**`SingleGroupScanKernel` launches as `(1, MaxNumThreadsPerGroup)` = ONE group of 256 threads
+(`ScanExtensions.cs:516`).** So "multi-group sort fails" does NOT mean cross-group shared memory.
+A LARGE sort makes a LARGE counter array (UnrollFactor*numRadixGroups), which this single group
+scans in MANY TILES (`ComputeTileScan`, `ScanExtensions.cs:388-403`), carrying the running total
+across tiles via `groupScan.NextIteration` → `ExclusiveScanNextIteration` →
+`Group.Broadcast(currentValue, DimX-1)`. **The race is the multi-WORKER, multi-TILE boundary
+carry within one group.** Fits every survivor: needs ≥2 workers (1 worker = no cross-worker
+broadcast/barrier race); large input = many tiles = many boundary carries = more race windows;
+"contiguous runs shifted by an offset" = one tile's `leftBoundary` carried wrong.
+
+**Broadcast tag is useless tile-to-tile:** tag = linear group index = constant 0 for a single
+group, so it can't distinguish tile N's broadcast slot contents from tile N+1's. Correctness
+across tiles rests ENTIRELY on the phase barriers (broadcast barrier1/barrier2 + the scan's
+internal barriers). So the residual is either (a) V8 pure-spin PHASE-barrier linear-memory
+ordering under heavy yielding, or (b) a fiber state-save/restore gap on the MULTI-WORKER
+spin-yield path (single-worker also saves state every phase and is clean, so a plain state-save
+gap is excluded — it must be specific to the ≥2-worker yield/resume path under contention).
+
+**NEXT (needs full-sweep PMT + FO76 = TJ go):** instrument the SCAN kernel's per-tile
+`leftBoundary` carry — dump (tileIndex, leftBoundary, localBoundaries.RightBoundary, broadcast
+value) per tile to a buffer and compare a corrupted run's first wrong tile against the CPU
+oracle. ScanBroadcastIsolationTest is the fast within-test probe but is 0/300 scoped — the
+trigger is full-sweep cross-test accumulation, so the instrumented run must be the full sweep.
