@@ -3405,8 +3405,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // from available builtins instead: local_invocation_index / subgroup_size.
             bool bodyNeedsSubgroups = bodyUsesSubgroups || _usesGroupReduce;
 
+            // Marker (parsed by WebGPUCompiledKernel.UsesGridIdxZ) so the dispatch path knows whether the
+            // Z dimension is FREE for an X-workgroup-overflow fold. A kernel that reads Grid.IdxZ owns Z, so
+            // its X-overflow must NOT be folded into Z. A 2D kernel (Grid.IdxX/IdxY only) leaves Z free.
+            string gridIdxZMarker = KernelUsesGridIdxZ() ? "// @uses_grid_idx_z\n" : "";
             // Rename entry point builtins to _ep_xxx to avoid clashing with module-scope var<private>
-            string signature = $"@compute @workgroup_size({workgroupSize})\n" +
+            string signature = gridIdxZMarker + $"@compute @workgroup_size({workgroupSize})\n" +
                 "fn main(@builtin(global_invocation_id) _ep_global_id : vec3<u32>, " +
                 "@builtin(local_invocation_id) _ep_local_id : vec3<u32>, " +
                 "@builtin(workgroup_id) _ep_group_id : vec3<u32>, " +
@@ -3969,6 +3973,29 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             return false;
         }
 
+        private bool? _kernelUsesGridIdxZ;
+        /// <summary>
+        /// Scans the kernel IR for Grid.IdxZ access. A 2D-grid kernel (uses Grid.IdxY but NOT
+        /// Grid.IdxZ) leaves the Z dispatch dimension FREE, so the accelerator can fold an
+        /// X-workgroup-count overflow (> maxComputeWorkgroupsPerDimension) into Z. When that
+        /// happens, Grid.IdxX must reconstruct as group_id.x + group_id.z*num_workgroups.x and
+        /// Grid.DimX as num_workgroups.x*num_workgroups.z. A true 3D-grid kernel (uses Grid.IdxZ)
+        /// has no free Z dim, so the fold isn't applied and Grid.IdxX stays group_id.x.
+        /// </summary>
+        private bool KernelUsesGridIdxZ()
+        {
+            if (_kernelUsesGridIdxZ.HasValue)
+                return _kernelUsesGridIdxZ.Value;
+            bool found = EntryPoint.IndexType == IndexType.Index3D;
+            if (!found)
+                foreach (var block in Method.Blocks)
+                    foreach (var entry in block)
+                        if (entry.Value is GridIndexValue g && g.Dimension == DeviceConstantDimension3D.Z)
+                        { found = true; break; }
+            _kernelUsesGridIdxZ = found;
+            return found;
+        }
+
         /// <summary>
         /// Override: Grid.IdxX returns the linearized workgroup index for 1D kernels.
         /// When 2D dispatch fallback is used (workY > 1), group_id.x alone is wrong;
@@ -3982,7 +4009,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             if (value.Dimension == DeviceConstantDimension3D.X && ShouldLinearizeGridX())
             {
+                // 1D kernel: X overflow folds into Y → reconstruct the flat group index.
                 AppendLine($"{target} = i32(group_id.x + group_id.y * num_workgroups.x);");
+            }
+            else if (value.Dimension == DeviceConstantDimension3D.X && !KernelUsesGridIdxZ())
+            {
+                // 2D kernel (uses Grid.IdxY, Z free): X overflow folds into Z → reconstruct via z.
+                // Backward-compatible: when not folded, num_workgroups.z=1 and group_id.z=0 → group_id.x.
+                AppendLine($"{target} = i32(group_id.x + group_id.z * num_workgroups.x);");
             }
             else
             {
@@ -4010,7 +4044,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             if (value.Dimension == DeviceConstantDimension3D.X && ShouldLinearizeGridX())
             {
+                // 1D kernel: X folded into Y → logical Grid.DimX = num_workgroups.x * num_workgroups.y.
                 AppendLine($"{target} = i32(num_workgroups.x * num_workgroups.y);");
+            }
+            else if (value.Dimension == DeviceConstantDimension3D.X && !KernelUsesGridIdxZ())
+            {
+                // 2D kernel: X folded into Z (exact fold X*Z=logicalX) → Grid.DimX = num_workgroups.x*num_workgroups.z.
+                // Backward-compatible: num_workgroups.z=1 when not folded.
+                AppendLine($"{target} = i32(num_workgroups.x * num_workgroups.z);");
             }
             else
             {
