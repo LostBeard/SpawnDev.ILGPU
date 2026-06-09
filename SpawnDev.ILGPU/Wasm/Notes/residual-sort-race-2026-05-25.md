@@ -1213,3 +1213,23 @@ signatures (CPURadixSortKernel1 has 6 params) — need to resolve the EXACT runt
 is baked at compile, so it's not a runtime arg) before the Node dispatch can be faithful. Validation gate (1 worker,
 small input → correct one-pass radix vs CPU reference) will catch any arg mistake. Tooling: `radix-emit` + extend
 `run-real-scan.mjs`'s dispatch into a 3-kernel pipeline harness (`run-radix-pipeline.mjs`).
+
+## 2026-06-09 (Geordi): BLOCKER CLEARED — real radix kernels pulled from the debug dump
+The debug dump folder is `D:\users\tj\Projects\SpawnDev.ILGPU\_dump\` (PERSISTENT for months; saved to memory
+`reference-spawndev-ilgpu-wasm-debug-dump-folder`). Today's full sweep dumped 1694 Wasm kernels to
+`_dump\2026-06-09_16-15-44\wasm\`. The keys-only RadixSort trio compiles CONSECUTIVELY — identified by `.txt`
+metadata: `017_kernel_3` (pass1, params=14 no-barrier), `018_kernel_4` (scan, params=20 barriers=8 sharedMem=5120
+helpers=1), `019_kernel_5` (pass2, params=27 no-barrier). Copied to `<outer>\wasm-radix-repro\realkernels\`
+(pass1.wasm / scan.wasm / pass2.wasm). **pass1's wasm — which lazy-compiles on dispatch and could NOT be emitted
+offline — is now in hand. The Node-pipeline blocker is GONE.**
+
+Signatures (parsed from the binaries, `realkernels\sig.mjs`): kernel func total params = pass1 **14** (12 system
++ 2 user), scan **20** (12+8 = 2 dense views×4), pass2 **27** (12+15 = 3 views×4 + 3 int scalars numGroups/
+paddedLen/shift). scan+pass2 map cleanly to the documented dispatch. **OPEN (the one remaining piece): pass1's
+2 user wasm-params don't match a presort that writes a 4·numGroups counter from a 1D input — so pass1 is either
+SPECIALIZED (N/shift baked → the dumped pass1 is valid only for THAT test's N) or the keys-only path uses a
+different presort kernel. Disassemble pass1's body (`wasm2wat --enable-threads pass1.wasm`) to read its actual
+args + any baked constants BEFORE wiring the Node dispatch — a wrong arg map gives false repro results.** Once
+resolved: build `run-radix-pipeline.mjs` (pass1 non-barrier dispatch → scan barrier dispatch [reuse run-real-scan
+logic] → pass2 non-barrier dispatch, with the counter handoff + persistent workers + oversubscription),
+validation-gate on a 1-worker small sort vs CPU reference, then hammer the handoff.
