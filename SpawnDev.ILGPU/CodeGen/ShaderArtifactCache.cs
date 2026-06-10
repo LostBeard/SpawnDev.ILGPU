@@ -104,6 +104,7 @@ public static class ShaderArtifactCache
             ProfileCacheKey = generated.Profile.ToCacheKeyString(),
             Source = generated.Source,
             Binary = generated.Binary,
+            CodegenMetadata = generated.CodegenMetadata,
         });
 
     /// <summary>

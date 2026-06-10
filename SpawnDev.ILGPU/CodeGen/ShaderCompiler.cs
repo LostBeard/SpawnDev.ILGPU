@@ -124,6 +124,18 @@ public static class ShaderCompiler
                 ? $"{dt.FullName}.{method.Name}"
                 : method.Name,
             GroupSize = (gx, gy, gz),
+            BindingCount = compiled.ExpectedBindingCount,
+        };
+
+        // Capture the codegen metadata the DISPATCH path needs, so a precompiled artifact can
+        // reconstruct a correct kernel without re-running the transpiler (Layer 3 hit path).
+        var codegen = new WebGPUBackend.WebGPUKernelMetadata
+        {
+            DynamicSharedOverrides = compiled.DynamicSharedOverrides,
+            ScalarPackingManifest = compiled.ScalarPackingManifest,
+            ExpectedBindingCount = compiled.ExpectedBindingCount,
+            I64SpinlockParamIndices = new List<(int, int)>(compiled.I64SpinlockParamIndices),
+            CoalesceManifest = compiled.CoalesceManifest,
         };
 
         return new GeneratedKernel
@@ -132,6 +144,7 @@ public static class ShaderCompiler
             Profile = profile,
             Source = wgsl,
             Metadata = metadata,
+            CodegenMetadata = codegen,
             Diagnostics = diagnostics,
         };
     }

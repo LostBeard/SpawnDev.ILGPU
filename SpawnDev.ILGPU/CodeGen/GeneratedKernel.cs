@@ -90,6 +90,16 @@ public sealed record GeneratedKernel
     public GeneratedKernelMetadata Metadata { get; init; } = new();
 
     /// <summary>
+    /// Opaque, backend-specific codegen metadata needed to RECONSTRUCT a compiled kernel from
+    /// this artifact without re-running the transpiler (e.g. for WebGPU the scalar-packing
+    /// manifest, binding count, i64-spinlock indices, coalesce manifest, dynamic-shared
+    /// overrides). Carried into <see cref="ShaderArtifact.CodegenMetadata"/> when registered, and
+    /// serialized to a sidecar file by the build-time precompile step. See
+    /// <see cref="ShaderArtifactCache"/>.
+    /// </summary>
+    public object? CodegenMetadata { get; init; }
+
+    /// <summary>
     /// Diagnostics produced during generation (and pre-validation, when wired). An
     /// <see cref="GeneratedKernelDiagnosticSeverity.Error"/> here means the artifact would
     /// fail to compile on a real device of this profile.

@@ -128,5 +128,51 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                         $"RECONSTRUCTED (cache-hit) dispatch WRONG @{i}: {r2[i]} != {src[i] * mul} " +
                         "— cached codegen metadata (scalar packing) did not rebuild a faithful kernel.");
         });
+
+        // The Layer-1 -> Layer-3 BRIDGE: an OFFLINE-generated artifact (what a build-time precompile +
+        // manifest produces) must be HIT by the runtime load path and dispatch correctly. This proves
+        // the offline ShaderCompiler.Generate output (WGSL + captured codegen metadata) is a faithful,
+        // runtime-usable precompiled artifact - the whole point of build-time precompilation.
+        [TestMethod]
+        public async Task PrecompiledShaders_OfflineArtifact_HitsAndDispatches() =>
+            await RunTest(async accelerator =>
+        {
+            if (accelerator is not WebGPUAccelerator webgpu)
+                throw new UnsupportedTestException("WebGPU-only.");
+
+            ShaderArtifactCache.Clear();
+            ShaderArtifactCache.ResetStats();
+
+            // Generate OFFLINE for this device's profile (no warm run) and register - exactly what a
+            // build-time precompile + manifest does.
+            var profile = CapabilityProfiles.FromAccelerator(webgpu, webgpu.EnabledFeatures);
+            var km = ((Action<Index1D, ArrayView<float>, ArrayView<float>, float>)
+                PrecompiledShaders_ScaleKernel).Method;
+            var generated = ShaderCompiler.Generate(km, profile);
+            ShaderArtifactCache.Register(km, generated);
+
+            const int n = 256;
+            const float mul = 4f;
+            var src = new float[n];
+            for (int i = 0; i < n; i++) src[i] = i + 1;
+            using var inBuf = accelerator.Allocate1D(src);
+            using var outBuf = accelerator.Allocate1D<float>(n);
+
+            long hitsBefore = ShaderArtifactCache.Hits;
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, float>(
+                PrecompiledShaders_ScaleKernel);
+            if (ShaderArtifactCache.Hits <= hitsBefore)
+                throw new Exception(
+                    $"Offline artifact NOT hit by runtime load (cache-key misalignment). " +
+                    $"offlineKey={profile.ToCacheKeyString()} hits={ShaderArtifactCache.Hits} " +
+                    $"misses={ShaderArtifactCache.Misses} count={ShaderArtifactCache.Count}.");
+
+            k((Index1D)n, inBuf.View, outBuf.View, mul);
+            await accelerator.SynchronizeAsync();
+            var r = await outBuf.CopyToHostAsync<float>();
+            for (int i = 0; i < n; i++)
+                if (MathF.Abs(r[i] - src[i] * mul) > 1e-3f)
+                    throw new Exception($"Offline-artifact dispatch WRONG @{i}: {r[i]} != {src[i] * mul}");
+        });
     }
 }
