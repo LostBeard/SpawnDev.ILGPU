@@ -981,6 +981,114 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             new WGSLKernelFunctionGenerator(data, method, allocas);
 
         /// <summary>
+        /// Serializable codegen metadata for a WebGPU kernel - everything BEYOND the WGSL that the
+        /// dispatch path needs (scalar packing, binding count, i64 spinlock indices, coalescing,
+        /// dynamic-shared overrides), so a cached artifact can rebuild a correct
+        /// <see cref="WebGPUCompiledKernel"/> without re-running the transpiler. None of this is
+        /// recoverable from the WGSL text, so the precompiled-shader cache MUST carry it.
+        /// </summary>
+        public sealed record WebGPUKernelMetadata
+        {
+            /// <summary>Dynamic shared-memory overrides.</summary>
+            public IReadOnlyList<DynamicSharedOverrideInfo> DynamicSharedOverrides { get; init; }
+                = System.Array.Empty<DynamicSharedOverrideInfo>();
+            /// <summary>Scalar-packing manifest (how scalar args pack into _scalar_params).</summary>
+            public IReadOnlyList<ScalarPackingEntry> ScalarPackingManifest { get; init; }
+                = System.Array.Empty<ScalarPackingEntry>();
+            /// <summary>Expected storage-buffer binding count.</summary>
+            public int ExpectedBindingCount { get; init; }
+            /// <summary>(param, field) indices using i64 spinlock companion buffers.</summary>
+            public IReadOnlyList<(int ParamIdx, int FieldIdx)> I64SpinlockParamIndices { get; init; }
+                = System.Array.Empty<(int, int)>();
+            /// <summary>Coalesce-group manifest.</summary>
+            public IReadOnlyList<CoalesceGroupEntry> CoalesceManifest { get; init; }
+                = System.Array.Empty<CoalesceGroupEntry>();
+        }
+
+        /// <summary>
+        /// A <see cref="CapabilityProfile"/> describing THIS backend's EFFECTIVE codegen
+        /// capabilities - matches <see cref="CapabilityProfiles.FromAccelerator"/> for a device
+        /// using this backend, so a warm-registered artifact and a future lookup share a key.
+        /// </summary>
+        private CapabilityProfile ProfileForThisBackend(in KernelSpecialization specialization)
+        {
+            var features = new HashSet<string>(System.StringComparer.Ordinal);
+            if (HasShaderF16) features.Add("shader-f16");
+            if (HasSubgroups) features.Add("subgroups");
+            return new CapabilityProfile
+            {
+                Backend = AcceleratorType.WebGPU,
+                Name = "WebGPU-runtime",
+                Float16Native = HasShaderF16,
+                Float64Native = false,
+                Float64Mode = F64Mode,
+                Int64Native = false,
+                SubGroups = HasSubgroups,
+                WarpSize = 1,
+                MaxNumThreadsPerGroup = specialization.MaxNumThreadsPerGroup ?? (DefaultMaxWorkgroupSize ?? 0),
+                MaxStorageBufferBindings = 0,
+                EnabledFeatures = features,
+            };
+        }
+
+        /// <summary>
+        /// Precompiled-shader cache hook (Layer 3). On a cache HIT, rebuilds the compiled kernel
+        /// from the cached WGSL + <see cref="WebGPUKernelMetadata"/> instead of running the
+        /// transpiler; on a MISS, runs the normal codegen (<c>base.Compile</c>) and warm-registers
+        /// the result so later loads (this session or a precompiled manifest) can hit. The cached
+        /// WGSL is the FINAL, validated source (post-placeholder-resolution), so the reconstructed
+        /// kernel is byte-identical to the codegen'd one by construction.
+        /// </summary>
+        protected override CompiledKernel Compile(
+            EntryPoint entryPoint,
+            in BackendContext backendContext,
+            in KernelSpecialization specialization)
+        {
+            var method = entryPoint.MethodInfo;
+            if (method != null && ShaderArtifactCache.Enabled)
+            {
+                var profile = ProfileForThisBackend(specialization);
+                if (ShaderArtifactCache.TryGet(method, profile, out var art)
+                    && art.Source is { } cachedWgsl
+                    && art.CodegenMetadata is WebGPUKernelMetadata meta)
+                {
+                    return new WebGPUCompiledKernel(
+                        Context,
+                        entryPoint,
+                        cachedWgsl,
+                        meta.DynamicSharedOverrides.Count > 0 ? meta.DynamicSharedOverrides : null,
+                        meta.ScalarPackingManifest.Count > 0 ? meta.ScalarPackingManifest : null,
+                        meta.ExpectedBindingCount,
+                        meta.I64SpinlockParamIndices.Count > 0
+                            ? new HashSet<(int, int)>(meta.I64SpinlockParamIndices) : null,
+                        meta.CoalesceManifest.Count > 0 ? meta.CoalesceManifest : null);
+                }
+            }
+
+            var kernel = base.Compile(entryPoint, backendContext, specialization);
+
+            if (method != null && ShaderArtifactCache.Enabled && kernel is WebGPUCompiledKernel wk)
+            {
+                var profile = ProfileForThisBackend(specialization);
+                ShaderArtifactCache.Register(method, profile, new ShaderArtifact
+                {
+                    Backend = AcceleratorType.WebGPU,
+                    ProfileCacheKey = profile.ToCacheKeyString(),
+                    Source = wk.WGSLSource,
+                    CodegenMetadata = new WebGPUKernelMetadata
+                    {
+                        DynamicSharedOverrides = wk.DynamicSharedOverrides,
+                        ScalarPackingManifest = wk.ScalarPackingManifest,
+                        ExpectedBindingCount = wk.ExpectedBindingCount,
+                        I64SpinlockParamIndices = new List<(int, int)>(wk.I64SpinlockParamIndices),
+                        CoalesceManifest = wk.CoalesceManifest,
+                    },
+                });
+            }
+            return kernel;
+        }
+
+        /// <summary>
         /// Creates the final compiled kernel.
         /// </summary>
         protected override CompiledKernel CreateKernel(

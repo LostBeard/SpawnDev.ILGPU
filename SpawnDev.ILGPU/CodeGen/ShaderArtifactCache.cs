@@ -20,6 +20,16 @@ public sealed record ShaderArtifact
     public string? Source { get; init; }
     /// <summary>Generated module BYTES (Wasm). Null for WebGPU/WebGL.</summary>
     public byte[]? Binary { get; init; }
+
+    /// <summary>
+    /// Opaque, backend-specific codegen metadata needed to RECONSTRUCT the compiled kernel
+    /// without re-running the transpiler - e.g. for WebGPU the scalar-packing manifest, binding
+    /// count, i64-spinlock indices, coalesce manifest, and dynamic-shared overrides that the
+    /// DISPATCH path depends on (none of which are recoverable from the shader text alone). The
+    /// backend that produced the artifact knows the concrete type and casts it back on a hit. For
+    /// cross-session (Layer 2) the backend serializes this to a sidecar file alongside the shader.
+    /// </summary>
+    public object? CodegenMetadata { get; init; }
 }
 
 /// <summary>

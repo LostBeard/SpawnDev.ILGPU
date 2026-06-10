@@ -69,7 +69,12 @@ namespace ILGPU.Backends
         /// <param name="backendContext"></param>
         /// <param name="specialization"></param>
         /// <returns></returns>
-        protected sealed override CompiledKernel Compile(
+        // NOTE (SpawnDev): un-sealed so a backend can intercept codegen for the
+        // precompiled-shader cache (Layer 3) - on a cache hit it rebuilds the compiled kernel
+        // from the cached shader + codegen metadata instead of running the transpiler, and
+        // calls base.Compile(...) on a miss. Base behaviour is unchanged for backends that do
+        // not override it. See SpawnDev.ILGPU/CodeGen/ShaderArtifactCache.cs.
+        protected override CompiledKernel Compile(
             EntryPoint entryPoint,
             in BackendContext backendContext,
             in KernelSpecialization specialization)

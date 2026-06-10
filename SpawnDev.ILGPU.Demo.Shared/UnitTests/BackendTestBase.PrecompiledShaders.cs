@@ -66,5 +66,67 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     $"LIVE>>>{ctxLive}<<< OFFLINE>>>{ctxOff}<<<");
             }
         });
+
+        // Scalar-parameter kernel: `mul` packs into _scalar_params via the ScalarPackingManifest,
+        // which is codegen metadata NOT recoverable from the WGSL text. If the runtime cache fails
+        // to carry/reconstruct it, this dispatch silently produces garbage. This test is the
+        // dispatch-correctness proof for the precompiled cache hit path (Layer 3).
+        private static void PrecompiledShaders_ScaleKernel(
+            Index1D i, ArrayView<float> input, ArrayView<float> output, float mul)
+            => output[i] = input[i] * mul;
+
+        [TestMethod]
+        public async Task PrecompiledShaders_RuntimeCache_HitProducesCorrectDispatch() =>
+            await RunTest(async accelerator =>
+        {
+            if (accelerator is not WebGPUAccelerator)
+                throw new UnsupportedTestException("WebGPU-only runtime cache test.");
+
+            ShaderArtifactCache.Clear();
+            ShaderArtifactCache.ResetStats();
+
+            const int n = 256;
+            const float mul = 3f;
+            var src = new float[n];
+            for (int i = 0; i < n; i++) src[i] = i;
+            using var inBuf = accelerator.Allocate1D(src);
+            using var outBuf = accelerator.Allocate1D<float>(n);
+
+            // (1) WARM: first load runs codegen (cache MISS) and warm-registers the artifact.
+            var k1 = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, float>(
+                PrecompiledShaders_ScaleKernel);
+            k1((Index1D)n, inBuf.View, outBuf.View, mul);
+            await accelerator.SynchronizeAsync();
+            var r1 = await outBuf.CopyToHostAsync<float>();
+            for (int i = 0; i < n; i++)
+                if (MathF.Abs(r1[i] - src[i] * mul) > 1e-3f)
+                    throw new Exception($"WARM dispatch wrong @{i}: {r1[i]} != {src[i] * mul}");
+            if (ShaderArtifactCache.Misses == 0)
+                throw new Exception("Expected a cache MISS on the first compile.");
+
+            // (2) Clear the FRAMEWORK kernel cache so the next load re-enters Backend.Compile,
+            // where our precompiled cache now HITS (it is a separate static, untouched by ClearCache).
+            accelerator.ClearCache(ClearCacheMode.Everything);
+            long hitsBefore = ShaderArtifactCache.Hits;
+
+            var k2 = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, float>(
+                PrecompiledShaders_ScaleKernel);
+            if (ShaderArtifactCache.Hits <= hitsBefore)
+                throw new Exception(
+                    $"Expected a precompiled-cache HIT after ClearCache; hits={ShaderArtifactCache.Hits} " +
+                    $"misses={ShaderArtifactCache.Misses} count={ShaderArtifactCache.Count}.");
+
+            // (3) Dispatch the RECONSTRUCTED kernel — must be correct (proves the cached metadata,
+            // esp. the scalar packing, rebuilt a faithful kernel).
+            using var outBuf2 = accelerator.Allocate1D<float>(n);
+            k2((Index1D)n, inBuf.View, outBuf2.View, mul);
+            await accelerator.SynchronizeAsync();
+            var r2 = await outBuf2.CopyToHostAsync<float>();
+            for (int i = 0; i < n; i++)
+                if (MathF.Abs(r2[i] - src[i] * mul) > 1e-3f)
+                    throw new Exception(
+                        $"RECONSTRUCTED (cache-hit) dispatch WRONG @{i}: {r2[i]} != {src[i] * mul} " +
+                        "— cached codegen metadata (scalar packing) did not rebuild a faithful kernel.");
+        });
     }
 }
