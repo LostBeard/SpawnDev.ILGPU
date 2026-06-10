@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using ILGPU.Runtime;
+using SpawnDev.ILGPU.WebGPU;
 
 namespace SpawnDev.ILGPU;
 
@@ -155,12 +156,11 @@ public static class CapabilityProfiles
     /// real device into a profile; the code generators themselves must read ONLY from the
     /// profile (the structural byte-identical guard).
     ///
-    /// NOTE: native-f16 on WebGPU depends on whether the backend negotiated the
-    /// <c>shader-f16</c> adapter feature, which is backend state not exposed on the generic
-    /// accelerator surface here - so for WebGPU prefer the explicit
-    /// <see cref="ChromeWebGPU"/> / <see cref="ChromeWebGPUNoF16"/> presets, or pass the
-    /// observed feature set via <paramref name="enabledFeatures"/>. f64/i64-native are
-    /// determined per-backend (Wasm native; WebGPU/WebGL emulated).
+    /// For WebGPU it reads the backend's EFFECTIVE capabilities (`HasShaderF16`/`HasSubgroups`/
+    /// `F64Mode`), so a force-disabled subgroups or force-emulated f16 configuration is captured
+    /// faithfully (the offline artifact then matches that backend byte-for-byte). For other
+    /// backends f64/i64-native are per-backend (Wasm native; WebGL emulated) and f16-native comes
+    /// from <paramref name="enabledFeatures"/> (OpenCL <c>cl_khr_fp16</c>).
     /// </summary>
     public static CapabilityProfile FromAccelerator(
         Accelerator accelerator,
@@ -182,13 +182,37 @@ public static class CapabilityProfiles
             AcceleratorType.OpenCL or AcceleratorType.CPU => true,
             _ => false, // WebGPU / WebGL emulate i64
         };
-        bool f16Native = type switch
+
+        bool f16Native;
+        bool subGroups;
+        var f64Mode = F64EmulationMode.Dekker;
+        var effectiveFeatures = new HashSet<string>(StringComparer.Ordinal);
+
+        // WebGPU: snapshot the backend's EFFECTIVE capabilities, NOT the raw adapter feature set.
+        // The backend can force-disable subgroups (ForceDisableSubgroups) or force-emulate f16
+        // (ForceEmulatedF16) even when the adapter exposes them - and the generators branch on the
+        // EFFECTIVE values (HasSubgroups / HasShaderF16). Reading the raw features would make an
+        // offline artifact diverge from a backend that disabled a feature (verified by the
+        // PrecompiledShaders_OfflineWGSL_MatchesRuntime guard on the no-subgroups lane).
+        if (accelerator is WebGPUAccelerator wgpu)
         {
-            AcceleratorType.WebGPU => features.Contains("shader-f16"),
-            AcceleratorType.OpenCL => features.Contains("cl_khr_fp16"),
-            AcceleratorType.Cuda or AcceleratorType.CPU => true,
-            _ => false, // WebGL / Wasm emulate f16
-        };
+            f16Native = wgpu.Backend.HasShaderF16;
+            subGroups = wgpu.Backend.HasSubgroups;
+            f64Mode = wgpu.Backend.F64Mode;
+            if (f16Native) effectiveFeatures.Add("shader-f16");
+            if (subGroups) effectiveFeatures.Add("subgroups");
+        }
+        else
+        {
+            f16Native = type switch
+            {
+                AcceleratorType.OpenCL => features.Contains("cl_khr_fp16"),
+                AcceleratorType.Cuda or AcceleratorType.CPU => true,
+                _ => false, // WebGL / Wasm emulate f16
+            };
+            subGroups = accelerator.WarpSize > 1;
+            foreach (var f in features) effectiveFeatures.Add(f);
+        }
 
         return new CapabilityProfile
         {
@@ -196,13 +220,13 @@ public static class CapabilityProfiles
             Name = $"{type}-snapshot",
             Float16Native = f16Native,
             Float64Native = f64Native,
-            Float64Mode = F64EmulationMode.Dekker,
+            Float64Mode = f64Mode,
             Int64Native = i64Native,
-            SubGroups = accelerator.WarpSize > 1,
-            WarpSize = accelerator.WarpSize,
+            SubGroups = subGroups,
+            WarpSize = subGroups ? accelerator.WarpSize : 1,
             MaxNumThreadsPerGroup = accelerator.MaxNumThreadsPerGroup,
-            MaxStorageBufferBindings = 0, // filled from backend when wiring WebGPU snapshot
-            EnabledFeatures = new HashSet<string>(features, StringComparer.Ordinal),
+            MaxStorageBufferBindings = 0, // a dispatch-time limit; not a codegen input
+            EnabledFeatures = effectiveFeatures,
         };
     }
 }
