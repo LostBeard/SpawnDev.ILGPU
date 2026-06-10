@@ -35,17 +35,19 @@ Every f16 value is exactly representable as f32. The f16 format is a strict subs
 
 Unlike Dekker f64 emulation (which is approximate), f16 emulation through f32 is **lossless**. There is zero precision cost.
 
-## Current State
+## Current State (at authoring 2026-04-08 — SUPERSEDED; ALL rows below now SHIPPED, see "Shipping status" above)
+
+> Updated to the shipped reality so this table can't be misread out of context. **f16 is supported on every backend** — emulated losslessly where native `shader-f16`/`cl_khr_fp16` is absent, so `Capabilities.Float16` is always `true` and `Capabilities.Float16Native` only distinguishes the codegen path.
 
 | Backend | Native f16? | Emulated? | Float16 capability | Half tests |
 |---------|------------|-----------|-------------------|------------|
 | WebGPU (with shader-f16) | Yes | N/A | `true` | All pass |
-| WebGPU (without shader-f16) | No | **No** | `false` | All skip |
-| WebGL | No | **No** | `false` (hardcoded) | All skip |
+| WebGPU (without shader-f16) | No | **Yes** (shipped `30eb12c`) | `true` | All pass (emulated) |
+| WebGL | No | **Yes** (shipped `f391042`) | `true` | non-algorithm pass (emulated); algo Scan/Reduce skip (no shared mem/barriers) |
 | Wasm | No | **Yes** (April 2026) | `true` | All pass |
 | CUDA | Yes | N/A | `true` | All pass |
 | CPU | Yes (.NET Half) | N/A | `true` | All pass |
-| OpenCL | Device-dependent | No | Device-dependent | Varies |
+| OpenCL | `cl_khr_fp16`-dependent | **Yes** (`vload_half`/`vstore_half`) | `true` | All pass |
 
 ## Reference Implementation: Wasm Backend
 

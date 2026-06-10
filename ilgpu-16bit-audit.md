@@ -4,6 +4,8 @@
 **Scope:** WebGPU backend - int8, int16, uint16, float16 math and buffer access
 **Finding:** Sub-word buffer access infrastructure EXISTS but only handles 8-bit. 16-bit is broken.
 
+> **⚠ STATUS: HISTORICAL / RESOLVED (do not cite as current).** This is the PRE-FIX audit (Apr 2026). Everything below — including "Float16 without shader-f16 ... LIKELY BROKEN" and the "What Needs Fixing" list — has SHIPPED. **f16 is supported on EVERY backend; where native `shader-f16` is unavailable it is EMULATED losslessly** (`_f16_to_f32`/`_f32_to_f16`), so `Capabilities.Float16` is always `true` and only `Capabilities.Float16Native` distinguishes native vs emulated. See `Plans/f16-emulation-plan.md` "Shipping status" (Phases 1-4 SHIPPED) and `SpawnDev.ILGPU/WebGPU/CLAUDE.md` "Float16 (Half) — Native and Emulated". Kept for historical context only.
+
 ---
 
 ## The Core Bug

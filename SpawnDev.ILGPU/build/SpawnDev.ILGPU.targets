@@ -1,0 +1,45 @@
+<Project>
+
+  <!--
+    Precompiled-shaders Layer 2 - build-time automation. Auto-imported by NuGet from the
+    package build/ folder. OFF by default: nothing runs unless <SpawnDevPrecompileShaders>
+    is set true, so a project that does not opt in behaves exactly as before (runtime transpile).
+
+    Opt in from the consuming .csproj:
+      <PropertyGroup>
+        <SpawnDevPrecompileShaders>true</SpawnDevPrecompileShaders>
+        <SpawnDevPrecompileProfiles>WebGPU-Dekker-Subgroups-NativeF16;Wasm-NativeF64-Subgroups</SpawnDevPrecompileProfiles>
+        <SpawnDevPrecompilePackaging>Content</SpawnDevPrecompilePackaging>
+      </PropertyGroup>
+
+    After the consumer builds, this spawns SpawnDev.ILGPU.Precompiler against the just-built
+    assembly, emitting wwwroot/_shaders/{manifest.json + per-kernel sidecars} that the runtime
+    loader (SpawnDev.ILGPU.ShaderArtifactManifestLoader) consumes.
+  -->
+
+  <PropertyGroup>
+    <!-- Where the tool lives. Default: the package's tools/ folder (next to this build/ folder).
+         Overridable so a source/repo build can point at the tool's bin output. -->
+    <SpawnDevPrecompilerToolPath Condition="'$(SpawnDevPrecompilerToolPath)' == ''">$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\tools\SpawnDev.ILGPU.Precompiler.dll'))</SpawnDevPrecompilerToolPath>
+    <!-- Output directory for the emitted artifacts (default: the project's wwwroot/_shaders). -->
+    <SpawnDevPrecompileOutDir Condition="'$(SpawnDevPrecompileOutDir)' == ''">$(MSBuildProjectDirectory)\wwwroot\_shaders</SpawnDevPrecompileOutDir>
+    <SpawnDevPrecompilePackaging Condition="'$(SpawnDevPrecompilePackaging)' == ''">Content</SpawnDevPrecompilePackaging>
+  </PropertyGroup>
+
+  <Target Name="SpawnDevPrecompileShadersTarget"
+          AfterTargets="Build"
+          Condition="'$(SpawnDevPrecompileShaders)' == 'true'">
+
+    <Error Condition="!Exists('$(SpawnDevPrecompilerToolPath)')"
+           Text="SpawnDevPrecompileShaders is true but the precompiler tool was not found at '$(SpawnDevPrecompilerToolPath)'. Set &lt;SpawnDevPrecompilerToolPath&gt; or ensure the SpawnDev.ILGPU package's tools/ folder is restored." />
+
+    <Message Importance="high"
+             Text="[SpawnDev.ILGPU] Precompiling shaders for '$(TargetFileName)' (profiles: '$(SpawnDevPrecompileProfiles)') -> $(SpawnDevPrecompileOutDir)" />
+
+    <!-- Process-isolated worker (per design): reflect the built assembly, generate per
+         (kernel x profile), write sidecars + manifest. Non-zero exit (a declared kernel that
+         does not transpile) fails the build - precompile errors surface here, not at runtime. -->
+    <Exec Command="dotnet &quot;$(SpawnDevPrecompilerToolPath)&quot; &quot;$(TargetPath)&quot; &quot;$(SpawnDevPrecompileOutDir)&quot; &quot;$(SpawnDevPrecompileProfiles)&quot; &quot;$(SpawnDevPrecompilePackaging)&quot;" />
+  </Target>
+
+</Project>

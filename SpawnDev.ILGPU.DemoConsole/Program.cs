@@ -6,6 +6,18 @@ using SpawnDev.UnitTesting;
 
 try
 {
+    // Offline WGSL/GLSL/Wasm generation probe (precompiled-shaders Layer 1). No device/browser.
+    if (args.Length > 0 && args[0] == "shader-gen")
+        return await ShaderGenDump.Run();
+
+    // Precompiled-shaders Layer 2 serialization round-trip (sidecar + manifest). No device/browser.
+    if (args.Length > 0 && args[0] == "shader-roundtrip")
+        return ShaderArtifactRoundTrip.Run();
+
+    // Precompiled-shaders Layer 2 end-to-end: build-time precompile -> emit -> runtime load. No browser.
+    if (args.Length > 0 && args[0] == "precompile-e2e")
+        return ShaderArtifactRoundTrip.RunPrecompileE2E();
+
     var services = new ServiceCollection();
     services.AddPlatformCrypto();
     services.AddSingleton<SpawnDev.WebTorrent.WebTorrentClient>();
