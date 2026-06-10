@@ -80,7 +80,7 @@ namespace ILGPU.IR.Transformations
         /// explicit attribute is the user's signal that the cost is intentional.
         /// (2026-05-06 follow-up to `tuvok-rc28-codecs-still-52K-locals-2026-05-06.md`.)
         /// </summary>
-        private const int CumulativeInlinedILBudget = 16384;
+        private const int CumulativeInlinedILBudget = 2048;
 
         #endregion
 

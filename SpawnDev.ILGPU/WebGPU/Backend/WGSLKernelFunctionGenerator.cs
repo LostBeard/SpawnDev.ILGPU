@@ -3149,6 +3149,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 string generatedCode = Builder.ToString(codeGenStartPosition, Builder.Length - codeGenStartPosition);
                 var missingDeclarations = new List<string>(); // var declarations to add
                 var hoistedLetDeclarations = new List<string>(); // pointer-alias lets to hoist
+                // Name -> WGSL type for resolving arithmetic operand types in the missing-decl path.
+                // Seeded with the ALREADY-EMITTED `var v_N : type;` declarations (the hoisted
+                // inlined-helper temps - these are inlining-generated, NOT kernel IR values, so they
+                // are absent from valueVariables), then extended as we declare each missing-decl temp.
+                // This lets a LATER temp's arithmetic inherit the type of an EARLIER hoisted OR
+                // missing-decl operand (the inlined-helper temps chain: v_a = acc+bias (f32);
+                // v_b = v_a * v_c (f32); ...). Without it, the 2nd+ link falls back to the i32 default.
+                var missingDeclInferredTypes = new Dictionary<string, string>(System.StringComparer.Ordinal);
+                foreach (System.Text.RegularExpressions.Match dm in
+                    System.Text.RegularExpressions.Regex.Matches(generatedCode, @"\bvar\s+(v_\w+)\s*:\s*([\w<>]+)\s*;"))
+                {
+                    missingDeclInferredTypes[dm.Groups[1].Value] = dm.Groups[2].Value;
+                }
                 bool anyReplacements = false;
                 string processed = s_inlineLetPattern.Replace(generatedCode, match =>
                 {
@@ -3238,10 +3251,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         // ("cannot assign f32 to i32"). Bug #3 (FusedRegBlockedLinearActivation),
                         // 2026-06-09.
                         if (inferredType == "i32"
-                            && TryInferArithmeticOperandType(exprTrimmed, out var arithOperandType))
+                            && TryInferArithmeticOperandType(exprTrimmed, missingDeclInferredTypes, out var arithOperandType))
                         {
                             inferredType = arithOperandType;
                         }
+                        // Record this temp's resolved type so a later missing-decl temp that does
+                        // arithmetic on it (the inlined-helper chain) can inherit it.
+                        missingDeclInferredTypes[varName] = inferredType;
 
                         // WGSL: pointer types are not constructible and can't be declared
                         // as 'var'. They will be bound as 'let' at their point of use.
@@ -3323,6 +3339,57 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                     return "";
                 });
+
+                // Bug #3 fixpoint: a temp declared `i32` but assigned binary ARITHMETIC whose
+                // operand is non-i32 must take the operand's type (WGSL requires both arithmetic
+                // operands to share the result type). The string-heuristic that typed missing-decl
+                // temps can't see operand types across the inlined-helper f32 chain (acc+bias ->
+                // v_b = v_a * v_c -> ...). Here the COMPLETE name->type map exists, so resolve to a
+                // fixpoint over the assignments. Monotonic (i32 -> non-i32 only) => terminates.
+                {
+                    // COMPLETE operand-type map: hoistedVars (the code-window decls just scanned)
+                    // PLUS the HoistCrossBlockVariables declarations emitted BEFORE
+                    // codeGenStartPosition (absent from `code`, hence absent from hoistedVars - this
+                    // is exactly why the f32 operand v_10015 was invisible). Corrections update both
+                    // maps so the chain resolves in any order.
+                    var allKnownTypes = new Dictionary<string, string>(hoistedVars, System.StringComparer.Ordinal);
+                    foreach (System.Text.RegularExpressions.Match pm in
+                        s_varHoistPattern.Matches(Builder.ToString(0, codeGenStartPosition)))
+                    {
+                        allKnownTypes[pm.Groups[2].Value] = pm.Groups[3].Value.Trim();
+                    }
+                    var s_assignRe = new System.Text.RegularExpressions.Regex(
+                        @"(?m)^\s*(v_\w+)\s*=\s*([^;]+);");
+                    var arithOps = new[] { " + ", " - ", " * ", " / ", " % " };
+                    bool changed = true;
+                    while (changed)
+                    {
+                        changed = false;
+                        foreach (System.Text.RegularExpressions.Match am in s_assignRe.Matches(hoisted))
+                        {
+                            var lhs = am.Groups[1].Value;
+                            if (!hoistedVars.TryGetValue(lhs, out var lhsType) || lhsType != "i32")
+                                continue;
+                            var rhs = am.Groups[2].Value;
+                            if (rhs.Contains("==") || rhs.Contains("i32(")) continue;
+                            if (!(rhs.Contains(" + ") || rhs.Contains(" - ") || rhs.Contains(" * ")
+                                  || rhs.Contains(" / ") || rhs.Contains(" % ")))
+                                continue;
+                            foreach (var op in rhs.Split(arithOps, System.StringSplitOptions.RemoveEmptyEntries))
+                            {
+                                var tok = op.Trim().Trim('(', ')').Trim();
+                                if (allKnownTypes.TryGetValue(tok, out var ot)
+                                    && ot != "i32" && ot != "bool" && !ot.StartsWith("ptr<"))
+                                {
+                                    hoistedVars[lhs] = ot;
+                                    allKnownTypes[lhs] = ot;
+                                    changed = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
 
                 if (hoistedVars.Count > 0)
                 {
@@ -3535,7 +3602,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// shape-only <c>i32</c> guess for float/u32 arithmetic (e.g. FusedActivate's
         /// <c>v = acc + bias</c>). Returns false when no non-i32 operand can be resolved.
         /// </summary>
-        private bool TryInferArithmeticOperandType(string expr, out string type)
+        private bool TryInferArithmeticOperandType(
+            string expr, Dictionary<string, string> localTypes, out string type)
         {
             type = "i32";
             if (!(expr.Contains(" + ") || expr.Contains(" - ") || expr.Contains(" * ")
@@ -3548,6 +3616,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 var tok = raw.Trim().Trim('(', ')').Trim();
                 if (!IsSimpleIdentifier(tok)) continue;
+                // Earlier missing-decl temp in the same inlined-helper chain (e.g. the f32 acc+bias
+                // temp feeding `v_b = v_a * v_c`). Checked first so the chain resolves in source order.
+                if (localTypes != null && localTypes.TryGetValue(tok, out var lt) && lt != "i32")
+                {
+                    type = lt;
+                    return true;
+                }
                 foreach (var kvp in valueVariables)
                 {
                     if (kvp.Value.Name == tok)
