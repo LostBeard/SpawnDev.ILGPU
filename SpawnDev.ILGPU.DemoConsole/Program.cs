@@ -6,9 +6,25 @@ using SpawnDev.UnitTesting;
 
 try
 {
-    // Offline WGSL/GLSL/Wasm generation probe (precompiled-shaders Layer 1). No device/browser.
+    // Offline Wasm compile dump (H8 shared-alloca audit). No browser, no dispatch.
+    if (args.Length > 0 && args[0] == "wasm-dump")
+        return await WasmCompileDump.Run();
+
+    // Offline WGSL generation probe (precompiled-shaders Layer 1). No device/browser.
     if (args.Length > 0 && args[0] == "shader-gen")
         return await ShaderGenDump.Run();
+
+    // Emit the real generated inclusive-scan kernel(s) for the pure-Node repro harness.
+    if (args.Length > 0 && args[0] == "scan-emit")
+        return await WasmScanEmit.Run(args.Length > 1 ? args[1] : @"D:\users\tj\Projects\SpawnDev.ILGPU\wasm-scan-repro");
+
+    // Emit the real radix-sort kernels (pass1/scan/pass2) for the full-pipeline Node repro.
+    if (args.Length > 0 && args[0] == "radix-emit")
+        return await WasmScanEmit.Run(args.Length > 1 ? args[1] : @"D:\users\tj\Projects\SpawnDev.ILGPU\wasm-radix-repro", radix: true);
+
+    // Emit the in-kernel single-value ExclusiveScan exerciser (item-2 validation harness).
+    if (args.Length > 0 && args[0] == "inkernel-emit")
+        return await WasmInKernelScanEmit.Run(args.Length > 1 ? args[1] : @"D:\users\tj\Projects\SpawnDev.ILGPU\SpawnDev.ILGPU\SpawnDev.ILGPU\Wasm\repro\wasm-inkernel-scan-repro");
 
     // Precompiled-shaders Layer 2 serialization round-trip (sidecar + manifest). No device/browser.
     if (args.Length > 0 && args[0] == "shader-roundtrip")

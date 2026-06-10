@@ -2,6 +2,34 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.10.0 (in development) - Offline code generation (`ShaderCompiler.Generate` + `CapabilityProfile`)
+
+**Precompiled-shaders Layer 1.** Generate a kernel's shader/binary for a target backend WITHOUT a real
+device, on any host OS (build servers, CI, a dev box without WebGPU). This is the foundation for build-time
+shader precompilation and a runtime shader cache (Layers 2/3, see `Plans/precompiled-shaders.md`), and it
+makes "dump any kernel's generated code" a one-liner.
+
+- **`CapabilityProfile`** - a serializable, device-independent description of the capabilities a code
+  generator branches on (`Float16Native`, `Float64Native` + `Float64Mode`, `Int64Native`, `SubGroups`,
+  `WarpSize`, `MaxNumThreadsPerGroup`, `MaxStorageBufferBindings`, raw `EnabledFeatures`). Reuses
+  `AcceleratorType` and `F64EmulationMode` rather than introducing parallel enums; `Float64Native` gates
+  whether `Float64Mode` is consulted. Includes a deterministic `ToCacheKeyString()`.
+- **`CapabilityProfiles`** - named presets keyed by CAPABILITY, not browser (`WebGPUFull` =
+  f16+subgroups, `WebGPUNoSubgroups` = a Firefox-class point, `WebGPUBaseline`, `WebGL2Baseline`,
+  `WasmDefault`), a name registry for `[PrecompiledKernel]` resolution, and `FromAccelerator()` to snapshot
+  a live device. WebGPU/WGSL is a W3C standard, so the emitted shader is browser-independent; profiles
+  partition only by the feature/limit set a device exposes.
+- **`ShaderCompiler.Generate(kernel, profile)`** - the static, device-free entry point. Returns a
+  `GeneratedKernel` (`Source` for WGSL/GLSL, `Binary` for Wasm, plus metadata + diagnostics). Drives the
+  SAME WGSL/GLSL/Wasm generators the runtime uses, fed by the profile instead of a live adapter.
+- **Verified** across all three browser backends: WGSL, GLSL, and Wasm generate offline; output is
+  deterministic (`(IL, profile) -> bytes` byte-identical across runs); the generate path is JS-runtime-free
+  (runs on the desktop). An audit confirmed the generators contain ZERO live-device capability reads (they
+  consume only the backend's profile-fed properties), locked by a cap-routing guard.
+- Probe: `dotnet run --project SpawnDev.ILGPU.DemoConsole -- shader-gen`.
+
+Backwards-compatible, additive only (no breaking changes) - hence the minor bump.
+
 ## 4.9.15 (2026-06-08) - `MemoryPressure.AllocateWithReclaim` pressure-aware allocation helper
 
 Bundles forks **SpawnDev.ILGPU.Fork 2.0.13** and **SpawnDev.ILGPU.Algorithms.Fork 2.0.13**.

@@ -32,6 +32,346 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             return (context, accelerator);
         }
 
+        // DECISIVE real-vs-harness test (2026-06-09, Geordi). The pure-Node repro
+        // (wasm-scan-repro/run-real-scan.mjs) catches a "delta -GROUP_SIZE" stale-boundary error in the
+        // single-group MULTI-TILE inclusive scan at WorkerCount=48 — but ONLY with PER-TILE-DISTINCT input
+        // (all-1s masks it: every tile sums to GROUP_SIZE, so a stale boundary read returns the right value
+        // by accident). This runs the SAME scenario on the REAL Wasm backend with its OWN oversubscribed
+        // accelerator (WorkerCount=48). If it FAILS here, the Node repro is REAL and the scan's cross-worker
+        // boundary read ([0]) is the residual large-sort race; if clean, the Node harness has a resume bug.
+        // Prior team's CrossGroupScanReuseDetector tested CROSS-GROUP reuse — a DIFFERENT path. No FO76.
+        // Gate for the PARKED Wasm-residual diagnostics below. They legitimately FAIL while the
+        // oversubscription/parking scan race is unfixed (Notes SESSION 11b), so they are gated to
+        // SKIP to keep the suite green. Flip to true to run them when working the fix. (Static, not
+        // const, so the gate isn't constant-folded into unreachable code.)
+        private static bool RunParkedWasmRaceDiagnostics = false;
+
+        [TestMethod(Timeout = 600000)]
+        public async Task Wasm_MultiTileScan_Oversub48_PerTileDistinct()
+        {
+            if (!RunParkedWasmRaceDiagnostics)
+                throw new UnsupportedTestException(
+                    "PARKED: Wasm oversubscription multi-tile scan race (cheap repro that localized " +
+                    "the bug to the yield/park path; Notes SESSION 11b). Set " +
+                    "RunParkedWasmRaceDiagnostics=true to run.");
+            var builder = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm();
+            using var ctx = builder.ToContext();
+            using var acc = await ctx.CreateWasmAcceleratorAsync(new WasmBackendOptions { WorkerCount = 48 });
+
+            const int groupSize = 256, n = 16384, iters = 120;
+            var input = new int[n];
+            for (int i = 0; i < n; i++) input[i] = 1 + ((i / groupSize) % 251);
+            var cpuRef = new int[n];
+            int a = 0;
+            for (int i = 0; i < n; i++) { a = unchecked(a + input[i]); cpuRef[i] = a; }
+
+            using var inBuf = acc.Allocate1D(input);
+            using var outBuf = acc.Allocate1D<int>(n);
+            var tempSize = acc.ComputeScanTempStorageSize<int>(n);
+            using var tempBuf = acc.Allocate1D<int>(tempSize);
+            var scan = acc.CreateScan<int, Stride1D.Dense, Stride1D.Dense,
+                global::ILGPU.Algorithms.ScanReduceOperations.AddInt32>(ScanKind.Inclusive);
+
+            int badRuns = 0, totalMism = 0, firstIter = -1;
+            // Full mismatch pattern of the FIRST bad iteration (idx, delta) — to discriminate
+            // a propagating leftBoundary-carry error (contiguous, all-same-delta, whole tail) from
+            // an occasional per-slot stale read (scattered, few, slot/tile-localized).
+            var firstBad = new System.Collections.Generic.List<(int idx, int delta)>();
+            for (int it = 0; it < iters; it++)
+            {
+                scan(acc.DefaultStream, inBuf.View, outBuf.View, tempBuf.View.AsContiguous());
+                await acc.SynchronizeAsync();
+                var r = await outBuf.CopyToHostAsync<int>();
+                int mism = 0;
+                for (int i = 0; i < n; i++)
+                    if (r[i] != cpuRef[i])
+                    {
+                        if (badRuns == 0) { if (mism == 0) firstIter = it; firstBad.Add((i, r[i] - cpuRef[i])); }
+                        mism++;
+                    }
+                if (mism > 0) { badRuns++; totalMism += mism; }
+            }
+            System.Console.WriteLine($"===MULTITILE48=== n={n} iters={iters} WorkerCount=48 badRuns={badRuns} totalMism={totalMism}");
+            if (badRuns > 0)
+            {
+                // Pattern analysis on the first bad iteration.
+                bool allSameDelta = firstBad.Count > 0;
+                int d0 = firstBad.Count > 0 ? firstBad[0].delta : 0;
+                bool contiguous = true;
+                var slots = new System.Collections.Generic.SortedSet<int>();
+                var tiles = new System.Collections.Generic.SortedSet<int>();
+                for (int k = 0; k < firstBad.Count; k++)
+                {
+                    if (firstBad[k].delta != d0) allSameDelta = false;
+                    if (k > 0 && firstBad[k].idx != firstBad[k - 1].idx + 1) contiguous = false;
+                    slots.Add(firstBad[k].idx % groupSize);
+                    tiles.Add(firstBad[k].idx / groupSize);
+                }
+                var sample = new System.Text.StringBuilder();
+                for (int k = 0; k < firstBad.Count && k < 16; k++)
+                    sample.Append($"[idx={firstBad[k].idx} tile={firstBad[k].idx / groupSize} slot={firstBad[k].idx % groupSize} d={firstBad[k].delta}] ");
+                int maxTail = firstBad.Count > 0 ? (n - firstBad[firstBad.Count - 1].idx) : 0;
+                throw new System.Exception(
+                    $"REAL-BACKEND multi-tile scan @WorkerCount=48 CORRUPTS: {badRuns}/{iters} runs, {totalMism} mismatches. " +
+                    $"FIRST-BAD-ITER {firstIter}: count={firstBad.Count} contiguous={contiguous} allSameDelta={allSameDelta}(d={d0}) " +
+                    $"distinctSlots={slots.Count} distinctTiles={tiles.Count} lastIdxTail={maxTail}. " +
+                    $"SAMPLE: {sample}");
+            }
+        }
+
+        // DISCRIMINATOR (2026-06-09, Geordi): is the multi-tile-scan stale-boundary corruption
+        // correlated with WORKER OVERSUBSCRIPTION (workers >> cores → fibers park/resume via the
+        // yield-escape path), or does it fire even at low worker counts (a steady-state barrier /
+        // kernel-logic bug)? Runs the identical per-tile-distinct inclusive scan at increasing
+        // WorkerCount and reports badRuns per count. If it's ~0 at <=cores and rises with
+        // oversubscription, the bug is in the fiber yield/resume save-restore, not the barrier
+        // visibility (whose fences read as seq_cst-correct). Throws with the full curve so the
+        // numbers land in the PMT error field regardless of outcome.
+        [TestMethod(Timeout = 600000)]
+        public async Task Wasm_MultiTileScan_WorkerCountSweep()
+        {
+            if (!RunParkedWasmRaceDiagnostics)
+                throw new UnsupportedTestException(
+                    "PARKED diagnostic: worker-count sweep that proved the scan race is " +
+                    "OVERSUBSCRIPTION-ONLY (clean <=cores, corrupts >cores; Notes SESSION 11b). " +
+                    "Set RunParkedWasmRaceDiagnostics=true to run.");
+            const int groupSize = 256, n = 16384, iters = 80;
+            var input = new int[n];
+            for (int i = 0; i < n; i++) input[i] = 1 + ((i / groupSize) % 251);
+            var cpuRef = new int[n];
+            int acc0 = 0;
+            for (int i = 0; i < n; i++) { acc0 = unchecked(acc0 + input[i]); cpuRef[i] = acc0; }
+
+            int[] workerCounts = { 4, 8, 12, 24, 36, 48 };
+            var report = new System.Text.StringBuilder();
+            foreach (int wc in workerCounts)
+            {
+                var builder = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm();
+                using var ctx = builder.ToContext();
+                using var acc = await ctx.CreateWasmAcceleratorAsync(new WasmBackendOptions { WorkerCount = wc });
+                using var inBuf = acc.Allocate1D(input);
+                using var outBuf = acc.Allocate1D<int>(n);
+                var tempSize = acc.ComputeScanTempStorageSize<int>(n);
+                using var tempBuf = acc.Allocate1D<int>(tempSize);
+                var scan = acc.CreateScan<int, Stride1D.Dense, Stride1D.Dense,
+                    global::ILGPU.Algorithms.ScanReduceOperations.AddInt32>(ScanKind.Inclusive);
+
+                int badRuns = 0, totalMism = 0;
+                for (int it = 0; it < iters; it++)
+                {
+                    scan(acc.DefaultStream, inBuf.View, outBuf.View, tempBuf.View.AsContiguous());
+                    await acc.SynchronizeAsync();
+                    var r = await outBuf.CopyToHostAsync<int>();
+                    int mism = 0;
+                    for (int i = 0; i < n; i++) if (r[i] != cpuRef[i]) mism++;
+                    if (mism > 0) { badRuns++; totalMism += mism; }
+                }
+                report.Append($"[WorkerCount={wc}: badRuns={badRuns}/{iters} totalMism={totalMism}] ");
+                System.Console.WriteLine($"===WCSWEEP=== WorkerCount={wc} badRuns={badRuns}/{iters} totalMism={totalMism}");
+            }
+            throw new System.Exception($"WORKER-COUNT SWEEP (cores≈12): {report}");
+        }
+
+        // RADIX-path oversubscription validation (2026-06-10, Geordi) for item 2 (Seven's
+        // WasmGroupExtensions no-boundaries ExclusiveScan/InclusiveScan). The two scan tests
+        // above exercise the multi-tile SCAN path; this exercises the RADIX path's in-kernel
+        // single-value GroupExtensions.ExclusiveScan (RadixSortKernel1) — the exact path item 2
+        // changes (it stops routing through ExclusiveScanWithBoundaries, dropping the cross-tile
+        // scanResults publication copy). Data = the RadixSortDescendingWithSentinels shape
+        // (~30% int.MinValue sentinels + tiny-range depth => heavy duplicates, multi-pass
+        // DescendingInt32 pairs) that historically tripped the residual ~1/7 full sweeps under
+        // accumulated load — here run at WorkerCount=48 (deliberate oversubscription on a ~12-core
+        // box) so it fires deterministically instead of waiting on full-sweep load.
+        //
+        // VALIDATION PROTOCOL (Geordi, Rule 4c — a test that cannot fail proves nothing):
+        //   (1) BASELINE (item 2 reverted) must report badRuns > 0 — proves the test detects the
+        //       residual at this oversubscription.
+        //   (2) WITH item 2 must report badRuns == 0 — the production closure.
+        // Verification is sort-algorithm-agnostic (no stability assumption) and LINQ-free
+        // (interpreted-WASM LINQ over large arrays hangs): descending-order violations +
+        // multiset histogram match + pair validity (keys[outValue]==outKey).
+        [TestMethod(Timeout = 600000)]
+        public async Task Wasm_RadixSortSentinels_Oversub48()
+        {
+            if (!RunParkedWasmRaceDiagnostics)
+                throw new UnsupportedTestException(
+                    "PARKED: Wasm oversubscription RADIX-sort validation for item 2 (the " +
+                    "WasmGroupExtensions no-boundaries ExclusiveScan fix). Set " +
+                    "RunParkedWasmRaceDiagnostics=true to run. Baseline must fire (badRuns>0); " +
+                    "with item 2 must reach badRuns==0.");
+
+            var builder = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm();
+            using var ctx = builder.ToContext();
+            using var acc = await ctx.CreateWasmAcceleratorAsync(new WasmBackendOptions { WorkerCount = 16 });
+
+            // Per-iter cost under 48-worker oversub is dominated by barrier parking (~fixed in n), so the
+            // residual's fire-chances scale with GROUPS x passes x iters. Maximize groups (large n), keep
+            // iters small to fit the 600s gate. 256K = 1024 groups x 256; 8 iters x 1024 groups x ~8 passes
+            // = ~65K in-kernel group-scans = plenty of independent chances to catch the store-vanish.
+            const int n = 262_144;          // 1024 groups x 256
+            const int depthRange = 64;      // tiny range => heavy duplicates (the residual trigger)
+            const int iters = 6;            // 16-worker oversub (1.3x cores): should complete fast; ladder up if it doesn't fire
+            const int sentinelBucket = depthRange; // histogram slot for int.MinValue
+
+            var rng = new Random(99);
+            var keys = new int[n];
+            var values = new int[n];
+            // Input multiset histogram (built once): buckets 0..depthRange-1 for depths, depthRange for sentinel.
+            var inHist = new int[depthRange + 1];
+            for (int i = 0; i < n; i++)
+            {
+                bool culled = rng.NextDouble() < 0.3;
+                if (culled) { keys[i] = int.MinValue; inHist[sentinelBucket]++; }
+                else { int d = rng.Next(0, depthRange); keys[i] = d; inHist[d]++; }
+                values[i] = i;
+            }
+
+            using var keysBuf = acc.Allocate1D<int>(n);
+            using var valuesBuf = acc.Allocate1D<int>(n);
+            var tempSize = acc.ComputeRadixSortPairsTempStorageSize<int, int, DescendingInt32>(n);
+            using var tempBuf = acc.Allocate1D<int>(tempSize);
+            var fullSort = acc.CreateRadixSortPairs<
+                int, Stride1D.Dense, int, Stride1D.Dense, DescendingInt32>();
+
+            int badRuns = 0, totalProblems = 0, firstBadIter = -1;
+            string firstBadDetail = "";
+            var outHist = new int[depthRange + 1];
+            for (int it = 0; it < iters; it++)
+            {
+                keysBuf.CopyFromCPU(keys);
+                valuesBuf.CopyFromCPU(values);
+                fullSort(acc.DefaultStream, keysBuf.View, valuesBuf.View, tempBuf.View.AsContiguous());
+                await acc.SynchronizeAsync();
+                var ok = await keysBuf.CopyToHostAsync<int>();
+                var ov = await valuesBuf.CopyToHostAsync<int>();
+
+                int orderViol = 0, pairErr = 0, multisetErr = 0;
+                int firstOrderIdx = -1, firstPairIdx = -1;
+                System.Array.Clear(outHist, 0, outHist.Length);
+                for (int i = 0; i < n; i++)
+                {
+                    // descending order
+                    if (i > 0 && ok[i] > ok[i - 1]) { if (orderViol == 0) firstOrderIdx = i; orderViol++; }
+                    // multiset bucket
+                    if (ok[i] == int.MinValue) outHist[sentinelBucket]++;
+                    else if (ok[i] >= 0 && ok[i] < depthRange) outHist[ok[i]]++;
+                    else multisetErr++; // out-of-domain key value = corruption
+                    // pair validity: the value must index an original element with the same key
+                    int origIdx = ov[i];
+                    if (origIdx < 0 || origIdx >= n || keys[origIdx] != ok[i])
+                    { if (pairErr == 0) firstPairIdx = i; pairErr++; }
+                }
+                for (int b = 0; b <= depthRange; b++) if (outHist[b] != inHist[b]) multisetErr++;
+
+                int problems = orderViol + pairErr + multisetErr;
+                if (problems > 0)
+                {
+                    if (badRuns == 0)
+                    {
+                        firstBadIter = it;
+                        firstBadDetail =
+                            $"orderViol={orderViol}(firstIdx={firstOrderIdx}) pairErr={pairErr}" +
+                            $"(firstIdx={firstPairIdx}) multisetErr={multisetErr}";
+                    }
+                    badRuns++; totalProblems += problems;
+                }
+            }
+
+            System.Console.WriteLine(
+                $"===RADIXSENT48=== n={n} iters={iters} WorkerCount=48 badRuns={badRuns} totalProblems={totalProblems}");
+            if (badRuns > 0)
+                throw new System.Exception(
+                    $"RADIX-SENTINELS @WorkerCount=48 CORRUPTS: {badRuns}/{iters} runs, {totalProblems} total problems. " +
+                    $"FIRST-BAD-ITER {firstBadIter}: {firstBadDetail}. " +
+                    $"(BASELINE expectation: fires; item-2 expectation: 0/{iters}.)");
+        }
+
+        // FAST in-kernel single-value ExclusiveScan validator (2026-06-10, Geordi) for item 2.
+        // The pairs-sort test above is ~24 dispatches/iter — too slow at high oversubscription. This
+        // isolates the EXACT primitive item 2 changes: the in-kernel single-value
+        // GroupExtensions.ExclusiveScan (-> WasmGroupExtensions, the same call RadixSortKernel1 uses
+        // for its per-group histogram scan). 4 scans/thread mirrors RadixSort's unrollFactor=4; all-1
+        // input => exclusive scan == Group.IdxX, so each group's segment must read 0..gs-1. ONE
+        // dispatch/iter => fast even at 48-worker oversub (like Seven's scan repro), so many iters
+        // reliably catch the per-group store-vanish. BASELINE (item 2 reverted) must fire (badRuns>0);
+        // with item 2 must reach 0.
+        static void OversubInKernelScanKernel(
+            Index1D index, ArrayView<int> output, SpecializedValue<int> groupSize)
+        {
+            var scanMem = SharedMemory.Allocate<int>(groupSize * 4);
+            for (int j = 0; j < 4; j++)
+                scanMem[Group.IdxX + Group.DimX * j] = 1;
+            Group.Barrier();
+            for (int j = 0; j < 4; j++)
+                scanMem[Group.IdxX + Group.DimX * j] =
+                    GroupExtensions.ExclusiveScan<int,
+                        global::ILGPU.Algorithms.ScanReduceOperations.AddInt32>(
+                        scanMem[Group.IdxX + Group.DimX * j]);
+            Group.Barrier();
+            int gid = Grid.IdxX * groupSize + Group.IdxX;
+            if (gid < output.Length)
+                output[gid] = scanMem[Group.IdxX]; // bucket-0 exclusive scan of all-1s == Group.IdxX
+        }
+
+        [TestMethod(Timeout = 600000)]
+        public async Task Wasm_InKernelExclusiveScan_Oversub()
+        {
+            if (!RunParkedWasmRaceDiagnostics)
+                throw new UnsupportedTestException(
+                    "PARKED: Wasm oversubscription in-kernel single-value ExclusiveScan validation for " +
+                    "item 2 (WasmGroupExtensions no-boundaries fix). Set RunParkedWasmRaceDiagnostics=true. " +
+                    "Baseline must fire (badRuns>0); with item 2 must reach 0.");
+
+            const int gs = 256;
+            const int numGroups = 64;        // 64 groups x 256 = 16384 (matches Seven's scan repro size)
+            const int total = gs * numGroups;
+            const int workerCount = 48;      // 4x oversub (Seven's proven trigger) — fast here: ONE dispatch/iter
+            const int iters = 60;
+
+            var builder = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm();
+            using var ctx = builder.ToContext();
+            using var acc = await ctx.CreateWasmAcceleratorAsync(
+                new WasmBackendOptions { WorkerCount = workerCount });
+
+            using var buf = acc.Allocate1D<int>(total);
+            var kernel = acc.LoadStreamKernel<Index1D, ArrayView<int>, SpecializedValue<int>>(
+                OversubInKernelScanKernel);
+
+            int badRuns = 0, totalMism = 0, firstBadIter = -1;
+            string firstBadDetail = "";
+            for (int it = 0; it < iters; it++)
+            {
+                kernel(new KernelConfig(numGroups, gs), (Index1D)total, buf.View, SpecializedValue.New(gs));
+                await acc.SynchronizeAsync();
+                var r = await buf.CopyToHostAsync<int>();
+                int mism = 0, firstIdx = -1;
+                for (int i = 0; i < total; i++)
+                {
+                    int expected = i % gs; // each group's segment must be 0..gs-1
+                    if (r[i] != expected) { if (mism == 0) firstIdx = i; mism++; }
+                }
+                if (mism > 0)
+                {
+                    if (badRuns == 0)
+                    {
+                        firstBadIter = it;
+                        firstBadDetail =
+                            $"firstIdx={firstIdx} group={firstIdx / gs} slot={firstIdx % gs} " +
+                            $"got={r[firstIdx]} expected={firstIdx % gs}";
+                    }
+                    badRuns++; totalMism += mism;
+                }
+            }
+            System.Console.WriteLine(
+                $"===INKERNELSCAN=== groups={numGroups} workers={workerCount} iters={iters} " +
+                $"badRuns={badRuns} totalMism={totalMism}");
+            if (badRuns > 0)
+                throw new System.Exception(
+                    $"IN-KERNEL ExclusiveScan @workers={workerCount} groups={numGroups} CORRUPTS: " +
+                    $"{badRuns}/{iters} runs, {totalMism} mismatches. FIRST-BAD-ITER {firstBadIter}: " +
+                    $"{firstBadDetail}. (BASELINE: fires; item-2: 0/{iters}.)");
+        }
+
         // Verifies the opt-in host-buffer race DETECTOR (WasmMemoryBuffer.DetectHostBufferRaces).
         // RunKernel registers the per-buffer in-flight intent SYNCHRONOUSLY at queue time, so a
         // synchronous host read on the same JS turn (no await between dispatch and read) always
@@ -663,6 +1003,10 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task RadixSortDescending2MTest() => await base.RadixSortDescending2MTest();
         [TestMethod(Timeout = 240000)]
         public new async Task RadixSortDescending4MTest() => await base.RadixSortDescending4MTest();
+        // Scan-in-context isolation under contention (2026-06-09, Geordi). Explicit Wasm override
+        // guarantees discovery + the 600s timeout for the 300-iteration high-trial loop.
+        [TestMethod(Timeout = 600000)]
+        public new async Task GlobalInclusiveScanHighTrialTest() => await base.GlobalInclusiveScanHighTrialTest();
         [TestMethod(Timeout = 240000)]
         public new async Task RadixSortAscending1_4MTest() => await base.RadixSortAscending1_4MTest();
 

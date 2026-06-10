@@ -1,0 +1,9 @@
+# Generated debug-instrumented kernels (rebuilt by the patcher scripts from
+# 00_kernel_1.wasm, which IS committed). Regenerate with:
+#   node patch-debug-ring.mjs      -> 00_kernel_1_dbg.wat/.wasm
+#   node patch-writer-stamps.mjs   -> 00_kernel_1_dbg2.wat/.wasm + sitemap.json
+00_kernel_1_dbg.wat
+00_kernel_1_dbg.wasm
+00_kernel_1_dbg2.wat
+00_kernel_1_dbg2.wasm
+sitemap.json

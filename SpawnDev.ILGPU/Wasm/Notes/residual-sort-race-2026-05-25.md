@@ -1,5 +1,43 @@
 # Residual Wasm large-sort race — investigation notes (2026-05-25/26, Tuvok)
 
+## ★★★★★★★ SESSION 11b (2026-06-09, Geordi) — RESIDUAL DEFINITIVELY LOCALIZED: OVERSUBSCRIPTION/PARKING-ONLY (not kernel, not steady-state barrier)
+
+**The SESSION-11 `ILGroupExtensions` barrier fix is correct for the 5 non-Wasm backends but DOES NOT touch the Wasm path** — `EnableWasmAlgorithms()` redirects group-scan to `WasmGroupExtensions` (`WasmAlgorithmContext.cs:89-144`, Redirect intrinsics). So the Wasm residual was NOT closed by it. Honest correction.
+
+**Decisive new data (cheap repro, NO FO76):** `WasmTests.Wasm_MultiTileScan_Oversub48_PerTileDistinct` (self-oversubscribing 48-worker inclusive scan, 118ms) + `Wasm_MultiTileScan_WorkerCountSweep`. The sweep (cores≈12):
+| WorkerCount | badRuns/80 |
+|---|---|
+| 4, 8, 12 (≤cores) | **0 / 0 / 0** |
+| 24, 36, 48 (>cores) | 7, 4, 1 |
+
+**Hard threshold at hardware concurrency. Clean at ≤cores, corrupts only when oversubscribed.** Failure signature (instrumented): a SINGLE thread reads a tile's `RightBoundary` (`scanResults[DimX-1]`) **stale by exactly one tile** for a window of consecutive tiles, then recovers; `allSameDelta=-256`, `distinctSlots=1`. The -256 is exact only because the test increments the per-tile value by 1 (all-1s masks it — every tile sums to GROUP_SIZE).
+
+**CONCLUSION — the residual is the YIELD-ESCAPE PARKING path, not the kernel or the steady-state barrier:**
+- Steady-state pure-spin barrier fences are seq_cst-correct (release fence after tid-loop writes `WasmBackend.cs:1026`, seq_cst arrival/gen RMW, acquire fence on waiter `:1295`). Static trace of `WasmGroupExtensions` scanResults reuse = protected by 2 phase barriers. Both "look correct" — and ARE, at ≤cores.
+- At >cores (or under FO76 starving a default pool) workers spin past `YIELD_SPIN_THRESHOLD`, PARK via JS `Atomics.wait`, wake via `env.notify`, and RESUME by re-entering the dispatcher. The corruption fires ONLY in this regime. This is the long-sought "load-correlated" trigger: load forces parking even at default worker count.
+- **Default config (WorkerCount ≤ cores) is SAFE** — `WasmAccelerator` defaults below cores; the bug needs forced parking.
+- Corrects the RESEARCH-INDEX "fix the race → enable wait/notify parking" payoff: PARKING is the broken thing, not the thing to enable.
+
+**OPEN (next):** pin the exact park→wake→resume visibility gap — JS `Atomics.wait`/`env.notify` (`WasmAccelerator.cs`) vs the dispatcher resume re-entry + its acquire fence (`WasmBackend.cs` RESUMED flow `:1058-1068`, acquire `:1295`). Either a mis-ordered fence on resume, or the genuine V8 linear-memory wait/notify ordering bug (chromium#490434403 family) — in which case the correct posture is keep default WorkerCount ≤cores + a resume-revalidation of barrier-published reads. Diagnostic tests `Wasm_MultiTileScan_*` are staged (they always throw) — gate/remove before any commit.
+
+## ★★★★★★ SESSION 11 (2026-06-09, Geordi) — ROOT CAUSE FOUND BY READING (no contention) + FIX [SUPERSEDED for Wasm by 11b above; valid for the other 5 backends]
+
+**TJ directive: solve it WITHOUT contention — read the synchronization code, find the ONE bug.** Done.
+
+**ROOT CAUSE: a missing `Group.Barrier()` — an unguarded write-after-read hazard on the REUSED scan/reduce shared-memory region across tile iterations.** In `ILGroupExtensions.InclusiveScanImplementation` (`ILGPU.Algorithms/IL/ILGroupExtensions.cs:134`) the shared region (`SharedMemory.Allocate<T>(2048)`, same alloca every call) is written `sharedMemory[LinearIndex]=value` (line 146) → barrier → first-thread serial scan → barrier (160) → returns the view. The caller `*ScanWithBoundaries` then reads `sharedMemory[0]`, `[Size-1]`/`[Size-2]`, `[LinearIndex]`/`[LinearIndex-1]` (lines 100-106 / 120-123) **after** that final barrier — with **NO barrier before the NEXT tile re-enters `InclusiveScanImplementation` and overwrites the same slots**.
+
+`ComputeTileScan` (`ScanExtensions.cs:388`) drives this loop: `Scan(k)` → read boundaries(k) → `output`(k) → `NextIteration` → `Scan(k+1)` (overwrites shared). A thread that laps ahead writes its tile-(k+1) value into a boundary slot a lagging peer is still reading for tile k → **wrong tile carry → the entire downstream region is shifted by a wrong offset (misplaced-but-VALID), with ±neighbor errors where adjacent-thread slots collide.** Exactly the residual signature.
+
+**Why Wasm-only / why it survived every prior fix / why ≥2 workers + large input:**
+- **SIMT backends (CUDA/OpenCL/CPU) MASK it** — lockstep warp execution keeps threads from lapping a full loop iteration between barriers. The **Wasm multi-worker backend is MIMD + preemptible** (real OS-thread workers that yield/park), so one worker descheduled right at the boundary read while another races ahead opens the window. Load/FO76 only WIDENS the window — it is not required; this is a real logic bug, not a timing/engine artifact.
+- **≥2 workers**: 1 worker = sequential tid loop, writes never overlap reads → clean. **Large input**: only a multi-TILE scan enters the reuse loop → single-tile (small) sorts never race → always passed. **Misplaced-valid, not garbage**: the values are real scan results with a wrong additive boundary.
+- Survived kernelId-fix, fiber save-asymmetry-fix, group-fence-fix, grow tests, dispatch-completion audit — **none added this barrier.** The group-fence "fix" (~50%→~14%) was a timing artifact, consistent with this being the true cause.
+- **Inclusive vs Exclusive:** `ExclusiveScanNextIteration` (`ILGroupExtensions.cs:176`) calls `Group.Broadcast` whose internal barrier ACCIDENTALLY closes the window → exclusive-scan radix variants were protected. `InclusiveScanNextIteration` (line 201) is pure arithmetic, no barrier. **The primary `CreateRadixSort` uses `ScanKind.Inclusive`** (`RadixSortExtensions.cs:1203-1207`) → unprotected → corrupted. That's why int keys-only descending sorts were the failing tests.
+
+**FIX (correct for ALL 6 backends, fixes the CLASS):** added `Group.Barrier()` at the ENTRY of `InclusiveScanImplementation` (before the shared write) and `AllReduce` (before its re-zeroing) — the two primitives that reuse a shared region and return a value read by all threads. The barrier guarantees no thread overwrites the region until every thread finished reading the previous tile's result. Deadlock-safe by construction: each primitive already executes 2 group barriers per call inside the same uniform loop without deadlocking → a 3rd at the same call site is equally uniform. Build green (0 errors). Placed at the shared region's OWNER so it covers inclusive, exclusive (via the shared `InclusiveScanImplementation` call at line 100), and any future reuse — removes the exclusive path's reliance on Broadcast-as-barrier.
+
+**VALIDATION STATUS:** correct-by-construction (a required barrier was missing). Regression check = a NORMAL all-backend PMT sweep (NOT a contention sweep) — pending TJ's go on resource timing. Residual-closure no longer needs FO76: if the reasoning holds the bug is structurally impossible post-fix.
+
 ## ★★★ SESSION 10 (2026-05-29 PM, Tuvok, lead) — engine-vs-pattern REPRO ran on real Chrome; barrier+fan-in read visibility is SOUND → boundary-read hypothesis REFUTED
 
 **This settles the decided Session-9 question.** Ran the approved repro on TJ's **actual Chrome
@@ -987,3 +1025,319 @@ contention. Points at the SCAN helper's cross-worker offset publication or the
 scan↔scatter phase boundary, not the group barrier and not memory ordering. Confirm with
 the throw-on-first repro's ROOT-displacement locations (group~i/256, localPos) before
 touching code. Do NOT add fences (Rule: find the logic race).
+
+## 2026-06-09 (Geordi, attempt #9): H8 (shared-mem alloca slot overlap) RULED OUT by direct measurement
+H8 was the last un-audited corpus suspect from attempt #8's handoff: "two distinct allocas
+colliding on an offset, OR fiber re-entry clobbering a live shared-mem slot." Audited it to ground.
+
+**Built an OFFLINE compile harness** (`SpawnDev.ILGPU.DemoConsole -- wasm-dump`,
+`WasmCompileDump.cs`): compiles the RadixSort kernels on the DESKTOP (no browser, no workers, no
+dispatch — `WasmAccelerator.Create` try/catches the JS lookup; `CreateRadixSort*` compiles eagerly
+via LoadKernel) with `WasmBackend.VerboseLogging=true`, captures the emitted `[Wasm-SharedMem]`
+alloca table, and flags any `GenerateCode(Alloca)` type+size FALLBACK aliasing or offset overlap.
+
+**Measured result (RadixSortKernel1, the barrier kernel, groupSize 256 / UnrollFactor 4):**
+- Exactly **2 distinct shared allocas**: `scanMemory` int[1024] @offset 0 (4096B); group-scan
+  scratch int[256] @offset 4096 (1024B). **Non-overlapping.**
+- **ZERO fallback matches** — every shared alloca resolves by its primary key `v_{Value.Id}` to a
+  distinct offset. The type+size fallback (the aliasing mechanism) never fires for these kernels.
+- The unrolled `GroupExtensions.ExclusiveScan` calls share ONE deduped scratch (int[256]), not
+  UnrollFactor copies. The "UnrollFactor inlined int[2048] scratches collide" sub-theory was WRONG.
+
+**Also ruled out by code reading this pass (same attempt):**
+- **Between-group shared zeroing race**: `zeroRegionSize = fenceSlot - sharedMemBase` covers the
+  FULL shared region + barrier slots (NOT under-counted), and the phase barrier gates EVERY phase
+  incl. the last, so worker-0's zeroing can't stomp a slow worker still in the final phase body.
+- **Per-thread scratch overflow**: each tid's scratch slot is owned by exactly one worker; an
+  undersized slot would corrupt the WorkerCount=1 path too — but that path is 4/4 clean.
+
+**Conclusion: the residual race is NOT a shared-memory alloca-layout bug.** H8 is dead. The standing
+strongest live lead remains the SCAN/BROADCAST cross-worker boundary publication (2026-05-25/26
+entries above: "wrong LEFT boundary" in ScanBroadcastIsolationTest), whose trigger is FULL-SWEEP
+cross-test accumulation, not within-test repetition.
+
+**Doc fix landed**: Wasm/CLAUDE.md said `MaxNumThreadsPerGroup=64`; the device actually sets 256
+(`WasmILGPUDevice.cs:68-69`, confirmed by the dump). The stale 64 had misled part of the H8 analysis.
+
+## 2026-06-09 (Geordi, cont.): the barrier kernel in a Wasm RadixSort is the COUNTER SCAN, not kernel1 — race is its multi-tile boundary carry
+Used the offline `wasm-dump` harness (now prints per-kernel info lines) to attribute shared
+allocas to specific kernels. For `CreateRadixSort<int,DescendingInt32>`, THREE kernels compile:
+- kernel1 (presort): `params=14, sharedMem=0, barriers=0, hasBarriers=False` — Wasm uses the
+  CPU-STYLE no-barrier `CPURadixSortKernel1` (single-thread-per-group; its int[UnrollFactor]
+  scanMemory/addMemory are NOT shared allocas here). **No barriers, no shared mem.**
+- **scan (of the counter): `params=20, sharedMem=5120, barriers=8, hasBarriers=True, helpers=1`**
+  — the ONLY barrier kernel (production numbers, reverted build). 5120 = scan workspace int[1024]
+  @0 (4096B) + scanResults int[256]@4096 (1024B), exactly. TWO named shared allocas, distinct
+  sizes (1024 vs 256), **no overlap, no fallback**. The 8 barriers = pre-loop Scan (3: two
+  InclusiveScanImpl barriers + one scanResults-copy barrier) + tile-loop body {NextIteration
+  Broadcast (2) + Scan (3)} = 3+5. (Broadcast value+tag slots log as `[Wasm-Broadcast]`, not
+  `[Wasm-SharedMem]`, and live in the helper.)
+- kernel2 (scatter): `params=27, sharedMem=0, barriers=0` — no barriers, no shared mem.
+
+**Proof the int[1024] alloca is the SCAN WORKSPACE (not the radix scanMemory):** a controlled
+probe changed `InclusiveScanImplementation`'s `Allocate<T>(1024)` → 2048; the dump's first alloca
+tracked 1024→2048 and NO separate int[1024] appeared. So the radix `scanMemory` is absent from
+every barrier kernel. (Probe reverted.)
+
+**`SingleGroupScanKernel` launches as `(1, MaxNumThreadsPerGroup)` = ONE group of 256 threads
+(`ScanExtensions.cs:516`).** So "multi-group sort fails" does NOT mean cross-group shared memory.
+A LARGE sort makes a LARGE counter array (UnrollFactor*numRadixGroups), which this single group
+scans in MANY TILES (`ComputeTileScan`, `ScanExtensions.cs:388-403`), carrying the running total
+across tiles via `groupScan.NextIteration` → `ExclusiveScanNextIteration` →
+`Group.Broadcast(currentValue, DimX-1)`. **The race is the multi-WORKER, multi-TILE boundary
+carry within one group.** Fits every survivor: needs ≥2 workers (1 worker = no cross-worker
+broadcast/barrier race); large input = many tiles = many boundary carries = more race windows;
+"contiguous runs shifted by an offset" = one tile's `leftBoundary` carried wrong.
+
+**Broadcast tag is useless tile-to-tile:** tag = linear group index = constant 0 for a single
+group, so it can't distinguish tile N's broadcast slot contents from tile N+1's. Correctness
+across tiles rests ENTIRELY on the phase barriers (broadcast barrier1/barrier2 + the scan's
+internal barriers). So the residual is either (a) V8 pure-spin PHASE-barrier linear-memory
+ordering under heavy yielding, or (b) a fiber state-save/restore gap on the MULTI-WORKER
+spin-yield path (single-worker also saves state every phase and is clean, so a plain state-save
+gap is excluded — it must be specific to the ≥2-worker yield/resume path under contention).
+
+**NEXT (needs full-sweep PMT + FO76 = TJ go):** instrument the SCAN kernel's per-tile
+`leftBoundary` carry — dump (tileIndex, leftBoundary, localBoundaries.RightBoundary, broadcast
+value) per tile to a buffer and compare a corrupted run's first wrong tile against the CPU
+oracle. ScanBroadcastIsolationTest is the fast within-test probe but is 0/300 scoped — the
+trigger is full-sweep cross-test accumulation, so the instrumented run must be the full sweep.
+
+## 2026-06-09 (Geordi): barrier MECHANISM cleared by pure-Node harness — bug is kernel logic, and wait/notify is NOT the V8 culprit
+Ran the existing pure-Node harness `<outer>\wasm-barrier-repro\run-scan-test.mjs` (hand-written
+scan-barrier MODEL, read-compute-write-barrier cycles; worker_threads + SAB; A/Bs spin vs wait32;
+no Chromium). Config 12 workers × 64 threads = 768, 150 phases, 4 rounds, oversubscribed on a
+12-core box:
+- **spin: PASS (0 violations / 4 rounds). wait32: PASS (0 violations / 4 rounds).**
+
+**Implications (evidence, not theory):**
+1. The barrier PATTERN itself is correct under BOTH spin and wait32, even oversubscribed with many
+   phases — matches `Research\01-wasm-memory-model-and-atomics.md` (the gen-barrier is correct by the
+   model). So the residual is NOT the barrier wait mechanism.
+2. **wait32 is NOT inherently broken on V8.** It passes a correct pattern in Node V8. So the
+   `wasm-waitnotify-still-races-2026-05-24.md` "V8 bug" verdict is very likely MIS-ATTRIBUTED — the
+   real-kernel wait/notify failures were the SAME kernel-protocol race, exposed worse by wait/notify
+   timing. This is the through-line: **fix the kernel-logic race → both barriers pass → wait/notify
+   viable → workers PARK instead of spin → the spin core-burn (the "rapes my PC" problem) is solved.**
+3. The model harness does NOT reproduce the bug because it does NOT model the buggy logic — the
+   multi-tile `ComputeTileScan` boundary carry via `Group.Broadcast`. **Next: extend the Node harness
+   to run the REAL generated scan kernel** (offline-compiled wasm + replicated single-group dispatch),
+   scan a large counter array, diff vs a JS prefix-sum oracle, oversubscribed — a cheap, controllable,
+   no-Chromium repro of the ACTUAL race. Then instrument per-tile leftBoundary to find the protocol gap.
+
+Full index of the corpus + reading order: `<repo>\SpawnDev.ILGPU\Wasm\RESEARCH-INDEX.md`.
+
+## 2026-06-09 (Geordi): REAL-kernel pure-Node repro BUILT — isolated scan kernel is CLEAN; redirect to pipeline/growth
+Built a pure-Node worker_threads harness (`<outer>\wasm-scan-repro\run-real-scan.mjs`) that runs the
+ACTUAL generated `SingleGroupScanKernel` (emitted offline via `DemoConsole -- scan-emit`; byte-identical
+to RadixSort's counter scan: sharedMem=5120, barriers=8, scratchPerThread=2376). Faithfully replicates
+WasmAccelerator's barrier dispatch: full memory layout, per-worker fiber ranges (`fibersPerWorker =
+ceil(256/W)`), the dispatcher arg list, and the spin-yield/park(`Atomics.wait`)/resume loop. No Chromium,
+no Blazor, no FO76 — controllable worker count.
+
+**VALIDATION GATE PASSED:** 1 worker, N=256 (1 tile) and N=512 (2 tiles, exercises the broadcast
+boundary carry) → correct inclusive scan. So the harness is a faithful replica (a layout/ABI bug would
+corrupt even 1-worker output). (One bug found+fixed during bring-up: `gridDimX` is the TOTAL extent
+`numGroups*groupSize`, NOT the group count — passing 1 trapped `remainder by zero` in `Grid.IdxX %
+(dimX/realGroupDimX)`, the documented 2D-group trap.)
+
+**RESULT — the isolated scan kernel does NOT reproduce the race:**
+| N (tiles) | workers | rounds | JS-yields | violations |
+|-----------|---------|--------|-----------|-----------|
+| 16384 (64) | 8 | 30 | — | 0 |
+| 16384 (64) | 16 (oversub) | 30 | — | 0 |
+| 65536 (256) | 24 (2× oversub) | 40 | 495,184 | 0 |
+| 16384 (64) | 48 (4× oversub) | 100 | 951,703 | 0 |
+| 262144 (1024) | 16 | 30 (~30K tile carries) | 933,306 | **0** |
+
+Heavy contention, the spin-yield/park/resume path hammered (~1M yields), oversubscribed past cores —
+**0 violations across all configs.** A ~1.6%/sort intra-scan bug would have fired hundreds of times.
+
+**CONCLUSION (honest correction of the 2026-06-09 earlier entry):** the scan kernel is the only BARRIER
+kernel in a Wasm RadixSort, but its INTRA-DISPATCH scan/broadcast logic is **CLEAN** — it is NOT the
+residual bug. The "localized to the scan kernel" claim is **withdrawn**: being the only barrier kernel ≠
+being the bug. The residual requires the radix PIPELINE context that this isolated single-kernel,
+fixed-memory harness does NOT exercise:
+1. **Cross-dispatch counter handoff** — kernel1 (non-barrier presort) writes `counter[]`, the scan reads
+   it, kernel2 (non-barrier scatter) reads the scanned counter — across SEPARATE Wasm dispatches on a
+   reused worker pool. (My 2026-06-08 cross-dispatch micro-repro cleared *postMessage SAB visibility*,
+   but not the real multi-kernel buffer handoff.)
+2. **Memory-growth propagation lag** — `wasm-sharedarraybuffer-growth.md`: host grows the SAB between
+   dispatches; a reused worker lags seeing the new buffer. My harness uses FIXED memory + fresh workers
+   per round → does not exercise growth. **This is now the leading suspect.**
+
+**NEXT:** extend the harness to (a) persistent workers across multiple dispatches with a `memory.grow`
+between them (the growth-lag scenario), and/or (b) the full kernel1→scan→kernel2 counter handoff. Tools:
+`DemoConsole -- scan-emit` (emit kernels), `<outer>\wasm-scan-repro\run-real-scan.mjs` (extend).
+
+## 2026-06-09 (Geordi): memory-GROWTH-LAG hypothesis ELIMINATED on the real scan kernel
+Extended the Node repro to `<outer>\wasm-scan-repro\run-persistent-scan.mjs`: PERSISTENT message-driven
+workers (faithful port of `WorkerPool.WasmBootstrapScript` — per-kernel module cache, re-instantiate on
+`memory.buffer` swap), and a host loop of VARYING-N scan dispatches that force the shared
+`WebAssembly.Memory` to `grow()` between dispatches (re-sending wasmBytes, exactly like WasmAccelerator
+clearing `_initializedWorkersByKernel`). Oversubscribed (W=16 on 12 cores).
+- **200 dispatches, 3 real grows, ~520K JS-yields, module re-instantiation on every grow → 0 violations.**
+
+**GROWTH-LAG IS ELIMINATED** (the corpus's leading-but-unconfirmed suspect, `wasm-sharedarraybuffer-growth.md`).
+And it confirms the first-principles objection: SHARED memory grows IN PLACE (existing instances see it),
+dispatches are SERIALIZED (`RunKernelAsync` awaits `_pendingWork`), so a grow NEVER happens while a worker
+is mid-flight — there is no lag window to race. The Gemini-conversation "post-grow handshake" remediation
+is **not needed** (no bug to fix there).
+
+(Harness note: a varying-N sequence that SHRINKS must zero the reused working region `[scratchBase, end)`
+per dispatch — else a smaller dispatch's fence/arrival slots land on a larger dispatch's stale scratch and
+the barrier DEADLOCKS. That is a harness-fidelity artifact, not the backend bug; the backend zeroes scratch
+between dispatches (fiber-refactor note #8). Worth a separate check that the backend zeroes the fence/arrival
+region when reusing cached memory across DIFFERENT-layout dispatches — kernel1/scan/kernel2 in one sort have
+different fenceSlots over the same buffer base.)
+
+## STATUS: cheap-reproducible suspect space is EXHAUSTED CLEAN
+Ruled out by cheap Node/offline repro (no Chromium, no FO76): barrier mechanism (spin AND wait32),
+isolated scan kernel (1024 tiles / 48 workers / ~1M yields), memory-growth-lag, H8 alloca overlap,
+cross-dispatch postMessage SAB visibility (attempt 8). Plus prior: kernelId collision (fixed), group-fence
+(no-op). **The residual lives in full-pipeline INTEGRATION that component repros don't capture** — the only
+remaining realistic suspects are the multi-kernel kernel1→scan→kernel2 counter handoff under the REAL
+host orchestration (8 passes, temp ping-pong) and/or the fence-region-reuse-across-different-layouts noted
+above. Next: either the full radix pipeline in Node (emit 3 kernels + replicate host orchestration) OR a
+single targeted INSTRUMENTED real-backend scoped+oversubscribed run (TJ-sanctioned "when we really need
+contention") to catch the first wrong value + the worker/phase state at that point.
+
+## 2026-06-09 (Geordi): FULL PMT sweep under sustained FO76 — CLEAN (3354/0/194), but STATISTICALLY MEANINGLESS
+TJ ran Fallout76 hard; I ran a FULL PMT sweep (`dotnet test PlaywrightMultiTest`, no filter). Phase A 31:32
+(513 CPU + 513 CUDA + 493 OpenCL + 1512 browser non-Wasm), then **Phase B Wasm lane: 515 tests isolated**
+under sustained contention. **Result: 3354 passed, 0 failed, 194 skipped.** The large RadixSort canaries
+(1.4M/2M/4M, HeavyDuplicate, Sentinels, RepeatedResort) AND `GlobalInclusiveScanHighTrial` all passed.
+
+**DO NOT read this as "fixed."** Per the statistical-discipline rule (this file, 2026-06-08 EOD: *"clean
+streaks under ~186 trials are nearly worthless — ONLY FAILURES are evidence"*): the residual is ~14%/sweep
+(group-fence-fixed rate). A clean sweep is the EXPECTED outcome ~86% of the time. Direct evidence it's still
+live: **yesterday's 4.9.15 full sweep CAUGHT it (1 fail = RadixSortDescending4M); today's didn't.** Classic
+intermittent. One clean run proves nothing.
+
+**CONCLUSION: the full-sweep + FO76 method is a DEAD END as a hunting tool** — ~35 min + a PC-rape per trial,
+~86% clean, so ~5-7 trials (~3 hrs FO76) to expect one hit, then no localization. Do NOT keep running full
+sweeps to hunt this. The disciplined path is the **full radix PIPELINE in Node** (kernel1→counter-scan→kernel2,
+oversubscribed, thousands of trials in a terminal, no Chromium/FO76) — the cheap component repros already
+cleared the scan/barrier/growth IN ISOLATION, so the bug is in the multi-kernel pipeline INTEGRATION +
+worker-pool/memory accumulation that only the full pipeline exercises. Building that repro next.
+
+**Useful asset found:** `RadixSortExtensions.cs:308` has a per-pass diagnostic hook (`counterView` = 4*numGroups
+bucket counts after each pass) — a cheap future path to verify the scan IN-PIPELINE on the real backend
+(capture pre-scan counter, compare scanned-counter vs CPU scan) if the Node pipeline repro proves too costly.
+
+## 2026-06-09 (Geordi): full-pipeline Node repro — FOUNDATION laid (`radix-emit`); building pass1→scan→pass2
+TJ: "find that tribble" + "do what you have to". The isolated scan was clean because it used all-1s input
+(NO counter handoff from pass1). The full pipeline's CROSS-KERNEL COUNTER HANDOFF (pass1 writes per-group
+bucket counts → scan reads/scans them → pass2 scatters using the scanned counter) is the untested suspect.
+Building a Node single-pass-pair repro of it.
+
+**`DemoConsole -- radix-emit`** (added) compiles `CreateRadixSort<int,Dense,AscendingInt32>` offline and
+dumps the 3 real kernels to `<outer>\wasm-radix-repro\`:
+- **kernel_1 (pass1):** params=14, userParams=2, **no barriers**, sharedMem=0 (presort, writes counter).
+- **kernel_2 (scan):** params=20, userParams=2, barriers=8, sharedMem=5120 (counter scan — ALREADY
+  replicated in `run-real-scan.mjs`).
+- **kernel_3 (pass2):** params=27, userParams=6, **no barriers**, sharedMem=0 (scatter via scanned counter).
+
+Per-pass dispatch sequence (`RadixSortExtensions.cs:1371-1434`, args are ALL ints+views, no structs):
+`init(counter,0) → pass1(input, counter, SpecializedValue<int>(groupDim), numVirtualGroups, paddedLen, bitIdx)
+→ inclusiveScan(counter→counter2, tempScan) → pass2(input, tempOut, counter2, numVirtualGroups, paddedLen, bitIdx)`.
+counter size = 4*numVirtualGroups (UnrollFactor=4). `paddedLen = DivRoundUp(N,groupDim)*groupDim`. pass1/pass2
+are NON-barrier → the simpler flat BuildWasmWorkerScript dispatch (no spin-yield), pass2 is `(gridDim,groupDim)`
+KernelConfig.
+
+**OPEN (next step):** the emitted `userParams` count (pass1=2, pass2=6) doesn't map 1:1 to the source kernel
+signatures (CPURadixSortKernel1 has 6 params) — need to resolve the EXACT runtime dispatch-arg marshalling
+(which path Wasm takes: CPU-path `CPUPass*KernelDelegate` @1248 vs GPU-path `Pass*KernelDelegate` @1330; SpecializedValue
+is baked at compile, so it's not a runtime arg) before the Node dispatch can be faithful. Validation gate (1 worker,
+small input → correct one-pass radix vs CPU reference) will catch any arg mistake. Tooling: `radix-emit` + extend
+`run-real-scan.mjs`'s dispatch into a 3-kernel pipeline harness (`run-radix-pipeline.mjs`).
+
+## 2026-06-09 (Geordi): BLOCKER CLEARED — real radix kernels pulled from the debug dump
+The debug dump folder is `D:\users\tj\Projects\SpawnDev.ILGPU\_dump\` (PERSISTENT for months; saved to memory
+`reference-spawndev-ilgpu-wasm-debug-dump-folder`). Today's full sweep dumped 1694 Wasm kernels to
+`_dump\2026-06-09_16-15-44\wasm\`. The keys-only RadixSort trio compiles CONSECUTIVELY — identified by `.txt`
+metadata: `017_kernel_3` (pass1, params=14 no-barrier), `018_kernel_4` (scan, params=20 barriers=8 sharedMem=5120
+helpers=1), `019_kernel_5` (pass2, params=27 no-barrier). Copied to `<outer>\wasm-radix-repro\realkernels\`
+(pass1.wasm / scan.wasm / pass2.wasm). **pass1's wasm — which lazy-compiles on dispatch and could NOT be emitted
+offline — is now in hand. The Node-pipeline blocker is GONE.**
+
+Signatures (parsed from the binaries, `realkernels\sig.mjs`): kernel func total params = pass1 **14** (12 system
++ 2 user), scan **20** (12+8 = 2 dense views×4), pass2 **27** (12+15 = 3 views×4 + 3 int scalars numGroups/
+paddedLen/shift). scan+pass2 map cleanly to the documented dispatch. **OPEN (the one remaining piece): pass1's
+2 user wasm-params don't match a presort that writes a 4·numGroups counter from a 1D input — so pass1 is either
+SPECIALIZED (N/shift baked → the dumped pass1 is valid only for THAT test's N) or the keys-only path uses a
+different presort kernel. Disassemble pass1's body (`wasm2wat --enable-threads pass1.wasm`) to read its actual
+args + any baked constants BEFORE wiring the Node dispatch — a wrong arg map gives false repro results.** Once
+resolved: build `run-radix-pipeline.mjs` (pass1 non-barrier dispatch → scan barrier dispatch [reuse run-real-scan
+logic] → pass2 non-barrier dispatch, with the counter handoff + persistent workers + oversubscription),
+validation-gate on a 1-worker small sort vs CPU reference, then hammer the handoff.
+
+## 2026-06-09 (Geordi): pass1 dispatch RESOLVED — it's STRUCT-PACKED (the crux of the Node pipeline build)
+Disassembled `realkernels\pass1.wasm` (`wasm2wat --enable-threads`, wasm2wat at
+`C:\Users\TJ\AppData\Roaming\npm\wasm2wat.ps1`). The exported `kernel` func (;24;) signature:
+`(param i32×12 [system] i64 i32) (result i32)`. So pass1's **2 user params = an i64 scalar + an i32 POINTER
+to a serialized struct** — the body does `local.get 13; i64.load` (field@0), `+8 i64.load` (field@8),
+`+24 i32.load` (field@24). This is the **struct-with-view serialization pattern** (Wasm CLAUDE.md: "CLR layout
+≠ IR layout; WasmParamInfo.StructFields + FlattenCLRStruct"): pass1 takes a packed struct {input view, counter
+view, scalars} by pointer, NOT flat view args. (scan + pass2 ARE flat-view: scan=2 dense views, pass2=3 views
++ 3 int scalars — those replicate easily.)
+
+**So the Node pipeline's one hard piece = faithfully serializing pass1's param struct in IR layout + patching
+the view NativePtrs to wasm offsets, then passing (i64 scalar, structPtr).** Reference: `WasmAccelerator.cs`
+struct serialization (FlattenCLRStruct / StructFields, NativePtr patching set-to-offset-then-restore-0). The
+1-worker-small-sort validation gate catches any layout mistake (iterate until output == CPU reference, exactly
+how the scan harness's gridDimX bug was caught). This is bounded, careful work — do it as a focused build, not
+rushed. Everything is staged: `realkernels\{pass1,scan,pass2}.wasm` + `sig.mjs` + the dispatch sequence/args
+documented above. Next session starts here.
+
+## 2026-06-09 (Geordi): ONE new finding — all-1s input MASKS the boundary race (use per-tile-distinct). Real-vs-artifact UNRESOLVED.
+**Keep this; it's the only non-redundant thing from a session that otherwise re-tread prior work (re-added the
+ca20808 broadcast tag; nearly re-ran the lines 30-41 oversubscription tests — DON'T).**
+
+**Finding:** every previous "isolated scan is clean" result (including this session's first Node runs) used
+ALL-1s input. That CANNOT detect a tile-boundary race: every tile of 1s sums to GROUP_SIZE(256), so a stale
+boundary read from the wrong tile returns the right value by accident. With PER-TILE-DISTINCT input
+(`input[i] = 1 + (floor(i/256) % 251)`, adjacent tiles differ by 1 so tile sums differ by 256), a stale carry
+becomes a VISIBLE `delta = -256` block displacement — the exact "block displacement by k" production signature.
+
+**Pure-Node repro (`<outer>\wasm-scan-repro\run-real-scan.mjs`, per-tile-distinct + int32 CPU ref):** the REAL
+emitted SingleGroupScanKernel, single-group MULTI-TILE carry, fires at HEAVY oversubscription:
+- 1 worker: 0 (cross-worker). 16 workers: 0 (barely oversub). **48 workers: ~3% rounds (6/200), delta -256.**
+  64 workers / 256 tiles: more. The constant slot for ~12% at 50 rounds was a LUCKY STREAK (real rate ~3%).
+- A per-INSTANCE broadcast tag (vs ca20808's constant group-index tag) did NOT fix it → it's NOT `[1]` (the
+  Group.Broadcast). In the scan-only repro that leaves `[0]` (the scan's internal cross-worker boundary read,
+  `scanResults[DimX-1]`), NOT `[2]` (the radix line-747 direct read, which isn't in a pure scan).
+
+**THE CONTRADICTION (unresolved — do NOT spend money re-deriving; resolve deliberately):** lines 30-41 already
+showed 48-worker 4× oversubscription on the production yield-park barrier = ~6M reads, 0 stale → "barrier
+visibility REFUTED." That was a SYNTHETIC barrier test AND tested CROSS-GROUP reuse — NOT the single-group
+multi-tile scan carry with per-tile-distinct values. So either (a) my Node harness's hand-ported
+spin-yield/resume loop has a bug (artifact), or (b) the real multi-tile scan carry genuinely races where the
+synthetic test didn't look. **The single decisive test:** run the REAL Wasm backend scan, per-tile-distinct
+input, WorkerCount=48, ~120 iters, on the PMT Wasm lane (no FO76 needed). Staged as
+`WasmTests.Wasm_MultiTileScan_Oversub48_PerTileDistinct` (reverted from the tree pending budget — TJ pays for
+PMT runs out of grocery money; get an explicit go before running it). If it fails → repro real, fix `[0]`;
+if clean → Node harness artifact, distrust the Node repro.
+
+## 2026-06-09 (Geordi) — DECISIVE: bug is REAL on the real backend; reuse-guard barrier RULED OUT.
+1. **Repro VALIDATED on the REAL Wasm backend** (not a Node-harness artifact): new
+   `WasmTests.Wasm_MultiTileScan_Oversub48_PerTileDistinct` (its own WorkerCount=48 accelerator,
+   per-tile-distinct input, 120 iters) FAILED on the PMT Wasm lane: **6/120 runs, delta -256, tile
+   boundary** — same signature as the Node repro. The pure-Node `run-real-scan.mjs` (per-tile-distinct,
+   48 workers) is therefore a TRUE, cheap, validated repro of the residual large-sort race. Use it.
+2. **Reuse-guard barrier on `scanResults` = RULED OUT.** Hypothesis (from a research-agent audit): the
+   scan's `scanResults` shared slot lacks the publish+reuse-guard barrier pair that `Group.Broadcast` and
+   `Warp.Shuffle` carry. Added `Group.Barrier()` after the boundary reads in BOTH
+   `WasmGroupExtensions.InclusiveScanWithBoundaries` + `ExclusiveScanWithBoundaries` (kernel barriers
+   8 -> 10, confirmed in the re-emitted wasm). Node repro STILL FAILS 5/200, identical delta -256.
+   REVERTED (adds 2 barriers/scan of perf cost, fixes nothing). The strict barrier structure was already
+   covered by the next tile's A+B workspace barriers + max-one-phase-lag, exactly as the agent's caveat
+   predicted.
+3. **Therefore the residual is NOT a missing sync POINT** — it survives extra barriers. It is an
+   **integer-tile (GROUP_SIZE=256) phase/fiber-state SKEW**: under heavy yielding one tid ends up one
+   tile behind when it reads/writes shared scan state (or the loop-carried `leftBoundary` accumulator is
+   restored stale across a barrier yield). Matches the two open CLAUDE.md suspects: "V8 pure-spin
+   linear-memory ordering under heavy yielding, OR a kernel-side fiber state-save gap." Next: audit the
+   fiber save/restore of loop-carried locals (`leftBoundary`, loop `i`, `_stateLocal`) across the
+   tile-loop barrier yield in the emitted kernel; instrument the Node repro to see if `leftBoundary` is
+   restored one tile stale. NO new PMT runs needed — the Node repro is the iterate loop.

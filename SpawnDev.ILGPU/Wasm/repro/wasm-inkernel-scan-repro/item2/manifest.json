@@ -1,0 +1,6 @@
+{
+  "maxGroupSize": 256,
+  "kernels": [
+    { "index": 0, "name": "kernel_1", "wasm": "00_kernel_1.wasm", "bytes": 23045, "info": "Kernel params=16 (userParams=1), locals=114, code=20343b, helpers=1, sharedMem=8192, barriers=14, hasBarriers=True, dynSharedElemSize=0, scratchPerThread=2656" }
+  ]
+}

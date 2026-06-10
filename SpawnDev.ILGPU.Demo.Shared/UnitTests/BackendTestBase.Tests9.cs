@@ -154,6 +154,55 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         });
 
         /// <summary>
+        /// HIGH-TRIAL inclusive scan stress (2026-06-09, Geordi). Runs a large multi-tile scan
+        /// MANY times with REUSED buffers + scan delegate (the real RadixSort reuse pattern), to
+        /// catch the ~1.6% residual race in the SCAN dispatch specifically. The isolated scan kernel
+        /// is CLEAN in a pure-Node repro (1024 tiles / 48 workers / ~1M yields, 0 fails) — so if THIS
+        /// fails under real contention (TJ's Fallout76), the difference is the REAL worker pool / V8 /
+        /// memory, isolating the bug to the scan-in-context. If this stays clean while the RadixSort
+        /// canaries fail under the same contention, the scan is NOT the culprit (=> kernel1/kernel2/
+        /// handoff). Run under contention: PMT_FILTER=GlobalInclusiveScanHighTrial.
+        /// </summary>
+        [TestMethod(Timeout = 600000)]
+        public async Task GlobalInclusiveScanHighTrialTest() => await RunTest(async accelerator =>
+        {
+            const int n = 16384;       // 64 tiles at groupDim=256 — many cross-tile boundary carries
+            const int iterations = 300;
+            var input = new int[n];
+            for (int i = 0; i < n; i++) input[i] = 1; // all-1s => output[i] == i+1 (trivial CPU oracle)
+
+            using var inputBuf = accelerator.Allocate1D(input);
+            using var outputBuf = accelerator.Allocate1D<int>(n);
+            var tempSize = accelerator.ComputeScanTempStorageSize<int>(n);
+            using var tempBuf = accelerator.Allocate1D<int>(tempSize);
+            var scan = accelerator.CreateScan<int, Stride1D.Dense, Stride1D.Dense, AddInt32>(
+                ScanKind.Inclusive);
+
+            int badRuns = 0, totalMismatch = 0, firstBadIter = -1, firstBadIdx = -1, firstBadGot = 0;
+            for (int it = 0; it < iterations; it++)
+            {
+                scan(accelerator.DefaultStream, inputBuf.View, outputBuf.View, tempBuf.View.AsContiguous());
+                await accelerator.SynchronizeAsync();
+                var result = await outputBuf.CopyToHostAsync<int>();
+                int mism = 0;
+                for (int i = 0; i < n; i++)
+                {
+                    if (result[i] != i + 1)
+                    {
+                        if (mism == 0 && badRuns == 0) { firstBadIter = it; firstBadIdx = i; firstBadGot = result[i]; }
+                        mism++;
+                    }
+                }
+                if (mism > 0) { badRuns++; totalMismatch += mism; }
+            }
+            Console.WriteLine($"===SCANHIGHTRIAL=== n={n} iters={iterations} badRuns={badRuns} totalMismatch={totalMismatch}");
+            if (badRuns > 0)
+                throw new Exception($"GlobalInclusiveScanHighTrial: {badRuns}/{iterations} runs corrupt, " +
+                    $"{totalMismatch} total mismatches. First @iter {firstBadIter} idx {firstBadIdx}: got {firstBadGot}, expected {firstBadIdx + 1}. " +
+                    $"=> the SCAN dispatch corrupts under contention (scan-in-context is the culprit).");
+        });
+
+        /// <summary>
         /// Inclusive scan at the EXACT counter array threshold: 4096 (single-tile) vs 4160 (multi-tile).
         /// Counter array = numVirtualGroups * 4. With gridDim=16, groupDim=256:
         ///   n=262144 → numVG=1024 → counter=4096 → scan numIterPerGroup=1 (PASS)
