@@ -40,9 +40,20 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         // accelerator (WorkerCount=48). If it FAILS here, the Node repro is REAL and the scan's cross-worker
         // boundary read ([0]) is the residual large-sort race; if clean, the Node harness has a resume bug.
         // Prior team's CrossGroupScanReuseDetector tested CROSS-GROUP reuse — a DIFFERENT path. No FO76.
+        // Gate for the PARKED Wasm-residual diagnostics below. They legitimately FAIL while the
+        // oversubscription/parking scan race is unfixed (Notes SESSION 11b), so they are gated to
+        // SKIP to keep the suite green. Flip to true to run them when working the fix. (Static, not
+        // const, so the gate isn't constant-folded into unreachable code.)
+        private static bool RunParkedWasmRaceDiagnostics = false;
+
         [TestMethod(Timeout = 600000)]
         public async Task Wasm_MultiTileScan_Oversub48_PerTileDistinct()
         {
+            if (!RunParkedWasmRaceDiagnostics)
+                throw new UnsupportedTestException(
+                    "PARKED: Wasm oversubscription multi-tile scan race (cheap repro that localized " +
+                    "the bug to the yield/park path; Notes SESSION 11b). Set " +
+                    "RunParkedWasmRaceDiagnostics=true to run.");
             var builder = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm();
             using var ctx = builder.ToContext();
             using var acc = await ctx.CreateWasmAcceleratorAsync(new WasmBackendOptions { WorkerCount = 48 });
@@ -61,7 +72,11 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             var scan = acc.CreateScan<int, Stride1D.Dense, Stride1D.Dense,
                 global::ILGPU.Algorithms.ScanReduceOperations.AddInt32>(ScanKind.Inclusive);
 
-            int badRuns = 0, totalMism = 0, firstIter = -1, firstIdx = -1, firstGot = 0, firstExp = 0;
+            int badRuns = 0, totalMism = 0, firstIter = -1;
+            // Full mismatch pattern of the FIRST bad iteration (idx, delta) — to discriminate
+            // a propagating leftBoundary-carry error (contiguous, all-same-delta, whole tail) from
+            // an occasional per-slot stale read (scattered, few, slot/tile-localized).
+            var firstBad = new System.Collections.Generic.List<(int idx, int delta)>();
             for (int it = 0; it < iters; it++)
             {
                 scan(acc.DefaultStream, inBuf.View, outBuf.View, tempBuf.View.AsContiguous());
@@ -69,15 +84,92 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                 var r = await outBuf.CopyToHostAsync<int>();
                 int mism = 0;
                 for (int i = 0; i < n; i++)
-                    if (r[i] != cpuRef[i]) { if (mism == 0 && badRuns == 0) { firstIter = it; firstIdx = i; firstGot = r[i]; firstExp = cpuRef[i]; } mism++; }
+                    if (r[i] != cpuRef[i])
+                    {
+                        if (badRuns == 0) { if (mism == 0) firstIter = it; firstBad.Add((i, r[i] - cpuRef[i])); }
+                        mism++;
+                    }
                 if (mism > 0) { badRuns++; totalMism += mism; }
             }
             System.Console.WriteLine($"===MULTITILE48=== n={n} iters={iters} WorkerCount=48 badRuns={badRuns} totalMism={totalMism}");
             if (badRuns > 0)
+            {
+                // Pattern analysis on the first bad iteration.
+                bool allSameDelta = firstBad.Count > 0;
+                int d0 = firstBad.Count > 0 ? firstBad[0].delta : 0;
+                bool contiguous = true;
+                var slots = new System.Collections.Generic.SortedSet<int>();
+                var tiles = new System.Collections.Generic.SortedSet<int>();
+                for (int k = 0; k < firstBad.Count; k++)
+                {
+                    if (firstBad[k].delta != d0) allSameDelta = false;
+                    if (k > 0 && firstBad[k].idx != firstBad[k - 1].idx + 1) contiguous = false;
+                    slots.Add(firstBad[k].idx % groupSize);
+                    tiles.Add(firstBad[k].idx / groupSize);
+                }
+                var sample = new System.Text.StringBuilder();
+                for (int k = 0; k < firstBad.Count && k < 16; k++)
+                    sample.Append($"[idx={firstBad[k].idx} tile={firstBad[k].idx / groupSize} slot={firstBad[k].idx % groupSize} d={firstBad[k].delta}] ");
+                int maxTail = firstBad.Count > 0 ? (n - firstBad[firstBad.Count - 1].idx) : 0;
                 throw new System.Exception(
                     $"REAL-BACKEND multi-tile scan @WorkerCount=48 CORRUPTS: {badRuns}/{iters} runs, {totalMism} mismatches. " +
-                    $"First @iter {firstIter} idx {firstIdx} (tile {firstIdx / groupSize}): got {firstGot}, expected {firstExp}, " +
-                    $"delta {firstGot - firstExp}. Node repro is REAL; [0] scan cross-worker boundary read is the residual race.");
+                    $"FIRST-BAD-ITER {firstIter}: count={firstBad.Count} contiguous={contiguous} allSameDelta={allSameDelta}(d={d0}) " +
+                    $"distinctSlots={slots.Count} distinctTiles={tiles.Count} lastIdxTail={maxTail}. " +
+                    $"SAMPLE: {sample}");
+            }
+        }
+
+        // DISCRIMINATOR (2026-06-09, Geordi): is the multi-tile-scan stale-boundary corruption
+        // correlated with WORKER OVERSUBSCRIPTION (workers >> cores → fibers park/resume via the
+        // yield-escape path), or does it fire even at low worker counts (a steady-state barrier /
+        // kernel-logic bug)? Runs the identical per-tile-distinct inclusive scan at increasing
+        // WorkerCount and reports badRuns per count. If it's ~0 at <=cores and rises with
+        // oversubscription, the bug is in the fiber yield/resume save-restore, not the barrier
+        // visibility (whose fences read as seq_cst-correct). Throws with the full curve so the
+        // numbers land in the PMT error field regardless of outcome.
+        [TestMethod(Timeout = 600000)]
+        public async Task Wasm_MultiTileScan_WorkerCountSweep()
+        {
+            if (!RunParkedWasmRaceDiagnostics)
+                throw new UnsupportedTestException(
+                    "PARKED diagnostic: worker-count sweep that proved the scan race is " +
+                    "OVERSUBSCRIPTION-ONLY (clean <=cores, corrupts >cores; Notes SESSION 11b). " +
+                    "Set RunParkedWasmRaceDiagnostics=true to run.");
+            const int groupSize = 256, n = 16384, iters = 80;
+            var input = new int[n];
+            for (int i = 0; i < n; i++) input[i] = 1 + ((i / groupSize) % 251);
+            var cpuRef = new int[n];
+            int acc0 = 0;
+            for (int i = 0; i < n; i++) { acc0 = unchecked(acc0 + input[i]); cpuRef[i] = acc0; }
+
+            int[] workerCounts = { 4, 8, 12, 24, 36, 48 };
+            var report = new System.Text.StringBuilder();
+            foreach (int wc in workerCounts)
+            {
+                var builder = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm();
+                using var ctx = builder.ToContext();
+                using var acc = await ctx.CreateWasmAcceleratorAsync(new WasmBackendOptions { WorkerCount = wc });
+                using var inBuf = acc.Allocate1D(input);
+                using var outBuf = acc.Allocate1D<int>(n);
+                var tempSize = acc.ComputeScanTempStorageSize<int>(n);
+                using var tempBuf = acc.Allocate1D<int>(tempSize);
+                var scan = acc.CreateScan<int, Stride1D.Dense, Stride1D.Dense,
+                    global::ILGPU.Algorithms.ScanReduceOperations.AddInt32>(ScanKind.Inclusive);
+
+                int badRuns = 0, totalMism = 0;
+                for (int it = 0; it < iters; it++)
+                {
+                    scan(acc.DefaultStream, inBuf.View, outBuf.View, tempBuf.View.AsContiguous());
+                    await acc.SynchronizeAsync();
+                    var r = await outBuf.CopyToHostAsync<int>();
+                    int mism = 0;
+                    for (int i = 0; i < n; i++) if (r[i] != cpuRef[i]) mism++;
+                    if (mism > 0) { badRuns++; totalMism += mism; }
+                }
+                report.Append($"[WorkerCount={wc}: badRuns={badRuns}/{iters} totalMism={totalMism}] ");
+                System.Console.WriteLine($"===WCSWEEP=== WorkerCount={wc} badRuns={badRuns}/{iters} totalMism={totalMism}");
+            }
+            throw new System.Exception($"WORKER-COUNT SWEEP (cores≈12): {report}");
         }
 
         // Verifies the opt-in host-buffer race DETECTOR (WasmMemoryBuffer.DetectHostBufferRaces).

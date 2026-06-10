@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html>
+<head><title>Wasm Barrier Repro - Browser</title></head>
+<body>
+<h2>Wasm Barrier Repro (Browser Web Workers)</h2>
+<div>
+    Workers: <input id="workers" type="number" value="4" min="2" max="16" style="width:60px">
+    Phases: <input id="phases" type="number" value="1000" min="1" style="width:80px">
+    Rounds: <input id="rounds" type="number" value="5" min="1" style="width:60px">
+    <button id="run" onclick="runTest()">Run Test</button>
+</div>
+<pre id="output" style="font-family:monospace;white-space:pre-wrap;margin-top:10px;"></pre>
+<script>
+const log = (msg) => { document.getElementById('output').textContent += msg + '\n'; };
+
+async function runTest() {
+    const btn = document.getElementById('run');
+    btn.disabled = true;
+    document.getElementById('output').textContent = '';
+
+    const WORKERS = parseInt(document.getElementById('workers').value);
+    const PHASES = parseInt(document.getElementById('phases').value);
+    const ROUNDS = parseInt(document.getElementById('rounds').value);
+    const MEM_SIZE = 16 + WORKERS * 4 + 8;
+    const PAGES = Math.max(1, Math.ceil(MEM_SIZE / 65536));
+
+    log(`Barrier Test: ${WORKERS} workers, ${PHASES} phases, ${ROUNDS} rounds`);
+    log('='.repeat(60));
+
+    let wasmBytes;
+    try {
+        const resp = await fetch('barrier-test.wasm');
+        wasmBytes = await resp.arrayBuffer();
+    } catch (e) {
+        log('ERROR: Could not fetch barrier-test.wasm: ' + e);
+        btn.disabled = false;
+        return;
+    }
+
+    if (typeof SharedArrayBuffer === 'undefined') {
+        log('ERROR: SharedArrayBuffer not available. Need COOP/COEP headers.');
+        btn.disabled = false;
+        return;
+    }
+
+    for (const mode of ['spin', 'wait32']) {
+        const useWait32 = mode === 'wait32' ? 1 : 0;
+        let totalViolations = 0;
+
+        for (let round = 0; round < ROUNDS; round++) {
+            const memory = new WebAssembly.Memory({ initial: PAGES, maximum: PAGES, shared: true });
+            const view = new Int32Array(memory.buffer);
+            view.fill(0);
+
+            const violationIdx = (16 + WORKERS * 4) >> 2;
+
+            const workers = [];
+            const promises = [];
+
+            for (let i = 0; i < WORKERS; i++) {
+                const w = new Worker('barrier-worker.js');
+                workers.push(w);
+                promises.push(new Promise((resolve, reject) => {
+                    w.onmessage = (e) => resolve(e.data);
+                    w.onerror = (e) => reject(e);
+                }));
+                w.postMessage({ wasmBytes, memory, workerIdx: i, workerCount: WORKERS, numPhases: PHASES, useWait32 });
+            }
+
+            await Promise.all(promises);
+            for (const w of workers) w.terminate();
+
+            const violations = Atomics.load(view, violationIdx);
+            totalViolations += violations;
+            if (violations > 0) {
+                log(`  ${mode} round ${round + 1}: ${violations} violations`);
+            }
+        }
+
+        const status = totalViolations === 0 ? 'PASS' : 'FAIL';
+        log(`${mode.padEnd(8)}: ${status} (${totalViolations} violations across ${ROUNDS} rounds of ${PHASES} phases)`);
+    }
+
+    log('\nDone.');
+    btn.disabled = false;
+}
+</script>
+</body>
+</html>

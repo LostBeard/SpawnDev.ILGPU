@@ -1,5 +1,43 @@
 # Residual Wasm large-sort race — investigation notes (2026-05-25/26, Tuvok)
 
+## ★★★★★★★ SESSION 11b (2026-06-09, Geordi) — RESIDUAL DEFINITIVELY LOCALIZED: OVERSUBSCRIPTION/PARKING-ONLY (not kernel, not steady-state barrier)
+
+**The SESSION-11 `ILGroupExtensions` barrier fix is correct for the 5 non-Wasm backends but DOES NOT touch the Wasm path** — `EnableWasmAlgorithms()` redirects group-scan to `WasmGroupExtensions` (`WasmAlgorithmContext.cs:89-144`, Redirect intrinsics). So the Wasm residual was NOT closed by it. Honest correction.
+
+**Decisive new data (cheap repro, NO FO76):** `WasmTests.Wasm_MultiTileScan_Oversub48_PerTileDistinct` (self-oversubscribing 48-worker inclusive scan, 118ms) + `Wasm_MultiTileScan_WorkerCountSweep`. The sweep (cores≈12):
+| WorkerCount | badRuns/80 |
+|---|---|
+| 4, 8, 12 (≤cores) | **0 / 0 / 0** |
+| 24, 36, 48 (>cores) | 7, 4, 1 |
+
+**Hard threshold at hardware concurrency. Clean at ≤cores, corrupts only when oversubscribed.** Failure signature (instrumented): a SINGLE thread reads a tile's `RightBoundary` (`scanResults[DimX-1]`) **stale by exactly one tile** for a window of consecutive tiles, then recovers; `allSameDelta=-256`, `distinctSlots=1`. The -256 is exact only because the test increments the per-tile value by 1 (all-1s masks it — every tile sums to GROUP_SIZE).
+
+**CONCLUSION — the residual is the YIELD-ESCAPE PARKING path, not the kernel or the steady-state barrier:**
+- Steady-state pure-spin barrier fences are seq_cst-correct (release fence after tid-loop writes `WasmBackend.cs:1026`, seq_cst arrival/gen RMW, acquire fence on waiter `:1295`). Static trace of `WasmGroupExtensions` scanResults reuse = protected by 2 phase barriers. Both "look correct" — and ARE, at ≤cores.
+- At >cores (or under FO76 starving a default pool) workers spin past `YIELD_SPIN_THRESHOLD`, PARK via JS `Atomics.wait`, wake via `env.notify`, and RESUME by re-entering the dispatcher. The corruption fires ONLY in this regime. This is the long-sought "load-correlated" trigger: load forces parking even at default worker count.
+- **Default config (WorkerCount ≤ cores) is SAFE** — `WasmAccelerator` defaults below cores; the bug needs forced parking.
+- Corrects the RESEARCH-INDEX "fix the race → enable wait/notify parking" payoff: PARKING is the broken thing, not the thing to enable.
+
+**OPEN (next):** pin the exact park→wake→resume visibility gap — JS `Atomics.wait`/`env.notify` (`WasmAccelerator.cs`) vs the dispatcher resume re-entry + its acquire fence (`WasmBackend.cs` RESUMED flow `:1058-1068`, acquire `:1295`). Either a mis-ordered fence on resume, or the genuine V8 linear-memory wait/notify ordering bug (chromium#490434403 family) — in which case the correct posture is keep default WorkerCount ≤cores + a resume-revalidation of barrier-published reads. Diagnostic tests `Wasm_MultiTileScan_*` are staged (they always throw) — gate/remove before any commit.
+
+## ★★★★★★ SESSION 11 (2026-06-09, Geordi) — ROOT CAUSE FOUND BY READING (no contention) + FIX [SUPERSEDED for Wasm by 11b above; valid for the other 5 backends]
+
+**TJ directive: solve it WITHOUT contention — read the synchronization code, find the ONE bug.** Done.
+
+**ROOT CAUSE: a missing `Group.Barrier()` — an unguarded write-after-read hazard on the REUSED scan/reduce shared-memory region across tile iterations.** In `ILGroupExtensions.InclusiveScanImplementation` (`ILGPU.Algorithms/IL/ILGroupExtensions.cs:134`) the shared region (`SharedMemory.Allocate<T>(2048)`, same alloca every call) is written `sharedMemory[LinearIndex]=value` (line 146) → barrier → first-thread serial scan → barrier (160) → returns the view. The caller `*ScanWithBoundaries` then reads `sharedMemory[0]`, `[Size-1]`/`[Size-2]`, `[LinearIndex]`/`[LinearIndex-1]` (lines 100-106 / 120-123) **after** that final barrier — with **NO barrier before the NEXT tile re-enters `InclusiveScanImplementation` and overwrites the same slots**.
+
+`ComputeTileScan` (`ScanExtensions.cs:388`) drives this loop: `Scan(k)` → read boundaries(k) → `output`(k) → `NextIteration` → `Scan(k+1)` (overwrites shared). A thread that laps ahead writes its tile-(k+1) value into a boundary slot a lagging peer is still reading for tile k → **wrong tile carry → the entire downstream region is shifted by a wrong offset (misplaced-but-VALID), with ±neighbor errors where adjacent-thread slots collide.** Exactly the residual signature.
+
+**Why Wasm-only / why it survived every prior fix / why ≥2 workers + large input:**
+- **SIMT backends (CUDA/OpenCL/CPU) MASK it** — lockstep warp execution keeps threads from lapping a full loop iteration between barriers. The **Wasm multi-worker backend is MIMD + preemptible** (real OS-thread workers that yield/park), so one worker descheduled right at the boundary read while another races ahead opens the window. Load/FO76 only WIDENS the window — it is not required; this is a real logic bug, not a timing/engine artifact.
+- **≥2 workers**: 1 worker = sequential tid loop, writes never overlap reads → clean. **Large input**: only a multi-TILE scan enters the reuse loop → single-tile (small) sorts never race → always passed. **Misplaced-valid, not garbage**: the values are real scan results with a wrong additive boundary.
+- Survived kernelId-fix, fiber save-asymmetry-fix, group-fence-fix, grow tests, dispatch-completion audit — **none added this barrier.** The group-fence "fix" (~50%→~14%) was a timing artifact, consistent with this being the true cause.
+- **Inclusive vs Exclusive:** `ExclusiveScanNextIteration` (`ILGroupExtensions.cs:176`) calls `Group.Broadcast` whose internal barrier ACCIDENTALLY closes the window → exclusive-scan radix variants were protected. `InclusiveScanNextIteration` (line 201) is pure arithmetic, no barrier. **The primary `CreateRadixSort` uses `ScanKind.Inclusive`** (`RadixSortExtensions.cs:1203-1207`) → unprotected → corrupted. That's why int keys-only descending sorts were the failing tests.
+
+**FIX (correct for ALL 6 backends, fixes the CLASS):** added `Group.Barrier()` at the ENTRY of `InclusiveScanImplementation` (before the shared write) and `AllReduce` (before its re-zeroing) — the two primitives that reuse a shared region and return a value read by all threads. The barrier guarantees no thread overwrites the region until every thread finished reading the previous tile's result. Deadlock-safe by construction: each primitive already executes 2 group barriers per call inside the same uniform loop without deadlocking → a 3rd at the same call site is equally uniform. Build green (0 errors). Placed at the shared region's OWNER so it covers inclusive, exclusive (via the shared `InclusiveScanImplementation` call at line 100), and any future reuse — removes the exclusive path's reliance on Broadcast-as-barrier.
+
+**VALIDATION STATUS:** correct-by-construction (a required barrier was missing). Regression check = a NORMAL all-backend PMT sweep (NOT a contention sweep) — pending TJ's go on resource timing. Residual-closure no longer needs FO76: if the reasoning holds the bug is structurally impossible post-fix.
+
 ## ★★★ SESSION 10 (2026-05-29 PM, Tuvok, lead) — engine-vs-pattern REPRO ran on real Chrome; barrier+fan-in read visibility is SOUND → boundary-read hypothesis REFUTED
 
 **This settles the decided Session-9 question.** Ran the approved repro on TJ's **actual Chrome

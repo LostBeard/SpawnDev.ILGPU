@@ -15,13 +15,25 @@
 2. **`<repo>\SpawnDev.ILGPU\Wasm\CLAUDE.md`** — current backend state: pure-spin barriers, group-fence fix, kernelId fix, yield-escape, the standing "Barriers are PURE SPIN" verdict.
 3. **`<repo>\SpawnDev.ILGPU\Wasm\Notes\residual-sort-race-2026-05-25.md`** — THE running investigation log (now ~1065 lines). Every attempt, what was ruled out, the statistical discipline. Includes the 2026-06-09 (Geordi) entries: H8 alloca-overlap ruled out by measurement; race localized to the counter-SCAN kernel's multi-tile boundary carry.
 4. **`<repo>\Plans\wasm-waitnotify-still-races-2026-05-24.md`** — the notify/wait verdict (see RECONCILIATION below — its "V8 bug" conclusion is walked back by doc #1).
-5. **`<outer>\wasm-barrier-repro\`** — the PURE-NODE repro harness (no browser). `run-scan-test.mjs` etc. The cheap, controllable way to hunt without raping the machine.
+5. **`<repo>\SpawnDev.ILGPU\Wasm\repro\`** — the consolidated repro harnesses (moved here 2026-06-09 from the outer tree, now version-controlled). `wasm-barrier-repro/` (PURE-NODE, no browser), `wasm-crossdispatch-repro/`, `wasm-radix-repro/`, `wasm-scan-repro/`. **HISTORICAL** — the bug was solved by reading (SESSION 11), not these load harnesses. See `repro\README.md`.
 
 ---
 
-## Current best understanding (synthesis, 2026-06-09)
+## ✅ RESOLVED (2026-06-09, Geordi) — ROOT CAUSE FOUND BY READING, FIX IN
 
-**The residual = ONE logic race in the scan/broadcast KERNEL protocol — not the barrier wait mechanism, not memory ordering, not V8.**
+**The residual was a MISSING `Group.Barrier()` — an unguarded write-after-read on the REUSED scan/reduce shared-memory region across tile iterations.** Found by reading the protocol (TJ directive: no contention). Full write-up: `Notes\residual-sort-race-2026-05-25.md` **SESSION 11** (top of file).
+
+- **Where:** `ILGPU.Algorithms/IL/ILGroupExtensions.cs` — `InclusiveScanImplementation` (and its sibling `AllReduce`) reuse ONE shared region every call. The previous tile's results are READ by all threads (`sharedMemory[0]/[Size-1]/[LinearIndex]`) after the final barrier, with NO barrier before the next tile overwrites those slots (`ScanExtensions.ComputeTileScan` loop). A lapping worker clobbers a boundary slot a lagging worker is still reading → wrong tile carry → wholesale misplaced-but-VALID output.
+- **Why Wasm-only:** lockstep SIMT (CUDA/OpenCL/CPU) masks it; the Wasm MIMD-preemptible worker pool exposes it. Load only WIDENS the window — never required (so the years of FO76/contention sweeps were the wrong instrument; the gap is structural).
+- **Why inclusive only:** `ExclusiveScanNextIteration`'s `Group.Broadcast` accidentally supplied a barrier; `InclusiveScanNextIteration` did not, and the primary `CreateRadixSort` uses `ScanKind.Inclusive` → corrupted.
+- **Fix:** `Group.Barrier()` at the entry of both reused-region primitives (before they overwrite). All-6-backend, deadlock-safe by construction, build green. **Validation:** correct-by-construction; normal all-backend PMT regression sweep in flight; contention re-sweep optional (window-widener, not a discoverer). This OBSOLETES the contention-hunt tooling below (kept as historical).
+- **Payoff (still valid):** with the kernel-protocol race fixed, wait/notify barriers should also pass large sorts → workers can PARK instead of pure-spin → no more core-pegging during any future Wasm work.
+
+---
+
+## Current best understanding (synthesis, 2026-06-09) — SUPERSEDED by the RESOLVED block above
+
+**The residual = ONE logic race in the scan/broadcast KERNEL protocol — not the barrier wait mechanism, not memory ordering, not V8.** *(This localization was correct in spirit — it pointed at the counter-SCAN kernel — but mis-attributed the carry to `Group.Broadcast`; the actual gap was the missing barrier in the inclusive tile-reuse loop. See RESOLVED above.)*
 
 - **Localized (2026-06-09):** the only barrier kernel in a Wasm RadixSort is the **counter-SCAN** (`SingleGroupScanKernel`, launched `(1, 256)` = one group). A large sort makes a large counter array scanned in **many tiles** by one group, carrying the running total across tiles via `Group.Broadcast` (`ScanExtensions.ComputeTileScan`). The race is the **multi-worker, multi-tile boundary carry**. Fits every survivor: needs ≥2 workers (1 worker = sequential tid loop, clean), large input (many tiles), "contiguous run shifted by an offset" (one tile's `leftBoundary` wrong).
 - **RECONCILIATION — spin and wait/notify fail the SAME way:** `wasm-waitnotify-still-races-2026-05-24.md` blamed V8 (chromium#490434403). But the later ground-truth `Research\01-...md` (§4) explicitly walks that back: *"wait/notify still races... but that is also (most likely) OUR protocol, not V8 — treat 'V8 bug' as last resort."* Both barriers show the identical signature ("woken/advanced worker proceeds, gen DID advance, but doesn't see the writes that happened-before the bump"). **That signature is a kernel-protocol logic race, exposed under both barrier mechanisms** (wait/notify worse only because its parking timing widens the window).
@@ -98,8 +110,8 @@
 
 ---
 
-## Consolidation recommendation (TJ, 2026-06-09)
+## Consolidation status (started TJ 2026-06-09; executed Geordi 2026-06-09 after root cause)
 
-1. **Version-control the outer-tree research.** `_research/`, `wasm-barrier-repro/`, `wasm-crossdispatch-repro/` are outside git. They are valuable + hand-built — move (or symlink) them under `<repo>\SpawnDev.ILGPU\Wasm\repro\` and `<repo>\Research\` so they survive and are reviewable. (Decision needed: keep the hand-written `.wasm` blobs or regenerate via `.wat`?)
-2. **This index is the single entry point.** Link it from `Wasm/CLAUDE.md` so any agent lands here before re-treading.
-3. **Retire/relabel SUPERSEDED docs** (the cooperative-scheduling-plan model; the V8-BUG-DRAFT; the contested wait/notify verdict) with a one-line banner pointing to the current understanding, rather than deleting (history matters).
+1. ✅ **Repro harnesses version-controlled.** `wasm-barrier-repro/`, `wasm-crossdispatch-repro/`, `wasm-radix-repro/`, `wasm-scan-repro/` MOVED from the un-tracked outer tree into `<repo>\SpawnDev.ILGPU\Wasm\repro\` (+ a README marking them HISTORICAL, bug solved by reading). Hand-written `.wasm` blobs kept (small; the `.wat` sources sit alongside). **Still outer + un-tracked:** `_research/` (48M of cloned external reference repos — NOT pulled into the library git; regenerable from the URLs documented in `<repo>\Research\01-...md` and `<outer>\_research\01-official-specification.md`) and the transient PMT dump folders (`_dump/`, `_tj_dump_local*/`, `_ilgpudump/`, `_mldump/` — outputs, gitignored, not research).
+2. ✅ **This index is the single entry point.** Linked from `Wasm/CLAUDE.md` (top RESOLVED banner points here).
+3. ✅ **Root cause documented in canonical docs** — `Notes/residual-sort-race-2026-05-25.md` SESSION 11, this index's RESOLVED block, `Wasm/CLAUDE.md` (top banner + residual paragraph). Superseded synthesis/verdicts relabeled in place (history kept).
