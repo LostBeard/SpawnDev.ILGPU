@@ -45,6 +45,15 @@ namespace ILGPU.Algorithms.IL
             int warpIdx = Warp.WarpIdx;
             int numWarps = IntrinsicMath.DivRoundUp(Group.DimX, Warp.WarpSize);
 
+            // Same reused-shared-region write-after-read hazard as
+            // InclusiveScanImplementation: warpResults is reused across multi-tile
+            // reductions (ComputeTileRightBoundary). All threads read warpResults[0] as the
+            // return value (line below: `return warpResults[0];`) with NO barrier before the
+            // next call re-zeros slot 0. Barrier on entry so a lapping thread cannot overwrite
+            // slot 0 while a lagging peer still reads the previous tile's result.
+            // (MIMD-exposed on Wasm, SIMT-masked on CUDA/OpenCL/CPU.)
+            Group.Barrier();
+
             if (Group.IsFirstThread)
             {
                 for (int i = 0; i < numWarps; i++)
@@ -143,6 +152,23 @@ namespace ILGPU.Algorithms.IL
             Debug.Assert(
                 Group.Dimension.Size <= MaxNumThreads,
                 "Invalid group/warp size");
+
+            // Multi-tile reuse hazard (write-after-read on shared memory). This region is
+            // reused on every tile of a multi-iteration scan (ComputeTileScan). The previous
+            // tile's results are read by all threads (sharedMemory[0], [Size-1/Size-2],
+            // [LinearIndex], [LinearIndex-1]) in *WithBoundaries AFTER the final barrier
+            // below, with NO barrier before the next tile re-enters here and overwrites the
+            // same slots. A thread that laps ahead clobbers a boundary slot a lagging peer is
+            // still reading -> wrong tile carry -> wholesale misplaced-but-valid output.
+            // Lockstep SIMT backends (CUDA/OpenCL/CPU) mask this; the Wasm multi-worker (MIMD,
+            // preemptible) backend exposes it as the residual large-sort corruption. This
+            // entry barrier makes the reuse safe by construction: no thread overwrites the
+            // region until every thread has finished reading the previous tile's results.
+            // (ExclusiveScanNextIteration happened to mask this via Group.Broadcast's barrier;
+            // InclusiveScanNextIteration does not, which is why ScanKind.Inclusive radix sorts
+            // corrupted. Fixing it at the shared region's owner covers all scan variants.)
+            Group.Barrier();
+
             sharedMemory[Group.LinearIndex] = value;
             Group.Barrier();
 
