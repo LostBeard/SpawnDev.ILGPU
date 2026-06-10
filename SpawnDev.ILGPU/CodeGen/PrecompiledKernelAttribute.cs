@@ -11,8 +11,8 @@ namespace SpawnDev.ILGPU;
 /// load path can use it instead of transpiling (Layer 3).
 ///
 /// Apply multiple times for multiple (backend, profile) targets. <see cref="Profile"/> names a
-/// preset registered in <see cref="CapabilityProfiles"/> (e.g. "WebGPU-f16-subgroups",
-/// "WasmDefault") or a project-defined profile.
+/// preset registered in <see cref="CapabilityProfiles"/> (e.g. "WebGPU-Dekker-Subgroups-NativeF16",
+/// "Wasm-NativeF64-Subgroups") or a project-defined profile.
 ///
 /// Purely declarative - it has NO runtime effect on its own; precompilation is opt-in via the
 /// <c>&lt;SpawnDevPrecompileShaders&gt;</c> csproj flag, and a cache miss always falls back to

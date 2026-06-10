@@ -18,15 +18,25 @@ namespace SpawnDev.ILGPU;
 /// </summary>
 public static class CapabilityProfiles
 {
-    // WebGPU presets are named by CAPABILITY, not browser - the profile keys on what the
-    // adapter exposes, never on Chrome vs Firefox. WebGPU/WGSL is a W3C standard, so the
-    // emitted shader is the same target across browsers; what differs is the FEATURE/LIMIT
-    // set (notably `subgroups` - Chrome shipped it ahead of Firefox - and `shader-f16`
-    // availability, plus limits like maxStorageBuffersPerShaderStage = 10 on Chrome vs the
-    // spec floor of 8). Two browsers exposing the same caps share a profile (and an
-    // artifact); a device lacking a cap is simply a different point in this space and the
-    // exact-match cache falls back to runtime generation. Use FromAccelerator() to snapshot
-    // a real device (Chrome, Firefox, or anything else) rather than guessing.
+    // PROFILES ARE KEYED BY CAPABILITY, NOT BROWSER. WebGPU/WGSL is a W3C standard, so the
+    // emitted shader is the same target across browsers; what differs is the feature/limit set.
+    // Two browsers exposing the same caps share a profile (and an artifact); a device lacking a
+    // cap is a different point in this space and the exact-match cache falls back to runtime
+    // generation. Use FromAccelerator() to snapshot a real device rather than guessing.
+    //
+    // NAMING CONVENTION: "{Backend}-{f64-strategy}[-Subgroups][-NativeF16]", with the tokens
+    // ordered by codegen IMPACT (most surprising-if-wrong first):
+    //   1. f64-strategy (ALWAYS present): the f64 path is the highest-impact axis - it changes
+    //      both the emitted shader AND the numeric result. Emulated => the F64EmulationMode name
+    //      ("Dekker", "Ozaki", or "noF64" for Disabled); native => "NativeF64".
+    //   2. "Subgroups": present only when the profile has subgroup ops (native intrinsics vs the
+    //      shared-memory fallback - a real Chrome-vs-Firefox split).
+    //   3. "NativeF16": present only when native `shader-f16` is used. Its ABSENCE means EMULATED
+    //      f16, NOT "no f16" - every backend supports f16 (emulated losslessly where not native),
+    //      so emulated is the unmarked default and only the native path is called out.
+    // The name is a HUMAN LABEL only; it is NOT part of the cache key (ToCacheKeyString hashes the
+    // full field set), so it never needs to encode every field - just the headline axes. i64-native
+    // and numeric limits (threads/bindings/warp) are intentionally not in the name.
 
     /// <summary>
     /// WebGPU with BOTH native <c>shader-f16</c> AND <c>subgroups</c> (a modern Chrome-class
@@ -36,7 +46,7 @@ public static class CapabilityProfiles
     public static readonly CapabilityProfile WebGPUFull = new()
     {
         Backend = AcceleratorType.WebGPU,
-        Name = "WebGPU-f16-subgroups",
+        Name = "WebGPU-Dekker-Subgroups-NativeF16",
         Float16Native = true,
         Float64Native = false,
         Float64Mode = F64EmulationMode.Dekker,
@@ -56,7 +66,7 @@ public static class CapabilityProfiles
     public static readonly CapabilityProfile WebGPUNoSubgroups = new()
     {
         Backend = AcceleratorType.WebGPU,
-        Name = "WebGPU-f16-noSubgroups",
+        Name = "WebGPU-Dekker-NativeF16",
         Float16Native = true,
         Float64Native = false,
         Float64Mode = F64EmulationMode.Dekker,
@@ -76,7 +86,7 @@ public static class CapabilityProfiles
     public static readonly CapabilityProfile WebGPUBaseline = new()
     {
         Backend = AcceleratorType.WebGPU,
-        Name = "WebGPU-baseline",
+        Name = "WebGPU-Dekker",
         Float16Native = false,
         Float64Native = false,
         Float64Mode = F64EmulationMode.Dekker,
@@ -92,7 +102,7 @@ public static class CapabilityProfiles
     public static readonly CapabilityProfile WebGL2Baseline = new()
     {
         Backend = AcceleratorType.WebGL,
-        Name = "WebGL2-Baseline",
+        Name = "WebGL2-Dekker",
         Float16Native = false,
         Float64Native = false,
         Float64Mode = F64EmulationMode.Dekker,
@@ -111,7 +121,7 @@ public static class CapabilityProfiles
     public static readonly CapabilityProfile WasmDefault = new()
     {
         Backend = AcceleratorType.Wasm,
-        Name = "WasmDefault",
+        Name = "Wasm-NativeF64-Subgroups",
         Float16Native = false,
         Float64Native = true,
         Float64Mode = F64EmulationMode.Disabled, // ignored (native), set explicit for clarity

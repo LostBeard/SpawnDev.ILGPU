@@ -5,6 +5,7 @@
   <Project Path="SpawnDev.ILGPU.Demo.Shared/SpawnDev.ILGPU.Demo.Shared.csproj" />
   <Project Path="SpawnDev.ILGPU.Demo/SpawnDev.ILGPU.Demo.csproj" />
   <Project Path="SpawnDev.ILGPU.DemoConsole/SpawnDev.ILGPU.DemoConsole.csproj" Id="e5c2f28d-9872-4d07-ae4b-3ecb1b4a1f4a" />
+  <Project Path="SpawnDev.ILGPU.Precompiler/SpawnDev.ILGPU.Precompiler.csproj" />
   <Project Path="SpawnDev.ILGPU.WpfDemo/SpawnDev.ILGPU.WpfDemo.csproj" />
   <Project Path="SpawnDev.ILGPU/SpawnDev.ILGPU.csproj" Id="21af58b2-0004-41c4-bb4e-3265e99632e6" />
   <Project Path="SpawnDev.ILGPU.P2P/SpawnDev.ILGPU.P2P.csproj" />

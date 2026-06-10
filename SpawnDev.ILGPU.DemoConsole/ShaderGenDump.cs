@@ -23,9 +23,9 @@ internal static class ShaderGenDump
 
         foreach (var profile in new[]
         {
-            CapabilityProfiles.WebGPUFull,          // f16 + subgroups (Chrome-class)
-            CapabilityProfiles.WebGPUNoSubgroups,   // f16, no subgroups (Firefox-class)
-            CapabilityProfiles.WebGPUBaseline,      // no f16, no subgroups (broadest)
+            CapabilityProfiles.WebGPUFull,          // Dekker f64, subgroups, native f16 (Chrome-class)
+            CapabilityProfiles.WebGPUNoSubgroups,   // Dekker f64, native f16, no subgroups (Firefox-class)
+            CapabilityProfiles.WebGPUBaseline,      // Dekker f64, emulated f16, no subgroups (broadest)
         })
         {
             Console.WriteLine($"=== Generate WGSL for profile '{profile.Name}' " +

@@ -22,6 +22,18 @@ try
     if (args.Length > 0 && args[0] == "radix-emit")
         return await WasmScanEmit.Run(args.Length > 1 ? args[1] : @"D:\users\tj\Projects\SpawnDev.ILGPU\wasm-radix-repro", radix: true);
 
+    // Emit the in-kernel single-value ExclusiveScan exerciser (item-2 validation harness).
+    if (args.Length > 0 && args[0] == "inkernel-emit")
+        return await WasmInKernelScanEmit.Run(args.Length > 1 ? args[1] : @"D:\users\tj\Projects\SpawnDev.ILGPU\SpawnDev.ILGPU\SpawnDev.ILGPU\Wasm\repro\wasm-inkernel-scan-repro");
+
+    // Precompiled-shaders Layer 2 serialization round-trip (sidecar + manifest). No device/browser.
+    if (args.Length > 0 && args[0] == "shader-roundtrip")
+        return ShaderArtifactRoundTrip.Run();
+
+    // Precompiled-shaders Layer 2 end-to-end: build-time precompile -> emit -> runtime load. No browser.
+    if (args.Length > 0 && args[0] == "precompile-e2e")
+        return ShaderArtifactRoundTrip.RunPrecompileE2E();
+
     var services = new ServiceCollection();
     services.AddPlatformCrypto();
     services.AddSingleton<SpawnDev.WebTorrent.WebTorrentClient>();

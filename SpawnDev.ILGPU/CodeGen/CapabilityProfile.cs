@@ -45,8 +45,10 @@ public sealed record CapabilityProfile
 
     /// <summary>
     /// Human-readable profile name, used in artifact paths and diagnostics
-    /// (e.g. "Chrome-WebGPU-f16", "WebGL2-Baseline", "WasmDefault"). Not semantically
-    /// significant - the generators branch on the capability fields, not the name.
+    /// (e.g. "WebGPU-Dekker-Subgroups-NativeF16", "WebGL2-Dekker", "Wasm-NativeF64-Subgroups").
+    /// Not semantically significant - the generators branch on the capability fields, not the
+    /// name, and <see cref="ToCacheKeyString"/> does NOT include it. See the naming convention
+    /// on <c>CapabilityProfiles</c>.
     /// </summary>
     public string Name { get; init; } = "";
 

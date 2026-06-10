@@ -131,6 +131,13 @@ public static class ShaderArtifactCache
     public static bool Contains(MethodInfo method, CapabilityProfile profile) =>
         Cache.ContainsKey(Key(KernelId(method), profile.ToCacheKeyString()));
 
+    /// <summary>
+    /// True if an artifact exists for a raw (kernel id, profile key) - used by the Layer 2 manifest
+    /// loader to skip re-fetching an artifact that is already registered. No counter side effects.
+    /// </summary>
+    public static bool ContainsKey(string kernelId, string profileCacheKey) =>
+        Cache.ContainsKey(Key(kernelId, profileCacheKey));
+
     /// <summary>Remove all cached artifacts.</summary>
     public static void Clear() => Cache.Clear();
 

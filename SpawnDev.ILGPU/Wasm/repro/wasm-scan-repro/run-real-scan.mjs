@@ -64,7 +64,10 @@ function computeLayout(N, W) {
     // DBG_KERNEL=1 (00_kernel_1_dbg.wasm) appends per-tid debug rings at FIXED addresses
     // (built for the N=16384 layout): ring1 = rb at READ (helper ph3), ring2 = rb at
     // CONSUMPTION (kernel carry update) + carryBefore - needs >= 22 pages.
+    // DBG_KERNEL=2 (00_kernel_1_dbg2.wasm) = rings + WRITER STAMPS on every store that
+    // hits any tid's boundaries region [+1384,+1392) - the aliasing discriminator.
     if (process.env.DBG_KERNEL === '1') pages = Math.max(pages, 22);
+    if (process.env.DBG_KERNEL === '2') pages = Math.max(pages, 26);
     const zeroRegionSize = fenceSlot - sharedMemBase;
     return { inOff, outOff, scratchBase, sharedMemBase, barrierBase, fenceSlot,
              yieldStateRegionBase, zeroRegionSize, pages, numGroups, gridDimX };
@@ -163,8 +166,8 @@ if (isMainThread) {
     const WORKERS = parseInt(process.argv[3] || '8');
     const ROUNDS = parseInt(process.argv[4] || '20');
     const wasmBytes = readFileSync(new URL(
-        process.env.DBG_KERNEL === '1' ? './00_kernel_1_dbg.wasm' : './00_kernel_1.wasm', import.meta.url));
-    if (process.env.DBG_KERNEL === '1') console.log('DBG_KERNEL=1: per-tid rb-observation rings active (helper ph3)');
+        process.env.DBG_KERNEL === '2' ? './00_kernel_1_dbg2.wasm' : process.env.DBG_KERNEL === '1' ? './00_kernel_1_dbg.wasm' : './00_kernel_1.wasm', import.meta.url));
+    if (process.env.DBG_KERNEL) console.log('DBG_KERNEL=1: per-tid rb-observation rings active (helper ph3)');
     const thisFile = fileURLToPath(import.meta.url);
 
     const L = computeLayout(N, WORKERS);
@@ -235,6 +238,14 @@ if (isMainThread) {
                 mism++;
             }
         }
+        // STAMP_CHECK=1: positive control for the writer-stamp instrument - dump tid0's
+        // ring every round (owner publications MUST appear; 0 writes = broken probe).
+        if (process.env.STAMP_CHECK === '1' && process.env.DBG_KERNEL === '2') {
+            const STAMPC = 1568768, STAMPD = 1572864;
+            const cnt = i32[(STAMPC + 0) >>> 2];
+            const e0 = (STAMPD + 0) >>> 2;
+            console.log(`  [stamp-check] round ${round + 1}: tid0 totalWrites=${cnt} first={w=${i32[e0]} v=${i32[e0 + 1]} site#${i32[e0 + 2]} slot=+${i32[e0 + 3]}}`);
+        }
         if (mism > 0) {
             totalBadRounds++; totalMismatch += mism;
             const tileArr = [...tiles].sort((a, b) => a - b);
@@ -279,7 +290,7 @@ if (isMainThread) {
             //   victim ring shows correct rb    -> read fine; corruption is AFTER the read
             //                                      (out-param/carry/save-restore path)
             // Cursor sanity: every tid must have run ph3 exactly 64 times (one per tile).
-            if (process.env.DBG_KERNEL === '1') {
+            if (process.env.DBG_KERNEL) {
                 const cursorOf = t => i32[(DBGC + t * 4) >>> 2];
                 // ring1 16B records: {rbRead, tempBack([55+4] after plain store),
                 //                     outBack([13+4] after atomic copy), local54Again}
@@ -320,6 +331,35 @@ if (isMainThread) {
                         if (rb2 !== exp || ptr !== myPtr) rows.push(`tile${k}: rbCONSUMED=${rb2} exp=${exp} (d=${rb2 - exp}) HELD=${heldTile(rb2)} carryBefore=${ring2Val(t, k, 4)} ptr=${ptr}${ptr !== myPtr ? ` WRONG(own=${myPtr}, = tid${Math.floor((ptr - 1388 - L.scratchBase) / SCRATCH_PER_THREAD)}'s slot)` : '(own)'}`);
                     }
                     console.log(`    rings tid${t}${slots.has(t) ? ' [VICTIM]' : ''}: ${rows.length === 0 ? 'read/readBack/consumed rb all CORRECT' : rows.join(' | ')}`);
+                }
+                // WRITER STAMPS (DBG_KERNEL=2): the aliasing discriminator. For each
+                // victim, dump its boundaries-region write ring: any writerTid != owner
+                // = FOREIGN WRITER = aliasing in our backend. Owner-only = coherence.
+                if (process.env.DBG_KERNEL === '2') {
+                    const STAMPC = 1568768, STAMPD = 1572864;
+                    const sitemap = JSON.parse(readFileSync(new URL('./sitemap.json', import.meta.url), 'utf8'));
+                    // global sweep: ANY tid with a foreign writer this round?
+                    let foreignAny = 0;
+                    for (let o = 0; o < GROUP_SIZE; o++) {
+                        const cnt = i32[(STAMPC + o * 4) >>> 2];
+                        const nEntries = Math.min(cnt, 8);
+                        for (let e = 0; e < nEntries; e++) {
+                            const rec = (STAMPD + o * 128 + e * 16) >>> 2;
+                            if (i32[rec] !== o) foreignAny++;
+                        }
+                    }
+                    console.log(`    stamps: foreign-writer entries across ALL tids' visible rings this round: ${foreignAny}`);
+                    for (const t of dumpTids) {
+                        const cnt = i32[(STAMPC + t * 4) >>> 2];
+                        const entries = [];
+                        for (let e = 0; e < Math.min(cnt, 8); e++) {
+                            const rec = (STAMPD + t * 128 + e * 16) >>> 2;
+                            const wtid = i32[rec], val = i32[rec + 1], site = i32[rec + 2], slot = i32[rec + 3];
+                            const sm = sitemap[site] || {};
+                            entries.push(`{w=${wtid}${wtid !== t ? ' FOREIGN!' : ''} v=${val} slot=+${slot} site#${site}@wat:${sm.watLine}(${sm.instr})}`);
+                        }
+                        console.log(`    stamps tid${t}${slots.has(t) ? ' [VICTIM]' : ''}: totalWrites=${cnt} (expect ~130: 2/tile pub + init) last${Math.min(cnt, 8)}=[${entries.join(' ')}]`);
+                    }
                 }
             }
             // Cross-worker continuation agreement: at any phase p, every worker's sv
