@@ -2464,7 +2464,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 {
                     EmitF32ToF16();
                     if (_hasBarriers)
-                        WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicStore16, 1, 0);
+                        EmitVerifiedAtomicStore(16);
                     else
                         WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store16, 1, 0);
                 }
@@ -2534,12 +2534,16 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(Code, valLocal);
             WasmModuleBuilder.EmitLocalSet(Code, addrLocal);
 
-            (byte storeOp, byte loadOp, uint align) = width switch
+            // Read-back via RMW(+0), NOT an atomic load: a plain load read-back can be
+            // satisfied by store-forwarding (returning the own in-flight store) while
+            // the store still never lands in memory - a lying verify. RMWs proved
+            // truthful in every instrumented event (exact counters on all victims).
+            (byte storeOp, byte rmwOp, uint align) = width switch
             {
-                8 => (WasmOpCodes.I32AtomicStore8, WasmOpCodes.I32AtomicLoad8U, 0u),
-                16 => (WasmOpCodes.I32AtomicStore16, WasmOpCodes.I32AtomicLoad16U, 1u),
-                64 => (WasmOpCodes.I64AtomicStore, WasmOpCodes.I64AtomicLoad, 3u),
-                _ => (WasmOpCodes.I32AtomicStore, WasmOpCodes.I32AtomicLoad, 2u),
+                8 => (WasmOpCodes.I32AtomicStore8, WasmOpCodes.I32AtomicRmw8AddU, 0u),
+                16 => (WasmOpCodes.I32AtomicStore16, WasmOpCodes.I32AtomicRmw16AddU, 1u),
+                64 => (WasmOpCodes.I64AtomicStore, WasmOpCodes.I64AtomicRmwAdd, 3u),
+                _ => (WasmOpCodes.I32AtomicStore, WasmOpCodes.I32AtomicRmwAdd, 2u),
             };
 
             Code.Add(WasmOpCodes.Loop);
@@ -2548,9 +2552,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalGet(Code, addrLocal);
             WasmModuleBuilder.EmitLocalGet(Code, valLocal);
             WasmModuleBuilder.EmitAtomicRmw(Code, storeOp, align, 0);
-            // read back
+            // read back (truthful RMW(+0))
             WasmModuleBuilder.EmitLocalGet(Code, addrLocal);
-            WasmModuleBuilder.EmitAtomicRmw(Code, loadOp, align, 0);
+            if (is64)
+                WasmModuleBuilder.EmitI64Const(Code, 0);
+            else
+                WasmModuleBuilder.EmitI32Const(Code, 0);
+            WasmModuleBuilder.EmitAtomicRmw(Code, rmwOp, align, 0);
             // compare against the (masked) stored value
             WasmModuleBuilder.EmitLocalGet(Code, valLocal);
             if (width == 8)
@@ -4073,29 +4081,23 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         protected override void EmitTypedStore(byte wasmType)
         {
             if (!_hasBarriers) { base.EmitTypedStore(wasmType); return; }
+            // Barrier kernels: VERIFIED atomic store (residual large-sort race fix -
+            // see EmitVerifiedAtomicStore).
             switch (wasmType)
             {
                 case WasmOpCodes.I32:
-                    Code.Add(WasmOpCodes.AtomicPrefix);
-                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore);
-                    Code.Add(0x02); Code.Add(0x00);
+                    EmitVerifiedAtomicStore(32);
                     break;
                 case WasmOpCodes.I64:
-                    Code.Add(WasmOpCodes.AtomicPrefix);
-                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I64AtomicStore);
-                    Code.Add(0x03); Code.Add(0x00);
+                    EmitVerifiedAtomicStore(64);
                     break;
                 case WasmOpCodes.F32:
                     Code.Add(WasmOpCodes.I32ReinterpretF32);
-                    Code.Add(WasmOpCodes.AtomicPrefix);
-                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore);
-                    Code.Add(0x02); Code.Add(0x00);
+                    EmitVerifiedAtomicStore(32);
                     break;
                 case WasmOpCodes.F64:
                     Code.Add(WasmOpCodes.I64ReinterpretF64);
-                    Code.Add(WasmOpCodes.AtomicPrefix);
-                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I64AtomicStore);
-                    Code.Add(0x03); Code.Add(0x00);
+                    EmitVerifiedAtomicStore(64);
                     break;
                 default:
                     base.EmitTypedStore(wasmType);
@@ -4238,25 +4240,17 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 {
                     case WasmOpCodes.F32:
                         Code.Add(WasmOpCodes.I32ReinterpretF32);
-                        Code.Add(WasmOpCodes.AtomicPrefix);
-                        WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore);
-                        Code.Add(0x02); Code.Add(0x00);
+                        EmitVerifiedAtomicStore(32); // residual race fix
                         break;
                     case WasmOpCodes.F64:
                         Code.Add(WasmOpCodes.I64ReinterpretF64);
-                        Code.Add(WasmOpCodes.AtomicPrefix);
-                        WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I64AtomicStore);
-                        Code.Add(0x03); Code.Add(0x00);
+                        EmitVerifiedAtomicStore(64); // residual race fix
                         break;
                     case WasmOpCodes.I64:
-                        Code.Add(WasmOpCodes.AtomicPrefix);
-                        WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I64AtomicStore);
-                        Code.Add(0x03); Code.Add(0x00);
+                        EmitVerifiedAtomicStore(64); // residual race fix
                         break;
                     default: // I32
-                        Code.Add(WasmOpCodes.AtomicPrefix);
-                        WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore);
-                        Code.Add(0x02); Code.Add(0x00);
+                        EmitVerifiedAtomicStore(32); // residual race fix
                         break;
                 }
             }
@@ -4273,9 +4267,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 Code.Add(WasmOpCodes.I32Add);
             }
             WasmModuleBuilder.EmitLocalGet(Code, seqLocal);
-            Code.Add(WasmOpCodes.AtomicPrefix);
-            WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore);
-            Code.Add(0x02); Code.Add(0x00);
+            EmitVerifiedAtomicStore(32); // residual race fix
 
             Code.Add(WasmOpCodes.End); // end if
 
@@ -4405,25 +4397,17 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             {
                 case WasmOpCodes.F32:
                     Code.Add(WasmOpCodes.I32ReinterpretF32);
-                    Code.Add(WasmOpCodes.AtomicPrefix);
-                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore);
-                    Code.Add(0x02); Code.Add(0x00);
+                    EmitVerifiedAtomicStore(32); // residual race fix
                     break;
                 case WasmOpCodes.F64:
                     Code.Add(WasmOpCodes.I64ReinterpretF64);
-                    Code.Add(WasmOpCodes.AtomicPrefix);
-                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I64AtomicStore);
-                    Code.Add(0x03); Code.Add(0x00);
+                    EmitVerifiedAtomicStore(64); // residual race fix
                     break;
                 case WasmOpCodes.I64:
-                    Code.Add(WasmOpCodes.AtomicPrefix);
-                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I64AtomicStore);
-                    Code.Add(0x03); Code.Add(0x00);
+                    EmitVerifiedAtomicStore(64); // residual race fix
                     break;
                 default: // I32
-                    Code.Add(WasmOpCodes.AtomicPrefix);
-                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore);
-                    Code.Add(0x02); Code.Add(0x00);
+                    EmitVerifiedAtomicStore(32); // residual race fix
                     break;
             }
 
@@ -4772,10 +4756,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // i32.atomic.store(arrivalAddr, 0)
             WasmModuleBuilder.EmitLocalGet(Code, arrivalAddrLocal);
             WasmModuleBuilder.EmitI32Const(Code, 0);
-            Code.Add(WasmOpCodes.AtomicPrefix);
-            WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore);
-            Code.Add(0x02);
-            Code.Add(0x00);
+            EmitVerifiedAtomicStore(32); // residual race fix
 
             // i32.atomic.rmw.add(genAddr, 1) — bump generation. No notify:
             // V8 14.7+ has a confirmed FutexEmulation race for memory.atomic.notify
