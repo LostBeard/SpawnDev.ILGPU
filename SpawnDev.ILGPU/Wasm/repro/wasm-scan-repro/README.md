@@ -34,16 +34,23 @@ Input is per-tile PSEUDORANDOM so a stale consumed value fingerprints WHICH tile
 
 > ⚠️ 48 workers oversubscribes (pegs cores). Announce + get the Captain's go before running.
 
-## VERDICT (final, 2026-06-10)
-Root cause PINNED at instruction level: a **same-thread store (plain or atomic) intermittently
-loses visibility to everyone including the storing thread** under CPU oversubscription, leaving
-the slot one publication behind. Fires in BOTH V8 tiers (Liftoff `--no-wasm-tier-up`, TurboFan
-`--no-liftoff`); oversubscribed-only; victim is always the worker's last tid. Exonerated by
-evidence: emitted-vs-source 1:1, `Atomics.wait` park (NO_PARK also corrupts), fiber save/restore,
-dispatcher savedGen/phase invariants. **Aliasing REFUTED with positive evidence** - the
-writer-stamp discriminator (`DBG_KERNEL=2`) instrumented all 1,605 store sites: ZERO foreign
-writers + totalWrites exact on every victim. Full trail:
-`_DevComms/global/seven-ROOT-CAUSE-EVIDENCE-*`, `seven-ADDENDUM-*`, `seven-DISCRIMINATOR-VERDICT-*`.
+## VERDICT (FINAL - KILLED 2026-06-10/11, commits `b0dfc5c`/`b6c558a`)
+Root cause: **V8 atomic stores in this workload can silently fail to LAND** under CPU
+oversubscription - the boundaries out-param copy was the ring-proven victim (ring1b: the
+store instruction executed with the correct value; the immediate same-thread read-back
+returned the previous value; in paired-field events the left store landed while the right
+vanished = "a window of consecutive stores vanishes"). Fires in BOTH V8 tiers; victim is
+the worker's last tid's publication (the last store of the phase). Aliasing REFUTED
+(writer stamps: 1,605 sites, zero foreign writers, exact counts). Read-side staleness
+models FALSIFIED (RMW-ifying loads doesn't help - nothing can read a store that never
+landed). **Fix: `EmitVerifiedAtomicStore`** - every atomic store = store -> RMW(+0)
+read-back -> retry (the read-back must be RMW; a load read-back can be store-forwarded
+while the store still doesn't land) + RMW-confirmed dispatcher sense barriers.
+**This harness: 7-15/120 failing rounds pre-fix -> 0/120 x3 consecutive post-fix.**
+The committed `00_kernel_1.wasm` is the PRE-FIX kernel (preserved as the failing baseline
++ upstream-report payload); re-emit via `scan-emit` for a current-build kernel.
+Full trail: `_DevComms/global/seven-*-2026-06-10.md`;
+upstream draft: `../../Notes/v8-atomic-store-vanish-upstream-report-draft.md`.
 
 ## What this repro does and does NOT validate
 This repro exercises the **multi-tile `ComputeTileScan` path, which is DEAD on production Wasm**
