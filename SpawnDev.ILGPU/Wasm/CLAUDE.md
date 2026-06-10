@@ -2,7 +2,28 @@
 
 Compiles ILGPU IR → WebAssembly binary. Dispatches via Web Workers with SharedArrayBuffer.
 
-> **✅ RESIDUAL LARGE-SORT RACE ROOT-CAUSED + FIXED (2026-06-09, Geordi).** It was a MISSING `Group.Barrier()` — an unguarded write-after-read on the REUSED scan/reduce shared region across tile iterations in `ILGPU.Algorithms/IL/ILGroupExtensions.cs` (`InclusiveScanImplementation` + `AllReduce`). SIMT-masked, Wasm-MIMD-exposed; the inclusive radix scan path was unprotected. Fix = entry barrier at both primitives (all-6-backend, build green). Full write-up: [`Notes/residual-sort-race-2026-05-25.md`](Notes/residual-sort-race-2026-05-25.md) **SESSION 11** + [`RESEARCH-INDEX.md`](RESEARCH-INDEX.md) RESOLVED block. The contention-hunt corpus (outer-tree repro folders) is now HISTORICAL — the bug was found by reading, not load.
+> **✅ RESIDUAL LARGE-SORT RACE KILLED (2026-06-10/11, Seven) — VERIFIED ATOMIC STORES.**
+> Root cause (ring-instrumented at instruction level, 21/21 events): under CPU
+> oversubscription **V8 atomic stores in barrier kernels can silently fail to land** —
+> the boundaries out-param copy was the proven victim (left field landed, right field
+> vanished = the "window of consecutive stores vanishes"), leaving a fiber's tile carry
+> one publication behind. Fix: **`EmitVerifiedAtomicStore`** (every atomic store →
+> store → **RMW(+0) read-back** → retry until it sticks; the read-back must be an RMW —
+> a plain-load read-back can be store-forwarded while the store never lands) + the
+> dispatcher sense barrier hardened (savedGen via RMW, RMW-confirmed spin exits — a
+> lagged gen load caused EARLY PHASE CROSSING) + Broadcast monotonic per-execution tags.
+> **Gate: 0/120 × 3 consecutive at 48-worker 4× oversubscription (baseline: 7-15/120,
+> and 1/30 even at 12 workers).** Perf: ~1-4% at ≤cores configs; +25% only under 4×
+> oversubscription stress where the unfixed code corrupted. Commits `b0dfc5c` + `b6c558a`.
+> The 2026-06-09 Group.Barrier() attribution (entry barrier in ILGroupExtensions) was a
+> REAL S11-class fix for the 5 non-Wasm backends but did NOT close the Wasm path; the
+> entry-barrier-on-Wasm attempts made it worse (the scanResults copy was load-bearing
+> reuse cushion). Forensic trail: `_DevComms/global/seven-*-2026-06-10.md` + the
+> instruments in [`repro/wasm-scan-repro/`](repro/wasm-scan-repro/README.md)
+> (`patch-pub-timing.mjs` DBG_KERNEL=3 gen-stamp rings, `patch-debug-ring.mjs` ring1b =
+> the store-fate detector). Older write-ups
+> ([`Notes/residual-sort-race-2026-05-25.md`](Notes/residual-sort-race-2026-05-25.md),
+> [`RESEARCH-INDEX.md`](RESEARCH-INDEX.md)) are historical context.
 
 ## Key Files
 - `Backend/WasmKernelFunctionGenerator.cs` — kernel codegen, parameter setup, helper functions
