@@ -1,6 +1,22 @@
 # Wasm Backend — Research Index (the residual large-sort race + notify/wait)
 
-**Maintained by:** the SpawnDev crew. **Last updated:** 2026-06-09 (Geordi).
+> **🏆 FINAL RESOLUTION (2026-06-10/11, Seven) — THE RESIDUAL IS KILLED. VERIFIED ATOMIC STORES.**
+> Root cause (ring-instrumented, 21/21 events): **V8 atomic stores in barrier kernels can
+> silently fail to land under CPU oversubscription** — the boundaries out-param copy was the
+> proven victim (left field landed, right vanished; an immediate same-thread read-back showed
+> the old value; the slot stayed stale). Fix = `EmitVerifiedAtomicStore` (every atomic store →
+> store → **RMW(+0) read-back** → retry; the read-back MUST be RMW — a load read-back can be
+> store-forwarded while the store never lands) + RMW-confirmed dispatcher sense barriers +
+> Broadcast monotonic tags. **Gate: 0/120 × 3 consecutive @ 48w 4× oversub (baseline 7-15/120,
+> and 1/30 even at 12w).** Perf ~1-4% at ≤cores. Commits `b0dfc5c`/`b6c558a`/`82c2c07`.
+> Current docs: `Wasm/CLAUDE.md` banner, `repro/wasm-scan-repro/README.md` VERDICT,
+> `Notes/v8-atomic-store-vanish-upstream-report-draft.md` (upstream filing draft).
+> **Everything below this banner is HISTORICAL CONTEXT** — including the 2026-06-09
+> "RESOLVED (Group.Barrier)" block (a real S11 fix for the 5 non-Wasm backends, but not the
+> Wasm residual) and doc #1's "most likely not V8" verdict (it WAS V8-level store loss; the
+> protocol logic was sound). The reading-order docs remain valuable forensic history.
+
+**Maintained by:** the SpawnDev crew. **Last updated:** 2026-06-11 (Seven).
 **Purpose:** one place to find ALL the scattered research + repro tooling on the Wasm multi-worker barrier backend — the residual large multi-group sort corruption, the fiber phase dispatcher, and the notify/wait-vs-pure-spin question. The corpus is riddled across two trees (inside the git repo AND in the outer working dir). This index locates every piece, flags what is CURRENT vs SUPERSEDED, gives a reading order, and states the current best understanding so we stop re-treading.
 
 > **Path note.** Two roots:
