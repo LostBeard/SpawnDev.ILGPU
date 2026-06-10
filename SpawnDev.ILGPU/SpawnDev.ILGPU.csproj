@@ -69,7 +69,30 @@
 		<None Include="..\LICENSE.txt" Pack="true" PackagePath="\" />
 		<None Include="..\README.md" Pack="true" PackagePath="\" />
 		<None Include="wwwroot\icon-128.png" />
+		<!-- precompiled-shaders Layer 2: the build automation .targets is auto-imported by NuGet
+		     from build/. Gated OFF by default (<SpawnDevPrecompileShaders>), so consumers that do
+		     not opt in are unaffected. -->
+		<None Include="build\SpawnDev.ILGPU.targets" Pack="true" PackagePath="build\" />
 	</ItemGroup>
+
+	<!-- precompiled-shaders Layer 2: bundle the precompiler worker (+ its dependency closure) into
+	     the package tools/ folder so a consumer that opts in gets it with zero config. Gated on
+	     PackPrecompilerTool (default FALSE) so the everyday build/pack stays fast - publishing the
+	     tool is only done for an explicit release pack:
+	         dotnet pack SpawnDev.ILGPU/SpawnDev.ILGPU.csproj -c Release -p:PackPrecompilerTool=true
+	     When not bundled, the .targets emits a clear error pointing at <SpawnDevPrecompilerToolPath>. -->
+	<PropertyGroup Condition="'$(PackPrecompilerTool)' == 'true'">
+		<TargetsForTfmSpecificContentInPackage>$(TargetsForTfmSpecificContentInPackage);_BundlePrecompilerTool</TargetsForTfmSpecificContentInPackage>
+	</PropertyGroup>
+	<Target Name="_BundlePrecompilerTool">
+		<Exec Command="dotnet publish &quot;$(MSBuildThisFileDirectory)..\SpawnDev.ILGPU.Precompiler\SpawnDev.ILGPU.Precompiler.csproj&quot; -c $(Configuration) -o &quot;$(IntermediateOutputPath)precompiler-tool&quot;" />
+		<ItemGroup>
+			<_PrecompilerToolFiles Include="$(IntermediateOutputPath)precompiler-tool\**\*.*" />
+			<TfmSpecificPackageFile Include="@(_PrecompilerToolFiles)">
+				<PackagePath>tools\%(RecursiveDir)%(Filename)%(Extension)</PackagePath>
+			</TfmSpecificPackageFile>
+		</ItemGroup>
+	</Target>
 
 	<ItemGroup>
 		<Content Remove="wwwroot\icon-128.png" />

@@ -115,3 +115,26 @@
 1. ✅ **Repro harnesses version-controlled.** `wasm-barrier-repro/`, `wasm-crossdispatch-repro/`, `wasm-radix-repro/`, `wasm-scan-repro/` MOVED from the un-tracked outer tree into `<repo>\SpawnDev.ILGPU\Wasm\repro\` (+ a README marking them HISTORICAL, bug solved by reading). Hand-written `.wasm` blobs kept (small; the `.wat` sources sit alongside). **Still outer + un-tracked:** `_research/` (48M of cloned external reference repos — NOT pulled into the library git; regenerable from the URLs documented in `<repo>\Research\01-...md` and `<outer>\_research\01-official-specification.md`) and the transient PMT dump folders (`_dump/`, `_tj_dump_local*/`, `_ilgpudump/`, `_mldump/` — outputs, gitignored, not research).
 2. ✅ **This index is the single entry point.** Linked from `Wasm/CLAUDE.md` (top RESOLVED banner points here).
 3. ✅ **Root cause documented in canonical docs** — `Notes/residual-sort-race-2026-05-25.md` SESSION 11, this index's RESOLVED block, `Wasm/CLAUDE.md` (top banner + residual paragraph). Superseded synthesis/verdicts relabeled in place (history kept).
+
+---
+
+## Also in the corpus — Wasm design + notes scattered in other folders (added 2026-06-10, Geordi)
+
+TJ flagged that Wasm research is spread across 6+ folders. The docs above cover the residual-race
+investigation; these are the remaining Wasm-backend DESIGN + implementation docs, by folder, so the
+map is complete:
+
+| File | What | Status |
+|------|------|--------|
+| `<repo>\SpawnDev.ILGPU\Wasm\Plans\multi-worker-barrier-dispatch.md` | The multi-worker / fiber phase-dispatch design (origin of the in-Wasm phase dispatcher the residual lives in). | DESIGN (implemented) |
+| `<repo>\SpawnDev.ILGPU\Wasm\Plans\divergent-barrier-plan.md` | Divergent-barrier handling design. | DESIGN |
+| `<repo>\SpawnDev.ILGPU\Wasm\Notes\fiber-refactor-implementation-notes.md` | Fiber refactor implementation notes (the phase/yield state-save machinery — directly relevant to the barrier-at-helper-boundary codegen bug). | IMPLEMENTATION NOTES |
+| `<repo>\SpawnDev.ILGPU\Wasm\Notes\wasm-sharedarraybuffer-growth.md` + `wasm-sharedarraybuffer-growth-research.md` | SharedArrayBuffer `memory.grow()` behavior + research (ruled out as a residual cause, see SESSION log). | RESEARCH (ruled out) |
+| `<repo>\SpawnDev.ILGPU\Wasm\Notes\tuvoks-session-tail.md` | A prior session tail (Tuvok). | HISTORICAL |
+| `<repo>\Notes\Wasm-CrossGroup-Cooperative-Scheduling-Plan.md` | Cross-group cooperative scheduling design for the multi-worker pool. | DESIGN |
+| `<repo>\Research\00-README.md` | Entry note for the `Research/` ground-truth folder (memory model). | REFERENCE |
+
+**For the active problem (barrier-at-the-scan-helper-phase-boundary codegen bug):** start with
+`Wasm\Notes\fiber-refactor-implementation-notes.md` + `Wasm\Plans\multi-worker-barrier-dispatch.md`
+(the phase/yield state machinery), then the SESSION 11/11b entries in `residual-sort-race-2026-05-25.md`,
+then the geordi-to-seven handoff `_DevComms/global/geordi-to-seven-wasm-backend-is-yours-consolidated-findings-2026-06-10.md`.

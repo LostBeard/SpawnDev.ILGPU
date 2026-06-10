@@ -129,6 +129,7 @@ Comprehensive documentation is available in the [Docs](Docs/) folder:
 - **[Limitations](Docs/limitations.md)** - Blazor WASM constraints, browser compatibility
 - **[QR Codes](Docs/qr-codes.md)** - GPU-accelerated QR code encoder, decoder, renderer with logo overlay
 - **[API Reference](Docs/api-reference.md)** - Public API surface by namespace
+- **[Precompiled Shaders](Docs/precompiled-shaders.md)** - Offline codegen, build-time shader precompilation, runtime cache (move IL->shader transpilation off the runtime hot path)
 
 ## Browser Backends (Blazor WebAssembly)
 
@@ -475,6 +476,21 @@ The Wasm backend compiles ILGPU kernels to native WebAssembly binary modules and
 - Kernels are compiled to `.wasm` binary format (not text)
 - Compiled modules are cached and reused across dispatches
 - Shared memory uses `SharedArrayBuffer` for zero-copy data sharing
+
+## Precompiled Shaders (Build-Time Transpilation)
+
+SpawnDev.ILGPU transpiles .NET IL into WGSL/GLSL/Wasm at runtime. Precompiled shaders let you move that work off the runtime hot path and generate/inspect shader code on any machine with no device - the classic AOT shader / pipeline-cache pattern, three layers (all opt-in; a cache miss always falls back to runtime generation, so it can never change results):
+
+- **Offline codegen** - `ShaderCompiler.Generate(kernel, profile)` emits a kernel's WGSL/GLSL/Wasm for a `CapabilityProfile` with no accelerator, on any host OS (cross-backend debugging on a box without that GPU).
+- **Build-time precompile** - mark kernels with `[PrecompiledKernel(backend, profile)]`, set `<SpawnDevPrecompileShaders>true</SpawnDevPrecompileShaders>` in your `.csproj`, and a build step emits `wwwroot/_shaders/` (a manifest + per-kernel sidecars). Precompile errors surface at build time, not at the user's runtime.
+- **Runtime cache** - at kernel-load the active device profile is matched against the precompiled artifact; on a hit the transpiler is skipped, on a miss it falls back to runtime generation.
+
+```csharp
+[PrecompiledKernel(AcceleratorType.WebGPU, "WebGPU-Dekker-Subgroups-NativeF16")]
+static void MyKernel(Index1D i, ArrayView<float> data) { /* ... */ }
+```
+
+Because SpawnDev.ILGPU also generates kernels dynamically (Lambda Kernels, DelegateSpecialization, the ML layer transpiling ONNX graphs at runtime), the runtime transpiler always stays as the fallback - this fork is **AOT + runtime fallback**, never AOT-only. Full guide: **[Docs/precompiled-shaders.md](Docs/precompiled-shaders.md)**.
 
 ## Synchronization
 
