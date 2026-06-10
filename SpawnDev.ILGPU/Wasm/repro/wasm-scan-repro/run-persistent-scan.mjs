@@ -17,7 +17,19 @@ import { readFileSync } from 'fs';
 import { Worker, isMainThread, parentPort, workerData } from 'worker_threads';
 import { fileURLToPath } from 'url';
 
-const GROUP_SIZE = 256, SHARED_MEM = 5120, BARRIER_COUNT = 8, SCRATCH_PER_THREAD = Math.max(2376, 64);
+// Kernel layout metadata: read LIVE from manifest.json (see run-real-scan.mjs for why
+// hardcoding these caused a 16-byte cross-thread fiber-scratch overlap after a re-emit).
+const _manifest = JSON.parse(readFileSync(new URL('./manifest.json', import.meta.url), 'utf8'));
+const _kernelInfo = _manifest.kernels[0].info;
+const _infoNum = (key) => {
+    const m = _kernelInfo.match(new RegExp(key + '=(\\d+)'));
+    if (!m) throw new Error(`manifest.json kernel info is missing '${key}=' (info: ${_kernelInfo})`);
+    return parseInt(m[1], 10);
+};
+const GROUP_SIZE = _manifest.maxGroupSize;
+const SHARED_MEM = _infoNum('sharedMem');
+const BARRIER_COUNT = _infoNum('barriers');
+const SCRATCH_PER_THREAD = Math.max(_infoNum('scratchPerThread'), 64);
 const WASM_MAX_PAGES = 16384;
 const align = (x, a) => Math.ceil(x / a) * a;
 
