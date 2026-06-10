@@ -412,6 +412,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// <summary>
         /// Writes an atomic RMW instruction (0xFE prefix + opcode + memarg).
         /// Atomic instructions use the same alignment/offset format as regular memory ops.
+        /// NOTE (2026-06-10, Seven): an experiment translating all atomic LOADS here to
+        /// rmw.add(+0) reads made the residual large-sort race WORSE (11/120 vs 2-3/120
+        /// with the dispatcher sense-barrier fix alone) - the "RMW reads bypass the
+        /// lagged view" model was falsified; rate changes from load-vs-RMW swaps are
+        /// timing perturbation. Loads stay loads.
         /// </summary>
         public static void EmitAtomicRmw(List<byte> code, byte atomicOpcode, uint align, uint offset)
         {

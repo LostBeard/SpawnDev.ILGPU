@@ -1269,7 +1269,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 int irValueCount = 0;
                 foreach (var block in blocks)
                     irValueCount += block.Count;
-                int estimatedStateBytes = (irValueCount + 20) * 8;
+                // Margin raised 20 -> 100 (2026-06-10): EmitVerifiedAtomicStore allocates
+                // 2 locals per atomic-store site during IR visiting; the spill region
+                // must cover them or saves overflow into the alloca region.
+                int estimatedStateBytes = (irValueCount + 100) * 8;
                 _scratchNextOffset = (_phaseStateOffset + estimatedStateBytes + 7) & ~7;
             }
 
@@ -2507,6 +2510,65 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(Code, fallbackTarget);
         }
 
+        /// <summary>
+        /// VERIFIED atomic store (Seven, 2026-06-10 - the Wasm residual large-sort race).
+        /// Instrumented at instruction level (debug rings, 21/21 events): under CPU
+        /// oversubscription an atomic store in a barrier kernel can SILENTLY FAIL TO
+        /// LAND - the immediately following same-thread atomic read-back returns the
+        /// previous value, and the slot stays stale (the classic event: the boundaries
+        /// out-param copy pair, where the left field landed and the right field
+        /// vanished, exactly the "window of consecutive stores vanishes" signature
+        /// that produced the one-publication-behind carry corruption). The read-back
+        /// DETECTED the miss in every instrumented event, so the defense is
+        /// store -> read back -> retry until it sticks. Expects [addr, value(int)] on
+        /// the stack like a plain atomic store; emits a bounded-in-practice retry loop
+        /// (the store lands on the first try in the overwhelming majority of cases -
+        /// one extra atomic load per store is the steady-state cost).
+        /// width: 8, 16, 32, or 64 (sub-word compares mask the value accordingly).
+        /// </summary>
+        private void EmitVerifiedAtomicStore(int width)
+        {
+            bool is64 = width == 64;
+            var valLocal = AllocateNewLocal(is64 ? WasmOpCodes.I64 : WasmOpCodes.I32);
+            var addrLocal = AllocateNewLocal(WasmOpCodes.I32);
+            WasmModuleBuilder.EmitLocalSet(Code, valLocal);
+            WasmModuleBuilder.EmitLocalSet(Code, addrLocal);
+
+            (byte storeOp, byte loadOp, uint align) = width switch
+            {
+                8 => (WasmOpCodes.I32AtomicStore8, WasmOpCodes.I32AtomicLoad8U, 0u),
+                16 => (WasmOpCodes.I32AtomicStore16, WasmOpCodes.I32AtomicLoad16U, 1u),
+                64 => (WasmOpCodes.I64AtomicStore, WasmOpCodes.I64AtomicLoad, 3u),
+                _ => (WasmOpCodes.I32AtomicStore, WasmOpCodes.I32AtomicLoad, 2u),
+            };
+
+            Code.Add(WasmOpCodes.Loop);
+            Code.Add(WasmOpCodes.Void);
+            // store
+            WasmModuleBuilder.EmitLocalGet(Code, addrLocal);
+            WasmModuleBuilder.EmitLocalGet(Code, valLocal);
+            WasmModuleBuilder.EmitAtomicRmw(Code, storeOp, align, 0);
+            // read back
+            WasmModuleBuilder.EmitLocalGet(Code, addrLocal);
+            WasmModuleBuilder.EmitAtomicRmw(Code, loadOp, align, 0);
+            // compare against the (masked) stored value
+            WasmModuleBuilder.EmitLocalGet(Code, valLocal);
+            if (width == 8)
+            {
+                WasmModuleBuilder.EmitI32Const(Code, 0xFF);
+                Code.Add(WasmOpCodes.I32And);
+            }
+            else if (width == 16)
+            {
+                WasmModuleBuilder.EmitI32Const(Code, 0xFFFF);
+                Code.Add(WasmOpCodes.I32And);
+            }
+            Code.Add(is64 ? WasmOpCodes.I64Ne : WasmOpCodes.I32Ne);
+            Code.Add(WasmOpCodes.BrIf);
+            WasmModuleBuilder.EmitU32Leb128(Code, 0); // retry
+            Code.Add(WasmOpCodes.End); // end loop
+        }
+
         public override void GenerateCode(Store value)
         {
             var target = value.Target.Resolve();
@@ -2529,11 +2591,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 EmitGetLocal(storeValue);
                 EmitF32ToF16();
                 if (_hasBarriers)
-                {
-                    Code.Add(WasmOpCodes.AtomicPrefix);
-                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore16);
-                    Code.Add(0x01); Code.Add(0x00);
-                }
+                    EmitVerifiedAtomicStore(16);
                 else
                     WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store16, 1, 0);
                 return;
@@ -2650,7 +2708,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         WasmModuleBuilder.EmitI32Const(Code, byteOffset);
                         Code.Add(WasmOpCodes.I32Add);
                     }
-                    // Load field value (atomic for barrier kernels, all types via reinterpret)
+                    // Load field value (atomic for barrier kernels). The barrier-kernel
+                    // copy is a PURE INT MOVE (no float reinterpret round-trip needed -
+                    // bit-exact either way) so the verified store can compare raw bits.
                     if (_hasBarriers)
                     {
                         if (isFloat16Field)
@@ -2661,17 +2721,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         else switch (fieldWasmType)
                         {
                             case WasmOpCodes.I64:
-                                WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I64AtomicLoad, 3, 0);
-                                break;
-                            case WasmOpCodes.F32:
-                                WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicLoad, 2, 0);
-                                Code.Add(WasmOpCodes.F32ReinterpretI32);
-                                break;
                             case WasmOpCodes.F64:
                                 WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I64AtomicLoad, 3, 0);
-                                Code.Add(WasmOpCodes.F64ReinterpretI64);
                                 break;
-                            default: // I32
+                            default: // I32 / F32
                                 WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicLoad, 2, 0);
                                 break;
                         }
@@ -2679,29 +2732,22 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     else
                         WasmModuleBuilder.EmitLoad(Code, loadOp, align, 0);
 
-                    // Store to destination (atomic for barrier kernels, all types via reinterpret)
+                    // Store to destination. Barrier kernels use the VERIFIED atomic store
+                    // (store -> read back -> retry) - the boundaries out-param field copy
+                    // emitted here was THE instrumented vanishing-store site of the
+                    // residual large-sort race (see EmitVerifiedAtomicStore).
                     if (_hasBarriers)
                     {
                         if (isFloat16Field)
-                        {
-                            // Float16: 2-byte atomic store
-                            WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicStore16, 1, 0);
-                        }
+                            EmitVerifiedAtomicStore(16);
                         else switch (fieldWasmType)
                         {
                             case WasmOpCodes.I64:
-                                WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I64AtomicStore, 3, 0);
-                                break;
-                            case WasmOpCodes.F32:
-                                Code.Add(WasmOpCodes.I32ReinterpretF32);
-                                WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicStore, 2, 0);
-                                break;
                             case WasmOpCodes.F64:
-                                Code.Add(WasmOpCodes.I64ReinterpretF64);
-                                WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I64AtomicStore, 3, 0);
+                                EmitVerifiedAtomicStore(64);
                                 break;
-                            default: // I32
-                                WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicStore, 2, 0);
+                            default: // I32 / F32
+                                EmitVerifiedAtomicStore(32);
                                 break;
                         }
                     }
@@ -2727,12 +2773,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 EmitGetLocal(storeValue);
                 EmitF32ToF16(); // inline conversion: f32 → i32 (f16 bits)
                 if (_hasBarriers)
-                {
-                    // Atomic 16-bit store (2-byte aligned)
-                    Code.Add(WasmOpCodes.AtomicPrefix);
-                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore16);
-                    Code.Add(0x01); Code.Add(0x00); // align=1 (2 bytes), offset=0
-                }
+                    EmitVerifiedAtomicStore(16);
                 else
                     WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store16, 1, 0);
                 return;
@@ -2755,11 +2796,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 EmitGetLocal(target);
                 EmitGetLocal(storeValue);
                 if (_hasBarriers)
-                {
-                    Code.Add(WasmOpCodes.AtomicPrefix);
-                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore16);
-                    Code.Add(0x01); Code.Add(0x00); // align=1, offset=0
-                }
+                    EmitVerifiedAtomicStore(16);
                 else
                     WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store16, 1, 0);
                 return;
@@ -2781,11 +2818,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 EmitGetLocal(target);
                 EmitGetLocal(storeValue);
                 if (_hasBarriers)
-                {
-                    Code.Add(WasmOpCodes.AtomicPrefix);
-                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore8);
-                    Code.Add(0x00); Code.Add(0x00); // align=0, offset=0
-                }
+                    EmitVerifiedAtomicStore(8);
                 else
                     WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store8, 0, 0);
                 return;
@@ -2819,23 +2852,24 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             if (_hasBarriers)
             {
-                // Atomic store for ALL types in barrier kernels.
-                // Float types use reinterpret: i32.reinterpret_f32 → i32.atomic.store (or i64/f64).
+                // VERIFIED atomic store for ALL types in barrier kernels (the residual
+                // large-sort race fix - see EmitVerifiedAtomicStore). Float types use
+                // reinterpret: i32.reinterpret_f32 -> verified i32 store (or i64/f64).
                 switch (destType)
                 {
                     case WasmOpCodes.I64:
-                        WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I64AtomicStore, 3, 0);
+                        EmitVerifiedAtomicStore(64);
                         break;
                     case WasmOpCodes.F32:
                         Code.Add(WasmOpCodes.I32ReinterpretF32);
-                        WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicStore, 2, 0);
+                        EmitVerifiedAtomicStore(32);
                         break;
                     case WasmOpCodes.F64:
                         Code.Add(WasmOpCodes.I64ReinterpretF64);
-                        WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I64AtomicStore, 3, 0);
+                        EmitVerifiedAtomicStore(64);
                         break;
                     default: // I32
-                        WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicStore, 2, 0);
+                        EmitVerifiedAtomicStore(32);
                         break;
                 }
             }
@@ -4118,7 +4152,20 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             var origin = broadcast.Origin.Resolve();
 
             // Allocate a value slot and a tag slot in shared memory for this broadcast.
-            // Tag slot hardens against stale reads by requiring per-group tag match before load.
+            // The tag is a MONOTONIC PER-EXECUTION SEQUENCE (2026-06-10, Seven): each fiber
+            // keeps a per-site iteration counter in a local (uniform control flow keeps all
+            // fibers in lockstep), the origin publishes value THEN tag=seq, and readers spin
+            // until tag == their own seq. This makes freshness LOCALLY VERIFIABLE for every
+            // execution: a stale slot (one publication behind) can never pass the guard, it
+            // just makes the reader wait out the propagation. The previous tag (= group index)
+            // was VACUOUS within a group - constant across a kernel's repeated broadcasts to
+            // the same slot (e.g. the scan tile-carry loop) and equal to the zero-initialized
+            // slot for group 0 - which silently exposed the one-publication-behind residual
+            // at the JS->wasm re-entry boundary. The spin needs no yield escape: the origin's
+            // store always completes a full dispatcher phase BEFORE any reader spins (barrier1
+            // separates them), so the wait is bounded by memory propagation, not scheduling.
+            // Cross-group: the dispatcher zeroes the tag slot between groups and the seq local
+            // restarts at 1 with fresh locals, so group N+1's first spin still verifies.
             int broadcastSlotOffset = _sharedMemorySize;
             int slotSize = wasmType switch
             {
@@ -4158,12 +4205,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     break;
             }
 
-            // expectedTag = globalIdx / groupDimX (linear group index)
-            var expectedTagLocal = AllocateNewLocal(WasmOpCodes.I32);
-            WasmModuleBuilder.EmitLocalGet(Code, _globalIdxLocal);
-            WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
-            Code.Add(WasmOpCodes.I32DivU);
-            WasmModuleBuilder.EmitLocalSet(Code, expectedTagLocal);
+            // Per-site monotonic sequence: seq += 1 on EVERY execution, ALL fibers.
+            // Uniform control flow (required by the barriers below) keeps every fiber's
+            // counter identical; the local is saved/restored across yields with all locals,
+            // and resets to 0 with fresh locals at each new group (phase 0, no restore).
+            var seqLocal = AllocateNewLocal(WasmOpCodes.I32);
+            WasmModuleBuilder.EmitLocalGet(Code, seqLocal);
+            WasmModuleBuilder.EmitI32Const(Code, 1);
+            Code.Add(WasmOpCodes.I32Add);
+            WasmModuleBuilder.EmitLocalSet(Code, seqLocal);
 
             // Step 1: if (threadIdX == origin) { mem[sharedMemBase + offset] = source }
             WasmModuleBuilder.EmitLocalGet(Code, _threadIdXLocal);
@@ -4213,14 +4263,16 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             else
                 WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
 
-            // Publish tag after value store. Readers verify this tag before loading value.
+            // Publish tag = seq AFTER the value store (program order is load-bearing:
+            // a reader that observes tag == seq via seq_cst load is guaranteed to see
+            // the value store that seq_cst-precedes it). Readers verify before loading.
             WasmModuleBuilder.EmitLocalGet(Code, _sharedMemBaseLocal);
             if (tagSlotOffset > 0)
             {
                 WasmModuleBuilder.EmitI32Const(Code, tagSlotOffset);
                 Code.Add(WasmOpCodes.I32Add);
             }
-            WasmModuleBuilder.EmitLocalGet(Code, expectedTagLocal);
+            WasmModuleBuilder.EmitLocalGet(Code, seqLocal);
             Code.Add(WasmOpCodes.AtomicPrefix);
             WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicStore);
             Code.Add(0x02); Code.Add(0x00);
@@ -4231,8 +4283,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             int barrier1 = _barrierCounter++;
             EmitBarrier(barrier1);
 
-            // Step 3: All threads spin until tag matches this group, then load value.
-            // This avoids consuming stale broadcast slot contents from a previous group.
+            // Step 3: All threads spin until tag == THIS execution's seq, then load value.
+            // A slot still holding the previous publication (tag = seq-1) can no longer
+            // pass; the reader waits out the propagation instead of silently consuming
+            // stale data. Bounded wait: the origin's store completed a full dispatcher
+            // phase ago (barrier1), so this only ever waits on memory visibility.
             Code.Add(WasmOpCodes.Block);
             Code.Add(WasmOpCodes.Void);
             Code.Add(WasmOpCodes.Loop);
@@ -4246,7 +4301,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             Code.Add(WasmOpCodes.AtomicPrefix);
             WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad);
             Code.Add(0x02); Code.Add(0x00);
-            WasmModuleBuilder.EmitLocalGet(Code, expectedTagLocal);
+            WasmModuleBuilder.EmitLocalGet(Code, seqLocal);
             Code.Add(WasmOpCodes.I32Eq);
             Code.Add(WasmOpCodes.BrIf);
             WasmModuleBuilder.EmitU32Leb128(Code, 1); // break out of spin loop

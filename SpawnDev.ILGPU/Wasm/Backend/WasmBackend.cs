@@ -1034,10 +1034,22 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             code.Add(0x02); code.Add(0x08); // align=2, offset=8 (global yield counter)
             code.Add(WasmOpCodes.Drop);
 
-            // Save current generation
+            // Save current generation - VIA RMW(+0), NOT a plain atomic load (Seven,
+            // 2026-06-10, the residual large-sort race fix). Under CPU oversubscription
+            // V8 can serve a worker's atomic LOADS from a lagged-but-consistent view of
+            // shared memory for a few generations after park/wake or JS re-entry, while
+            // atomic RMWs always operate on true memory. A lagged gen read here poisons
+            // the sense barrier: savedGen = G-1 (stale) while the true gen is G -> the
+            // worker arrives, then its spin sees the CURRENT gen G != savedGen G-1 and
+            // crosses WITHOUT the barrier ever releasing - running phase P+1 a full
+            // phase early and consuming publications that do not exist yet (the
+            // "one-publication-behind" corruption; also why the wait/notify variant
+            // corrupted catastrophically: wait(gen, staleGen) returns immediately).
+            // The RMW result is the true generation, closing the early-cross window.
             WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
+            WasmModuleBuilder.EmitI32Const(code, 0);
             code.Add(WasmOpCodes.AtomicPrefix);
-            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicLoad);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicRmwAdd);
             code.Add(0x02); code.Add(0x04); // align=2, offset=4 (generation)
             WasmModuleBuilder.EmitLocalSet(code, pSavedGen);
 
@@ -1075,10 +1087,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             code.Add(WasmOpCodes.If);
             code.Add(WasmOpCodes.Void);
 
-            // Last worker: check global yield count
+            // Last worker: check global yield count - VIA RMW(+0) (lagged-view defense:
+            // a stale-low read here would set the exit flag while fibers still have
+            // pending phases, truncating the kernel).
             WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
+            WasmModuleBuilder.EmitI32Const(code, 0);
             code.Add(WasmOpCodes.AtomicPrefix);
-            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicLoad);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicRmwAdd);
             code.Add(0x02); code.Add(0x08); // offset=8 (global yield count)
             code.Add(WasmOpCodes.I32Eqz);
             // Store exit flag: 1 if no yields, 0 if yields remain
@@ -1226,15 +1241,29 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             code.Add(WasmOpCodes.Void);
             code.Add(WasmOpCodes.Loop); // $spin_loop
             code.Add(WasmOpCodes.Void);
-            // curGen = atomic.load(gen); if (curGen != savedGen) break $spin_exit
+            // Fast check via plain atomic load; on change, CONFIRM via RMW before
+            // crossing (the lagged-view defense - see the savedGen RMW note above:
+            // a lagged load can show the CURRENT gen against a stale savedGen, or a
+            // stale gen against a true savedGen; the RMW result is authoritative).
             WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
             code.Add(WasmOpCodes.AtomicPrefix);
             WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicLoad);
             code.Add(0x02); code.Add(0x04); // offset=4 (generation)
             WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
             code.Add(WasmOpCodes.I32Ne);
+            code.Add(WasmOpCodes.If);
+            code.Add(WasmOpCodes.Void);
+            // confirm: true gen via RMW(+0)
+            WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
+            WasmModuleBuilder.EmitI32Const(code, 0);
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicRmwAdd);
+            code.Add(0x02); code.Add(0x04); // offset=4 (generation)
+            WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
+            code.Add(WasmOpCodes.I32Ne);
             code.Add(WasmOpCodes.BrIf);
-            WasmModuleBuilder.EmitU32Leb128(code, 1); // break (gen changed)
+            WasmModuleBuilder.EmitU32Leb128(code, 2); // break $spin_exit (from inside if)
+            code.Add(WasmOpCodes.End); // end confirm-if (false alarm: keep spinning)
 
             if (enableYieldEscape)
             {
@@ -1296,10 +1325,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.AtomicFence);
             code.Add(0x00);
 
-            // All workers: check exit flag
+            // All workers: check exit flag - VIA RMW(+0) (lagged-view defense).
             WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
+            WasmModuleBuilder.EmitI32Const(code, 0);
             code.Add(WasmOpCodes.AtomicPrefix);
-            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicLoad);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicRmwAdd);
             code.Add(0x02); code.Add(0x0C); // offset=12 (exit flag)
             code.Add(WasmOpCodes.BrIf);
             WasmModuleBuilder.EmitU32Leb128(code, 1); // break to $exit_phase if exit=1
@@ -1374,10 +1404,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 code.Add(WasmOpCodes.If);
                 code.Add(WasmOpCodes.Void);
             }
-            // Save generation
+            // Save generation - VIA RMW(+0), not a plain load (see the phase barrier's
+            // savedGen note: a lagged gen read poisons the sense barrier -> early cross).
             WasmModuleBuilder.EmitLocalGet(code, 13); // fenceBase
+            WasmModuleBuilder.EmitI32Const(code, 0);
             code.Add(WasmOpCodes.AtomicPrefix);
-            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicLoad);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicRmwAdd);
             code.Add(0x02); code.Add(0x14); // align=2, offset=20 (group gen at fenceBase+20)
             WasmModuleBuilder.EmitLocalSet(code, pSavedGen);
             // Arrive
@@ -1506,14 +1538,26 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             code.Add(WasmOpCodes.Void);
             code.Add(WasmOpCodes.Loop);
             code.Add(WasmOpCodes.Void);
+            // Fast load check + RMW confirmation before crossing (lagged-view defense,
+            // mirrors the phase-barrier spin above).
             WasmModuleBuilder.EmitLocalGet(code, 13);
             code.Add(WasmOpCodes.AtomicPrefix);
             WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicLoad);
             code.Add(0x02); code.Add(0x14); // offset=20
             WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
             code.Add(WasmOpCodes.I32Ne);
+            code.Add(WasmOpCodes.If);
+            code.Add(WasmOpCodes.Void);
+            WasmModuleBuilder.EmitLocalGet(code, 13);
+            WasmModuleBuilder.EmitI32Const(code, 0);
+            code.Add(WasmOpCodes.AtomicPrefix);
+            WasmModuleBuilder.EmitU32Leb128(code, WasmOpCodes.I32AtomicRmwAdd);
+            code.Add(0x02); code.Add(0x14); // offset=20 (group gen)
+            WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
+            code.Add(WasmOpCodes.I32Ne);
             code.Add(WasmOpCodes.BrIf);
-            WasmModuleBuilder.EmitU32Leb128(code, 1); // break (gen changed)
+            WasmModuleBuilder.EmitU32Leb128(code, 2); // break $spin_exit (from inside if)
+            code.Add(WasmOpCodes.End); // end confirm-if
             if (enableYieldEscape)
             {
                 // spinCount++

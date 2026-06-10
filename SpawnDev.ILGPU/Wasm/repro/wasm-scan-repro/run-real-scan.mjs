@@ -68,6 +68,10 @@ function computeLayout(N, W) {
     // hits any tid's boundaries region [+1384,+1392) - the aliasing discriminator.
     if (process.env.DBG_KERNEL === '1') pages = Math.max(pages, 22);
     if (process.env.DBG_KERNEL === '2') pages = Math.max(pages, 26);
+    // DBG_KERNEL=3 (00_kernel_1_dbg3.wasm) = PUBLICATION-TIMING rings: {genAtWrite,value}
+    // at the scanResults copy + {genAtRead,rbConsumed} at the carry consumption - the
+    // writer-lag discriminator (pubGen > consGen = the store ran LATE = fiber lag).
+    if (process.env.DBG_KERNEL === '3') pages = Math.max(pages, 30);
     const zeroRegionSize = fenceSlot - sharedMemBase;
     return { inOff, outOff, scratchBase, sharedMemBase, barrierBase, fenceSlot,
              yieldStateRegionBase, zeroRegionSize, pages, numGroups, gridDimX };
@@ -166,7 +170,7 @@ if (isMainThread) {
     const WORKERS = parseInt(process.argv[3] || '8');
     const ROUNDS = parseInt(process.argv[4] || '20');
     const wasmBytes = readFileSync(new URL(
-        process.env.DBG_KERNEL === '2' ? './00_kernel_1_dbg2.wasm' : process.env.DBG_KERNEL === '1' ? './00_kernel_1_dbg.wasm' : './00_kernel_1.wasm', import.meta.url));
+        process.env.DBG_KERNEL === '3' ? './00_kernel_1_dbg3.wasm' : process.env.DBG_KERNEL === '2' ? './00_kernel_1_dbg2.wasm' : process.env.DBG_KERNEL === '1' ? './00_kernel_1_dbg.wasm' : './00_kernel_1.wasm', import.meta.url));
     if (process.env.DBG_KERNEL) console.log('DBG_KERNEL=1: per-tid rb-observation rings active (helper ph3)');
     const thisFile = fileURLToPath(import.meta.url);
 
@@ -284,13 +288,46 @@ if (isMainThread) {
                 const compact = log.map(r => `${r.f}:g${r.g}:p${r.p}:sg${r.sg}:gy${r.gy}:gw${r.gw}:sv${r.sv}${r.sx ? ':SX' + r.sx : ''}`).join(' ');
                 console.log(`    suspect w${w} (tids ${w * fibersPerWorker}..${Math.min(w * fibersPerWorker + fibersPerWorker, GROUP_SIZE) - 1}) ylog[${log.length}]: ${compact}`);
             }
+            // PUB-TIMING DUMP (DBG_KERNEL=3): the writer-lag discriminator. For each
+            // victim (fiber s corrupt from tile t): the crossing into tile t consumed
+            // rb published by tid 255 at PUB cursor t-1; the victim consumed at CONS
+            // cursor t-1. pubGen > consGen = THE STORE RAN LATE (fiber continuation
+            // lag = our codegen bug); pubGen < consGen = genuine visibility anomaly.
+            if (process.env.DBG_KERNEL === '3') {
+                const PUBC = 1380352, PUBD = 1384448, CONC = 1650688, COND = 1654784;
+                const pubCur = t2 => i32[(PUBC + t2 * 4) >>> 2];
+                const pubRec = (t2, k, o) => i32[(PUBD + t2 * 1024 + k * 16 + o) >>> 2];
+                const conCur = t2 => i32[(CONC + t2 * 4) >>> 2];
+                const conRec = (t2, k, o) => i32[(COND + t2 * 1024 + k * 16 + o) >>> 2];
+                const expTiles3 = Math.ceil(N / GROUP_SIZE);
+                console.log(`    [pub-timing] cursors: pub[255]=${pubCur(255)} (expect ${expTiles3})`);
+                for (const s of slots) {
+                    const evTile = Math.min(...[...tiles]);
+                    for (let k = Math.max(0, evTile - 2); k <= Math.min(expTiles3 - 1, evTile); k++) {
+                        const pg = pubRec(255, k, 0), pv = pubRec(255, k, 4);
+                        const cg = conRec(s, k, 0), cv = conRec(s, k, 4), cShared = conRec(s, k, 8);
+                        const expRb = GROUP_SIZE * tileVal(k);
+                        // cShared = scanResults[DimX-1] read DIRECTLY from shared memory at
+                        // consumption time. scratch stale + shared fresh = the struct
+                        // out-param handoff got clobbered (spill overlap class, OUR bug).
+                        const verdict = (k === evTile - 1)
+                            ? (cv !== expRb && cShared === expRb
+                                ? '  <<< SCRATCH STALE, SHARED FRESH - out-param clobbered (OUR BUG)'
+                                : cv !== expRb && cShared !== expRb
+                                    ? '  <<< BOTH STALE - shared-memory visibility anomaly'
+                                    : (pg > cg ? '  <<< WRITE WAS LATE - fiber lag' : ''))
+                            : '';
+                        console.log(`    [pub-timing] k=${k}: pub[255]={gen ${pg}, val ${pv}${pv !== expRb ? ' WRONGVAL exp ' + expRb : ''}}  cons[${s}]={gen ${cg}, rbScratch ${cv}${cv !== expRb ? ' STALE' : ''}, rbShared ${cShared}${cShared !== expRb ? ' STALE' : ''}, exp ${expRb}}${verdict}`);
+                    }
+                }
+            }
             // DEBUG RING DUMP (DBG_KERNEL=1): per-tid rb observations from INSIDE the
             // helper's final phase, at the moment of the read. Decisive fork:
             //   victim ring shows the stale rb  -> the READ itself returned old data
             //   victim ring shows correct rb    -> read fine; corruption is AFTER the read
             //                                      (out-param/carry/save-restore path)
             // Cursor sanity: every tid must have run ph3 exactly 64 times (one per tile).
-            if (process.env.DBG_KERNEL) {
+            if (process.env.DBG_KERNEL === '1' || process.env.DBG_KERNEL === '2') {
                 const cursorOf = t => i32[(DBGC + t * 4) >>> 2];
                 // ring1 16B records: {rbRead, tempBack([55+4] after plain store),
                 //                     outBack([13+4] after atomic copy), local54Again}
