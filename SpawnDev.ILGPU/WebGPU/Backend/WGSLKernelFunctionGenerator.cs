@@ -3229,6 +3229,20 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             }
                         }
 
+                        // Binary-arithmetic operand-type lookup: InferWgslType defaults
+                        // arithmetic (A + B, A * B, ...) to i32 from expression SHAPE alone,
+                        // which is wrong for float/u32 operands. WGSL requires both operands of
+                        // an arithmetic op to share the result type, so inherit the type of a
+                        // tracked non-i32 operand. Fixes inlined-helper temps like FusedActivate's
+                        // `v = acc + bias` (f32+f32) being declared i32 and rejected by Tint
+                        // ("cannot assign f32 to i32"). Bug #3 (FusedRegBlockedLinearActivation),
+                        // 2026-06-09.
+                        if (inferredType == "i32"
+                            && TryInferArithmeticOperandType(exprTrimmed, out var arithOperandType))
+                        {
+                            inferredType = arithOperandType;
+                        }
+
                         // WGSL: pointer types are not constructible and can't be declared
                         // as 'var'. They will be bound as 'let' at their point of use.
                         if (!inferredType.StartsWith("ptr<"))
@@ -3510,6 +3524,44 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 if (!char.IsLetterOrDigit(c) && c != '_') return false;
             }
             return true;
+        }
+
+        /// <summary>
+        /// For a binary ARITHMETIC expression (<c>A + B</c>, <c>A * B</c>, ...) in the
+        /// missing-declaration fallback, returns the WGSL result type by inheriting the type
+        /// of the first tracked operand variable that isn't the <c>i32</c> default. WGSL
+        /// requires both operands of an arithmetic op to share the result type, so any tracked
+        /// operand's type IS the result type. Used to override <see cref="InferWgslType"/>'s
+        /// shape-only <c>i32</c> guess for float/u32 arithmetic (e.g. FusedActivate's
+        /// <c>v = acc + bias</c>). Returns false when no non-i32 operand can be resolved.
+        /// </summary>
+        private bool TryInferArithmeticOperandType(string expr, out string type)
+        {
+            type = "i32";
+            if (!(expr.Contains(" + ") || expr.Contains(" - ") || expr.Contains(" * ")
+                || expr.Contains(" / ") || expr.Contains(" % ")))
+                return false;
+            var operands = expr.Split(
+                new[] { " + ", " - ", " * ", " / ", " % " },
+                System.StringSplitOptions.RemoveEmptyEntries);
+            foreach (var raw in operands)
+            {
+                var tok = raw.Trim().Trim('(', ')').Trim();
+                if (!IsSimpleIdentifier(tok)) continue;
+                foreach (var kvp in valueVariables)
+                {
+                    if (kvp.Value.Name == tok)
+                    {
+                        if (kvp.Value.Type != "i32")
+                        {
+                            type = kvp.Value.Type;
+                            return true;
+                        }
+                        break;
+                    }
+                }
+            }
+            return false;
         }
 
         private static string InferWgslType(string expr)
