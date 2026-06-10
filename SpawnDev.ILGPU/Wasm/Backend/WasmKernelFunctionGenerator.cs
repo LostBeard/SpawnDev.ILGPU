@@ -249,6 +249,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         private readonly List<(uint localIdx, int cumulativeOffset)> _helperScratchBaseLocals = new();
 
         /// <summary>
+        /// Per-helper dedicated scratch region locals for the SINGLE-CALL path (no-barrier
+        /// helpers): one region per unique helper, shared across its call sites (a
+        /// no-barrier helper keeps no cross-call state - only its completion-persist
+        /// writes land there, which previously clobbered the KERNEL's spill slots).
+        /// </summary>
+        private readonly Dictionary<global::ILGPU.IR.Method, uint> _singleCallHelperScratch = new();
+
+        /// <summary>
         /// Total bytes allocated for shared memory in this kernel.
         /// </summary>
         private int _sharedMemorySize = 0;
@@ -3255,12 +3263,41 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 // (internal loop path removed — using yield-per-phase exclusively)
                 else
                 {
-                    // Non-phase or no helper barriers: single call
+                    // Non-phase or no helper barriers: single call.
+                    //
+                    // TWO FIXES (2026-06-11, Seven - the RegBlocked "got 0"/garbage and
+                    // FusedLinear scattered-error bugs):
+                    // 1. SCRATCH: a phase-mode-compiled helper (helpers inherit phase mode
+                    //    from the kernel's PhaseCount) writes its completion state into its
+                    //    scratch region. Passing the KERNEL's scratch base here made the
+                    //    helper CLOBBER THE KERNEL'S FIBER SPILL SLOTS on every call.
+                    //    Give it a dedicated region (shared across call sites of the same
+                    //    helper - a no-barrier helper keeps no cross-call state).
+                    // 2. PHASE: passing the kernel's live phase param made the helper's
+                    //    prologue run `if (phase > 0) restore-all-locals` from scratch it
+                    //    never saved - garbage locals, garbage br_table dispatch, garbage
+                    //    return. A no-barrier helper is a fresh full run every call: phase 0.
+                    uint singleCallScratchLocal;
+                    if (_singleCallHelperScratch.TryGetValue(targetMethod, out var scs))
+                    {
+                        singleCallScratchLocal = scs;
+                    }
+                    else
+                    {
+                        singleCallScratchLocal = AllocateNewLocal(WasmOpCodes.I32);
+                        _helperScratchBaseLocals.Add((singleCallScratchLocal, _helperScratchCumulativeOffset));
+                        if (_generatorArgs.HelperScratchEstimates.TryGetValue(targetMethod, out int singleHelperScratch))
+                            _helperScratchCumulativeOffset += (singleHelperScratch + 7) & ~7;
+                        else
+                            _helperScratchCumulativeOffset += 256; // conservative minimum
+                        _singleCallHelperScratch[targetMethod] = singleCallScratchLocal;
+                    }
+
                     // Push context params
                     WasmModuleBuilder.EmitLocalGet(Code, _globalIdxLocal);
                     WasmModuleBuilder.EmitLocalGet(Code, _dimXLocal);
                     WasmModuleBuilder.EmitLocalGet(Code, _dimYLocal);
-                    WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
+                    WasmModuleBuilder.EmitLocalGet(Code, singleCallScratchLocal);
                     WasmModuleBuilder.EmitLocalGet(Code, _groupDimXLocal);
                     WasmModuleBuilder.EmitLocalGet(Code, _threadIdXLocal);
                     WasmModuleBuilder.EmitLocalGet(Code, _sharedMemBaseLocal);
@@ -3271,7 +3308,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         Code.Add(WasmOpCodes.I32Add);
                     }
                     WasmModuleBuilder.EmitLocalGet(Code, _dynamicSharedLengthLocal);
-                    WasmModuleBuilder.EmitLocalGet(Code, _phaseParamLocal);
+                    WasmModuleBuilder.EmitI32Const(Code, 0); // phase 0: fresh run, no restore
                     WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimXLocal);
                     WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimYLocal);
                     for (int i = 0; i < targetMethod.Parameters.Count && i < methodCall.Nodes.Length; i++)
@@ -3279,10 +3316,18 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
                     WasmModuleBuilder.EmitCall(Code, (uint)helperFuncIdx);
 
-                    if (_phaseMode)
-                        Code.Add(WasmOpCodes.Drop); // helper returns i32 in phase mode
-                    else if (resultLocal.HasValue)
+                    // Phase-mode helper return convention (Option E, see the state-machine
+                    // epilogue ~line 1395): a NON-VOID helper returns its ACTUAL RESULT
+                    // (the yield flag lives in scratch[0]); only VOID helpers return the
+                    // yield flag i32. The old unconditional `if (_phaseMode) Drop` here
+                    // DISCARDED a non-void no-barrier helper's real return value, leaving
+                    // resultLocal at 0 - the "got 0" failures in phase-mode kernels calling
+                    // non-void multi-block helpers (FusedFFN_RegBlocked{Tanh,Erf}GELU:
+                    // the erf/tanh activation helpers). Fixed 2026-06-11 (Seven).
+                    if (resultLocal.HasValue)
                         WasmModuleBuilder.EmitLocalSet(Code, resultLocal.Value);
+                    else if (_phaseMode)
+                        Code.Add(WasmOpCodes.Drop); // void phase helper returns yield-flag i32
                 }
 
                 // Advance barrier counter for subsequent barriers/calls
