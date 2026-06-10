@@ -1,5 +1,47 @@
 # Residual Wasm large-sort race — investigation notes (2026-05-25/26, Tuvok)
 
+## 🏆 SESSION 12 (2026-06-10/11, Seven) — KILLED. VERIFIED ATOMIC STORES. GATE 0/120 ×3.
+
+**Root cause (ring-instrumented at the instruction level, 21/21 events):** V8 atomic stores
+in barrier kernels can **silently fail to land** under CPU oversubscription. The proven victim:
+the `ScanBoundaries` out-param field copies in the scan helper — events captured where the LEFT
+field's atomic store landed and the RIGHT field's vanished (and where both vanished): exactly
+the "window of consecutive stores vanishes". The immediate same-thread atomic-load read-back
+returned the OLD value (the detector that became the fix); the slot stayed stale; the consuming
+fiber's tile carry went one publication behind → the classic single-slot, contiguous-tiles,
+constant-delta signature. Per-tile pseudorandom fingerprints decoded all events as EXACTLY
+`v(t-2)−v(t-1)` (the linear input used before 2026-06-09 collapsed every delta to −GROUP_SIZE
+and hid the sign).
+
+**The day's falsifications (each implemented + gated, full trail in `_DevComms/global/seven-*`):**
+scanResults-copy elimination + Wasm entry barriers (120/120 — the copy was load-bearing reuse
+cushion); epoch protocols (a consistently-lagged view defeats own-slot expected epochs); blanket
+RMW-load translation (11/120 — WORSE; timing perturbation); every stale-READ model (nothing can
+read a store that never landed). The dispatcher sense barrier had a REAL second hole (savedGen
+via plain atomic load → lagged read → EARLY PHASE CROSS — independently 7-15/120 → 2-3/120,
+and the long-standing wait/notify catastrophe is the same poison: `wait(gen, staleGen)` returns
+immediately).
+
+**THE FIX (commits `b0dfc5c`, `b6c558a`, `82c2c07`):**
+1. `EmitVerifiedAtomicStore` — EVERY atomic store in barrier kernels = store → **RMW(+0)
+   read-back** → retry until it sticks. The read-back must be an RMW: a plain-load read-back
+   can be satisfied by store-forwarding while the store never lands (that lying-verify hole was
+   a residual 1/360 leak). Covers GenerateCode(Store) all paths, EmitTypedStore/SetField,
+   Broadcast value+tag, WarpShuffle slots, in-kernel EmitBarrier protocol stores.
+2. Dispatcher: savedGen via RMW(+0) (phase+group), RMW-confirmed spin exits, RMW
+   exit-flag/yield-count reads.
+3. Broadcast tags monotonic per-execution (old group-index tag was vacuous within a group).
+
+**Validation:** fire/clean gate (`repro/wasm-scan-repro/run-real-scan.mjs 16384 48 120`):
+pre-fix 7-15/120 bad rounds (and **1/30 at 12 workers** — production-like configs corrupted
+too); post-fix **0/120 × 3 consecutive (360 rounds, 0 mismatches)**. Perf: ≤cores ~1-4%
+(12w: 2.23s→2.33s/30 rounds); 4× oversub stress +25% (54s→68s) where the unfixed code was wrong.
+Instruments: `repro/wasm-scan-repro/patch-pub-timing.mjs` (DBG_KERNEL=3 gen-stamp rings),
+`patch-debug-ring.mjs` (ring1b outBack = the store-fate detector). Upstream V8 filing draft:
+`Notes/v8-atomic-store-vanish-upstream-report-draft.md`.
+
+---
+
 ## ★★★★★★★ SESSION 11b (2026-06-09, Geordi) — RESIDUAL DEFINITIVELY LOCALIZED: OVERSUBSCRIPTION/PARKING-ONLY (not kernel, not steady-state barrier)
 
 **The SESSION-11 `ILGroupExtensions` barrier fix is correct for the 5 non-Wasm backends but DOES NOT touch the Wasm path** — `EnableWasmAlgorithms()` redirects group-scan to `WasmGroupExtensions` (`WasmAlgorithmContext.cs:89-144`, Redirect intrinsics). So the Wasm residual was NOT closed by it. Honest correction.
