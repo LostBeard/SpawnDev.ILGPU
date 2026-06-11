@@ -2,7 +2,47 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
-## 4.10.0 (in development) - Offline code generation (`ShaderCompiler.Generate` + `CapabilityProfile`)
+## 4.10.0 (in development) - Offline code generation (`ShaderCompiler.Generate` + `CapabilityProfile`) + Wasm backend correctness overhaul
+
+**Wasm backend: the multi-worker corruption family is DEAD (2026-06-10/11, Seven).** Three
+root-caused fixes close every known correctness defect in the fiber-based barrier dispatch;
+`PMT_FILTER=WasmTests` is 510/510 (first fully-green sweep), including all large sorts
+(260K-4M), SpawnSceneSimulation, and the formerly failing GEMM tests.
+
+- **Residual large-sort race KILLED - verified atomic data stores.** Ring-instrumented proof
+  (21/21 events) that V8 atomic stores in barrier kernels can silently fail to land under CPU
+  oversubscription (the boundaries out-param copy: left field landed, right vanished -> a
+  fiber's tile carry one publication behind). Every atomic DATA store in barrier kernels is now
+  `EmitVerifiedAtomicStore`: store -> RMW(+0) read-back -> retry until it sticks (the read-back
+  must be an RMW - a plain-load read-back can be store-forwarded while the store never lands).
+  Plus RMW-confirmed dispatcher sense barriers (a lagged generation load caused early phase
+  crossing) and monotonic Broadcast tags. Stress gate: 7-15/120 corrupt rounds at 48-worker 4x
+  oversubscription (and 1/30 even at 12 workers) -> 0/120 x3 consecutive. Cost ~1-4% at <=cores.
+- **Single-call helper path: 3 chained codegen bugs FIXED** (the "Wasm reg-block GEMM-core"
+  ticket). A phase-mode kernel calling a no-barrier helper (e.g. a fused activation) dropped
+  the helper's non-void RETURN (`if (_phaseMode) Drop`), passed the kernel's LIVE phase as the
+  helper's phase (prologue restored never-saved scratch -> garbage br_table dispatch), and
+  passed the KERNEL's scratch base as the helper's scratch (the helper's completion-persist
+  clobbered the kernel's fiber spill slots - the "scattered error" signature). Fixed: capture
+  non-void returns, phase=0 (fresh run per call), dedicated per-helper scratch region.
+  `FusedFFN_RegBlocked{Tanh,Erf}GELU` green for the first time.
+- **Late-spill tail KILLED - liveness-reduced spills + checksum-gated restore.** The last
+  ~1/1000-dispatch corruption (a fiber's restore reading the PREVIOUS phase's spills - a
+  same-thread store still sitting in a delayed-store window across the yield/park boundary).
+  (1) LIVENESS: locals touched in exactly one state-machine block (most SSA temporaries) can
+  never be live across a yield and are no longer spilled at all - kernel body 16.1KB -> 7.6KB,
+  ~20 spill words per yield instead of 165. (2) CHECKSUM GATE: spills stay plain (bisect-proven:
+  mixing verified and plain stores on ordered data INVERTS write order - see the uniform-store-
+  regimes law in `SpawnDev.ILGPU/Wasm/CLAUDE.md`), but each save XORs the spill set tagged with
+  the PHASE NUMBER (a register parameter, immune to memory staleness) and the restore RE-READS
+  until the checksum proves every spill landed. Chromium canary (3x3000 iterations): zero
+  failures, was 3-of-3 batteries failing. Node 48w gate 0/120 at baseline speed.
+- Diagnostics shipped along the way: `GlobalInclusiveScanHighTrialTest` now fingerprints every
+  mismatch (tile/slot/value-provenance decode); `PMT_BROWSER_CHANNEL` env opt-in in
+  PlaywrightMultiTest (note: real-Chrome runs poison the shared Playwright profile for
+  subsequent bundled-Chromium runs - delete `%TEMP%\SpawnDev.ILGPU.PlaywrightProfile` if sweeps
+  suddenly report "2/2 passed" in under a second); V8 upstream report draft at
+  `SpawnDev.ILGPU/Wasm/Notes/v8-atomic-store-vanish-upstream-report-draft.md`.
 
 **Precompiled-shaders Layer 1.** Generate a kernel's shader/binary for a target backend WITHOUT a real
 device, on any host OS (build servers, CI, a dev box without WebGPU). This is the foundation for build-time
