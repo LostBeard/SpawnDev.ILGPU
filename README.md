@@ -9,69 +9,9 @@ Write parallel compute code in C# and let the library pick the best available ba
 
 ## Recent Highlights
 
-**4.9.15 (current):** `MemoryPressure.AllocateWithReclaim` - a pressure-aware allocation helper. `accelerator.AllocateWithReclaim(allocate, reclaim, describeState)` runs an allocation, and if it fails (a device out-of-memory surfaces as a backend-specific exception, not a single .NET `OutOfMemoryException`), it flushes pending GPU work via `Synchronize` (so a buffer the reclaim is about to free is not read by an in-flight WebGPU/WebGL dispatch), invokes your `reclaim` callback to free reclaimable device memory, retries once, and on a second failure throws with the reclaimed amount and your diagnostic context. It is the flush -> reclaim -> retry **mechanism** only; the eviction **policy** (which buffers are safe to free) stays in your `reclaim` callback, so a buffer pool composes it in without giving up its own bucketing. Bundles forks 2.0.13.
+**4.10.0 (current):** **Wasm multi-worker correctness overhaul** - the large-sort / barrier race family is dead (verified atomic stores + liveness-reduced, checksum-gated spill restore; `WasmTests` 510/510). **Precompiled shaders** - generate a kernel's WGSL/GLSL/Wasm offline with no device on any host OS, precompile at build time via an MSBuild task, and load the artifact at runtime to skip IL->shader transpilation. Plus WebGPU `GridDim.X > 65535` 2D-grid auto-tile, WebGL `Half` RadixSort, and `Float16`/`Float64`/`Int64` reported on every backend (emulated where not native). Bundles forks **2.0.15**.
 
-**4.9.14:** `CopyFromStreamAsync` - stream a `.NET Stream` into a GPU buffer in chunks. `view.CopyFromStreamAsync(stream)` (typed `ArrayView<T>` / `ArrayView1D` extension) reads exactly `view.Length * sizeof(T)` bytes (throwing `EndOfStreamException` on early EOF rather than silently zero-padding), 16 MiB chunks by default. On desktop it genuinely awaits `Stream.ReadExactlyAsync` (a model off disk or network no longer blocks a thread on a sync read); on the browser backends, when the source is a `SpawnDev.BlazorJS.Toolbox.IJSReadStream` (e.g. `BlobStream`, `ArrayBufferStream`, `TorrentReadStream`) the data goes JS -> GPU via `CopyFromJS` **without entering the .NET/WASM managed heap** (WebGPU honors the 4-byte `writeBuffer` rule, with a managed padded fallback for odd-count `Half`). Adds a dependency on **SpawnDev.BlazorJS 3.5.12**; the core default path is BlazorJS-independent. Bundles forks 2.0.12.
-
-**4.9.13:** `RadixSort` now supports **`Half` keys on WebGL** (the last unsupported key type - all of int/uint/float/long/double/Half now sort on every browser backend), via an unpacked-f32 working representation since the render-to-texture scatter can't move a sub-texel Half. While adding it, fixed a **cross-backend sub-word signed-reinterpret sign-extension bug**: `(short)someUshort` / `(sbyte)someByte` lost their sign extension on all three browser backends (WebGPU/WebGL/Wasm) because signed and unsigned sub-word types collapse to one `BasicValueType`, so the reinterpret `conv.i2` was elided and the widening promotion never re-extended - this silently corrupted the high bits (e.g. broke `ExtractRadixBits<Half>` for negative Halves). Fixed in the WGSL/GLSL/Wasm `ConvertValue` codegen (re-extend per `SourceUnsigned`), with a UB-safe GLSL sign-extend idiom (`(x << 16) >> 16` is undefined when bit 15 is set). Also: WebGL in-kernel group/warp scan & reduce (`Group.ExclusiveScan`/`InclusiveScan`/`AllReduce`) now **throw `UnsupportedKernelFeatureException`** instead of silently returning 0 (they need shared memory + barriers, which the Transform-Feedback vertex model lacks - use the host `CreateScan`/`CreateReduce`, which do work on WebGL). Bundles forks 2.0.11.
-
-**4.9.12:** Generic-math f16 kernels - one generic kernel (`MatMul<TW> where TW : INumber<TW>`, `TW = float | Half`) now replaces per-weight-type dedicated kernels. `ILGPU.Half` implements `INumber<Half>` / `ISignedNumber<Half>` so the operators bind to Half's transpilable FP32 `[MathIntrinsic]` path on all 6 backends (no `System.Half` `BitCast`), and `NumericConvert.ToFloat32<T>` / `ToFloat64<T>` are transpilable generic converts (the C# `float.CreateTruncating<T>` fails to lower - it inspects `typeof`) so the kernel body can widen the generic weight to float for fp32 accumulation. Also fixes a latent `Half.One` bug (was `0x1` == epsilon, not `1.0` == `0x3C00`, which made `(Half)true` produce epsilon in the bool->Half conversion). Bundles forks 2.0.10.
-
-**4.9.11:** `Math.Clamp` now compiles and runs in kernels on all 6 backends (IL-frontend remap to the throw-free `IntrinsicMath.Clamp`, the same path `Math.Min`/`Max`/`Abs` use). Async browser parity - overridable `SynchronizeAsync`/`CopyToCPUAsync` core primitives that actually drain in-flight work.
-
-**4.9.10:** Wasm residual large-sort race fix. `Group.Broadcast` codegen now uses a per-group atomic tag handshake (writer publishes value + group tag; readers wait for tag match before loading) to prevent stale shared-slot consumption under full-sweep churn and heavy CPU contention. Verified with two clean full Wasm sweeps (459/0/4 each) and two concurrent FO76 contention sweeps (1664/0/149 each).
-
-**4.9.9:** New backend-agnostic `CopyFromAsync` extension (`ArrayView<T>` / `ArrayView1D<T,TStride>` / `MemoryBuffer1D<T,TStride>`) - the async mirror of `CopyFrom`, draining pending Wasm worker dispatches before the copy (no-op on other backends). WebGPU scalar-slot drift fix for kernels with body-struct + trailing-scalar params (unblocks ML TensorView migration). WebGL GPU→GPU `CopyTo`/`CopyFrom` stale-CPU-side fix. Wasm `wait32`/`notify` barriers re-confirmed to race on V8 - pure-spin stays, gated default-off re-test harness retained.
-
-**4.9.6-4.9.8:** PTX vector memory intrinsics (`ld.v2/v4.f32`) + `ArrayView.LoadVectorized`/`StoreVectorized`, `System.Numerics.BitOperations` mapped to hardware GPU intrinsics, CUDA `DefaultMaxRegistersPerThread` occupancy fix, WebGPU `pow(negative_base, runtime_exp)` NaN fix, WebGLDevice probe-context leak fix.
-
-**4.9.5:** WebGPU direct-param coalesce - kernels with more than 9 `ArrayView` parameters no longer hit Chrome's 10-binding limit (i32/u32/f32 and sub-word types coalesced into a shared `array<atomic<u32>>` binding). IR Inliner cumulative-IL budget - kernels with deep call graphs (VP9 entropy walker, large codec helpers) no longer produce 50K+ local Wasm functions that crash V8/Naga. WebGL multi-view body-struct decomposition and WGSL/WebGL codegen correctness fixes for `[NoInlining]` helpers with 64-bit indices, sub-word ArrayViews, and cross-block pointer LEAs. GroupDimX extent clamp. Zero real test failures across all 6 backends.
-
-**4.9.4:** Wasm `CopyToHostAsync` partial readback + WebGPU `Half` NaN/Inf bitcast fix.
-
-**4.9.3:** `ArrayView<T>.CopyToHostAsync()` per-backend partial readback extension.
-
-**4.9.2:** `[NoInlining]` helper fn-definition emission (compile-cliff fix), `AcceleratorRequirements` capability gating, OpenCL phi-binding codegen fix, NaN/Inf codegen across all backends.
-
-**4.9.0:** Complete sub-word data type support (`Int8`, `UInt8`, `Int16`, `UInt16`, `Float16`) across all 6 GPU backends + `CopyFromJS` zero-copy JS->GPU transfer.
-
-**4.8.0:** Wasm worker function caching (3-4x kernel dispatch speedup), full worker parallelism for non-barrier kernels.
-
-**4.7.1:** GPU-side test verification (`GpuTestVerify`, 10x+ faster than CPU readback), CPU default optimization, full DI integration.
-
-**4.6.0:** Wasm fiber-based barrier dispatch (full ILGPU Algorithms on Wasm, all RadixSort variants 100K-4M+ elements), 20+ Wasm bugs fixed, `ShaderDebugService` auto-dump for all generated shader code.
-
-**See [CHANGELOG.md](CHANGELOG.md)** for the full per-version history including code samples and per-backend implementation details.
-
-### Helper Method Fn-Definition Emission - Compile Cliff Fix (4.9.2)
-
-The most-asked-about feature from 4.9.2 - large helper methods called many times from a kernel produce a multi-thousand-line WGSL/GLSL `fn main()` that hits the browser shader validator's size limit (Tint rejects with `Invalid BindGroupLayout`). Tag the helper with `[MethodImpl(MethodImplOptions.NoInlining)]` and SpawnDev.ILGPU emits a real WGSL/GLSL `fn` definition + N call sites instead of N inline expansions:
-
-```csharp
-using System.Runtime.CompilerServices;
-
-private static void IdctKernel(Index1D blockIdx, ArrayView<short> coeffs, ArrayView<byte> dest)
-{
-    // 32 calls to the helper - default inlining = ~3,800-line WGSL = compile cliff
-    Idct16Row(coeffs[r0], coeffs[r1], /* ... 14 short inputs */, out int o0, out int o1, /* ... */);
-    // ... 31 more calls
-}
-
-[MethodImpl(MethodImplOptions.NoInlining)]
-private static void Idct16Row(
-    short i0, short i1, /* ... */,
-    out int o0, out int o1, /* ... */)
-{
-    // 7-stage butterfly arithmetic
-}
-```
-
-Supports `int / float / short / byte / Half / bool` value params, `ref T` / `out T` for primitive value types (lowers to `ptr<function, T>` on WGSL, `inout T` on GLSL), struct value types, multiple call sites with per-call scratch slots. **Not yet supported on `[NoInlining]` helpers**: `ArrayView<T>` parameters, `LocalMemory<T>` access, barrier / shared-memory access — for those, use default inlining.
-
-See [`Docs/kernels.md` — Helper Methods and Inlining](Docs/kernels.md#helper-methods-and-inlining) for when to use `[NoInlining]`, when not to, and what each backend does.
-
-For everything else - per-version code samples, per-backend implementation details, the rc.X investigation logs - see **[CHANGELOG.md](CHANGELOG.md)**.
-
+**See [CHANGELOG.md](CHANGELOG.md)** for the full per-version history - every release, code samples, and per-backend implementation detail.
 
 ## Architecture
 
@@ -131,44 +71,15 @@ Comprehensive documentation is available in the [Docs](Docs/) folder:
 - **[API Reference](Docs/api-reference.md)** - Public API surface by namespace
 - **[Precompiled Shaders](Docs/precompiled-shaders.md)** - Offline codegen, build-time shader precompilation, runtime cache (move IL->shader transpilation off the runtime hot path)
 
-## Browser Backends (Blazor WebAssembly)
+## Backends
 
-| | 🎮 **WebGPU** | 🖼️ **WebGL** | 🧊 **Wasm** |
-|---|---|---|---|
-| **Executes on** | GPU | GPU | Web Workers |
-| **Transpiles to** | WGSL | GLSL ES 3.0 | WebAssembly binary |
-| **Technique** | Compute shader | Transform Feedback | Multi-worker |
-| **Blocking** | Non-blocking | Non-blocking | Non-blocking |
-| **SharedArrayBuffer** | Not required | Not required | Required for multi-worker |
-| **Shared Memory** | ✅ | ❌ | ✅ |
-| **Group.Barrier()** | ✅ | ❌ | ✅ |
-| **Dynamic Shared Memory** | ✅ | ❌ | ✅ |
-| **ILGPU Algorithms** | ✅ RadixSort, Scan, Reduce, etc. | ⚠️ Host RadixSort (all key types incl. Half) + Scan + Reduce work (multi-dispatch); in-kernel group/warp ops (`Group.Scan`/`Reduce`) throw - no shared memory | ✅ RadixSort, Scan, Reduce, Histogram |
-| **Atomics** | ✅ | ❌ | ✅ |
-| **Sub-word types** | ✅ Int8/UInt8/Int16/UInt16/Float16 | ✅ Int8/UInt8/Int16/UInt16/Float16 | ✅ Int8/UInt8/Int16/UInt16/Float16 |
-| **64-bit (f64/i64)** | ✅ Emulated | ✅ Emulated | ✅ Native |
-| **CopyFromJS** | ✅ | ✅ | ✅ |
-| **Browser support** | Chrome/Edge 113+ | All modern browsers | All modern browsers |
-| **Best for** | GPU compute (modern) | GPU compute (universal) | General compute |
+Six backends from one NuGet package - the same C# kernel runs on all of them:
 
-**Auto-selection priority:** WebGPU -> WebGL -> Wasm
+| Browser (Blazor WASM) | Desktop / Server |
+|---|---|
+| **WebGPU** (WGSL compute) · **WebGL** (GLSL Transform-Feedback) · **Wasm** (multi-worker WebAssembly) | **CUDA** (PTX) · **OpenCL** (incl. 3.0) · **CPU** |
 
-## Desktop Backends (Console, WPF, ASP.NET, etc.)
-
-SpawnDev.ILGPU bundles ILGPU's native backends, so the same NuGet package works on desktop and server too.
-
-| | 🚀 **Cuda** | 🔧 **OpenCL** | 🐢 **CPU** |
-|---|---|---|---|
-| **Executes on** | NVIDIA GPU | NVIDIA/AMD/Intel GPU | CPU cores |
-| **Transpiles to** | PTX | OpenCL C | - (interpreted) |
-| **Shared Memory** | ✅ | ✅ | ✅ |
-| **Atomics** | ✅ | ✅ | ✅ |
-| **64-bit** | ✅ Native | ✅ Native | ✅ Native |
-| **Requirement** | NVIDIA GPU + driver | OpenCL 2.0+ or 3.0 GPU | None |
-
-> **OpenCL 3.0 support:** NVIDIA GPUs with OpenCL 3.0 drivers are now supported. The `GenericAddressSpace` requirement that previously blocked these devices has been relaxed, significantly increasing OpenCL device compatibility.
-
-**Auto-selection:** Cuda -> OpenCL -> CPU (via `CreatePreferredAcceleratorAsync`)
+All support sub-word + `Half` types, 64-bit (native on Wasm/CUDA/OpenCL/CPU, emulated on WebGPU/WebGL), and the ILGPU Algorithms. **WebGL is the exception** - no shared memory / barriers / atomics, so in-kernel group/warp ops throw (host `RadixSort`/`Scan`/`Reduce` still work, all key types incl. `Half`). Auto-selection: WebGPU->WebGL->Wasm (browser), CUDA->OpenCL->CPU (desktop), via `CreatePreferredAcceleratorAsync`. Full per-backend capability matrix + setup: **[Docs/backends.md](Docs/backends.md)**.
 
 ## Features
 
@@ -359,55 +270,7 @@ dotnet run --project SpawnDev.ILGPU.Demo
 
 ## Test Coverage
 
-Comprehensive test suite across eight test suites covering all core features on both browser and desktop. All tests are run via the unified **PlaywrightMultiTest** runner in a single `dotnet test` invocation.
-
-### Test Suites
-
-#### Browser (Blazor WebAssembly via Playwright)
-
-| Suite | Backend | What's Tested |
-|-------|---------|---------------|
-| **WebGPUTests** | WebGPU | Full ILGPU feature set on GPU via WGSL, including RadixSort, Scan, Reduce |
-| **WebGPUNoSubgroupsTests** | WebGPU (no subgroups) | Same tests with subgroups force-disabled to verify shared-memory emulation |
-| **WebGLTests** | WebGL | GPU compute via GLSL ES 3.0, f64/i64 emulation |
-| **WasmTests** | Wasm | Native WebAssembly binary dispatch to workers, shared memory, barriers |
-| **DefaultTests** | Auto | Device enumeration, preferred backend, kernel execution |
-
-#### Desktop (Console Runner via subprocess)
-
-| Suite | Backend | What's Tested |
-|-------|---------|---------------|
-| **CudaTests** | CUDA | Full ILGPU feature set on NVIDIA GPU |
-| **OpenCLTests** | OpenCL | GPU compute on NVIDIA/AMD/Intel, dynamic subgroup feature detection |
-| **CPUTests** | CPU | Multi-threaded CPU accelerator (warp=8, warps=8, group size 64) |
-
-### Coverage by Area
-
-| Area | What's Tested | Status |
-|------|---------------|--------|
-| **Memory** | Allocation, transfer, copy, views | ✅ |
-| **Indexing** | 1D, 2D, 3D kernels, boundary conditions | ✅ |
-| **Arithmetic** | +, -, *, /, %, negation, complex expressions | ✅ |
-| **Bitwise** | AND, OR, XOR, NOT, shifts (<<, >>) | ✅ |
-| **Math Functions** | sin, cos, tan, exp, log, sqrt, pow, abs, min, max | ✅ |
-| **Atomics** | Add, Min, Max, CompareExchange, Xor | ✅ |
-| **Control Flow** | if/else, loops, nested, short-circuit | ✅ |
-| **Structs** | Simple, nested, with arrays | ✅ |
-| **Type Casting** | float<->int, uint, mixed precision | ✅ |
-| **Sub-Word Types** | Int8, UInt8, Int16, UInt16, Float16 buffer read/write/roundtrip/CopyFromJS | ✅ |
-| **Half Intrinsics** | Abs, Min, Max, Clamp across all backends | ✅ |
-| **64-bit Emulation** | `double` and `long` via software emulation (WebGPU, WebGL) | ✅ |
-| **GPU Patterns** | Stencil, reduction, matrix multiply, lerp, smoothstep | ✅ |
-| **Shared Memory** | Static and dynamic workgroup memory with `Group.Barrier()` | ✅ |
-| **Broadcast & Subgroups** | `Group.Broadcast`, `Warp.Shuffle` (WebGPU with subgroups extension) | ✅ |
-| **Dynamic Shared Memory** | Runtime-sized workgroup memory via `SharedMemory.GetDynamic()` | ✅ |
-| **ILGPU Algorithms** | RadixSort (pairs, non-pow2, descending, large), Scan, Reduce, Histogram | ✅ All backends including Wasm |
-| **Special Values** | NaN, Infinity detection | ✅ |
-| **Backend Selection** | Auto-discovery, priority, cross-backend kernel execution | ✅ |
-| **GpuMatrix4x4** | Identity, translation, LookAt transforms across all backends | ✅ |
-| **Lambda Kernels** | Capturing lambdas with scalar captures, multi-field, ArrayView rejection | ✅ |
-| **DelegateSpecialization** | Static method targets, cache validation, multi-target, rejection | ✅ |
-| **CopyFromJS** | TypedArray and ArrayBuffer direct-to-GPU writes on all browser backends | ✅ |
+Every feature is tested on all 6 backends (WebGPU, WebGPU-no-subgroups, WebGL, Wasm, CUDA, OpenCL, CPU) through the unified **PlaywrightMultiTest** runner in one `dotnet test`: memory, indexing, arithmetic/bitwise/math, atomics, control flow, structs, sub-word + `Half` types, 64-bit emulation, shared memory, broadcast/subgroups, the full ILGPU Algorithms (RadixSort/Scan/Reduce/Histogram), lambda + delegate specialization, and more. Latest full cross-backend sweep: **3367 pass / 0 fail**.
 
 ## Browser Requirements
 
@@ -423,37 +286,7 @@ Comprehensive test suite across eight test suites covering all core features on 
 
 ## GPU Backend Configuration
 
-### 64-bit Emulation
-
-GPU hardware typically only supports 32-bit operations. Both GPU backends (WebGPU and WebGL) provide software emulation for 64-bit types.
-
-**i64 emulation** (`long`/`ulong`) is always enabled - ILGPU's IR uses `Int64` for `ArrayView.Length` and indices, so i64 emulation via `vec2<u32>` is required for correctness.
-
-**f64 emulation** (`double`) is configurable via `F64EmulationMode`:
-
-| | **Dekker** (Default) | **Ozaki** | **Disabled** |
-|---|---|---|---|
-| **Representation** | `vec2<f32>` (high + low) | `vec4<f32>` (quad-float) | Native `f32` |
-| **Precision** | ~48-53 bits of mantissa | Strict IEEE 754 double precision | 32-bit only |
-| **Memory** | 8 bytes per value | 16 bytes per value | 4 bytes per value |
-| **Performance** | Fast | ~2x slower | Fastest |
-| **Best for** | General compute, fractals | Scientific, financial | Rendering, max perf |
-
-```csharp
-using SpawnDev.ILGPU;
-using SpawnDev.ILGPU.WebGPU.Backend;
-
-// Default: Dekker double-float emulation (good precision, fast)
-var options = new WebGPUBackendOptions();
-
-// Ozaki quad-float emulation (strict IEEE 754 precision)
-var options = new WebGPUBackendOptions { F64Emulation = F64EmulationMode.Ozaki };
-
-// Disable f64 emulation (double promoted to float for max performance)
-var options = new WebGPUBackendOptions { F64Emulation = F64EmulationMode.Disabled };
-
-using var accelerator = await device.CreateAcceleratorAsync(context, options);
-```
+GPU hardware is 32-bit; the browser backends (WebGPU/WebGL) emulate 64-bit. **i64** (`long`) is always on (ILGPU indices need it). **f64** (`double`) is configurable via `new WebGPUBackendOptions { F64Emulation = ... }` - **Dekker** (default; `vec2<f32>`, ~48-53 bit mantissa, fast), **Ozaki** (`vec4<f32>`, strict IEEE-754, ~2x slower), or **Disabled** (native f32, max perf). Per-mode tradeoffs + the full emulation reference: **[Docs/data-type-support.md](Docs/data-type-support.md)**.
 
 ## CUDA Libraries
 
@@ -494,38 +327,11 @@ Because SpawnDev.ILGPU also generates kernels dynamically (Lambda Kernels, Deleg
 
 ## Synchronization
 
-```csharp
-// Synchronize() - flushes queued commands to the backend (non-blocking, safe in WASM)
-accelerator.Synchronize();
-
-// SynchronizeAsync() - flushes AND waits for GPU completion
-await accelerator.SynchronizeAsync();
-
-// CopyToHostAsync() - the ONLY way to read GPU data back to CPU
-var results = await buffer.CopyToHostAsync<float>();
-
-// CopyFromAsync() - GPU->GPU copy that is safe to call right after an
-// unawaited kernel dispatch (drains pending Wasm worker writes first).
-// Use this instead of the sync CopyFrom in async code; no-op drain on
-// WebGPU/WebGL/CUDA/OpenCL/CPU (those already serialize the copy).
-await dstBuffer.View.CopyFromAsync(srcView);
-```
-
-> **Note:** `Synchronize()` does **not** block in Blazor WASM - it flushes commands without waiting. `SynchronizeAsync()` flushes and waits for completion. Neither transfers data; use `CopyToHostAsync()` for GPU->CPU readback. For GPU->GPU copies in async code following an unawaited dispatch, use `CopyFromAsync()` - the sync `CopyFrom` has no ordering guarantee against in-flight Wasm worker kernels (the main thread cannot block-wait), so it can read `SharedArrayBuffer` mid-write.
+`Synchronize()` flushes queued commands (non-blocking, safe in WASM); `await SynchronizeAsync()` flushes **and** waits for GPU completion; `await buffer.CopyToHostAsync<T>()` is the only GPU->CPU readback; `await dstView.CopyFromAsync(srcView)` is the async-safe GPU->GPU copy (drains pending Wasm worker writes first). Full contract + the WASM no-block / no-sync-readback rules: **[Docs/async.md](Docs/async.md)**.
 
 ## Verbose Logging
 
-All backends include verbose debug logging, disabled by default. Enable per-backend when needed:
-
-```csharp
-using SpawnDev.ILGPU.WebGPU.Backend;
-using SpawnDev.ILGPU.WebGL.Backend;
-using SpawnDev.ILGPU.Wasm.Backend;
-
-WebGPUBackend.VerboseLogging = true;   // WebGPU backend
-WebGLBackend.VerboseLogging = true;    // WebGL backend
-WasmBackend.VerboseLogging = true;     // Wasm backend
-```
+Per-backend, off by default: `WebGPUBackend.VerboseLogging = true;` (also `WebGLBackend` / `WasmBackend`).
 
 ## Blazor WebAssembly Configuration
 
