@@ -185,6 +185,11 @@ namespace PlaywrightMultiTest
                             new BrowserTypeLaunchPersistentContextOptions
                             {
                                 Headless = false,
+                                // PMT_BROWSER_CHANNEL=chrome runs the system Chrome instead of
+                                // the Playwright-bundled Chromium (V8-version discriminator for
+                                // engine-level wasm issues; same precedent as WebTorrent's
+                                // H.264 Channel fix). Unset = bundled Chromium (default).
+                                Channel = Environment.GetEnvironmentVariable("PMT_BROWSER_CHANNEL"),
                                 Args = new[]
                                 {
                                     "--enable-unsafe-webgpu",

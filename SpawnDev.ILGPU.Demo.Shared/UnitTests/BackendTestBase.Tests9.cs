@@ -179,6 +179,12 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 ScanKind.Inclusive);
 
             int badRuns = 0, totalMismatch = 0, firstBadIter = -1, firstBadIdx = -1, firstBadGot = 0;
+            // FINGERPRINT decode (2026-06-11, Seven): all-1s scan => every correct value is
+            // unique (i+1), so a wrong cell's GOT value identifies WHICH cell's correct value
+            // it carries (srcIdx = got-1). Record EVERY mismatch with tile/slot decode - the
+            // multi-point fingerprint discriminates stale-carry vs misplaced-write vs
+            // off-by-one-slot mechanisms (one printed point cannot).
+            var events = new System.Collections.Generic.List<string>();
             for (int it = 0; it < iterations; it++)
             {
                 scan(accelerator.DefaultStream, inputBuf.View, outputBuf.View, tempBuf.View.AsContiguous());
@@ -190,6 +196,12 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     if (result[i] != i + 1)
                     {
                         if (mism == 0 && badRuns == 0) { firstBadIter = it; firstBadIdx = i; firstBadGot = result[i]; }
+                        if (events.Count < 24)
+                        {
+                            int got = result[i], src = got - 1;
+                            events.Add($"iter{it} idx{i}[t{i >> 8}.s{i & 255}] got {got} exp {i + 1} d{got - (i + 1)}" +
+                                (src >= 0 && src < n ? $" =val-of idx{src}[t{src >> 8}.s{src & 255}]" : " =val-of OUT-OF-RANGE"));
+                        }
                         mism++;
                     }
                 }
@@ -199,6 +211,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             if (badRuns > 0)
                 throw new Exception($"GlobalInclusiveScanHighTrial: {badRuns}/{iterations} runs corrupt, " +
                     $"{totalMismatch} total mismatches. First @iter {firstBadIter} idx {firstBadIdx}: got {firstBadGot}, expected {firstBadIdx + 1}. " +
+                    $"EVENTS: {string.Join(" | ", events)} " +
                     $"=> the SCAN dispatch corrupts under contention (scan-in-context is the culprit).");
         });
 

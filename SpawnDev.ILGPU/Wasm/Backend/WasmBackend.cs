@@ -767,10 +767,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             moduleBuilder.ExportFunction("dispatcher", dispFuncIdx);
 
             // Locals: g, phase, tid, anyYielded, r, zeroIdx, savedGen, arrived, spinCount, resumed,
-            //         groupResume (11 i32)
+            //         groupResume, verifyAddr, verifyVal (13 i32)
             var locals = new List<WasmLocal>
             {
-                new WasmLocal { Type = WasmOpCodes.I32, Count = 11 }
+                new WasmLocal { Type = WasmOpCodes.I32, Count = 13 }
             };
             uint pG = (uint)dispParamTypes.Count;         // local index for g
             uint pPhase = pG + 1;
@@ -783,6 +783,35 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             uint pSpinCount = pG + 8;     // counter for phase AND group barrier spin iterations
             uint pResumed = pG + 9;       // 1 if re-entered after a PHASE-barrier spin-yield (yieldFlag=1)
             uint pGroupResume = pG + 10;  // 1 if re-entered after a GROUP-barrier spin-yield (yieldFlag=2)
+            uint pVerifyAddr = pG + 11;   // verified-store scratch (FIFO drain of yield-buffer writes)
+            uint pVerifyVal = pG + 12;
+
+            // Verified store of the LAST yield-buffer write before returning to JS: a
+            // store can sit unlanded across the wasm->JS boundary (the delayed-store
+            // window behind the residual race); verifying the TAIL write via RMW(+0)
+            // read-back + retry drains the (FIFO) store pipeline so JS and the resume
+            // read landed values. Expects the value in pVerifyVal, the address in
+            // pVerifyAddr.
+            void EmitVerifiedYieldWrite(List<byte> c)
+            {
+                c.Add(WasmOpCodes.Loop);
+                c.Add(WasmOpCodes.Void);
+                WasmModuleBuilder.EmitLocalGet(c, pVerifyAddr);
+                WasmModuleBuilder.EmitLocalGet(c, pVerifyVal);
+                c.Add(WasmOpCodes.AtomicPrefix);
+                WasmModuleBuilder.EmitU32Leb128(c, WasmOpCodes.I32AtomicStore);
+                c.Add(0x02); c.Add(0x00);
+                WasmModuleBuilder.EmitLocalGet(c, pVerifyAddr);
+                WasmModuleBuilder.EmitI32Const(c, 0);
+                c.Add(WasmOpCodes.AtomicPrefix);
+                WasmModuleBuilder.EmitU32Leb128(c, WasmOpCodes.I32AtomicRmwAdd);
+                c.Add(0x02); c.Add(0x00);
+                WasmModuleBuilder.EmitLocalGet(c, pVerifyVal);
+                c.Add(WasmOpCodes.I32Ne);
+                c.Add(WasmOpCodes.BrIf);
+                WasmModuleBuilder.EmitU32Leb128(c, 0);
+                c.Add(WasmOpCodes.End);
+            }
 
             // Yield-on-spin threshold. Pure spin runs ~5ns/iteration, so 1M = ~5ms before yielding to JS.
             // Tuning rationale (revised 2026-04-28 after Data's single-tab regression):
@@ -1291,7 +1320,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 WasmModuleBuilder.EmitLocalGet(code, 14);
                 WasmModuleBuilder.EmitLocalGet(code, pPhase);
                 WasmModuleBuilder.EmitStore(code, WasmOpCodes.I32Store, 2, 8);
-                // yieldStateAddr[12] = savedGen
+                // yieldStateAddr[12] = savedGen. PLAIN - uniform with the buffer's
+                // other writes (a verified-[12]-only variant inverted against delayed
+                // plain writes of the same buffer; uniform regimes only).
                 WasmModuleBuilder.EmitLocalGet(code, 14);
                 WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
                 WasmModuleBuilder.EmitStore(code, WasmOpCodes.I32Store, 2, 12);
@@ -1579,7 +1610,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 WasmModuleBuilder.EmitLocalGet(code, 14);
                 WasmModuleBuilder.EmitLocalGet(code, pG);
                 WasmModuleBuilder.EmitStore(code, WasmOpCodes.I32Store, 2, 4);
-                // yieldStateAddr[12] = savedGen (the group gen this waiter is blocked on)
+                // yieldStateAddr[12] = savedGen. PLAIN - uniform with the buffer's
+                // other writes (a verified-[12]-only variant inverted against delayed
+                // plain writes of the same buffer; uniform regimes only).
                 WasmModuleBuilder.EmitLocalGet(code, 14);
                 WasmModuleBuilder.EmitLocalGet(code, pSavedGen);
                 WasmModuleBuilder.EmitStore(code, WasmOpCodes.I32Store, 2, 12);

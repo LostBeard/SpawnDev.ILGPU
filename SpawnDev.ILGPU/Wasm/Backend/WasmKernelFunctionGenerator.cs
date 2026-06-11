@@ -134,6 +134,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// State local for the state machine (_block variable).
         /// </summary>
         private uint _stateLocal;
+        private uint _spillVerifyAddr, _spillVerifyVal32, _spillVerifyVal64;
         private uint _yieldedLocal;
 
         /// <summary>
@@ -1136,6 +1137,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             _stateLocal = AllocateNewLocal(WasmOpCodes.I32);
             // Allocate yielded flag (0=done, 1=yielded at barrier)
             _yieldedLocal = AllocateNewLocal(WasmOpCodes.I32);
+            // Fixed temporaries for the VERIFIED spill loop (see EmitSaveAllLocalsTo)
+            _spillVerifyAddr = AllocateNewLocal(WasmOpCodes.I32);
+            _spillVerifyVal32 = AllocateNewLocal(WasmOpCodes.I32);
+            _spillVerifyVal64 = AllocateNewLocal(WasmOpCodes.I64);
 
             // === Phase 1: Pre-scan for barriers and compute expanded block count ===
             // Each IR block that contains a Barrier instruction gets split into two
@@ -1384,13 +1389,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     Code.Add(WasmOpCodes.I32Add);
                     WasmModuleBuilder.EmitLocalGet(Code, _stateLocal);
                     WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store, 2, 0);
-                    // Also persist _yieldedLocal = 0 so re-entry returns 0
+                    // Also persist _yieldedLocal = 0 so re-entry returns 0.
+                    // This is the TAIL write of the completion persist - verified (FIFO drain).
                     int yieldedOffset = GetLocalSpillOffset(_yieldedLocal);
                     WasmModuleBuilder.EmitLocalGet(Code, _scratchBaseLocal);
                     WasmModuleBuilder.EmitI32Const(Code, yieldedOffset);
                     Code.Add(WasmOpCodes.I32Add);
                     WasmModuleBuilder.EmitLocalGet(Code, _yieldedLocal);
-                    WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store, 2, 0);
+                    EmitVerifiedAtomicStore(32);
                 }
                 Code.Add(WasmOpCodes.End); // end if
             }
@@ -4543,38 +4549,31 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// </summary>
         private void EmitSaveAllLocalsTo(List<byte> target)
         {
+            // Plain spills, ALL locals, plain state-slot writes at yields - the PROVEN
+            // 0/360-gate shape. Two falsified variants (2026-06-11, Seven), do not retry:
+            // - VERIFIED state-slot writes + plain state spill = write-write inversion
+            //   (the delayed plain spill lands AFTER the verified write -> fiber resumes
+            //   at the OLD continuation): bisected to 4/120 corrupt @ 48w.
+            // - Fully-VERIFIED spills (every local): correct but 2.7x at production
+            //   configs - rejected on perf. The rare in-browser late-spill tail
+            //   (~1/1000 dispatches in bundled Chromium) is tracked for a
+            //   liveness-based spill reduction, which would make verified spills
+            //   affordable.
             int offset = _phaseStateOffset;
             for (int i = 0; i < _locals.Count; i++)
             {
                 uint localIdx = (uint)(_paramCount + i);
                 byte type = _locals[i].Type;
-
-                // Address = scratchBase + offset
                 WasmModuleBuilder.EmitLocalGet(target, _scratchBaseLocal);
                 WasmModuleBuilder.EmitI32Const(target, offset);
                 target.Add(WasmOpCodes.I32Add);
-
-                // Value to store
                 WasmModuleBuilder.EmitLocalGet(target, localIdx);
-
                 switch (type)
                 {
-                    case WasmOpCodes.I32:
-                        WasmModuleBuilder.EmitStore(target, WasmOpCodes.I32Store, 2, 0);
-                        offset += 4;
-                        break;
-                    case WasmOpCodes.I64:
-                        WasmModuleBuilder.EmitStore(target, WasmOpCodes.I64Store, 3, 0);
-                        offset += 8;
-                        break;
-                    case WasmOpCodes.F32:
-                        WasmModuleBuilder.EmitStore(target, WasmOpCodes.F32Store, 2, 0);
-                        offset += 4;
-                        break;
-                    case WasmOpCodes.F64:
-                        WasmModuleBuilder.EmitStore(target, WasmOpCodes.F64Store, 3, 0);
-                        offset += 8;
-                        break;
+                    case WasmOpCodes.I32: WasmModuleBuilder.EmitStore(target, WasmOpCodes.I32Store, 2, 0); offset += 4; break;
+                    case WasmOpCodes.I64: WasmModuleBuilder.EmitStore(target, WasmOpCodes.I64Store, 3, 0); offset += 8; break;
+                    case WasmOpCodes.F32: WasmModuleBuilder.EmitStore(target, WasmOpCodes.F32Store, 2, 0); offset += 4; break;
+                    case WasmOpCodes.F64: WasmModuleBuilder.EmitStore(target, WasmOpCodes.F64Store, 3, 0); offset += 8; break;
                 }
             }
         }
