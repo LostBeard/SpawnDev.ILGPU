@@ -1024,7 +1024,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         // The per-kernel specialization (workgroup size) is NOT folded in here - it lives in the
         // cache key's separate SpecKey segment (ShaderArtifactCache.SpecKey). Folding it in here was
         // the bug that, when "fixed", collapsed every RadixSort workgroup variant onto one key.
-        private CapabilityProfile ProfileForThisBackend()
+        // internal (not private) so a drift-guard test can assert this == CapabilityProfiles.FromAccelerator.
+        internal CapabilityProfile ProfileForThisBackend()
         {
             var features = new HashSet<string>(System.StringComparer.Ordinal);
             if (HasShaderF16) features.Add("shader-f16");

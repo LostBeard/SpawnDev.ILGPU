@@ -182,5 +182,30 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 if (MathF.Abs(r[i] - src[i] * mul) > 1e-3f)
                     throw new Exception($"Offline-artifact dispatch WRONG @{i}: {r[i]} != {src[i] * mul}");
         });
+
+        // Drift guard (Seven, 2026-06-11): the runtime cache-LOOKUP profile
+        // (WebGPUBackend.ProfileForThisBackend) and the registration/offline profile
+        // (CapabilityProfiles.FromAccelerator) are two hand-maintained builders of the SAME device
+        // profile. If they drift on ANY key field, an artifact registered with one is never found by
+        // the other = a SILENT cache miss (exactly how the WarpSize=1-vs-32 drift surfaced). Assert the
+        // KEY STRINGS are identical so a future drift fails LOUDLY with both keys printed, not as a
+        // generic "offline artifact NOT hit".
+        [TestMethod]
+        public async Task PrecompiledShaders_ProfileBuilders_ProduceIdenticalKeyStrings() =>
+            await RunTest(async accelerator =>
+        {
+            if (accelerator is not WebGPUAccelerator webgpu)
+                throw new UnsupportedTestException("WebGPU-only (the runtime cache hook is WebGPU).");
+
+            var lookupKey = webgpu.Backend.ProfileForThisBackend().ToCacheKeyString();
+            var registrationKey =
+                CapabilityProfiles.FromAccelerator(webgpu, webgpu.EnabledFeatures).ToCacheKeyString();
+            if (lookupKey != registrationKey)
+                throw new Exception(
+                    "Profile-key DRIFT: ProfileForThisBackend (cache lookup) and FromAccelerator " +
+                    "(registration/offline) produce DIFFERENT cache keys -> precompiled artifacts will " +
+                    $"never hit. lookup=[{lookupKey}] registration=[{registrationKey}]");
+            await Task.CompletedTask;
+        });
     }
 }

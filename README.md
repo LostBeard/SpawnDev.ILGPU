@@ -312,7 +312,7 @@ The Wasm backend compiles ILGPU kernels to native WebAssembly binary modules and
 
 ## Precompiled Shaders (Build-Time Transpilation)
 
-SpawnDev.ILGPU transpiles .NET IL into WGSL/GLSL/Wasm at runtime. Precompiled shaders let you move that work off the runtime hot path and generate/inspect shader code on any machine with no device - the classic AOT shader / pipeline-cache pattern, three layers (all opt-in; a cache miss always falls back to runtime generation, so it can never change results):
+SpawnDev.ILGPU transpiles .NET IL into WGSL/GLSL/Wasm at runtime **for the three browser backends (WebGPU/WebGL/Wasm)**. Precompiled shaders let you move that work off the runtime hot path and generate/inspect that code on any machine with no device - the classic AOT shader / pipeline-cache pattern, three layers (all opt-in; a cache miss always falls back to runtime generation, so it can never change results). (CUDA/OpenCL use ILGPU's own native PTX/OpenCL-C pipeline, and CPU runs IL directly - so this feature is browser-backend-specific.)
 
 - **Offline codegen** - `ShaderCompiler.Generate(kernel, profile)` emits a kernel's WGSL/GLSL/Wasm for a `CapabilityProfile` with no accelerator, on any host OS (cross-backend debugging on a box without that GPU).
 - **Build-time precompile** - mark kernels with `[PrecompiledKernel(backend, profile)]`, set `<SpawnDevPrecompileShaders>true</SpawnDevPrecompileShaders>` in your `.csproj`, and a build step emits `wwwroot/_shaders/` (a manifest + per-kernel sidecars). Precompile errors surface at build time, not at the user's runtime.
