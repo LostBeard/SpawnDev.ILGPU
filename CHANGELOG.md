@@ -2,7 +2,9 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
-## 4.10.0 (in development) - Offline code generation (`ShaderCompiler.Generate` + `CapabilityProfile`) + Wasm backend correctness overhaul
+## 4.10.0 (2026-06-11) - Offline code generation (`ShaderCompiler.Generate` + `CapabilityProfile`) + Wasm backend correctness overhaul
+
+Bundles forks **SpawnDev.ILGPU.Fork 2.0.15** and **SpawnDev.ILGPU.Algorithms.Fork 2.0.15**.
 
 **Wasm backend: the multi-worker corruption family is DEAD (2026-06-10/11, Seven).** Three
 root-caused fixes close every known correctness defect in the fiber-based barrier dispatch;
@@ -67,6 +69,26 @@ makes "dump any kernel's generated code" a one-liner.
   (runs on the desktop). An audit confirmed the generators contain ZERO live-device capability reads (they
   consume only the backend's profile-fed properties), locked by a cap-routing guard.
 - Probe: `dotnet run --project SpawnDev.ILGPU.DemoConsole -- shader-gen`.
+
+**Precompiled-shaders Layers 2 + 3 (build-time automation + runtime cache).** A `[PrecompiledKernel]`
+attribute, an auto-imported MSBuild `.targets` + `SpawnDev.ILGPU.Precompiler` tool that emit per-kernel
+shader artifacts at build time (opt-in, off by default), a lazy `ShaderArtifactManifestLoader`, and a
+runtime `ShaderArtifactCache` that serves a precompiled (or warm-transpiled) artifact instead of
+re-running the IL->shader transpiler. The cache key FULLY determines the generated shader -
+`(kernel id, capability profile, specialization)` - where the kernel id carries generic method
+arguments and a dynamic-assembly tag, and `SpecializedValue<>` kernels bypass the cache (their value is
+baked into the IR upstream of the backend). A complete key is required for correctness: without it,
+`DelegateSpecialization` variants and RadixSort direction/workgroup-size variants (which share one
+`MethodInfo`) would collide on a cached shader and dispatch the wrong kernel. WebGPU/WGSL shader headers
+emit a stable source-method name (not the per-context IR ordinal) so a precompiled artifact's bytes do
+not depend on compile-order history.
+
+**WebGPU/WebGL.** 2D-grid dispatches with `GridDim.X > 65535` auto-tile into Z (unblocks SD-Turbo
+4096x4096 attention). WebGL gains scatter-based RadixSort for every key type including `Half`, plus host
+`CreateScan`/`CreateReduce`; a cross-backend sub-word signed-reinterpret sign-extension bug
+(`ExtractRadixBits<Half>` on negative values, WebGPU/WebGL/Wasm) is fixed. A WGSL inlined-helper f32
+chain that was mistyped i32 (SD-Turbo `FusedRegBlockedLinearActivation`) is fixed. `Float16`/`Float64`/
+`Int64` are reported as supported on EVERY backend (emulated where not native).
 
 Backwards-compatible, additive only (no breaking changes) - hence the minor bump.
 
