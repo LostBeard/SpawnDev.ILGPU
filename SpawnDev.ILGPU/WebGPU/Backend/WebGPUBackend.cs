@@ -449,6 +449,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public int? DefaultMaxWorkgroupSize { get; set; }
 
         /// <summary>
+        /// The device's warp/subgroup size (WebGPU = 32). Set by the accelerator after init to the
+        /// owning accelerator's <see cref="ILGPU.Runtime.Accelerator.WarpSize"/>, so the runtime
+        /// shader-cache profile (<see cref="ProfileForThisBackend"/>) computes the SAME WarpSize as
+        /// <see cref="CapabilityProfiles.FromAccelerator"/> at registration time - otherwise the
+        /// lookup key (warp=1) never matches a registered/precompiled artifact's key (warp=32).
+        /// </summary>
+        public int DeviceWarpSize { get; set; } = 1;
+
+        /// <summary>
         /// Creates a new WebGPU backend with default options.
         /// </summary>
         /// <param name="context">The ILGPU context.</param>
@@ -1010,7 +1019,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// capabilities - matches <see cref="CapabilityProfiles.FromAccelerator"/> for a device
         /// using this backend, so a warm-registered artifact and a future lookup share a key.
         /// </summary>
-        private CapabilityProfile ProfileForThisBackend(in KernelSpecialization specialization)
+        // DEVICE-LEVEL profile only - it MUST mirror CapabilityProfiles.FromAccelerator EXACTLY (the
+        // registration-side builder) so a runtime lookup key matches a registered/precompiled key.
+        // The per-kernel specialization (workgroup size) is NOT folded in here - it lives in the
+        // cache key's separate SpecKey segment (ShaderArtifactCache.SpecKey). Folding it in here was
+        // the bug that, when "fixed", collapsed every RadixSort workgroup variant onto one key.
+        private CapabilityProfile ProfileForThisBackend()
         {
             var features = new HashSet<string>(System.StringComparer.Ordinal);
             if (HasShaderF16) features.Add("shader-f16");
@@ -1024,8 +1038,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 Float64Mode = F64Mode,
                 Int64Native = false,
                 SubGroups = HasSubgroups,
-                WarpSize = 1,
-                MaxNumThreadsPerGroup = specialization.MaxNumThreadsPerGroup ?? (DefaultMaxWorkgroupSize ?? 0),
+                WarpSize = HasSubgroups ? DeviceWarpSize : 1,   // FromAccelerator: subGroups ? accelerator.WarpSize : 1
+                MaxNumThreadsPerGroup = DefaultMaxWorkgroupSize ?? 0, // device max (== accelerator.MaxNumThreadsPerGroup)
                 MaxStorageBufferBindings = 0,
                 EnabledFeatures = features,
             };
@@ -1045,10 +1059,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             in KernelSpecialization specialization)
         {
             var method = entryPoint.MethodInfo;
-            if (method != null && ShaderArtifactCache.Enabled)
+            // Kernels with SpecializedValue<> params bake the runtime value into the IR upstream of
+            // this hook (SpecializationCache), so two distinct values are indistinguishable here -
+            // there is no complete key. Skip the cache entirely (the per-value compiled-kernel cache
+            // one level up already memoizes them, and they are never offline-precompilable).
+            bool cacheable = method != null && ShaderArtifactCache.Enabled
+                && !ShaderArtifactCache.UsesRuntimeValueSpecialization(method);
+            if (cacheable)
             {
-                var profile = ProfileForThisBackend(specialization);
-                if (ShaderArtifactCache.TryGet(method, profile, out var art)
+                var profile = ProfileForThisBackend();
+                if (ShaderArtifactCache.TryGet(method!, profile, specialization, out var art)
                     && art.Source is { } cachedWgsl
                     && art.CodegenMetadata is WebGPUKernelMetadata meta)
                 {
@@ -1067,10 +1087,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             var kernel = base.Compile(entryPoint, backendContext, specialization);
 
-            if (method != null && ShaderArtifactCache.Enabled && kernel is WebGPUCompiledKernel wk)
+            if (cacheable && kernel is WebGPUCompiledKernel wk)
             {
-                var profile = ProfileForThisBackend(specialization);
-                ShaderArtifactCache.Register(method, profile, new ShaderArtifact
+                var profile = ProfileForThisBackend();
+                ShaderArtifactCache.Register(method!, profile, specialization, new ShaderArtifact
                 {
                     Backend = AcceleratorType.WebGPU,
                     ProfileCacheKey = profile.ToCacheKeyString(),

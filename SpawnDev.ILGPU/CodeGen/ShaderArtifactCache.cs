@@ -8,7 +8,7 @@ using ILGPU.Runtime;
 namespace SpawnDev.ILGPU;
 
 /// <summary>
-/// A precompiled/generated shader artifact for one (kernel, profile) pair.
+/// A precompiled/generated shader artifact for one (kernel, profile, specialization) tuple.
 /// </summary>
 public sealed record ShaderArtifact
 {
@@ -34,23 +34,35 @@ public sealed record ShaderArtifact
 
 /// <summary>
 /// The runtime shader-artifact cache (precompiled-shaders Layer 3). Maps a (stable kernel id,
-/// capability-profile key) to a precompiled or runtime-generated <see cref="ShaderArtifact"/>, so
-/// the kernel-compile path can use a ready artifact instead of running the IL-&gt;shader transpiler.
+/// capability-profile key, specialization key) to a precompiled or runtime-generated
+/// <see cref="ShaderArtifact"/>, so the kernel-compile path can use a ready artifact instead of
+/// running the IL-&gt;shader transpiler.
 ///
 /// POPULATED by two sources, identically:
 /// - the build-time MSBuild manifest (Layer 2), which calls <see cref="Register(string, string, ShaderArtifact)"/>;
 /// - the runtime warm path, which registers what it just transpiled (so repeated loads in a
 ///   session skip re-generation even without build-time precompilation).
 ///
-/// CORRECTNESS (global Rule 1): the cache is keyed by the FULL profile cache key, so an artifact is
-/// only ever returned for a device whose profile matches exactly; a miss falls back to runtime
-/// generation. The cache is a pure optimization that can never change results.
+/// CORRECTNESS (global Rule 1): the cache key must FULLY determine the generated shader, or it
+/// silently serves the wrong kernel. The key has THREE segments, each closing a distinct
+/// specialization-variant source (verified by Seven, 2026-06-11):
+/// - <see cref="KernelId"/> = declaring type + name + **generic method arguments** + parameter
+///   types + a **dynamic-assembly tag**. Generic args carry RadixSort's <c>TOperation</c> (sort
+///   direction), invisible in the parameter list. The dynamic tag separates
+///   <c>DelegateSpecializationRewriter</c> synthetic methods, which are NOMINAL TWINS (identical
+///   type/method/param names) distinguished only by their emitted assembly.
+/// - the full profile cache key (device capabilities the generator branches on).
+/// - <see cref="SpecKey"/> = the explicit <see cref="KernelSpecialization"/> (workgroup size),
+///   which the original code only ACCIDENTALLY captured by folding into the profile.
 ///
-/// KERNEL IDENTITY is the method's full signature (declaring type + name + parameter types), which
-/// is STABLE across builds and identical between the build-time task and the runtime - NOT an MVID
-/// or metadata token (those differ per build, and the build-time manifest is compiled INTO the
-/// assembly so it cannot reference its own MVID) and NEVER <see cref="object.GetHashCode"/> (a
-/// non-unique heuristic; see the kernelId-collision lesson in Wasm/CLAUDE.md).
+/// Kernels with <see cref="SpecializedValue{T}"/> parameters are NOT cacheable here
+/// (<see cref="UsesRuntimeValueSpecialization"/>): the value is baked as an IR constant INSIDE
+/// <c>SpecializationCache.SpecializeKernel</c>, upstream of and invisible to the backend
+/// compile hook, so no complete key exists at the hook. Skipping is correct, not a workaround -
+/// that higher cache already memoizes the compiled kernel per (accelerator, value).
+///
+/// KERNEL IDENTITY uses the method's full signature (NOT an MVID/metadata token, which differ per
+/// build, and NEVER <see cref="object.GetHashCode"/>, a non-unique heuristic).
 /// </summary>
 public static class ShaderArtifactCache
 {
@@ -67,36 +79,101 @@ public static class ShaderArtifactCache
     /// <summary>Number of registered artifacts.</summary>
     public static int Count => Cache.Count;
 
+    /// <summary>Diagnostic: a snapshot of all current cache keys (kernelId||profile||spec), newline-joined.</summary>
+    public static string KeysSnapshot() => string.Join(" ;; ", Cache.Keys.OrderBy(k => k, StringComparer.Ordinal));
+
+    private static string TypeId(Type t) => t.FullName ?? t.Name;
+
     /// <summary>
     /// The stable, build-independent identity of a kernel method: declaring-type full name + method
-    /// name + parameter type full names. Identical between the build-time precompile task and the
-    /// runtime load path for the same source.
+    /// name + GENERIC METHOD ARGUMENTS + parameter type full names + a tag for dynamically-emitted
+    /// methods. Identical between the build-time precompile task and the runtime load path for the
+    /// same source. Non-generic, statically-emitted kernels (everything <c>[PrecompiledKernel]</c>
+    /// targets) produce the same string as a plain signature, so existing manifests stay valid.
     /// </summary>
     public static string KernelId(MethodInfo method)
     {
         if (method is null) throw new ArgumentNullException(nameof(method));
         var paramSig = string.Join(",",
-            method.GetParameters().Select(p => p.ParameterType.FullName ?? p.ParameterType.Name));
+            method.GetParameters().Select(p => TypeId(p.ParameterType)));
         var declaring = method.DeclaringType?.FullName ?? "<global>";
-        return $"{declaring}.{method.Name}({paramSig})";
+        // Generic METHOD arguments are program identity (RadixSort's TOperation IS the sort
+        // direction - AscendingInt32 vs DescendingInt32) but never appear in the parameter list.
+        var genericSig = method.IsGenericMethod
+            ? "<" + string.Join(",", method.GetGenericArguments().Select(TypeId)) + ">"
+            : "";
+        // Dynamically-emitted methods can be NOMINAL TWINS across emitted assemblies
+        // (DelegateSpecializationRewriter names every variant's type "DelegateSpecKernel" and method
+        // "<orig>_Specialized"); the emitted assembly name (a GUID) is the unique discriminator.
+        // Static assemblies stay OUT of the id so build-time manifest ids remain stable across machines.
+        var dynamicTag = method.Module.Assembly.IsDynamic
+            ? "@" + method.Module.Assembly.GetName().Name
+            : "";
+        return $"{declaring}.{method.Name}{genericSig}({paramSig}){dynamicTag}";
     }
 
-    private static string Key(string kernelId, string profileCacheKey) =>
-        kernelId + "||" + profileCacheKey;
+    /// <summary>
+    /// The specialization segment of the cache key - the explicit <see cref="KernelSpecialization"/>
+    /// (the whole struct is these two properties; ILGPU's own kernel key includes them all).
+    /// </summary>
+    public static string SpecKey(in KernelSpecialization s) =>
+        (s.MaxNumThreadsPerGroup?.ToString() ?? "_") + "/" +
+        (s.MinNumGroupsPerMultiprocessor?.ToString() ?? "_");
 
-    /// <summary>Register an artifact by raw (kernel id, profile key) - used by the build-time manifest.</summary>
+    /// <summary>
+    /// The spec segment for a kernel compiled with no explicit specialization - the offline/manifest
+    /// case and a plain auto-grouped load. Offline static kernels register under this; a static
+    /// runtime load looks up under this, so an offline artifact still hits.
+    /// </summary>
+    public static readonly string EmptySpecKey = SpecKey(KernelSpecialization.Empty);
+
+    /// <summary>
+    /// True if the kernel has any <see cref="SpecializedValue{T}"/> parameter. Such kernels are
+    /// NOT cacheable at the backend compile hook: the runtime value is baked into the IR upstream
+    /// (in <c>SpecializationCache</c>), so two distinct values are indistinguishable here. The
+    /// caller must skip both lookup and registration for them (zero loss - the value is memoized
+    /// by the per-value compiled-kernel cache one level up, and such kernels are never
+    /// offline-precompilable).
+    /// </summary>
+    public static bool UsesRuntimeValueSpecialization(MethodInfo method)
+    {
+        if (method is null) throw new ArgumentNullException(nameof(method));
+        return method.GetParameters().Any(p =>
+            p.ParameterType.IsGenericType &&
+            p.ParameterType.GetGenericTypeDefinition() == typeof(SpecializedValue<>));
+    }
+
+    private static string Key(string kernelId, string profileCacheKey, string specKey) =>
+        kernelId + "||" + profileCacheKey + "||" + specKey;
+
+    /// <summary>
+    /// Register an artifact by raw (kernel id, profile key) at the EMPTY specialization - used by the
+    /// build-time manifest (offline static kernels carry no explicit specialization).
+    /// </summary>
     public static void Register(string kernelId, string profileCacheKey, ShaderArtifact artifact)
     {
         if (kernelId is null) throw new ArgumentNullException(nameof(kernelId));
         if (profileCacheKey is null) throw new ArgumentNullException(nameof(profileCacheKey));
-        Cache[Key(kernelId, profileCacheKey)] = artifact ?? throw new ArgumentNullException(nameof(artifact));
+        Cache[Key(kernelId, profileCacheKey, EmptySpecKey)] = artifact ?? throw new ArgumentNullException(nameof(artifact));
     }
 
-    /// <summary>Register an artifact for a method + profile (used by the runtime warm path).</summary>
+    /// <summary>Register an artifact for a method + profile at the EMPTY specialization (offline path).</summary>
     public static void Register(MethodInfo method, CapabilityProfile profile, ShaderArtifact artifact) =>
         Register(KernelId(method), profile.ToCacheKeyString(), artifact);
 
-    /// <summary>Convenience: register a generated kernel's artifact for its profile.</summary>
+    /// <summary>
+    /// Register an artifact for a method + profile + explicit specialization (the runtime warm path,
+    /// which knows the real <see cref="KernelSpecialization"/>).
+    /// </summary>
+    public static void Register(MethodInfo method, CapabilityProfile profile, in KernelSpecialization specialization, ShaderArtifact artifact)
+    {
+        if (method is null) throw new ArgumentNullException(nameof(method));
+        if (profile is null) throw new ArgumentNullException(nameof(profile));
+        Cache[Key(KernelId(method), profile.ToCacheKeyString(), SpecKey(specialization))] =
+            artifact ?? throw new ArgumentNullException(nameof(artifact));
+    }
+
+    /// <summary>Convenience: register a generated kernel's artifact for its profile (offline, EMPTY spec).</summary>
     public static void Register(MethodInfo method, GeneratedKernel generated) =>
         Register(method, generated.Profile, new ShaderArtifact
         {
@@ -108,11 +185,18 @@ public static class ShaderArtifactCache
         });
 
     /// <summary>
-    /// Look up a cached artifact for a method + profile. Increments hit/miss counters. Returns
-    /// false (miss) when no exact-profile artifact exists - the caller then falls back to runtime
-    /// generation.
+    /// Look up a cached artifact for a method + profile at the EMPTY specialization. Convenience for
+    /// callers with no explicit specialization (offline-style lookups).
     /// </summary>
-    public static bool TryGet(MethodInfo method, CapabilityProfile profile, out ShaderArtifact artifact)
+    public static bool TryGet(MethodInfo method, CapabilityProfile profile, out ShaderArtifact artifact) =>
+        TryGet(method, profile, KernelSpecialization.Empty, out artifact);
+
+    /// <summary>
+    /// Look up a cached artifact for a method + profile + explicit specialization. Increments
+    /// hit/miss counters. Returns false (miss) when no exact-tuple artifact exists - the caller then
+    /// falls back to runtime generation.
+    /// </summary>
+    public static bool TryGet(MethodInfo method, CapabilityProfile profile, in KernelSpecialization specialization, out ShaderArtifact artifact)
     {
         if (method is null) throw new ArgumentNullException(nameof(method));
         artifact = null!;
@@ -121,22 +205,23 @@ public static class ShaderArtifactCache
             Interlocked.Increment(ref _misses);
             return false;
         }
-        bool found = Cache.TryGetValue(Key(KernelId(method), profile.ToCacheKeyString()), out artifact!);
+        bool found = Cache.TryGetValue(
+            Key(KernelId(method), profile.ToCacheKeyString(), SpecKey(specialization)), out artifact!);
         if (found) Interlocked.Increment(ref _hits);
         else Interlocked.Increment(ref _misses);
         return found;
     }
 
-    /// <summary>True if an artifact exists for the method + profile (no counter side effects).</summary>
+    /// <summary>True if an artifact exists for the method + profile at the EMPTY spec (no counters).</summary>
     public static bool Contains(MethodInfo method, CapabilityProfile profile) =>
-        Cache.ContainsKey(Key(KernelId(method), profile.ToCacheKeyString()));
+        Cache.ContainsKey(Key(KernelId(method), profile.ToCacheKeyString(), EmptySpecKey));
 
     /// <summary>
-    /// True if an artifact exists for a raw (kernel id, profile key) - used by the Layer 2 manifest
-    /// loader to skip re-fetching an artifact that is already registered. No counter side effects.
+    /// True if an artifact exists for a raw (kernel id, profile key) at the EMPTY spec - used by the
+    /// Layer 2 manifest loader to skip re-fetching an already-registered artifact. No counters.
     /// </summary>
     public static bool ContainsKey(string kernelId, string profileCacheKey) =>
-        Cache.ContainsKey(Key(kernelId, profileCacheKey));
+        Cache.ContainsKey(Key(kernelId, profileCacheKey, EmptySpecKey));
 
     /// <summary>Remove all cached artifacts.</summary>
     public static void Clear() => Cache.Clear();

@@ -1510,8 +1510,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public override void GenerateHeader(StringBuilder builder)
         {
             // ── Shader header comment ──
-            // Emitted at the top of every generated shader for debugging.
-            builder.AppendLine($"// Kernel: {Method.Name}");
+            // Emitted at the top of every generated shader for debugging. Use the SOURCE method name
+            // (stable), NOT the IR Method.Name - the latter carries the IRContext's per-context
+            // ordinal (e.g. "_41" live vs "_2" offline) which makes a precompiled artifact's bytes
+            // depend on compile-order history and breaks offline==runtime determinism (Seven, 2026-06-11).
+            builder.AppendLine($"// Kernel: {EntryPoint.MethodInfo?.Name ?? Method.Name}");
             builder.AppendLine($"// WorkgroupSize: {GetWorkgroupSize()}");
             if (_generatorArgs.SharedMemoryResolver.Count > 0)
             {

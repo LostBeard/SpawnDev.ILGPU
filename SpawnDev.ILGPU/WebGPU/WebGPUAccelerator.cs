@@ -602,6 +602,7 @@ namespace SpawnDev.ILGPU.WebGPU
             accelerator.NativeAccelerator.DeviceLost += (reason, msg) => accelerator.DeviceLost?.Invoke(reason, msg);
             accelerator.Backend = new WebGPUBackend(context, options ?? WebGPUBackendOptions.Default, accelerator.NativeAccelerator.EnabledFeatures);
             accelerator.Backend.DefaultMaxWorkgroupSize = accelerator.MaxNumThreadsPerGroup;
+            accelerator.Backend.DeviceWarpSize = accelerator.WarpSize;
             if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU-Init] DefaultMaxWorkgroupSize set to {accelerator.Backend.DefaultMaxWorkgroupSize} (MaxNumThreadsPerGroup={accelerator.MaxNumThreadsPerGroup})");
             accelerator.Init(accelerator.Backend);
             accelerator.DefaultStream = accelerator.CreateStreamInternal();
@@ -641,6 +642,7 @@ namespace SpawnDev.ILGPU.WebGPU
             accelerator.NativeAccelerator.DeviceLost += (reason, msg) => accelerator.DeviceLost?.Invoke(reason, msg);
             accelerator.Backend = new WebGPUBackend(context, options ?? WebGPUBackendOptions.Default, accelerator.NativeAccelerator.EnabledFeatures);
             accelerator.Backend.DefaultMaxWorkgroupSize = accelerator.MaxNumThreadsPerGroup;
+            accelerator.Backend.DeviceWarpSize = accelerator.WarpSize;
             accelerator.Init(accelerator.Backend);
             accelerator.DefaultStream = accelerator.CreateStreamInternal();
             accelerator.NativeAccelerator.FlushPendingCommands = () => accelerator.FlushPendingCommands();

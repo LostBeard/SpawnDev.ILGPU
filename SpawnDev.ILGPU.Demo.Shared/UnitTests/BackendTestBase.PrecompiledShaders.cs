@@ -151,6 +151,14 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             var generated = ShaderCompiler.Generate(km, profile);
             ShaderArtifactCache.Register(km, generated);
 
+            // Clear the FRAMEWORK kernel cache so the load below RE-ENTERS Backend.Compile (where the
+            // precompiled cache is consulted). Without this, a prior test in the same run that already
+            // compiled this kernel leaves it in ILGPU's framework cache -> the load returns that copy
+            // without ever calling Backend.Compile -> our artifact is never looked up (order-dependent
+            // false failure; the artifact cache is a SEPARATE static, untouched by ClearCache). Mirrors
+            // PrecompiledShaders_RuntimeCache_HitProducesCorrectDispatch.
+            accelerator.ClearCache(ClearCacheMode.Everything);
+
             const int n = 256;
             const float mul = 4f;
             var src = new float[n];
@@ -165,7 +173,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new Exception(
                     $"Offline artifact NOT hit by runtime load (cache-key misalignment). " +
                     $"offlineKey={profile.ToCacheKeyString()} hits={ShaderArtifactCache.Hits} " +
-                    $"misses={ShaderArtifactCache.Misses} count={ShaderArtifactCache.Count}.");
+                    $"misses={ShaderArtifactCache.Misses} count={ShaderArtifactCache.Count}. KEYS=[{ShaderArtifactCache.KeysSnapshot()}]");
 
             k((Index1D)n, inBuf.View, outBuf.View, mul);
             await accelerator.SynchronizeAsync();
