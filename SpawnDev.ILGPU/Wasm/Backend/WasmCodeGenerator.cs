@@ -196,7 +196,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         {
             var key = GetValueKey(value);
             if (_localMap.TryGetValue(key, out var existing))
+            {
+                TouchLocal(existing);
                 return existing;
+            }
 
             uint index = _nextLocalIndex++;
             _localMap[key] = index;
@@ -207,6 +210,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 string typeName = wasmType switch { WasmOpCodes.I32 => "i32", WasmOpCodes.I64 => "i64", WasmOpCodes.F32 => "f32", WasmOpCodes.F64 => "f64", _ => $"0x{wasmType:X2}" };
                 if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Local] AllocateLocal: local_{index} = {typeName} (key={key}, IR={value.GetType().Name}, IRType={value.Type})");
             }
+            TouchLocal(index);
             return index;
         }
 
@@ -217,11 +221,49 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         {
             var key = GetValueKey(value);
             if (_localMap.TryGetValue(key, out var index))
+            {
+                TouchLocal(index);
                 return index;
+            }
 
             // Auto-allocate if not found
             return AllocateLocal(value, GetWasmType(value));
         }
+
+        #region Spill liveness tracking (2026-06-11, Seven)
+        // Yields (fiber state save/restore) happen ONLY at state-machine block
+        // boundaries - a local touched in exactly ONE state block can never be live
+        // across a yield and never needs spilling. Touches funnel through GetLocal /
+        // AllocateLocal (every IR-value read and write); anonymous locals
+        // (AllocateNewLocal) have no analyzable IR uses and stay always-spill.
+
+        /// <summary>First state-machine block index each local was touched in.</summary>
+        protected readonly Dictionary<uint, int> _localFirstState = new();
+        /// <summary>Locals touched in more than one state block (live across a yield).</summary>
+        protected readonly HashSet<uint> _localCrossesState = new();
+        /// <summary>Anonymous (non-IR) locals - conservatively always spilled.</summary>
+        protected readonly HashSet<uint> _localManual = new();
+        /// <summary>The state-machine block index currently being emitted (kernel gen overrides).</summary>
+        protected virtual int CurrentStateIndex => 0;
+
+        protected void TouchLocal(uint index)
+        {
+            if (_localFirstState.TryGetValue(index, out var first))
+            {
+                if (first != CurrentStateIndex)
+                    _localCrossesState.Add(index);
+            }
+            else
+            {
+                _localFirstState[index] = CurrentStateIndex;
+            }
+        }
+
+        /// <summary>True if this local must be included in yield save/restore.</summary>
+        protected bool LocalNeedsSpill(uint index)
+            => _localCrossesState.Contains(index) || _localManual.Contains(index);
+
+        #endregion
 
         /// <summary>
         /// Gets a unique key for a value (used for local variable mapping).
@@ -336,11 +378,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         /// <summary>
         /// Allocates a new anonymous local variable (not tied to an IR Value).
+        /// Anonymous locals are conservatively ALWAYS-SPILL (no IR uses to analyze).
         /// </summary>
         protected uint AllocateNewLocal(byte wasmType)
         {
             uint index = _nextLocalIndex++;
             _locals.Add(new WasmLocal { Count = 1, Type = wasmType });
+            _localManual.Add(index);
             return index;
         }
 
