@@ -15,6 +15,32 @@ Compiles ILGPU IR → WebAssembly binary. Dispatches via Web Workers with Shared
 > **Gate: 0/120 × 3 consecutive at 48-worker 4× oversubscription (baseline: 7-15/120,
 > and 1/30 even at 12 workers).** Perf: ~1-4% at ≤cores configs; +25% only under 4×
 > oversubscription stress where the unfixed code corrupted. Commits `b0dfc5c` + `b6c558a`.
+>
+> **⚖ UNIFORM STORE REGIMES LAW (2026-06-11, bisect-proven BOTH directions - `81b585b`).**
+> NEVER mix verified and plain stores on ordered/overlapping data: a verified store forces
+> its landing NOW and OVERTAKES still-delayed plain stores → write-order inversion. A
+> verified state-slot write + the plain spill of the same slot = the fiber resumed at the
+> OLD continuation (4/120 @ 48w). Full-verified spills = correct but 2.7x at production
+> configs (rejected). The shipped shape: verified DATA stores (uniform) + plain
+> spills/state/yield-buffer (uniform, FIFO-benign). Convert ALL writers of an ordered set
+> or NONE. See memory `feedback-uniform-store-regimes-never-mix-verified-plain`.
+>
+> **Also fixed 2026-06-11 (`d835547`):** the single-call helper path (phase-mode kernel →
+> no-barrier helper, e.g. `FusedActivate`) had 3 chained bugs - dropped non-void returns
+> (`if (_phaseMode) Drop`), the kernel's LIVE phase passed as the helper's phase (garbage
+> restore), and the KERNEL's scratch base passed as the helper's scratch (completion-persist
+> clobbered fiber spill slots). `WasmTests.FusedFFN_RegBlocked*` (the GEMM-core ticket) green.
+>
+> **KNOWN REMAINING (tracked):** a ~1/1000-dispatch late-spill tail in Playwright-bundled
+> Chromium ONLY (Node clean at 4× oversub; canary: `GlobalInclusiveScanHighTrialTest`, now
+> with full mismatch fingerprinting - decode: a fiber's output-phase restore reads the
+> previous phase's carry spill for a few consecutive tiles, then self-heals). Planned fix:
+> liveness-based spill reduction (spill only live locals per yield), which makes VERIFIED
+> spills affordable. NOTE: `PMT_BROWSER_CHANNEL=chrome` (real Chrome) is environmentally
+> incompatible with the Wasm test lane (deterministic iter-0 garbage - different failure
+> class) AND poisons the shared Playwright profile dir for subsequent bundled-Chromium runs
+> (schema upgrade → browser-lane enumeration silently dies → "2/2 passed" sweeps; fix:
+> delete `%TEMP%\SpawnDev.ILGPU.PlaywrightProfile`).
 > The 2026-06-09 Group.Barrier() attribution (entry barrier in ILGroupExtensions) was a
 > REAL S11-class fix for the 5 non-Wasm backends but did NOT close the Wasm path; the
 > entry-barrier-on-Wasm attempts made it worse (the scanResults copy was load-bearing
