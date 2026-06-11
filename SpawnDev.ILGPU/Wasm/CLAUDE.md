@@ -31,25 +31,17 @@ Compiles ILGPU IR → WebAssembly binary. Dispatches via Web Workers with Shared
 > restore), and the KERNEL's scratch base passed as the helper's scratch (completion-persist
 > clobbered fiber spill slots). `WasmTests.FusedFFN_RegBlocked*` (the GEMM-core ticket) green.
 >
-> **KNOWN REMAINING (tracked):** a ~1/1000-dispatch late-spill tail in Playwright-bundled
-> Chromium ONLY (Node clean at 4× oversub; canary: `GlobalInclusiveScanHighTrialTest`, now
-> with full mismatch fingerprinting - decode: a fiber's output-phase restore reads the
-> previous phase's carry spill for a few consecutive tiles, then self-heals). Planned fix:
-> liveness-based spill reduction (spill only live locals per yield), which makes VERIFIED
-> spills affordable. NOTE: `PMT_BROWSER_CHANNEL=chrome` (real Chrome) is environmentally
-> incompatible with the Wasm test lane (deterministic iter-0 garbage - different failure
-> class) AND poisons the shared Playwright profile dir for subsequent bundled-Chromium runs
-> (schema upgrade → browser-lane enumeration silently dies → "2/2 passed" sweeps; fix:
-> delete `%TEMP%\SpawnDev.ILGPU.PlaywrightProfile`).
-> The 2026-06-09 Group.Barrier() attribution (entry barrier in ILGroupExtensions) was a
-> REAL S11-class fix for the 5 non-Wasm backends but did NOT close the Wasm path; the
-> entry-barrier-on-Wasm attempts made it worse (the scanResults copy was load-bearing
-> reuse cushion). Forensic trail: `_DevComms/global/seven-*-2026-06-10.md` + the
-> instruments in [`repro/wasm-scan-repro/`](repro/wasm-scan-repro/README.md)
-> (`patch-pub-timing.mjs` DBG_KERNEL=3 gen-stamp rings, `patch-debug-ring.mjs` ring1b =
-> the store-fate detector). Older write-ups
-> ([`Notes/residual-sort-race-2026-05-25.md`](Notes/residual-sort-race-2026-05-25.md),
-> [`RESEARCH-INDEX.md`](RESEARCH-INDEX.md)) are historical context.
+> **✅ THE LAST TAIL IS DEAD (2026-06-11, `f0a6df1`) — LIVENESS SPILLS + CHECKSUM-GATED RESTORE.**
+> The ~1/1000-dispatch bundled-Chromium corruption (a fiber restore reading the previous
+> phase's spills) is fixed: (1) LIVENESS - locals touched in one state block never spill
+> (kernel body 16.1KB→7.6KB); (2) CHECKSUM GATE - all stores stay PLAIN (every verified-
+> yield-path variant leaked 1-4/120; all-plain gates 0/360), but the save block XORs the
+> spill set tagged with the PHASE (a register param, immune to memory staleness) and the
+> restore RE-READS until the checksum proves every spill landed. Validation: Node 48w
+> 0/120 @ baseline speed; Chromium canary 3×3000 iterations ZERO failures (was 3-of-3
+> failing); PMT WasmTests 510/510. Ops note: `PMT_BROWSER_CHANNEL=chrome` poisons the
+> shared Playwright profile for bundled-Chromium runs (sub-second "2/2 passed" sweeps =
+> browser lane never launched; delete %TEMP%SpawnDev.ILGPU.PlaywrightProfile).
 
 ## Key Files
 - `Backend/WasmKernelFunctionGenerator.cs` — kernel codegen, parameter setup, helper functions
