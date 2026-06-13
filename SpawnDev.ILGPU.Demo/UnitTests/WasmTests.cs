@@ -372,13 +372,13 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                     $"{firstBadDetail}. (BASELINE: fires; item-2: 0/{iters}.)");
         }
 
-        // Verifies the opt-in host-buffer race DETECTOR (WasmMemoryBuffer.DetectHostBufferRaces).
-        // RunKernel registers the per-buffer in-flight intent SYNCHRONOUSLY at queue time, so a
-        // synchronous host read on the same JS turn (no await between dispatch and read) always
-        // observes intents>0 and MUST throw; after a real drain (SynchronizeAsync) intents==0 and
-        // the identical read succeeds with correct data. This is the mechanism for enumerating the
-        // sync-readback races that the async APIs (CopyToHostAsync/CopyFromAsync/MemSetToZeroAsync/
-        // SynchronizeAsync) are meant to replace. Wasm-only (the detector lives on WasmMemoryBuffer).
+        // Verifies that synchronous device->host READBACK is desktop-only on Wasm under the
+        // sync/async contract (Plans/sync-async-contract-2026-06-13): GetAsArray/CopyToCPU route
+        // through stream.Synchronize() (a WAIT), which throws NotSupportedException on the single
+        // Blazor thread — racy or not, drained or not. This SUPERSEDES the old opt-in
+        // DetectHostBufferRaces guard (which caught only RACY sync reads): now EVERY sync readback on
+        // Wasm throws, so the guard is unreachable (the contract throw fires first). The portable
+        // readback is `await SynchronizeAsync()` + `await CopyToHostAsync()`. Wasm-only.
         [TestMethod]
         public async Task DetectHostBufferRaceTest() => await RunTest(async accelerator =>
         {
@@ -386,39 +386,23 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             using var buf = accelerator.Allocate1D<int>(count);
             var fill = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(
                 (i, v) => v[i] = i + 1);
+            fill((Index1D)count, buf.View);
 
-            bool prior = WasmMemoryBuffer.DetectHostBufferRaces;
-            WasmMemoryBuffer.DetectHostBufferRaces = true;
-            try
-            {
-                // Unawaited dispatch: intent incremented synchronously; kernel not yet drained.
-                fill((Index1D)count, buf.View);
+            // Sync readback throws NotSupportedException on Wasm (sync wait is async-only) — in-flight
+            // or not, and it throws before the DetectHostBufferRaces guard can even observe the intent.
+            bool threw = false;
+            try { _ = buf.View.BaseView.GetAsArray(accelerator.DefaultStream); }
+            catch (NotSupportedException) { threw = true; }
+            if (!threw)
+                throw new Exception(
+                    "Sync readback (GetAsArray) must throw NotSupportedException on Wasm — sync device->host readback is desktop-only.");
 
-                bool threw = false;
-                try
-                {
-                    // Synchronous readback -> WasmMemoryBuffer.CopyTo -> detector guard.
-                    _ = buf.View.BaseView.GetAsArray(accelerator.DefaultStream);
-                }
-                catch (InvalidOperationException)
-                {
-                    threw = true;
-                }
-                if (!threw)
-                    throw new Exception(
-                        "Detector did not fire on a synchronous read during an in-flight dispatch.");
-
-                // Correct pattern: drain first, then the identical sync read succeeds.
-                await accelerator.SynchronizeAsync();
-                var ok = buf.View.BaseView.GetAsArray(accelerator.DefaultStream);
-                if (ok[0] != 1 || ok[count - 1] != count)
-                    throw new Exception(
-                        $"Post-drain readback wrong: [0]={ok[0]} [last]={ok[count - 1]} (expected 1..{count}).");
-            }
-            finally
-            {
-                WasmMemoryBuffer.DetectHostBufferRaces = prior;
-            }
+            // Portable pattern: async drain, then async readback returns correct data.
+            await accelerator.SynchronizeAsync();
+            var ok = await buf.CopyToHostAsync<int>();
+            if (ok[0] != 1 || ok[count - 1] != count)
+                throw new Exception(
+                    $"Post-drain async readback wrong: [0]={ok[0]} [last]={ok[count - 1]} (expected 1..{count}).");
         });
 
         // ═══════════════════════════════════════════════════════════════

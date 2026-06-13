@@ -2292,16 +2292,16 @@ namespace SpawnDev.ILGPU.WebGPU
 
         protected override MemoryBuffer AllocateRawInternal(long length, int elementSize) => new WebGPUMemoryBuffer(this, length, elementSize);
         protected override AcceleratorStream CreateStreamInternal() => new WebGPUStream(this);
-        protected override void SynchronizeInternal()
-        {
-            if (NativeAccelerator.IsDeviceLost)
-                throw new InvalidOperationException("WebGPU device has been lost and cannot accept commands.");
-
-            // Flush any pending batched commands on the default stream
-            ((WebGPUStream)DefaultStream).Flush();
-            // Surface any GPU validation errors that occurred during dispatch
-            NativeAccelerator.ThrowIfGpuErrors();
-        }
+        protected override void SynchronizeInternal() =>
+            // Synchronous Synchronize() is DESKTOP-ONLY. On WebGPU (browser, single-threaded) the
+            // device cannot be block-waited; the old behavior silently flushed WITHOUT waiting, which
+            // read stale/empty data whenever a caller expected completion. Throw so the misuse is loud
+            // instead of silently wrong — use `await SynchronizeAsync()` to wait for completion, or
+            // `await FlushAsync()` to submit without waiting.
+            throw new NotSupportedException(
+                "Synchronous Synchronize() is desktop-only (CPU/CUDA/OpenCL). On WebGPU use " +
+                "`await SynchronizeAsync()` to wait for GPU work, or `await FlushAsync()` to submit " +
+                "without waiting — browser backends are async-only at the GPU boundary.");
 
         /// <summary>
         /// Real async drain. The synchronous <see cref="Accelerator.Synchronize"/>
@@ -2311,6 +2311,16 @@ namespace SpawnDev.ILGPU.WebGPU
         /// </summary>
         public override Task SynchronizeAsync() =>
             WebGPUAcceleratorExtensions.SynchronizeAsync(this);
+
+        /// <summary>
+        /// Submits the batched command encoder without waiting (the browser-portable replacement
+        /// for the desktop-only sync <see cref="Accelerator.Flush"/>, which throws on WebGPU).
+        /// </summary>
+        public override Task FlushAsync()
+        {
+            FlushPendingCommands();
+            return Task.CompletedTask;
+        }
 
         protected override void OnBind() { }
         protected override void OnUnbind() { }
@@ -2328,7 +2338,7 @@ namespace SpawnDev.ILGPU.WebGPU
         /// Flush any pending batched kernel dispatches to the GPU.
         /// Call this after kernel sequences before consuming results externally.
         /// </summary>
-        public void FlushPendingCommands() => ((WebGPUStream)DefaultStream).Flush();
+        public void FlushPendingCommands() => ((WebGPUStream)DefaultStream).FlushPending();
 
         /// <summary>
         /// Records a <c>clearBuffer</c> command on the given stream's encoder,
@@ -2422,10 +2432,12 @@ namespace SpawnDev.ILGPU.WebGPU
             internal void DeferCoalesceBufferDestroy(GPUBuffer buf) => _pendingCoalesceBuffers.Add(buf);
 
             /// <summary>
-            /// Flush accumulated compute passes: Finish the command encoder and submit to GPU queue.
-            /// After submission, dispose deferred bind groups and return scalar buffers to pool.
+            /// Internal submit: Finish the command encoder and submit to the GPU queue, then dispose
+            /// deferred bind groups and return scalar buffers to pool. Used by the public async
+            /// <see cref="FlushAsync"/>, by Dispose, and by the accelerator's FlushPendingCommands /
+            /// SynchronizeAsync drain. The PUBLIC sync <see cref="Flush"/> is desktop-only and throws.
             /// </summary>
-            public void Flush()
+            public void FlushPending()
             {
                 if (_encoder == null) return;
 
@@ -2459,7 +2471,31 @@ namespace SpawnDev.ILGPU.WebGPU
             /// </summary>
             internal void IncrementPassCount() => _pendingPassCount++;
 
-            public override void Synchronize() => Flush();
+            /// <summary>
+            /// Flush (submit) is fire-and-forget and valid synchronously on WebGPU: it finishes the
+            /// batched command encoder and submits it to the GPU queue — a synchronous JS call that
+            /// does NOT wait for completion. Only the WAIT (<see cref="Synchronize"/>) is async-only
+            /// on browser. This is the honest "start the work" half of the contract.
+            /// </summary>
+            public override void Flush() => FlushPending();
+
+            /// <summary>Async submit — same as sync <see cref="Flush"/> (the encoder submit is sync).</summary>
+            public override Task FlushAsync()
+            {
+                FlushPending();
+                return Task.CompletedTask;
+            }
+
+            /// <summary>
+            /// Host->device upload is <c>queue.writeBuffer</c>, which consumes the host source
+            /// synchronously, so the sync CopyFromCPU completion is a no-op on WebGPU.
+            /// </summary>
+            protected override void EnsureHostCopyConsumed() { }
+
+            public override void Synchronize() =>
+                throw new NotSupportedException(
+                    "Synchronous Synchronize() is desktop-only on WebGPU; use `await SynchronizeAsync()` " +
+                    "to wait, or `await FlushAsync()` to submit without waiting.");
 
             /// <summary>
             /// Real async drain — forwards to the owning accelerator so submitted
@@ -2471,7 +2507,7 @@ namespace SpawnDev.ILGPU.WebGPU
 
             protected override void DisposeAcceleratorObject(bool disposing)
             {
-                if (disposing) Flush();
+                if (disposing) FlushPending();
             }
 
             protected override global::ILGPU.Runtime.ProfilingMarker AddProfilingMarkerInternal() => throw new NotSupportedException();

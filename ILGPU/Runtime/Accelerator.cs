@@ -306,6 +306,61 @@ namespace ILGPU.Runtime
         }
 
         /// <summary>
+        /// Submits all pending work to the device WITHOUT waiting for it to finish.
+        /// </summary>
+        /// <remarks>
+        /// This is the "start the work, do not wait" half of the synchronization surface
+        /// (the wait half is <see cref="Synchronize"/> / <see cref="SynchronizeAsync"/>).
+        /// On the desktop backends (CPU, CUDA, OpenCL) launched work is already submitted to
+        /// the stream as it is enqueued, so this is a no-op. On the browser backends (WebGPU,
+        /// WebGL, Wasm) dispatches are batched into a shared command encoder / worker queue;
+        /// this submits that batch so the GPU starts executing, and returns immediately. It is
+        /// the honestly-named replacement for the historical browser use of <see cref="Synchronize"/>
+        /// as a non-blocking flush.
+        ///
+        /// <para>The synchronous form is valid on every backend whose submit step is itself
+        /// synchronous (all current backends). A backend whose dispatch submission is inherently
+        /// asynchronous (e.g. a P2P backend that sends the dispatch to a remote peer over the
+        /// network) cannot honor a synchronous submit and overrides this to throw
+        /// <see cref="NotSupportedException"/>; such callers use <see cref="FlushAsync"/>.</para>
+        ///
+        /// <para>When you need the work to have actually FINISHED (before a host readback, or
+        /// before disposing buffers a pending dispatch references), use
+        /// <see cref="SynchronizeAsync"/> instead - <c>Flush</c> only starts the work.</para>
+        /// </remarks>
+        public void Flush()
+        {
+            Bind(); FlushInternal();
+        }
+
+        /// <summary>
+        /// Backend hook for <see cref="Flush"/>. The default submits the default stream's
+        /// pending work (a no-op on desktop streams, the encoder/queue submit on browser
+        /// streams). Backends whose submit is inherently asynchronous override this to throw.
+        /// </summary>
+        protected virtual void FlushInternal() => DefaultStream.Flush();
+
+        /// <summary>
+        /// Asynchronously submits all pending work to the device WITHOUT waiting for it to
+        /// finish - the async counterpart of <see cref="Flush"/>.
+        /// </summary>
+        /// <returns>A task that completes once the work has been SUBMITTED (not completed).</returns>
+        /// <remarks>
+        /// The default implementation runs the synchronous <see cref="Flush"/> and returns a
+        /// completed task, which is correct for every backend whose submit step is synchronous
+        /// (CPU, CUDA, OpenCL, WebGPU, WebGL, Wasm). A backend whose dispatch submission is
+        /// inherently asynchronous (e.g. a P2P backend sending the dispatch to a remote peer)
+        /// MUST override this to await the real submission, and its synchronous
+        /// <see cref="Flush"/> throws. To wait for COMPLETION rather than submission, use
+        /// <see cref="SynchronizeAsync"/>.
+        /// </remarks>
+        public virtual Task FlushAsync()
+        {
+            Flush();
+            return Task.CompletedTask;
+        }
+
+        /// <summary>
         /// Clears all internal caches.
         /// </summary>
         /// <param name="mode">The clear mode.</param>

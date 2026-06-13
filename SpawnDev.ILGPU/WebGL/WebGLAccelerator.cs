@@ -1208,11 +1208,14 @@ namespace SpawnDev.ILGPU.WebGL
 
         protected override AcceleratorStream CreateStreamInternal() => new WebGLStream(this);
 
-        protected override void SynchronizeInternal()
-        {
-            // With worker offloading, synchronous Synchronize is a no-op
-            // (use SynchronizeAsync extension method instead)
-        }
+        protected override void SynchronizeInternal() =>
+            // Synchronous Synchronize() is DESKTOP-ONLY. On WebGL (browser, worker-offloaded) the
+            // dispatches run async on the GL worker and cannot be block-waited; the old no-op
+            // silently returned before the work finished. Throw so the misuse is loud — use
+            // `await SynchronizeAsync()` (real worker-dispatch drain).
+            throw new NotSupportedException(
+                "Synchronous Synchronize() is desktop-only (CPU/CUDA/OpenCL). On WebGL use " +
+                "`await SynchronizeAsync()` — browser backends are async-only at the GPU boundary.");
 
         /// <summary>
         /// Real async drain. The synchronous <see cref="Accelerator.Synchronize"/> is a
@@ -1221,6 +1224,13 @@ namespace SpawnDev.ILGPU.WebGL
         /// </summary>
         public override Task SynchronizeAsync() =>
             WebGLAcceleratorExtensions.SynchronizeAsync(this);
+
+        /// <summary>
+        /// No-op async flush (the desktop-only sync <see cref="Accelerator.Flush"/> throws on WebGL).
+        /// WebGL dispatches via draw calls with no batched command encoder, so there is nothing to
+        /// submit — the work is already enqueued.
+        /// </summary>
+        public override Task FlushAsync() => Task.CompletedTask;
 
         protected override void OnBind() { }
         protected override void OnUnbind() { }
@@ -1324,7 +1334,17 @@ namespace SpawnDev.ILGPU.WebGL
         {
             public WebGLStream(Accelerator acc) : base(acc) { }
             protected override void DisposeAcceleratorObject(bool disposing) { }
-            public override void Synchronize() { }
+            public override void Synchronize() =>
+                throw new NotSupportedException(
+                    "Synchronous Synchronize() is desktop-only on WebGL; use `await SynchronizeAsync()`.");
+            // Flush (submit) is fire-and-forget and valid synchronously on WebGL: dispatch goes via
+            // draw calls with no batched command encoder, so there is nothing to submit — a genuine
+            // no-op. Only the WAIT (Synchronize) is async-only on browser.
+            public override void Flush() { }
+            public override Task FlushAsync() => Task.CompletedTask;
+            // Host->device upload is a backing-array copy consumed synchronously, so the sync
+            // CopyFromCPU completion is a no-op on WebGL — nothing in flight to wait for.
+            protected override void EnsureHostCopyConsumed() { }
             public override Task SynchronizeAsync() =>
                 WebGLAcceleratorExtensions.SynchronizeAsync((WebGLAccelerator)Accelerator);
             protected override global::ILGPU.Runtime.ProfilingMarker AddProfilingMarkerInternal() => throw new NotSupportedException();

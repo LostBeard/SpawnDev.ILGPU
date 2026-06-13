@@ -1192,10 +1192,11 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 inputBuf.View, tempBuf.View.SubView(1, numGroups), n);
             await accelerator.SynchronizeAsync();
 
-            // Fence: copy + sync (same as actual multi-pass scan)
+            // Fence: copy + flush (same as actual multi-pass scan — CopyFrom + Flush submit, NOT the
+            // sync Synchronize wait, which is async-only on browser under the sync/async contract).
             using var fenceBuf = accelerator.Allocate1D<int>(numBoundaries);
             fenceBuf.View.CopyFrom(accelerator.DefaultStream, tempBuf.View);
-            accelerator.Synchronize();
+            accelerator.Flush();
 
             // Pass 2: scan boundaries + apply to tile scan
             var pass2Kernel = accelerator.LoadStreamKernel<ArrayView<int>, ArrayView<int>, ArrayView<int>>(

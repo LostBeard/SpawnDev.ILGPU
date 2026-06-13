@@ -68,6 +68,52 @@ namespace ILGPU.Runtime
         public virtual Task SynchronizeAsync() => Task.Run(synchronizeAction);
 
         /// <summary>
+        /// Submits all queued operations to the device WITHOUT waiting for them to finish.
+        /// </summary>
+        /// <remarks>
+        /// The "start the work, do not wait" counterpart to <see cref="Synchronize"/>. Desktop
+        /// streams (CPU, CUDA, OpenCL) submit work as it is enqueued, so the default is a no-op.
+        /// Browser streams (WebGPU, WebGL, Wasm) batch dispatches and override this to submit the
+        /// pending batch. A stream whose submission is inherently asynchronous overrides this to
+        /// throw and exposes the work through <see cref="FlushAsync"/>.
+        /// </remarks>
+        public virtual void Flush() { }
+
+        /// <summary>
+        /// Asynchronously submits all queued operations to the device WITHOUT waiting for them
+        /// to finish - the async counterpart of <see cref="Flush"/>.
+        /// </summary>
+        /// <returns>A task that completes once the work has been SUBMITTED (not completed).</returns>
+        /// <remarks>
+        /// The default runs the synchronous <see cref="Flush"/> and returns a completed task,
+        /// correct for every backend whose submit step is synchronous. A stream whose submission
+        /// is inherently asynchronous (e.g. a remote/P2P stream) MUST override this and its
+        /// synchronous <see cref="Flush"/> throws.
+        /// </remarks>
+        public virtual Task FlushAsync()
+        {
+            Flush();
+            return Task.CompletedTask;
+        }
+
+        /// <summary>
+        /// Completion step for a SYNCHRONOUS host-&gt;device copy (upload) issued via
+        /// <c>CopyFromCPUUnsafeAsync</c>. The default WAITS via <see cref="Synchronize"/>, which is
+        /// correct on desktop (CPU/CUDA/OpenCL) where the upload DMA is still in flight after the
+        /// "unsafe async" copy returns, so the host source must not be reused until it drains.
+        /// </summary>
+        /// <remarks>
+        /// Browser streams (WebGPU/WebGL/Wasm) override this to a NO-OP: their host-&gt;device upload
+        /// (<c>queue.writeBuffer</c> / SharedArrayBuffer memcpy / backing-array copy) consumes the
+        /// host source SYNCHRONOUSLY at copy time, so there is nothing left to wait for. This is the
+        /// fire-and-forget upload half of the sync/async contract - distinct from the public
+        /// <see cref="Synchronize"/> (a wait-for-completion that is async-only on browser and THROWS).
+        /// A host-&gt;device upload is honest synchronously on every local backend, so it stays sync;
+        /// a remote/P2P stream whose upload is an async network send overrides this to throw.
+        /// </remarks>
+        protected internal virtual void EnsureHostCopyConsumed() => Synchronize();
+
+        /// <summary>
         /// Makes the associated accelerator the current one for this thread and
         /// returns a <see cref="ScopedAcceleratorBinding"/> object that allows
         /// to easily recover the old binding.

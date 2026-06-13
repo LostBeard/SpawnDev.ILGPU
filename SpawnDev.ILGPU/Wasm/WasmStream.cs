@@ -27,14 +27,33 @@ namespace SpawnDev.ILGPU.Wasm
         { }
 
         /// <summary>
-        /// Cleans up completed tasks and surfaces errors. Cannot block-wait in single-threaded WASM.
+        /// Synchronous Synchronize() is desktop-only — throws on Wasm. The single Blazor thread cannot
+        /// block-wait on in-flight worker kernels; use <see cref="SynchronizeAsync"/> (the real drain).
         /// </summary>
-        public override void Synchronize() => Accelerator.Synchronize();
+        public override void Synchronize() =>
+            throw new System.NotSupportedException(
+                "Synchronous Synchronize() is desktop-only on Wasm; use `await SynchronizeAsync()`.");
 
         /// <summary>
-        /// Real async drain. The synchronous <see cref="Synchronize"/> cannot block on
-        /// the single Blazor thread, so it only reaps completed dispatch tasks; this
-        /// awaits all in-flight worker kernels via the accelerator's pending-work set.
+        /// Flush (submit) is fire-and-forget and valid synchronously on Wasm: dispatch is already
+        /// fire-and-forget worker tasks with nothing batched to submit, so this is a genuine no-op.
+        /// (Submit is honest on browser; only the WAIT — <see cref="Synchronize"/> — is async-only.)
+        /// </summary>
+        public override void Flush() { }
+
+        /// <summary>Async submit — no-op on Wasm (nothing batched). Matches sync <see cref="Flush"/>.</summary>
+        public override System.Threading.Tasks.Task FlushAsync() =>
+            System.Threading.Tasks.Task.CompletedTask;
+
+        /// <summary>
+        /// Host-&gt;device upload is consumed synchronously (SharedArrayBuffer memcpy), so the sync
+        /// CopyFromCPU completion is a no-op on Wasm — nothing in flight to wait for.
+        /// </summary>
+        protected override void EnsureHostCopyConsumed() { }
+
+        /// <summary>
+        /// Real async drain. The synchronous <see cref="Synchronize"/> is desktop-only (throws on
+        /// Wasm); this awaits all in-flight worker kernels via the accelerator's pending-work set.
         /// </summary>
         public override System.Threading.Tasks.Task SynchronizeAsync() =>
             ((WasmAccelerator)Accelerator).SynchronizeAsync();

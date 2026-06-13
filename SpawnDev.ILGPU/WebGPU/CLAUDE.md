@@ -43,19 +43,19 @@ Transpiles ILGPU IR → WGSL shaders. Dispatches via `WebGPUAccelerator`.
 
 ## Command Batching & Synchronization
 
-**WebGPUStream batches compute passes into one command encoder.** `Synchronize()` = `Flush()` = finishes the encoder and submits to the GPU queue. This is NON-BLOCKING — it submits but does NOT wait for completion.
+**WebGPUStream batches compute passes into one command encoder.** Sync/async contract (2026-06-13, `Plans/sync-async-contract-2026-06-13.md`):
+- **`Flush()`** finishes the encoder and submits it to the GPU queue. This is a SUBMIT (start the work, don't wait) — fire-and-forget, so it is valid SYNCHRONOUSLY on WebGPU (a sync JS call). Use it to submit batches periodically.
+- **`Synchronize()` THROWS `NotSupportedException` on WebGPU** — it means "wait for completion," which cannot be honored on the single browser thread. Use `await SynchronizeAsync()` to wait (the only honest completion), or `Flush()` to submit without waiting. (This makes the silent-wrong-data misuse loud.)
+- **`SynchronizeAsync()`** calls `FlushPendingCommands()` then `queue.OnSubmittedWorkDone()` — this DOES wait. `OnSubmittedWorkDone` can deadlock in Blazor WASM if too much GPU work is queued (100+ compute passes → Chrome GPU watchdog timeout).
 
-**`SynchronizeAsync()`** calls `FlushPendingCommands()` then `queue.OnSubmittedWorkDone()` — this DOES wait. But `OnSubmittedWorkDone` can deadlock in Blazor WASM if too much GPU work is queued (100+ compute passes → Chrome GPU watchdog timeout).
-
-**Rule: Flush periodically for large workloads.** If dispatching many kernels (>50), call `Synchronize()` every 16-32 dispatches to submit smaller batches. This prevents the GPU command buffer from growing too large. Example:
+**Rule: Flush periodically for large workloads.** If dispatching many kernels (>50), call `Flush()` (NOT the now-throwing `Synchronize()`) every 16-32 dispatches to submit smaller batches:
 ```csharp
 for (int i = 0; i < 112; i++) {
     accelerator.LaunchKernel(...);
-    if (i % 16 == 0) accelerator.Synchronize(); // Flush batch
+    if (i % 16 == 0) accelerator.Flush(); // submit batch (sync, no wait)
 }
-// Final flush + async wait
-accelerator.Synchronize();
-await accelerator.SynchronizeAsync(); // Safe — only waits for last small batch
+accelerator.Flush();                  // submit the tail
+await accelerator.SynchronizeAsync(); // wait for completion (async-only on browser)
 ```
 
 **`CopyToHostAsync` internally:** FlushPendingCommands → CopyBufferToBuffer → Submit → `MapAsync(Read)`. The `MapAsync` waits for the copy to finish, which is queued behind all prior work. If prior work is large, `MapAsync` may timeout.

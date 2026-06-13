@@ -1256,7 +1256,9 @@ namespace ILGPU.Runtime
         {
             // Copy async into memory
             target.CopyFromCPUUnsafeAsync(stream, ref cpuData, length);
-            stream.Synchronize();
+            // Upload is fire-and-forget: wait on desktop (DMA in flight), no-op on browser
+            // (host source consumed synchronously). NOT the throwing sync Synchronize().
+            stream.EnsureHostCopyConsumed();
         }
 
         #endregion
@@ -1740,7 +1742,8 @@ namespace ILGPU.Runtime
                     stream,
                     ref Unsafe.AsRef<T>(ptr),
                     span.Length);
-                stream.Synchronize();
+                // Upload is fire-and-forget: wait on desktop, no-op on browser (sync-consumed).
+                stream.EnsureHostCopyConsumed();
             }
         }
 

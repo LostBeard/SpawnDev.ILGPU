@@ -39,8 +39,16 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
     /// </summary>
     public static class RadixCounterLocalizer
     {
-        /// <summary>Master switch. Default ON so the next FO76 sweep captures localization.</summary>
-        public static bool Enabled = true;
+        /// <summary>
+        /// Master switch. Default OFF (2026-06-13): the Wasm large-sort residual race this localizer
+        /// hunted is root-caused + fixed (see Wasm/CLAUDE.md "RESIDUAL LARGE-SORT RACE KILLED"), so the
+        /// diagnostic is now opt-in. It must stay off by default because its per-pass hook calls the
+        /// radix orchestration's `stream.Synchronize()` (RadixSortExtensions PerPassHook), which under
+        /// the sync/async contract THROWS on browser (sync wait is async-only) — a diagnostic that
+        /// observes GPU counters cannot run synchronously on Wasm. Flip to true only when actively
+        /// localizing a Wasm radix counter bug, and only on a desktop run.
+        /// </summary>
+        public static bool Enabled = false;
 
         private static Accelerator? _acc;
         private static Action<Index1D, ArrayView<int>, ArrayView<int>>? _copyKernel;

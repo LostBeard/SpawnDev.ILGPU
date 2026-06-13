@@ -367,17 +367,20 @@ namespace ILGPU.Algorithms
                 Index1D, ArrayView<Half>, ArrayView<float>>(
                 HalfToFloatCopyKernel);
             widenKernel((Index1D)(int)input.Length, input, f32Input.View);
-            // Flush the widen kernel before the Reduce reads the f32 buffer. On
-            // backends with deferred command encoding (WebGPU) the Reduce's compute
-            // pass may otherwise race with the widen writes.
-            accelerator.Synchronize();
+            // Flush (SUBMIT, not wait) the widen kernel before the Reduce reads the f32 buffer.
+            // On deferred-encoder backends (WebGPU) ending+submitting the pass barriers the Reduce
+            // compute pass against the widen writes; on Wasm dispatch is serialized; on desktop the
+            // stream orders it. Flush is fire-and-forget so it is valid synchronously on every backend
+            // — NOT the sync Synchronize(), which is async-only on browser (sync/async contract).
+            accelerator.Flush();
 
             // 3. Reduce the f32 view with the widened reduction op.
             accelerator.CreateReduction<float, Stride1D.Dense, TFloatReduction>()(
                 stream,
                 f32Input.View,
                 f32Output.View);
-            accelerator.Synchronize();
+            // Flush (submit) before the narrow kernel reads the reduced f32 — same barrier rationale.
+            accelerator.Flush();
 
             // 4. Convert final f32 result back to Half in the user's output slot.
             var narrowKernel = accelerator.LoadAutoGroupedStreamKernel<

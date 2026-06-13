@@ -57,14 +57,18 @@ Compiles ILGPU IR → WebAssembly binary. Dispatches via Web Workers with Shared
 `SpawnDev.ILGPU.DemoConsole -- wasm-dump` compiles RadixSort kernels on the DESKTOP and prints the emitted shared-memory alloca table + flags any `GenerateCode(Alloca)` type+size fallback aliasing or offset overlap. Works because `WasmAccelerator.Create` wraps the `BlazorJSRuntime.JS` lookup in try/catch (defaults to 4 cores) and `CreateRadixSort*` compiles its kernels eagerly via `LoadKernel` BEFORE any dispatch — so the IL→wasm compile path runs fully offline (no workers, no Chromium, no dispatch). Reusable for any shared-memory layout audit. Source: `SpawnDev.ILGPU.DemoConsole/WasmCompileDump.cs`.
 
 ## Hard Constraints
-- **Blazor WASM is single-threaded** — all async, no blocking. `stream.Synchronize()` is a no-op.
+- **Blazor WASM is single-threaded** — all async, no blocking. **Sync `stream.Synchronize()` / `accelerator.Synchronize()` / `Flush()` are DESKTOP-ONLY and now THROW `NotSupportedException` on Wasm** (2026-06-13, "sync = desktop-only" contract — were previously a silent no-op/reap that returned before workers finished). Use `await SynchronizeAsync()` (the real `await Task.WhenAll(_pendingWork)` drain) to wait, or `await FlushAsync()` (no-op submit) to mirror the desktop submit. Locked by `BackendTestBase.SyncSynchronizeContractTest` / `SyncFlushContractTest`.
 - **2D/3D groups are SUPPORTED (fixed 2026-06-07, commit `274b57c`).** A `KernelConfig` with `Index2D`/`Index3D` GroupDim works on Wasm like it does on CPU/CUDA/OpenCL/WebGPU. The kernel ABI carries the real per-dimension group sizes (`realGroupDimX`/`realGroupDimY`, in addition to `groupDimX` which is the TOTAL group size used by the barrier last-thread check + group-id math), and `Group.Idx`/`Grid.Idx`/`Group.Dim`/`Grid.Dim` decompose X-fastest (`Group.IdxX = l % GroupDim.X`, `Grid.IdxX = g % (dimX/GroupDim.X)`, ...). 1D launches pass `realGroupDimX = groupSize, realGroupDimY = 1`. **History:** before the fix the index model assumed 1D (`groupDimX == groupSize`), so a 2D group made `gridDimX = dimX/groupSize = 0` → `Grid.IdxX % 0` "remainder by zero" trap in `WasmAccelerator.DispatchToWorkers`. Verified by `BackendTestBase.Group2D` (CPU oracle). Tiled kernels may still prefer a 1D group + manual 2D index (like `MatMulKernel.TiledMatMulImpl`) for register/codegen simplicity, but it is no longer required for correctness.
 
 ## Async drain + readback — core virtuals (2026-05-29)
 
 `stream.Synchronize()` / `accelerator.Synchronize()` CANNOT block on the single Blazor
-thread, so on Wasm/WebGL they only reap completed tasks and on WebGPU only flush the
-encoder — **none of them drain in-flight work.** Any code that does an immediate buffer
+thread. Historically they were a silent no-op on Wasm/WebGL (reap completed tasks) and an
+encoder-flush on WebGPU — **none drained in-flight work**, so a caller expecting completion
+read stale/empty data. As of 2026-06-13 those sync forms (plus sync `Flush()`) are
+**desktop-only and THROW `NotSupportedException`** on all three browser backends; the async
+forms (`SynchronizeAsync` = real drain, `FlushAsync` = submit) are the portable path. Any
+code that does an immediate buffer
 op (`CopyTo`/`CopyToCPU`/`MemSet`/sync `CopyToHost`) right after an unawaited dispatch
 races the workers (Wasm reads stale; WebGPU sync GPU→CPU `CopyTo` throws). `CopyFromAsync`
 was the first patch of one instance of this class.

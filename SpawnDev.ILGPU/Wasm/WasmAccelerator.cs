@@ -2627,22 +2627,22 @@ namespace SpawnDev.ILGPU.Wasm
             return new WasmMemoryBuffer(this, length, elementSize);
         }
 
-        protected override void SynchronizeInternal()
-        {
-            // Can't block-wait in single-threaded Blazor WASM.
-            // But we CAN clean up completed tasks and surface errors,
-            // matching WebGPU's Synchronize which flushes + checks errors.
-            for (int i = _pendingWork.Count - 1; i >= 0; i--)
-            {
-                var task = _pendingWork[i];
-                if (task.IsCompleted)
-                {
-                    _pendingWork.RemoveAt(i);
-                    if (task.IsFaulted)
-                        throw task.Exception!.InnerException ?? task.Exception;
-                }
-            }
-        }
+        protected override void SynchronizeInternal() =>
+            // Synchronous Synchronize() is DESKTOP-ONLY. On Wasm (single-threaded Blazor, worker-pool
+            // dispatch) the main thread cannot block-wait on in-flight worker kernels; the old behavior
+            // only reaped already-completed tasks WITHOUT waiting, so a caller expecting completion read
+            // stale/in-flight data. Throw so the misuse is loud instead of silently wrong — use
+            // `await SynchronizeAsync()` (the real `await Task.WhenAll(_pendingWork)` drain).
+            throw new NotSupportedException(
+                "Synchronous Synchronize() is desktop-only (CPU/CUDA/OpenCL). On Wasm use " +
+                "`await SynchronizeAsync()` — browser backends are async-only at the GPU boundary.");
+
+        /// <summary>
+        /// Submits pending work without waiting — the browser-portable replacement for the
+        /// desktop-only sync <see cref="Accelerator.Flush"/> (which throws on Wasm). Wasm dispatch is
+        /// fire-and-forget worker tasks with nothing batched to submit, so this completes immediately.
+        /// </summary>
+        public override Task FlushAsync() => Task.CompletedTask;
 
         /// <summary>
         /// Asynchronously waits for all pending kernel dispatches to complete.
