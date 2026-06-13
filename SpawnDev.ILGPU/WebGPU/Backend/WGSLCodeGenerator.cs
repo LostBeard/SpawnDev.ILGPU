@@ -2576,7 +2576,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // so the subsequent (broken) thread-0-only atomicMax correctly writes the final value.
             var sourceMethodInfo = methodCall.Target.Source as MethodInfo;
             if (sourceMethodInfo != null &&
-                sourceMethodInfo.Name == "Reduce" &&
+                (sourceMethodInfo.Name == "Reduce" || sourceMethodInfo.Name == "AllReduce") &&
                 sourceMethodInfo.IsGenericMethod)
             {
                 string? subgroupOp = GetSubgroupReduceOp(sourceMethodInfo);

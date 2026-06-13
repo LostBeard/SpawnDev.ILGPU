@@ -1,6 +1,8 @@
 using System;
 using System.Threading.Tasks;
 using ILGPU;
+using ILGPU.Algorithms;
+using ILGPU.Algorithms.ScanReduceOperations;
 using ILGPU.Runtime;
 using SpawnDev.UnitTesting;
 using SpawnDev.ILGPU.WebGPU;
@@ -181,6 +183,69 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             for (int i = 0; i < n; i++)
                 if (MathF.Abs(r[i] - src[i] * mul) > 1e-3f)
                     throw new Exception($"Offline-artifact dispatch WRONG @{i}: {r[i]} != {src[i] * mul}");
+        });
+
+        // Reduction-codegen kernels for the offline AllReduce silent-zero guard below.
+        private static void PrecompiledShaders_GroupReduceKernel(
+            Index1D i, ArrayView<float> input, ArrayView<float> output)
+        {
+            int gid = Grid.GlobalIndex.X;
+            float r = GroupExtensions.Reduce<float, AddFloat>(input[gid]);
+            if (Group.IsFirstThread) output[0] = r;
+        }
+
+        private static void PrecompiledShaders_GroupAllReduceKernel(
+            Index1D i, ArrayView<float> input, ArrayView<float> output)
+        {
+            int gid = Grid.GlobalIndex.X;
+            output[gid] = GroupExtensions.AllReduce<float, AddFloat>(input[gid]);
+        }
+
+        // Regression guard (Geordi, 2026-06-13): the WGSL GenerateCode(MethodCall) reduction
+        // smart-fallback once matched ONLY Name=="Reduce", so GroupExtensions.AllReduce that reached
+        // the fallback (offline ShaderCompiler / any path where the registered intrinsic does not fire)
+        // emitted `target = f32(0); // Unmapped fallback` — a silent-ZERO precompiled AllReduce shader.
+        // Runtime masked it (intrinsic fired / IL body inlined to an inner Reduce call), so the
+        // correctness tests passed while a build-time precompiled artifact computed 0. Assert the
+        // OFFLINE-generated AllReduce WGSL is a real reduction: never the unmapped stub, and on a
+        // subgroups device it must take the subgroupAdd fast path (same as Reduce). WebGPU-only.
+        [TestMethod]
+        public async Task PrecompiledShaders_OfflineAllReduce_IsRealReduction() => await RunTest(async accelerator =>
+        {
+            if (accelerator is not WebGPUAccelerator webgpu)
+                throw new UnsupportedTestException("WebGPU-only WGSL reduction-codegen guard.");
+
+            var profile = CapabilityProfiles.FromAccelerator(webgpu, webgpu.EnabledFeatures);
+            var spec = new KernelSpecialization(64, null);
+
+            var allReduce = ShaderCompiler.Generate(
+                (Action<Index1D, ArrayView<float>, ArrayView<float>>)PrecompiledShaders_GroupAllReduceKernel,
+                profile, spec).Source ?? "";
+            var reduce = ShaderCompiler.Generate(
+                (Action<Index1D, ArrayView<float>, ArrayView<float>>)PrecompiledShaders_GroupReduceKernel,
+                profile, spec).Source ?? "";
+
+            if (allReduce.Contains("Unmapped", StringComparison.Ordinal))
+                throw new Exception(
+                    "Offline AllReduce WGSL contains the 'Unmapped' silent-zero stub — the reduction " +
+                    "smart-fallback regressed (must match AllReduce, not only Reduce). " +
+                    $"len={allReduce.Length}");
+
+            // Sanity: Reduce was always handled; if IT is unmapped the whole fallback broke.
+            if (reduce.Contains("Unmapped", StringComparison.Ordinal))
+                throw new Exception($"Offline Reduce WGSL unexpectedly Unmapped (len={reduce.Length}).");
+
+            // On a subgroups-capable device, AllReduce must take the same subgroupAdd fast path as Reduce.
+            if (webgpu.Backend.HasSubgroups)
+            {
+                if (!allReduce.Contains("subgroupAdd", StringComparison.Ordinal))
+                    throw new Exception(
+                        "Subgroups enabled but offline AllReduce WGSL has no subgroupAdd — it is not " +
+                        $"taking the register-only fast path. len={allReduce.Length}");
+                if (!reduce.Contains("subgroupAdd", StringComparison.Ordinal))
+                    throw new Exception($"Subgroups enabled but offline Reduce WGSL has no subgroupAdd (len={reduce.Length}).");
+            }
+            await Task.CompletedTask;
         });
 
         // Drift guard (Seven, 2026-06-11): the runtime cache-LOOKUP profile
