@@ -65,8 +65,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.15" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.15" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.16-local.1" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.16-local.1" />
 	</ItemGroup>
 
 	<ItemGroup>
