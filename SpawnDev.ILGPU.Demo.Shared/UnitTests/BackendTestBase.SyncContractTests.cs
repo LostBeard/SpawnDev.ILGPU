@@ -102,14 +102,13 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         });
 
         /// <summary>
-        /// Flush() contract: throws NotSupportedException on browser backends, completes on desktop.
-        /// FlushAsync() (submit-without-wait) is portable on EVERY backend; following it with
-        /// SynchronizeAsync() yields correct output.
+        /// Flush() contract: a fire-and-forget SUBMIT, valid synchronously on EVERY local backend
+        /// (it never throws on browser — only the WAIT, Synchronize(), is async-only there).
+        /// Following Flush() with SynchronizeAsync() yields correct output.
         /// </summary>
         [TestMethod]
         public async Task SyncFlushContractTest() => await RunTest(async accelerator =>
         {
-            bool browser = IsBrowserBackend(accelerator.AcceleratorType);
             const int count = 64;
 
             var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(
@@ -119,21 +118,19 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 
             // Flush is a fire-and-forget SUBMIT (start the work, don't wait) — honest synchronously on
             // EVERY local backend (desktop: eager/no-op; WebGPU: encoder submit; WebGL/Wasm: no-op).
-            // It must NOT throw on browser; only the WAIT (Synchronize) is async-only. (A remote/P2P
-            // stream whose submit is an async network send is the sole backend where sync Flush throws.)
+            // It must NOT throw on browser; only the WAIT (Synchronize) is async-only. Submit is
+            // synchronous on every backend, so there is no async Flush twin.
             accelerator.Flush();
             accelerator.DefaultStream.Flush();
 
-            // The async submit is portable everywhere; complete the work and verify the output.
-            await accelerator.FlushAsync();
-            await accelerator.DefaultStream.FlushAsync();
+            // Complete the work (the async WAIT) and verify the output.
             await accelerator.SynchronizeAsync();
             var result = await buf.CopyToHostAsync<int>();
             for (int i = 0; i < count; i++)
             {
                 if (result[i] != i * 2)
                     throw new Exception(
-                        $"FlushAsync + SynchronizeAsync produced wrong data at {i}: expected {i * 2}, got {result[i]}");
+                        $"Flush + SynchronizeAsync produced wrong data at {i}: expected {i * 2}, got {result[i]}");
             }
         });
     }

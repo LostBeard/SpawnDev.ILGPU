@@ -4,9 +4,9 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.12.0-local.1</Version>
+		<Version>4.12.0-local.2</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>Sync/async contract (bundles forks 2.0.16): an operation that WAITS for completion or OBSERVES a result is async-only on the browser backends (WebGPU/WebGL/Wasm) - its synchronous form throws NotSupportedException; fire-and-forget operations (dispatch, alloc, host-&gt;device upload, flush-submit) stay synchronous everywhere. Synchronize() now THROWS on browser (was a silent non-waiting flush) - use await SynchronizeAsync() to wait. New Flush()/FlushAsync() submit batched work without waiting (Flush() is valid synchronously on browser). CopyFromCPU/Allocate1D(data) work on every browser backend again (routed through the new EnsureHostCopyConsumed hook). Sync CreateScan/CreateRadixSort builders run on the browser backends. Gate: full cross-backend PMT 3384/0/218. Full contract: Docs/async.md. Full per-version history: CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
+		<PackageReleaseNotes>Sync/async contract (bundles forks 2.0.16): an operation that WAITS for completion or OBSERVES a result is async-only on the browser backends (WebGPU/WebGL/Wasm) - its synchronous form throws NotSupportedException; fire-and-forget operations (dispatch, alloc, host-&gt;device upload, flush-submit) stay synchronous everywhere. Synchronize() now THROWS on browser (was a silent non-waiting flush) - use await SynchronizeAsync() to wait. New Flush() submits batched work without waiting (valid synchronously on browser - submit is sync on every backend, so there is no async Flush twin). CopyFromCPU/Allocate1D(data) work on every browser backend again (routed through the new EnsureHostCopyConsumed hook). Sync CreateScan/CreateRadixSort builders run on the browser backends. Gate: full cross-backend PMT 3384/0/218. Full contract: Docs/async.md. Full per-version history: CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -65,8 +65,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.16-local.1" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.16-local.1" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.16-local.2" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.16-local.2" />
 	</ItemGroup>
 
 	<ItemGroup>

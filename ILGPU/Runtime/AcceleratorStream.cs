@@ -74,27 +74,9 @@ namespace ILGPU.Runtime
         /// The "start the work, do not wait" counterpart to <see cref="Synchronize"/>. Desktop
         /// streams (CPU, CUDA, OpenCL) submit work as it is enqueued, so the default is a no-op.
         /// Browser streams (WebGPU, WebGL, Wasm) batch dispatches and override this to submit the
-        /// pending batch. A stream whose submission is inherently asynchronous overrides this to
-        /// throw and exposes the work through <see cref="FlushAsync"/>.
+        /// pending batch. All current streams submit synchronously.
         /// </remarks>
         public virtual void Flush() { }
-
-        /// <summary>
-        /// Asynchronously submits all queued operations to the device WITHOUT waiting for them
-        /// to finish - the async counterpart of <see cref="Flush"/>.
-        /// </summary>
-        /// <returns>A task that completes once the work has been SUBMITTED (not completed).</returns>
-        /// <remarks>
-        /// The default runs the synchronous <see cref="Flush"/> and returns a completed task,
-        /// correct for every backend whose submit step is synchronous. A stream whose submission
-        /// is inherently asynchronous (e.g. a remote/P2P stream) MUST override this and its
-        /// synchronous <see cref="Flush"/> throws.
-        /// </remarks>
-        public virtual Task FlushAsync()
-        {
-            Flush();
-            return Task.CompletedTask;
-        }
 
         /// <summary>
         /// Completion step for a SYNCHRONOUS host-&gt;device copy (upload) issued via

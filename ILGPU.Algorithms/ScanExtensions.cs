@@ -76,50 +76,6 @@ namespace ILGPU.Algorithms
         where TStrideIn : struct, IStride1D
         where TStrideOut : struct, IStride1D;
 
-    /// <summary>
-    /// Asynchronous counterpart of <see cref="Scan{T, TStrideIn, TStrideOut}"/> — the
-    /// portable, all-backend scan. The synchronous <see cref="Scan{T, TStrideIn, TStrideOut}"/>
-    /// is desktop-only (it throws on the browser backends, which cannot do the inter-pass
-    /// command-buffer flush synchronously); this awaits the real async flush
-    /// (<see cref="Accelerator.FlushAsync"/>) between passes and works on every backend.
-    /// </summary>
-    /// <typeparam name="T">The underlying type of the scan operation.</typeparam>
-    /// <typeparam name="TStrideIn">The stride of the input view.</typeparam>
-    /// <typeparam name="TStrideOut">The stride of the output view.</typeparam>
-    /// <param name="stream">The accelerator stream.</param>
-    /// <param name="input">The input elements to scan.</param>
-    /// <param name="output">The output view to store the scanned values.</param>
-    /// <param name="temp">The temp view to store temporary results.</param>
-    /// <returns>A task that completes when the scan output is on the device.</returns>
-    public delegate Task ScanAsync<T, TStrideIn, TStrideOut>(
-        AcceleratorStream stream,
-        ArrayView1D<T, TStrideIn> input,
-        ArrayView1D<T, TStrideOut> output,
-        ArrayView<int> temp)
-        where T : unmanaged
-        where TStrideIn : struct, IStride1D
-        where TStrideOut : struct, IStride1D;
-
-    /// <summary>
-    /// Asynchronous counterpart of <see cref="BufferedScan{T, TStrideIn, TStrideOut}"/>
-    /// (carries its own temp buffer). Portable across all backends; see
-    /// <see cref="ScanAsync{T, TStrideIn, TStrideOut}"/> for why the async form exists.
-    /// </summary>
-    /// <typeparam name="T">The underlying type of the scan operation.</typeparam>
-    /// <typeparam name="TStrideIn">The stride of the input view.</typeparam>
-    /// <typeparam name="TStrideOut">The stride of the output view.</typeparam>
-    /// <param name="stream">The accelerator stream.</param>
-    /// <param name="input">The input elements to scan.</param>
-    /// <param name="output">The output view to store the scanned values.</param>
-    /// <returns>A task that completes when the scan output is on the device.</returns>
-    public delegate Task BufferedScanAsync<T, TStrideIn, TStrideOut>(
-        AcceleratorStream stream,
-        ArrayView1D<T, TStrideIn> input,
-        ArrayView1D<T, TStrideOut> output)
-        where T : unmanaged
-        where TStrideIn : struct, IStride1D
-        where TStrideOut : struct, IStride1D;
-
     #endregion
 
     /// <summary>
@@ -167,34 +123,6 @@ namespace ILGPU.Algorithms
             where TScanOperation : struct, IScanReduceOperation<T>
         {
             var scan = Accelerator.CreateScan<T, TStrideIn, TStrideOut, TScanOperation>(
-                kind);
-            return (stream, input, output) =>
-                scan(stream, input, output, tempBuffer.View);
-        }
-
-        /// <summary>
-        /// Creates a new asynchronous buffered scan operation (portable across all backends).
-        /// Async counterpart of
-        /// <see cref="CreateScan{T, TStrideIn, TStrideOut, TScanOperation}(ScanKind)"/>.
-        /// </summary>
-        /// <typeparam name="T">The underlying type of the scan operation.</typeparam>
-        /// <typeparam name="TStrideIn">The stride of the input view.</typeparam>
-        /// <typeparam name="TStrideOut">The stride of the output view.</typeparam>
-        /// <typeparam name="TScanOperation">The type of the scan operation.</typeparam>
-        /// <param name="kind">The scan kind.</param>
-        /// <returns>The created async scan handler.</returns>
-        public BufferedScanAsync<T, TStrideIn, TStrideOut> CreateScanAsync<
-            T,
-            TStrideIn,
-            TStrideOut,
-            TScanOperation>(
-            ScanKind kind)
-            where T : unmanaged
-            where TStrideIn : struct, IStride1D
-            where TStrideOut : struct, IStride1D
-            where TScanOperation : struct, IScanReduceOperation<T>
-        {
-            var scan = Accelerator.CreateScanAsync<T, TStrideIn, TStrideOut, TScanOperation>(
                 kind);
             return (stream, input, output) =>
                 scan(stream, input, output, tempBuffer.View);
@@ -1344,150 +1272,6 @@ namespace ILGPU.Algorithms
             };
         }
 
-        /// <summary>
-        /// Async twin of <see cref="CreateWebGPUMultiPassScan{T, TStrideIn, TStrideOut, TScanOperation}"/>.
-        /// Identical multi-pass dispatch, except the inter-pass and final command-buffer
-        /// boundaries use <c>await stream.FlushAsync()</c> (submit-without-wait) instead of the
-        /// synchronous <c>Flush()</c> — which throws on the browser backends under the
-        /// "sync = desktop-only" contract. Shared by the WebGPU path and the Wasm large-data path.
-        /// </summary>
-        private static ScanAsync<T, TStrideIn, TStrideOut> CreateWebGPUMultiPassScanAsync<
-            T,
-            TStrideIn,
-            TStrideOut,
-            TScanOperation>(
-            Accelerator accelerator,
-            ScanKind kind)
-            where T : unmanaged
-            where TStrideIn : struct, IStride1D
-            where TStrideOut : struct, IStride1D
-            where TScanOperation : struct, IScanReduceOperation<T>
-        {
-            var initializer = accelerator.CreateInitializer<T, Stride1D.Dense>();
-            var scanSpec = new KernelSpecialization(
-                accelerator.MaxNumThreadsPerGroup, null);
-
-            var pass1Kernel = accelerator.LoadKernel<
-                ArrayView1D<T, TStrideIn>, ArrayView<T>, Index1D>(
-                WebGPUScanPass1<T, TStrideIn, TScanOperation>,
-                scanSpec);
-
-            Action<AcceleratorStream, KernelConfig, ArrayView1D<T, TStrideIn>,
-                ArrayView<T>, ArrayView1D<T, TStrideOut>, Index1D> pass2Kernel;
-            if (kind == ScanKind.Inclusive)
-            {
-                pass2Kernel = accelerator.LoadKernel<ArrayView1D<T, TStrideIn>,
-                    ArrayView<T>, ArrayView1D<T, TStrideOut>, Index1D>(
-                    WebGPUInclusiveScanPass2<T, TStrideIn, TStrideOut, TScanOperation>,
-                    scanSpec);
-            }
-            else
-            {
-                pass2Kernel = accelerator.LoadKernel<ArrayView1D<T, TStrideIn>,
-                    ArrayView<T>, ArrayView1D<T, TStrideOut>, Index1D>(
-                    WebGPUExclusiveScanPass2<T, TStrideIn, TStrideOut, TScanOperation>,
-                    scanSpec);
-            }
-
-            return async (stream, input, output, temp) =>
-            {
-                if (!input.IsValid)
-                    throw new ArgumentNullException(nameof(input));
-                if (!output.IsValid)
-                    throw new ArgumentNullException(nameof(output));
-                if (output.Length < input.Length)
-                    throw new ArgumentOutOfRangeException(nameof(output));
-                if (input.Length > int.MaxValue)
-                {
-                    throw new NotSupportedException(
-                        ErrorMessages.NotSupportedArrayView64);
-                }
-
-                var (gridDim, groupDim) = accelerator.ComputeGridStrideLoopExtent(
-                    input.IntLength,
-                    out int numIterationsPerGroup);
-
-                var viewManager = new TempViewManager(temp, nameof(temp));
-                var tempView = viewManager.Allocate<T>(gridDim + 1);
-
-                TScanOperation scanOperation = default;
-                initializer(stream, tempView, scanOperation.Identity);
-                if (tempView.Length > 1)
-                {
-                    var offsetView =
-                        tempView.SubView(1, tempView.Length - 1);
-                    pass1Kernel(
-                        stream,
-                        (gridDim, groupDim),
-                        input,
-                        offsetView,
-                        numIterationsPerGroup);
-
-                    // Fence between scan passes — ensures pass1 output is visible to
-                    // pass2. On Wasm dispatches are serialized (async, one at a time) so
-                    // the fence is unnecessary and CopyFrom would fail (NativePtr is only
-                    // valid during dispatch).
-                    if (accelerator.AcceleratorType != AcceleratorType.Wasm)
-                    {
-                        using var resultBuffer = accelerator.Allocate1D<T>(tempView.Length);
-                        resultBuffer.View.CopyFrom(stream, tempView);
-                        await stream.FlushAsync().ConfigureAwait(false);
-                    }
-                }
-
-                pass2Kernel(
-                    stream,
-                    (gridDim, groupDim),
-                    input,
-                    tempView,
-                    output,
-                    numIterationsPerGroup);
-
-                // Submit the scan output in its own command buffer so a later dispatch
-                // (e.g. RadixSortKernel2) doesn't share one command buffer and trip a
-                // browser WebGPU barrier bug. await FlushAsync() is the submit-without-wait
-                // (on Wasm it drains the serialized dispatch).
-                await stream.FlushAsync().ConfigureAwait(false);
-            };
-        }
-
-        /// <summary>
-        /// Async twin of <see cref="CreateWasmHybridScan{T, TStrideIn, TStrideOut, TScanOperation}"/>:
-        /// single-group (no flush) for small data, the async multi-pass builder for large data.
-        /// </summary>
-        private static ScanAsync<T, TStrideIn, TStrideOut> CreateWasmHybridScanAsync<
-            T,
-            TStrideIn,
-            TStrideOut,
-            TScanOperation>(
-            Accelerator accelerator,
-            ScanKind kind)
-            where T : unmanaged
-            where TStrideIn : struct, IStride1D
-            where TStrideOut : struct, IStride1D
-            where TScanOperation : struct, IScanReduceOperation<T>
-        {
-            var singleGroupScan = CreateSingleGroupScan<
-                T, TStrideIn, TStrideOut, TScanOperation>(accelerator, kind);
-            ScanAsync<T, TStrideIn, TStrideOut>? multiPassScanAsync = null;
-
-            int maxGroupSize = accelerator.MaxNumThreadsPerGroup;
-
-            return (stream, input, output, temp) =>
-            {
-                if (input.Length <= maxGroupSize)
-                {
-                    // Single-group: one dispatch, no inter-pass flush — genuinely
-                    // synchronous work, complete the task immediately.
-                    singleGroupScan(stream, input, output, temp);
-                    return Task.CompletedTask;
-                }
-                multiPassScanAsync ??= CreateWebGPUMultiPassScanAsync<
-                    T, TStrideIn, TStrideOut, TScanOperation>(accelerator, kind);
-                return multiPassScanAsync(stream, input, output, temp);
-            };
-        }
-
         #endregion
 
         #region Scan
@@ -1517,8 +1301,8 @@ namespace ILGPU.Algorithms
             // Scan is fire-and-forget multi-dispatch (its inter-pass barrier is a SUBMIT — CopyFrom +
             // stream.Flush() — not a completion-wait, and it never reads back to host mid-operation),
             // so the synchronous builder is valid on EVERY backend including browser. Each backend
-            // routes to its proven sync builder below. CreateScanAsync is the async convenience twin;
-            // it is not required on browser. (Sync/async contract: Plans/sync-async-contract-2026-06-13.)
+            // routes to its proven sync builder below. (Sync/async contract:
+            // Plans/sync-async-contract-2026-06-13.)
             switch (accelerator.AcceleratorType)
             {
                 case AcceleratorType.CPU:
@@ -1533,7 +1317,6 @@ namespace ILGPU.Algorithms
                 // Scan is FIRE-AND-FORGET multi-dispatch on browser (no completion-wait, no
                 // device->host readback mid-operation), so the sync builder is valid on every
                 // browser backend per the sync/async contract (Plans/sync-async-contract-2026-06-13).
-                // Each routes to the same proven sync builder the async CreateScanAsync wraps.
                 case AcceleratorType.WebGPU:
                     // Generic multi-pass scan: inter-pass barrier is CopyFrom + stream.Flush()
                     // (a SUBMIT — valid synchronously on WebGPU), not the throwing Synchronize.
@@ -1553,83 +1336,6 @@ namespace ILGPU.Algorithms
                         accelerator, kind);
             }
         }
-
-        /// <summary>
-        /// Creates a new asynchronous scan operation — the portable, all-backend counterpart
-        /// of <see cref="CreateScan{T, TStrideIn, TStrideOut, TScanOperation}(Accelerator, ScanKind)"/>.
-        /// The synchronous scan is desktop-only (its inter-pass command-buffer flush throws on
-        /// the browser backends under the "sync = desktop-only" contract); this awaits the real
-        /// async flush between passes and runs on every backend.
-        /// </summary>
-        /// <typeparam name="T">The underlying type of the scan operation.</typeparam>
-        /// <typeparam name="TStrideIn">The stride of the input view.</typeparam>
-        /// <typeparam name="TStrideOut">The stride of the output view.</typeparam>
-        /// <typeparam name="TScanOperation">The type of the scan operation.</typeparam>
-        /// <param name="accelerator">The accelerator.</param>
-        /// <param name="kind">The scan kind.</param>
-        /// <returns>The created async scan handler.</returns>
-        public static ScanAsync<T, TStrideIn, TStrideOut> CreateScanAsync<
-            T,
-            TStrideIn,
-            TStrideOut,
-            TScanOperation>(
-            this Accelerator accelerator,
-            ScanKind kind)
-            where T : unmanaged
-            where TStrideIn : struct, IStride1D
-            where TStrideOut : struct, IStride1D
-            where TScanOperation : struct, IScanReduceOperation<T>
-        {
-            // Note: dispatches to the PRIVATE builders directly (not the public CreateScan)
-            // so it stays valid after sync CreateScan begins throwing on browser backends.
-            return accelerator.AcceleratorType switch
-            {
-                // Deferred command encoder — needs await FlushAsync() between passes.
-                AcceleratorType.WebGPU =>
-                    CreateWebGPUMultiPassScanAsync<T, TStrideIn, TStrideOut, TScanOperation>(
-                        accelerator, kind),
-                AcceleratorType.Wasm =>
-                    CreateWasmHybridScanAsync<T, TStrideIn, TStrideOut, TScanOperation>(
-                        accelerator, kind),
-                // WebGL has no inter-pass Flush (draw-call boundaries ARE the barrier), so its
-                // sync builder performs no browser-throwing primitive — wrapping it is genuine,
-                // not fake-async.
-                AcceleratorType.WebGL =>
-                    WrapSyncScan(CreateWebGLHillisSteeleScan<
-                        T, TStrideIn, TStrideOut, TScanOperation>(accelerator, kind)),
-                // Desktop: sync dispatch genuinely completes synchronously (Flush is a no-op).
-                AcceleratorType.Cuda =>
-                    WrapSyncScan(CreateSinglePassScan<
-                        T, TStrideIn, TStrideOut, TScanOperation>(accelerator, kind)),
-                AcceleratorType.OpenCL =>
-                    WrapSyncScan(CreateMultiPassScan<
-                        T, TStrideIn, TStrideOut, TScanOperation>(accelerator, kind)),
-                AcceleratorType.CPU =>
-                    WrapSyncScan(CreateSingleGroupScan<
-                        T, TStrideIn, TStrideOut, TScanOperation>(accelerator, kind)),
-                _ =>
-                    WrapSyncScan(CreateMultiPassScan<
-                        T, TStrideIn, TStrideOut, TScanOperation>(accelerator, kind)),
-            };
-        }
-
-        /// <summary>
-        /// Wraps a synchronous <see cref="Scan{T, TStrideIn, TStrideOut}"/> as a
-        /// <see cref="ScanAsync{T, TStrideIn, TStrideOut}"/> for backends whose sync scan
-        /// performs no browser-throwing primitive (desktop, and WebGL's draw-call-boundary
-        /// scan). The work genuinely completes synchronously, so the task is already completed —
-        /// this is NOT the fake <c>Task.Run(syncGpuWork)</c> anti-pattern.
-        /// </summary>
-        private static ScanAsync<T, TStrideIn, TStrideOut> WrapSyncScan<T, TStrideIn, TStrideOut>(
-            Scan<T, TStrideIn, TStrideOut> sync)
-            where T : unmanaged
-            where TStrideIn : struct, IStride1D
-            where TStrideOut : struct, IStride1D =>
-            (stream, input, output, temp) =>
-            {
-                sync(stream, input, output, temp);
-                return Task.CompletedTask;
-            };
 
         #region WebGL Hillis-Steele Multi-Pass Scan (shared-mem/barrier/atomic-free emulation)
 

@@ -318,11 +318,11 @@ namespace ILGPU.Runtime
         /// the honestly-named replacement for the historical browser use of <see cref="Synchronize"/>
         /// as a non-blocking flush.
         ///
-        /// <para>The synchronous form is valid on every backend whose submit step is itself
-        /// synchronous (all current backends). A backend whose dispatch submission is inherently
-        /// asynchronous (e.g. a P2P backend that sends the dispatch to a remote peer over the
-        /// network) cannot honor a synchronous submit and overrides this to throw
-        /// <see cref="NotSupportedException"/>; such callers use <see cref="FlushAsync"/>.</para>
+        /// <para>Submit is synchronous on every backend (desktop submit-as-enqueued, browser
+        /// command-encoder / worker-queue submit, even a P2P backend's dispatch enqueue is a
+        /// synchronous send), so <c>Flush</c> has no async counterpart - only WAIT
+        /// (<see cref="SynchronizeAsync"/>) and host READ-back are asynchronous at the GPU
+        /// boundary.</para>
         ///
         /// <para>When you need the work to have actually FINISHED (before a host readback, or
         /// before disposing buffers a pending dispatch references), use
@@ -336,29 +336,9 @@ namespace ILGPU.Runtime
         /// <summary>
         /// Backend hook for <see cref="Flush"/>. The default submits the default stream's
         /// pending work (a no-op on desktop streams, the encoder/queue submit on browser
-        /// streams). Backends whose submit is inherently asynchronous override this to throw.
+        /// streams). All current backends submit synchronously.
         /// </summary>
         protected virtual void FlushInternal() => DefaultStream.Flush();
-
-        /// <summary>
-        /// Asynchronously submits all pending work to the device WITHOUT waiting for it to
-        /// finish - the async counterpart of <see cref="Flush"/>.
-        /// </summary>
-        /// <returns>A task that completes once the work has been SUBMITTED (not completed).</returns>
-        /// <remarks>
-        /// The default implementation runs the synchronous <see cref="Flush"/> and returns a
-        /// completed task, which is correct for every backend whose submit step is synchronous
-        /// (CPU, CUDA, OpenCL, WebGPU, WebGL, Wasm). A backend whose dispatch submission is
-        /// inherently asynchronous (e.g. a P2P backend sending the dispatch to a remote peer)
-        /// MUST override this to await the real submission, and its synchronous
-        /// <see cref="Flush"/> throws. To wait for COMPLETION rather than submission, use
-        /// <see cref="SynchronizeAsync"/>.
-        /// </remarks>
-        public virtual Task FlushAsync()
-        {
-            Flush();
-            return Task.CompletedTask;
-        }
 
         /// <summary>
         /// Clears all internal caches.

@@ -2297,10 +2297,10 @@ namespace SpawnDev.ILGPU.WebGPU
             // device cannot be block-waited; the old behavior silently flushed WITHOUT waiting, which
             // read stale/empty data whenever a caller expected completion. Throw so the misuse is loud
             // instead of silently wrong — use `await SynchronizeAsync()` to wait for completion, or
-            // `await FlushAsync()` to submit without waiting.
+            // `Flush()` to submit without waiting.
             throw new NotSupportedException(
                 "Synchronous Synchronize() is desktop-only (CPU/CUDA/OpenCL). On WebGPU use " +
-                "`await SynchronizeAsync()` to wait for GPU work, or `await FlushAsync()` to submit " +
+                "`await SynchronizeAsync()` to wait for GPU work, or `Flush()` to submit " +
                 "without waiting — browser backends are async-only at the GPU boundary.");
 
         /// <summary>
@@ -2311,16 +2311,6 @@ namespace SpawnDev.ILGPU.WebGPU
         /// </summary>
         public override Task SynchronizeAsync() =>
             WebGPUAcceleratorExtensions.SynchronizeAsync(this);
-
-        /// <summary>
-        /// Submits the batched command encoder without waiting (the browser-portable replacement
-        /// for the desktop-only sync <see cref="Accelerator.Flush"/>, which throws on WebGPU).
-        /// </summary>
-        public override Task FlushAsync()
-        {
-            FlushPendingCommands();
-            return Task.CompletedTask;
-        }
 
         protected override void OnBind() { }
         protected override void OnUnbind() { }
@@ -2433,9 +2423,9 @@ namespace SpawnDev.ILGPU.WebGPU
 
             /// <summary>
             /// Internal submit: Finish the command encoder and submit to the GPU queue, then dispose
-            /// deferred bind groups and return scalar buffers to pool. Used by the public async
-            /// <see cref="FlushAsync"/>, by Dispose, and by the accelerator's FlushPendingCommands /
-            /// SynchronizeAsync drain. The PUBLIC sync <see cref="Flush"/> is desktop-only and throws.
+            /// deferred bind groups and return scalar buffers to pool. Used by the public sync
+            /// <see cref="Flush"/> (a fire-and-forget submit, valid synchronously on WebGPU), by
+            /// Dispose, and by the accelerator's FlushPendingCommands / SynchronizeAsync drain.
             /// </summary>
             public void FlushPending()
             {
@@ -2479,13 +2469,6 @@ namespace SpawnDev.ILGPU.WebGPU
             /// </summary>
             public override void Flush() => FlushPending();
 
-            /// <summary>Async submit — same as sync <see cref="Flush"/> (the encoder submit is sync).</summary>
-            public override Task FlushAsync()
-            {
-                FlushPending();
-                return Task.CompletedTask;
-            }
-
             /// <summary>
             /// Host->device upload is <c>queue.writeBuffer</c>, which consumes the host source
             /// synchronously, so the sync CopyFromCPU completion is a no-op on WebGPU.
@@ -2495,7 +2478,7 @@ namespace SpawnDev.ILGPU.WebGPU
             public override void Synchronize() =>
                 throw new NotSupportedException(
                     "Synchronous Synchronize() is desktop-only on WebGPU; use `await SynchronizeAsync()` " +
-                    "to wait, or `await FlushAsync()` to submit without waiting.");
+                    "to wait, or `Flush()` to submit without waiting.");
 
             /// <summary>
             /// Real async drain — forwards to the owning accelerator so submitted

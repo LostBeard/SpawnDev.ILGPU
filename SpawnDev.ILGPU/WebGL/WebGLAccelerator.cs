@@ -1225,13 +1225,6 @@ namespace SpawnDev.ILGPU.WebGL
         public override Task SynchronizeAsync() =>
             WebGLAcceleratorExtensions.SynchronizeAsync(this);
 
-        /// <summary>
-        /// No-op async flush (the desktop-only sync <see cref="Accelerator.Flush"/> throws on WebGL).
-        /// WebGL dispatches via draw calls with no batched command encoder, so there is nothing to
-        /// submit — the work is already enqueued.
-        /// </summary>
-        public override Task FlushAsync() => Task.CompletedTask;
-
         protected override void OnBind() { }
         protected override void OnUnbind() { }
 
@@ -1341,7 +1334,6 @@ namespace SpawnDev.ILGPU.WebGL
             // draw calls with no batched command encoder, so there is nothing to submit — a genuine
             // no-op. Only the WAIT (Synchronize) is async-only on browser.
             public override void Flush() { }
-            public override Task FlushAsync() => Task.CompletedTask;
             // Host->device upload is a backing-array copy consumed synchronously, so the sync
             // CopyFromCPU completion is a no-op on WebGL — nothing in flight to wait for.
             protected override void EnsureHostCopyConsumed() { }

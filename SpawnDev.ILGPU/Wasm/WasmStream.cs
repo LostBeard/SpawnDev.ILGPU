@@ -41,10 +41,6 @@ namespace SpawnDev.ILGPU.Wasm
         /// </summary>
         public override void Flush() { }
 
-        /// <summary>Async submit — no-op on Wasm (nothing batched). Matches sync <see cref="Flush"/>.</summary>
-        public override System.Threading.Tasks.Task FlushAsync() =>
-            System.Threading.Tasks.Task.CompletedTask;
-
         /// <summary>
         /// Host-&gt;device upload is consumed synchronously (SharedArrayBuffer memcpy), so the sync
         /// CopyFromCPU completion is a no-op on Wasm — nothing in flight to wait for.

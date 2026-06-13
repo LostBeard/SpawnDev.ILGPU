@@ -2638,13 +2638,6 @@ namespace SpawnDev.ILGPU.Wasm
                 "`await SynchronizeAsync()` — browser backends are async-only at the GPU boundary.");
 
         /// <summary>
-        /// Submits pending work without waiting — the browser-portable replacement for the
-        /// desktop-only sync <see cref="Accelerator.Flush"/> (which throws on Wasm). Wasm dispatch is
-        /// fire-and-forget worker tasks with nothing batched to submit, so this completes immediately.
-        /// </summary>
-        public override Task FlushAsync() => Task.CompletedTask;
-
-        /// <summary>
         /// Asynchronously waits for all pending kernel dispatches to complete.
         /// Overrides the core no-op-on-Wasm <see cref="Accelerator.SynchronizeAsync"/>
         /// with the real worker-dispatch drain (the synchronous
