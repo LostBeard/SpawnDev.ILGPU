@@ -1,29 +1,33 @@
 # SpawnDev.ILGPU Async API
 
-The browser backends - **WebGPU, WebGL, Wasm** - cannot do synchronous GPU&harr;CPU work. The browser's GPU and stream APIs are async-only (`GPUBuffer.mapAsync`, `queue.onSubmittedWorkDone`, async pixel readback, SharedArrayBuffer transfer), and the single JS/WASM thread cannot block on them without deadlocking. So every operation that crosses the GPU&harr;CPU boundary, or that waits for the GPU, has a **real async version** that browser callers MUST use. The synchronous versions remain for the desktop backends (CPU/CUDA/OpenCL), where blocking is fine and simpler.
+The browser backends - **WebGPU, WebGL, Wasm** - cannot do synchronous GPU&harr;CPU work. The browser's GPU and stream APIs are async-only (`GPUBuffer.mapAsync`, `queue.onSubmittedWorkDone`, async pixel readback, SharedArrayBuffer transfer), and the single JS/WASM thread cannot block on them without deadlocking. So every operation that **waits for GPU completion or observes a GPU result** has a **real async version** that browser callers MUST use. The synchronous versions remain for the desktop backends (CPU/CUDA/OpenCL), where blocking is fine and simpler.
 
-**The rule in one line:** on a browser backend, when you need to WAIT for GPU work or read it back to the host, use the `*Async` method and `await` it. Concretely: sync GPU&rarr;CPU readbacks (`CopyToCPU` / `GetAsArray1D`) **throw `NotSupportedException`**; sync `Synchronize()` does NOT throw but only FLUSHES the queued work without waiting (use `SynchronizeAsync` when you need it finished); and blocking the single thread on async work (`.Result` / `.Wait()`) **deadlocks**.
+**The governing principle (the sync/async contract, 2026-06-13):** an operation is **async-only on the browser backends if it WAITS for completion or OBSERVES a result** - its synchronous form **throws `NotSupportedException`** on WebGPU/WebGL/Wasm (the single thread cannot block-wait). An operation that is **fire-and-forget** - kernel dispatch, allocation, host&rarr;device upload, and **`Flush()` (submit)** - stays synchronous on every backend, because it does not wait so it cannot lie. Making the wait/observe surface throw (instead of silently flushing) means a desktop-only-tested "portable" library fails **loud** on browser instead of silently reading stale data.
 
-> This document exists because the async surface was never written down, and the gap bit us: a teardown `finally` calling the synchronous `Synchronize()` only flushes (it submits the queued work but does not wait), so it released GPU resources before the work had finished - it must `await SynchronizeAsync()`. Don't let the sync-vs-async contract stay tribal knowledge.
+**The rule in one line:** on a browser backend, to WAIT for GPU work or read it back, use the `*Async` method and `await` it. Concretely: sync GPU&rarr;CPU readbacks (`CopyToCPU` / `GetAsArray1D`) **throw**; **sync `Synchronize()` (wait for completion) THROWS** - use `await SynchronizeAsync()`; **sync `Flush()` (submit, no wait) is valid** on browser (it is fire-and-forget); and blocking the single thread on async work (`.Result` / `.Wait()`) **deadlocks**.
+
+> This document exists because the sync-vs-async surface was tribal knowledge, and the gap bit us twice. (1) A teardown `finally` calling synchronous `Synchronize()` released GPU resources before the work finished - it must `await SynchronizeAsync()`. (2) When `Synchronize()` was made to throw on browser (2026-06-13), the fix initially broke `Allocate1D(data)`/`CopyFromCPU` on every browser backend, because core `CopyFromCPU` used `Synchronize()` internally for an upload it didn't need to wait on - now routed through `EnsureHostCopyConsumed()` (desktop waits, browser no-ops; uploads are sync-consumed). Lesson: distinguish "wait/observe" (async-only) from "fire-and-forget" (sync-safe).
 
 ## Sync-vs-async contract
 
-| Operation | CPU / CUDA / OpenCL | WebGPU / WebGL / Wasm |
-|---|---|---|
-| `Synchronize()` (sync flush) | OK (blocks until done) | **Flushes/submits the queued work but does NOT wait for it** - it starts the work and returns (not a no-op, not a deadlock). To WAIT for completion, `await SynchronizeAsync()`. |
-| `CopyToCPU()` / `CopyTo()` (GPU&rarr;CPU) | OK (blocks) | **THROWS `NotSupportedException`**. Use `await CopyToHostAsync()`. |
-| `GetAsArray1D()` (GPU&rarr;CPU) | OK (blocks) | **THROWS** (sync readback). Use `await GetAsArray1DAsync()` / `CopyToHostAsync()`. |
-| `CopyToHostAsync()` (GPU&rarr;CPU) | OK (sync fallback) | `mapAsync` readback |
-| `CopyFrom()` (GPU&rarr;GPU) | OK | OK on WebGPU (native `CopyBufferToBuffer`) / WebGL (TF readback) — these order it after the producing kernel. **On Wasm it is NOT ordered after a producing kernel**: the source copy is an immediate host-side `SharedArrayBuffer` memcpy that runs BEFORE the deferred worker dispatch, so `CopyFrom` from a buffer a kernel just wrote reads STALE data. After a producing kernel on Wasm, `await SynchronizeAsync()` first (or use `CopyFromAsync`, which drains the producer). [Tracked Wasm-backend ordering bug — 2026-06-12.] |
-| `CopyFromCPU()` (CPU&rarr;GPU) | OK | OK - immediate `queue.writeBuffer` (WebGPU). No command-encoder hazard. |
-| Kernel launch / `Dispatch` | OK | OK - batched into the shared command encoder, submitted on flush. |
+| Operation | CPU / CUDA / OpenCL | WebGPU / WebGL / Wasm | Class |
+|---|---|---|---|
+| `Synchronize()` (wait for completion) | OK (blocks until done) | **THROWS `NotSupportedException`** - cannot block-wait on the single thread. Use `await SynchronizeAsync()` (wait) or `Flush()` (submit only). | wait |
+| `Flush()` / `FlushAsync()` (submit, no wait) | OK (eager/no-op) | **OK - valid synchronously.** WebGPU submits the batched command encoder; WebGL/Wasm are no-ops (already fire-and-forget). Fire-and-forget, so it does not throw. (A remote/P2P stream, whose submit is an async network send, is the only backend where sync `Flush()` throws.) | submit |
+| `CopyToCPU()` / `CopyTo()` / `GetAsArray1D()` (GPU&rarr;CPU readback) | OK (blocks) | **THROWS `NotSupportedException`**. Use `await CopyToHostAsync()` / `GetAsArray1DAsync()`. | observe |
+| `CopyToHostAsync()` (GPU&rarr;CPU) | OK (sync fallback) | `mapAsync` readback | observe |
+| sync scalar `Reduce()` &rarr; T (ends in a readback) | OK | **THROWS**. Use `await ReduceAsync<T,TReduction>()`. | observe |
+| `CopyFromCPU()` / `Allocate1D(data)` (CPU&rarr;GPU upload) | OK (waits for DMA) | **OK** - the upload is consumed synchronously (`queue.writeBuffer` / SAB memcpy / backing-array copy). Core routes its post-upload completion through `EnsureHostCopyConsumed()` (desktop waits, browser no-ops) - NOT the throwing sync `Synchronize()`. | fire-and-forget |
+| `CreateScan()` / `CreateRadixSort()` / `CreateRadixSortPairs()` (sync builders) | OK | **OK** - the multi-pass scan/sort is fire-and-forget multi-dispatch (inter-pass barrier is a `Flush()` submit, not a wait), so the sync builders run on browser. `*Async` builders exist as the portable convenience but are not required. | fire-and-forget |
+| `CopyFrom()` (GPU&rarr;GPU) | OK | OK on WebGPU (native `CopyBufferToBuffer`) / WebGL (TF readback) - these order it after the producing kernel. **On Wasm it is NOT ordered after a producing kernel**: the source copy is an immediate host-side `SharedArrayBuffer` memcpy that runs BEFORE the deferred worker dispatch, so `CopyFrom` from a buffer a kernel just wrote reads STALE data. After a producing kernel on Wasm, `await SynchronizeAsync()` first (or use `CopyFromAsync`, which drains the producer). [Tracked Wasm-backend ordering bug - 2026-06-12.] | fire-and-forget* |
+| Kernel launch / `Dispatch` | OK | OK - batched into the shared command encoder, submitted on `Flush()`. | fire-and-forget |
 
 **Corollaries (each has already bitten us):**
-- **When you need to WAIT for GPU work on a browser backend** (before a readback, or before disposing buffers a pending dispatch references), `await accelerator.SynchronizeAsync()`. The synchronous `Synchronize()` only FLUSHES (submits the queued work) and returns without waiting - right when you just need to kick the work off, wrong when you need the result to be ready.
-- **GPU&rarr;CPU is the async-only boundary.** GPU&rarr;GPU (`CopyFrom`) and CPU&rarr;GPU (`CopyFromCPU`) are sync-safe on the desktop and WebGPU/WebGL backends; prefer them over a readback+reupload. **EXCEPTION (Wasm):** `CopyFrom` from a buffer a kernel just wrote is NOT ordered after that kernel on Wasm (deferred worker dispatch vs. immediate host memcpy) and reads stale data — `await SynchronizeAsync()` (or `CopyFromAsync`) before it. Same deferred-dispatch root cause as the sync `Synchronize`/readback rule above: on browser, any op that depends on prior GPU work having *completed* must go through the async path. (Tracked Wasm-backend ordering bug, 2026-06-12 — to be fixed in the backend so the sync contract holds; until then, drain.)
+- **To WAIT for GPU work on a browser backend** (before a readback, or before disposing buffers a pending dispatch references), `await accelerator.SynchronizeAsync()`. Sync `Synchronize()` THROWS there (it is the wait surface). To merely SUBMIT batched work without waiting (e.g. periodic flush during a long dispatch loop), call `Flush()` - that is sync-valid on browser.
+- **GPU&rarr;CPU readback (and any wait) is the async-only boundary.** GPU&rarr;GPU (`CopyFrom`) and CPU&rarr;GPU (`CopyFromCPU`) uploads + dispatch + `Flush()` are fire-and-forget and sync-safe on browser; prefer them over a readback+reupload. **EXCEPTION (Wasm):** `CopyFrom` from a buffer a kernel just wrote is NOT ordered after that kernel on Wasm (deferred worker dispatch vs. immediate host memcpy) and reads stale data - `await SynchronizeAsync()` (or `CopyFromAsync`) before it. (Tracked Wasm-backend ordering bug, 2026-06-12.)
 - A kernel that dispatches reading a buffer keeps that buffer alive until the next flush (WebGPU batches dispatches). Don't dispose a buffer a pending dispatch references before `await SynchronizeAsync()`.
 
-The sync counterparts guard themselves: many call `accelerator.EnsureSyncReadbackSupported("<MethodName>")`, which throws on a backend that can't do sync readback (browser) with a message naming the `*Async` method to use instead. That throw is the canonical "sync op on a browser backend" failure.
+The sync counterparts guard themselves: the wait/observe ops throw `NotSupportedException` on browser with a message naming the `*Async` method to use instead (sync readbacks also call `accelerator.EnsureSyncReadbackSupported("<MethodName>")`). That throw is the canonical "sync wait/observe op on a browser backend" failure - it is loud by design.
 
 ## The async methods
 
@@ -34,7 +38,9 @@ All three browser backends (WebGPU + WebGL + Wasm) implement the same async surf
 - **Wasm** &rarr; SharedArrayBuffer-backed transfer
 
 ### Accelerator / lifecycle
-- **`SynchronizeAsync()` &rarr; Task** - async flush + wait for all submitted GPU work. The browser-safe replacement for `Synchronize()` when you need to WAIT (the sync `Synchronize()` only flushes/submits the queued work without waiting on the three browser backends). On WebGPU awaits `onSubmittedWorkDone`; on desktop completes synchronously. Call before a readback or before disposing buffers a pending dispatch references.
+- **`SynchronizeAsync()` &rarr; Task** - async wait for all submitted GPU work to COMPLETE. The browser-safe replacement for `Synchronize()` (which THROWS on the three browser backends - it is the wait surface). On WebGPU awaits `onSubmittedWorkDone`; on desktop completes synchronously. Call before a readback or before disposing buffers a pending dispatch references.
+- **`Flush()` (sync) / `FlushAsync()` &rarr; Task** - SUBMIT batched/pending work to the device WITHOUT waiting. Fire-and-forget, so the **sync `Flush()` is valid on browser** (WebGPU submits the command encoder; WebGL/Wasm no-op). Use it to submit periodically during a long dispatch loop, where you'd reach for `Synchronize()` on desktop. (`FlushAsync` exists for a future async-submit backend like P2P, where sync `Flush()` throws.)
+- **`EnsureHostCopyConsumed()` (protected, core)** - the internal completion step for a synchronous host&rarr;device copy: waits on desktop (DMA in flight), no-ops on browser (upload sync-consumed). It is why `Allocate1D(data)` / `CopyFromCPU` stay sync-safe on browser instead of throwing via `Synchronize()`. Backends with async upload (P2P) override it to throw.
 - **`CreateAcceleratorAsync()` / `CreateAsync()` / `CreatePreferredAcceleratorAsync()` / `CreateWebGPUAcceleratorAsync()` / `CreateWebGLAcceleratorAsync()` / `CreateWasmAcceleratorAsync()` &rarr; Task&lt;Accelerator&gt;** - async device/accelerator construction (one per browser backend plus generic/preferred forms). Browser adapter/device acquisition is async (`requestAdapter` / `requestDevice`, WebGL context creation, Wasm worker init).
 - **`GetDevicesAsync()` / `GetDefaultDeviceAsync()` &rarr; Task&lt;...&gt;** - async device enumeration.
 - **`DisposeAsync()` &rarr; ValueTask** - async teardown where disposal awaits GPU completion.
@@ -78,14 +84,14 @@ var logits = await readBuf.CopyToHostAsync<float>(0, vocab);  // GPU->CPU, async
 ```csharp
 finally
 {
-    await accelerator.SynchronizeAsync();   // NOT Synchronize() - that only flushes (submits) without waiting
+    await accelerator.SynchronizeAsync();   // NOT Synchronize() - that THROWS on browser (it's the wait surface)
     // ... release / clear ...
 }
 ```
 
 ## Anti-patterns
 
-- Using `accelerator.Synchronize()` on a browser backend when you actually need to WAIT for the result &rarr; it only flushes (submits) and returns immediately, so the GPU work is not finished and you read stale/empty data, or release a resource the work still needs. (A draft opt-in `finally` did exactly this on 2026-06-04 - it must `await SynchronizeAsync()` to drain before clearing/disposing.)
+- Using `accelerator.Synchronize()` on a browser backend &rarr; **throws `NotSupportedException`** (it is the wait surface, which the single thread can't honor). Use `await SynchronizeAsync()` to wait, or `Flush()` to submit without waiting. (Before 2026-06-13 it silently flushed without waiting, so a teardown `finally` released resources before the GPU finished - the throw now makes that misuse loud.)
 - Blocking the single browser thread on async GPU work - `someAsync().Result` / `.Wait()`, or `Task.Run(() => syncGpuWork()).Result` &rarr; **deadlock** (the thread can't pump the event loop the awaited GPU callback needs).
 - `buf.CopyToCPU(host)` / `buf.GetAsArray1D()` on browser &rarr; `NotSupportedException`. Use `await CopyToHostAsync()`.
 - `Task.Run(() => syncGpuWork()).Result` / `.Wait()` &rarr; fake-async; blocks the single browser thread and deadlocks.

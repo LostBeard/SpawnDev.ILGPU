@@ -327,7 +327,7 @@ Because SpawnDev.ILGPU also generates kernels dynamically (Lambda Kernels, Deleg
 
 ## Synchronization
 
-`Synchronize()` flushes queued commands (non-blocking, safe in WASM); `await SynchronizeAsync()` flushes **and** waits for GPU completion; `await buffer.CopyToHostAsync<T>()` is the only GPU->CPU readback; `await dstView.CopyFromAsync(srcView)` is the async-safe GPU->GPU copy (drains pending Wasm worker writes first). Full contract + the WASM no-block / no-sync-readback rules: **[Docs/async.md](Docs/async.md)**.
+**Sync/async contract:** async-only where an op WAITS or OBSERVES; sync stays for fire-and-forget. On the browser backends (WebGPU/WebGL/Wasm): `Synchronize()` (wait for completion) **throws `NotSupportedException`** - use `await SynchronizeAsync()` to wait, or `Flush()` to merely SUBMIT batched work without waiting (`Flush()` is valid synchronously on browser). `await buffer.CopyToHostAsync<T>()` is the only GPU->CPU readback (sync `CopyToCPU`/`GetAsArray1D` throw); kernel dispatch, allocation, `CopyFromCPU`/`Allocate1D(data)` uploads, and the sync `CreateScan`/`CreateRadixSort` builders are fire-and-forget and stay sync-safe on browser. `await dstView.CopyFromAsync(srcView)` is the async-safe GPU->GPU copy (drains pending Wasm worker writes first). Full contract: **[Docs/async.md](Docs/async.md)**.
 
 ## Verbose Logging
 

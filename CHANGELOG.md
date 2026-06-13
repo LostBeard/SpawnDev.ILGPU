@@ -2,6 +2,18 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.12.0 (2026-06-13) - Sync/async contract: async-only where it waits/observes, sync for fire-and-forget
+
+Bundles forks **SpawnDev.ILGPU.Fork 2.0.16** and **SpawnDev.ILGPU.Algorithms.Fork 2.0.16** (new core virtuals).
+
+Establishes a coherent, loud sync/async surface across all backends (and forward-compatible with an async-submit P2P backend). **Governing principle:** an operation that WAITS for completion or OBSERVES a result is **async-only** on the browser backends - its synchronous form throws `NotSupportedException` (the single browser thread cannot block-wait); fire-and-forget operations (kernel dispatch, allocation, host->device upload, flush-submit) stay synchronous everywhere. This makes the silent-wrong-behavior class structurally impossible: a desktop-only-tested "portable" library now fails loud on browser instead of reading stale data.
+
+- **`Synchronize()` (wait for completion) now THROWS on WebGPU/WebGL/Wasm** (previously a silent non-waiting flush, which returned before the work finished). Use `await SynchronizeAsync()` to wait. Sync GPU->CPU readbacks (`CopyToCPU`/`GetAsArray1D`) and sync scalar `Reduce()` continue to throw on browser.
+- **New `Flush()` / `FlushAsync()` (submit without waiting)** on `Accelerator` and `AcceleratorStream`. `Flush()` is fire-and-forget and **valid synchronously on browser** (WebGPU submits the command encoder; WebGL/Wasm no-op) - use it where you'd periodically `Synchronize()` on desktop during a long dispatch loop.
+- **`CopyFromCPU` / `Allocate1D(data)` work on every browser backend again.** Core `CopyFromCPU` now routes its post-upload completion through the new `EnsureHostCopyConsumed()` hook (desktop waits for the DMA, browser no-ops since the upload is synchronously consumed) instead of the now-throwing sync `Synchronize()`.
+- **Sync `CreateScan` / `CreateRadixSort` / `CreateRadixSortPairs` builders run on the browser backends** (the multi-pass scan/sort is fire-and-forget multi-dispatch; its inter-pass barrier is a `Flush()` submit, not a wait). `*Async` builders remain as a portable convenience.
+- **Gate:** full cross-backend PMT sweep **3384/0/218** (all 6 backends). Full contract + per-op table: **[Docs/async.md](Docs/async.md)**.
+
 ## 4.10.0 (2026-06-11) - Offline code generation (`ShaderCompiler.Generate` + `CapabilityProfile`) + Wasm backend correctness overhaul
 
 Bundles forks **SpawnDev.ILGPU.Fork 2.0.15** and **SpawnDev.ILGPU.Algorithms.Fork 2.0.15**.
