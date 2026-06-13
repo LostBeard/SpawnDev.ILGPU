@@ -2,6 +2,13 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.12.1 (2026-06-13) - `AcceleratorRequirements.RequiresScatterStores` capability flag
+
+Wrapper-only (forks stay **2.0.16**). Adds a new selection-gate capability flag:
+
+- **`AcceleratorRequirements.RequiresScatterStores`** (rules out WebGL) - declare it when a kernel writes a computed/arbitrary output index (`out[someIndex] = ...`) or more than one element of one buffer per thread that isn't the consecutive `v*storeCount+slot` layout. WebGL Transform-Feedback captures one output record per vertex at the thread's own slot (gather-only), so in-kernel scatter can't run there; the flag filters WebGL at `EnumerateCompatibleDevices` / `CreatePreferredAccelerator` / `Satisfies` time. (WebGL still scatters at the host/algorithm layer - e.g. RadixSort via render-to-texture.)
+- A compile-time fail-loud guard for this class (mirroring the atomics/barriers/Scan throws) was prototyped and backed out - the blunt criterion false-positived on legitimate positional multi-store + grid-stride-loop kernels. The correct codegen-level criterion is a tracked open item (`Plans/webgl-multistore-fail-loud-guard-plan-2026-06-13.md`). For now use the selection flag.
+
 ## 4.12.0 (2026-06-13) - Sync/async contract: async-only where it waits/observes, sync for fire-and-forget
 
 Bundles forks **SpawnDev.ILGPU.Fork 2.0.16** and **SpawnDev.ILGPU.Algorithms.Fork 2.0.16** (new core virtuals).

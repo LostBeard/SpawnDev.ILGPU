@@ -229,4 +229,55 @@ public class AcceleratorRequirementsTests
                 $"Devices: {string.Join(", ", context.Devices.Select(d => d.AcceleratorType))}.");
         return Task.CompletedTask;
     }
+
+    // ── RequiresScatterStores: in-kernel scatter / multi-element-per-thread output. WebGL is
+    //    the only backend that can't do it (Transform-Feedback captures one record per vertex
+    //    at the thread's own slot). The WebGL rule-out is verified in the browser suite (the
+    //    GuardOneStorePerThread codegen throw); here we cover Satisfies/Describe + no desktop drop.
+
+    [TestMethod]
+    public Task Satisfies_ScatterStores_PassesOnCpu()
+    {
+        using var context = Context.CreateDefault();
+        var cpu = context.Devices.FirstOrDefault(d => d.AcceleratorType == AcceleratorType.CPU);
+        if (cpu == null) throw new UnsupportedTestException("No CPU device available - unexpected on desktop.");
+        var req = new AcceleratorRequirements { RequiresScatterStores = true };
+        if (!cpu.Satisfies(req))
+            throw new Exception("CPU must satisfy RequiresScatterStores - arbitrary in-kernel stores are native off WebGL.");
+        return Task.CompletedTask;
+    }
+
+    [TestMethod]
+    public Task Describe_ScatterStores_ReturnsLabel()
+    {
+        var req = new AcceleratorRequirements { RequiresScatterStores = true };
+        var description = req.Describe();
+        if (description != "ScatterStores")
+            throw new Exception($"Expected 'ScatterStores', got '{description}'");
+        return Task.CompletedTask;
+    }
+
+    [TestMethod]
+    public Task Enumerate_ScatterStores_DoesNotDropDesktop()
+    {
+        // Desktop has no WebGL backend, so every device must remain compatible (and none is
+        // WebGL). Real WebGL filtering is verified in the browser suite.
+        using var context = Context.CreateDefault();
+        var req = new AcceleratorRequirements { RequiresScatterStores = true };
+        var compatible = context.EnumerateCompatibleDevices(req);
+        foreach (var device in compatible)
+        {
+            if (device.AcceleratorType == AcceleratorType.WebGL)
+                throw new Exception("WebGL present with ScatterStores requirement - capability gate broken.");
+        }
+        if (compatible.Count != context.Devices.Length)
+        {
+            var dropped = context.Devices
+                .Where(d => !compatible.Contains(d))
+                .Select(d => d.AcceleratorType.ToString());
+            throw new Exception(
+                $"ScatterStores requirement unexpectedly dropped desktop device(s): {string.Join(", ", dropped)}");
+        }
+        return Task.CompletedTask;
+    }
 }

@@ -41,6 +41,7 @@ Use it when **your kernel relies on features that aren't universal**:
 - `Warp.Shuffle` / `Group.Broadcast` — set `RequiresSubGroups = true`.
 - Native `double` / `long` performance (vs. emulation) — set `RequiresFloat64Native = true` / `RequiresInt64Native = true`. The emulated paths are correct but slower.
 - 64-bit atomics (`Atomic.Add(ref long, long)` etc.) — set `RequiresInt64Atomics = true`.
+- In-kernel scatter / more than one output element per thread — a kernel that writes a computed/arbitrary output index (`out[someIndex] = ...`), or writes several elements of one buffer per thread at offsets that aren't the consecutive `v*K+slot` layout. Set `RequiresScatterStores = true`. WebGL Transform-Feedback captures one output record per vertex at the thread's own slot (gather-only), so these can't run in-kernel there. (WebGL still scatters at the host/algorithm layer — e.g. RadixSort via render-to-texture — so this is specifically about scatter in *your own* kernel body.)
 
 Don't use it when your kernel is portable across all backends. `AcceleratorRequirements.None` (the default) accepts every backend.
 
@@ -62,6 +63,7 @@ Every flag below is `bool`, defaults to `false` (no requirement), and can be set
 | `RequiresInt64Native` | WebGPU, WebGL | Performance-critical i64/u64 kernels |
 | `RequiresInt64Atomics` | WebGL; OpenCL without `cl_khr_int64_base_atomics` | `Atomic.Add(ref long, ...)` and friends |
 | `RequiresSubGroups` | WebGL, Wasm, CPU; WebGPU without subgroups feature; OpenCL without subgroup ext | `Warp.Shuffle`, `Group.Broadcast`, etc. |
+| `RequiresScatterStores` | WebGL | In-kernel scatter (`out[computedIndex] = ...`) or >1 output element per thread that isn't the positional `v*K+slot` layout. WebGL TF is gather-only (one record per vertex at its own slot). |
 
 ## API Surface
 

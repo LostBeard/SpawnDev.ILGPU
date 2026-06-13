@@ -24,12 +24,16 @@ namespace SpawnDev.ILGPU;
 /// because sub-word writes go through atomic RMW). Making requirements explicit catches
 /// this at selection time instead of after a debugging session.
 ///
-/// This class is the SELECTION gate. A follow-up pass will add an
-/// <c>UnsupportedKernelFeatureException</c> thrown by the kernel-compile step when a
-/// user pins directly to an incapable backend despite this mechanism. For now, if a
-/// consumer specifies a backend that doesn't meet its own requirements, the mismatch
-/// surfaces downstream via silent-wrong-output or <c>CapabilityNotSupportedException</c>
-/// depending on the path.
+/// This class is the SELECTION gate. The complementary kernel-compile guard - an
+/// <c>UnsupportedKernelFeatureException</c> thrown when a user pins directly to an incapable
+/// backend despite this mechanism - is shipped for the WebGL atomics
+/// (<c>GenericAtomic</c>/<c>AtomicCAS</c>) and in-kernel group/warp Scan/Reduce classes. A
+/// compile guard for <see cref="RequiresScatterStores"/> (multi-store-per-thread / scatter
+/// output) is NOT yet shipped - a blunt first attempt false-positived on legitimate positional
+/// multi-store + grid-stride-loop kernels and was backed out; the correct criterion is an open
+/// problem, so for now that flag is selection-gate-only. For requirements without a compile-time
+/// guard, a consumer that pins to a backend not meeting its own requirements surfaces the mismatch
+/// downstream via silent-wrong-output or <c>CapabilityNotSupportedException</c> depending on the path.
 /// </summary>
 public sealed class AcceleratorRequirements
 {
@@ -136,6 +140,25 @@ public sealed class AcceleratorRequirements
     public bool RequiresSubGroups { get; init; }
 
     /// <summary>
+    /// Kernel writes more than one element of the same output buffer per thread, or writes to a
+    /// computed/scattered output index (<c>out[someComputedIndex] = ...</c>, e.g. a per-thread
+    /// loop filling several output elements, an in-place butterfly writing two slots, or any
+    /// <c>dst[perm[i]] = src[i]</c> reorder). True rules out WebGL.
+    ///
+    /// <para>WebGL's Transform-Feedback model captures exactly ONE output record per vertex
+    /// (thread) and the readback places it at the thread's own slot, so in-kernel scatter /
+    /// multi-element-per-thread writes are structurally impossible - they silently drop every
+    /// store but the thread's own (this is the failure class the WebGL codegen now throws
+    /// <c>UnsupportedKernelFeatureException</c> for at compile time). Every other backend
+    /// (WebGPU, Wasm, CUDA, OpenCL, CPU) supports arbitrary in-kernel stores.</para>
+    ///
+    /// <para>Note: WebGL CAN still scatter at the HOST/algorithm layer via the render-to-texture
+    /// path (<c>WebGLAccelerator.Scatter</c> / <c>IScatterProvider</c>, used by RadixSort) - this
+    /// flag is specifically about IN-KERNEL stores a consumer writes in their own kernel body.</para>
+    /// </summary>
+    public bool RequiresScatterStores { get; init; }
+
+    /// <summary>
     /// No requirements - every backend passes. Equivalent to <c>new AcceleratorRequirements()</c>.
     /// </summary>
     public static AcceleratorRequirements None { get; } = new();
@@ -207,6 +230,7 @@ public static class AcceleratorRequirementsExtensions
         if (requirements.RequiresInt64Native && !HasInt64Native(backend)) return false;
         if (requirements.RequiresInt64Atomics && !HasInt64Atomics(device)) return false;
         if (requirements.RequiresSubGroups && !HasSubGroups(device)) return false;
+        if (requirements.RequiresScatterStores && !HasScatterStores(backend)) return false;
         return true;
     }
 
@@ -227,6 +251,17 @@ public static class AcceleratorRequirementsExtensions
     };
 
     private static bool HasBarriers(AcceleratorType backend) => backend switch
+    {
+        AcceleratorType.WebGL => false,
+        _ => true,
+    };
+
+    // In-kernel scatter / multi-element-per-thread output stores. WebGL Transform-Feedback
+    // captures one output record per vertex at the thread's own slot, so a kernel that writes
+    // a computed output index or more than one element per thread is structurally unsupported
+    // (the WebGL codegen throws UnsupportedKernelFeatureException for it). Every other backend
+    // supports arbitrary in-kernel stores.
+    private static bool HasScatterStores(AcceleratorType backend) => backend switch
     {
         AcceleratorType.WebGL => false,
         _ => true,
@@ -320,6 +355,7 @@ public static class AcceleratorRequirementsExtensions
         if (r.RequiresInt64Native) flags.Add("Int64Native");
         if (r.RequiresInt64Atomics) flags.Add("Int64Atomics");
         if (r.RequiresSubGroups) flags.Add("SubGroups");
+        if (r.RequiresScatterStores) flags.Add("ScatterStores");
         return flags.Count == 0 ? "(none)" : string.Join(", ", flags);
     }
 }

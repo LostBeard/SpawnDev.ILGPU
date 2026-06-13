@@ -163,6 +163,7 @@ Not all ILGPU features work on all backends:
 | Dynamic SharedMemory | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Group.Broadcast | ✅ | ❌ | ✅ | ✅ | ✅¹ | ✅ |
 | Atomics | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
+| In-kernel scatter / multi-store per thread⁶ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | Warp/Subgroup ops | ✅² | ❌ | ❌ | ✅ | ✅¹ | ✅ |
 | f64 emulation | ✅ | ✅ | N/A (native) | N/A (native) | N/A (native) | N/A (native) |
 | i64 emulation | ✅ | ✅ | N/A (native) | N/A (native) | N/A (native) | N/A (native) |
@@ -172,7 +173,8 @@ Not all ILGPU features work on all backends:
 ² Requires `subgroups` WebGPU extension  
 ³ Most algorithms require shared memory or atomics  
 ⁴ WebGPU: RadixSort, Scan, Reduce, Histogram fully supported and tested
-⁵ Wasm: RadixSort, Scan, Reduce, Histogram fully supported with fiber-based phase dispatch and pure spin barriers at full `hardwareConcurrency` (v4.6.0). 249 pass / 0 fail / 3 skip.
+⁵ Wasm: RadixSort, Scan, Reduce, Histogram fully supported with fiber-based phase dispatch and pure spin barriers at full `hardwareConcurrency` (v4.6.0). 249 pass / 0 fail / 3 skip.  
+⁶ WebGL Transform-Feedback captures one output record per vertex at the thread's own slot (gather-only). A kernel writing a computed/arbitrary output index, or >1 element of one buffer per thread that isn't the consecutive `v*K+slot` layout, can't run in-kernel on WebGL. Declare `AcceleratorRequirements.RequiresScatterStores = true` to filter WebGL at selection time. (WebGL still scatters at the host/algorithm layer — e.g. RadixSort via render-to-texture.) A compile-time fail-loud guard for this is a tracked open item (`Plans/webgl-multistore-fail-loud-guard-plan-2026-06-13.md`).
 
 ## Browser Compatibility
 
