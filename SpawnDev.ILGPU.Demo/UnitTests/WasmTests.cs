@@ -1792,6 +1792,61 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                     $"accelerators — the custom-max reservation leak (Tuvok's ML-lane 88->91) has regressed (expected <= 1).");
         }
 
+        // Module-cache flush correctness (2026-06-14, Geordi). The persistent worker pool's per-kernel
+        // module cache (_modulesById) accumulates across a long lane (Tuvok's ML trace: 2->1057 kernels →
+        // late-heavy-test memory-pressure timeouts). The fix flushes the worker caches at a fresh
+        // accelerator's first dispatch once cumulative kernels cross WasmBackend.ModuleCacheFlushThreshold.
+        // The RISK is the flush orphaning a module the host still thinks a worker has → "module not cached"
+        // / wrong output. This test forces flushes EVERY accelerator (threshold=1) across many accelerators,
+        // each running TWO distinct kernels (so the within-accelerator repopulation after a flush is
+        // exercised), and asserts CPU-oracle correctness throughout. If the flush coordination were wrong,
+        // this fails loudly. (A green run with aggressive flushing proves the dispatch-boundary flush is safe.)
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_ModuleCacheFlush_DoesNotBreakCorrectness()
+        {
+            const int count = 2048;
+            const int accelerators = 6;
+            int savedThreshold = WasmBackend.ModuleCacheFlushThreshold;
+            WasmBackend.ModuleCacheFlushThreshold = 1; // flush on essentially every fresh accelerator
+            try
+            {
+                for (int a = 0; a < accelerators; a++)
+                {
+                    var context = Context.Create().Wasm().ToContext();
+                    var accelerator = await context.CreateWasmAcceleratorAsync();
+                    try
+                    {
+                        using var inBuf = accelerator.Allocate1D<int>(count);
+                        using var outA = accelerator.Allocate1D<int>(count);
+                        using var outB = accelerator.Allocate1D<int>(count);
+                        var seed = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(
+                            (i, v) => v[i] = i);
+                        seed((Index1D)count, inBuf.View);
+                        // Two DISTINCT kernels in this accelerator → 2 module compiles → repopulation after
+                        // the flush that fires at this accelerator's first dispatch.
+                        var kA = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(
+                            (i, src, o) => o[i] = src[i] * 2 + 1);
+                        var kB = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(
+                            (i, src, o) => o[i] = src[i] + 100);
+                        kA((Index1D)count, inBuf.View, outA.View);
+                        kB((Index1D)count, inBuf.View, outB.View);
+                        await accelerator.SynchronizeAsync();
+                        var rA = await outA.CopyToHostAsync<int>();
+                        var rB = await outB.CopyToHostAsync<int>();
+                        for (int i = 0; i < count; i++)
+                        {
+                            if (rA[i] != i * 2 + 1)
+                                throw new Exception($"Accelerator #{a} kA[{i}]={rA[i]} expected {i * 2 + 1} — flush broke kernel A (module not cached / stale?).");
+                            if (rB[i] != i + 100)
+                                throw new Exception($"Accelerator #{a} kB[{i}]={rB[i]} expected {i + 100} — flush broke kernel B.");
+                        }
+                    }
+                    finally { accelerator.Dispose(); context.Dispose(); }
+                }
+            }
+            finally { WasmBackend.ModuleCacheFlushThreshold = savedThreshold; }
+        }
+
         // Wasm SIMD128 emitter foundation (Phase 1, 2026-06-14, Geordi). Pure-CPU regression guard on
         // the v128 encoding — NO browser/GPU needed, just byte assertions. Locks the part most likely
         // to silently break: SIMD sub-opcodes are u32-LEB128 after the 0xFD prefix (NOT single bytes

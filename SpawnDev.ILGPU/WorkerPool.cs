@@ -91,6 +91,18 @@ const _mathImports = {
 self.onmessage = async function(e) {
   var d = e.data;
   try {
+    // Module-cache flush (bounds the per-worker _modulesById accumulation that drives late-lane
+    // memory pressure — Tuvok's trace 2026-06-14: kernels 2->1057 unbounded on the ML Wasm lane,
+    // heavy tests time out at high count). The host triggers this at a fresh accelerator's FIRST
+    // dispatch when the cumulative-kernels-since-flush crosses a threshold, BEFORE sending any kernel
+    // bytes — so dropping every cached module is safe (this accelerator re-sends its own; older
+    // disposed accelerators' modules are the dead weight being cleared). Drop instances + force a
+    // memory re-bind too. (Sequential-accelerator assumption, like the rest of the shared pool.)
+    if (d.clearModuleCache) {
+      _modulesById = {};
+      _instancesById = {};
+      _lastMemoryBuffer = null;
+    }
     // kernelId identifies which Wasm module to use. Sent on every dispatch.
     // The C# side sends wasmBytes only the FIRST time this worker sees this kernel.
     var kid = d.kernelId;

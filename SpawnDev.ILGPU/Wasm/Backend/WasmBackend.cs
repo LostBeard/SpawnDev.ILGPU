@@ -166,6 +166,21 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public static bool EffectiveWasmSimd => !ForceScalar && (ForceSimd || RuntimeSupportsWasmSimd);
 
         /// <summary>
+        /// Bounds the persistent-worker module cache (`_modulesById`). The shared worker pool keeps every
+        /// distinct kernel's compiled `WebAssembly.Module` for the tab's life; across a long test lane
+        /// (Tuvok's ML trace 2026-06-14: 2→1057 kernels, monotonic) this accumulates until late, heavy
+        /// tests hit memory pressure and time out. When the cumulative kernels compiled since the last
+        /// flush crosses this threshold, the host instructs the workers to drop their module/instance
+        /// caches at the NEXT fresh accelerator's first dispatch (safe: that accelerator re-sends its own
+        /// kernels; older disposed accelerators' modules are the dead weight cleared). Only default-pool
+        /// (shared-worker) accelerators trigger it. Short workloads never reach the threshold → never
+        /// flush → kernels stay fully warm (e.g. the ILGPU library Wasm lane is unaffected). Set 0 to
+        /// disable. Default 256 (≈ one flush per ~140 ML tests at ~1.8 new kernels/test, keeping peak
+        /// modules well under the ~1057 that caused pressure).
+        /// </summary>
+        public static int ModuleCacheFlushThreshold { get; set; } = 256;
+
+        /// <summary>
         /// Stage-3a SIMD uniformity analysis result for the most recently compiled kernel
         /// (<see cref="WasmSimdAnalysis"/>). DIAGNOSTIC ONLY — computed read-only during codegen; it
         /// does NOT yet drive emission (the v128 emitter is the next Stage-3a increment). Lets the

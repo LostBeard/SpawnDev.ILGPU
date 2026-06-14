@@ -98,6 +98,22 @@ accelerator. Locked by `WasmTests.Wasm_SharedWorkerPool_PersistsAndStaysBoundedA
 alive and both adopt the same worker, both install handlers — detach-on-dispose only cleans the
 dominant sequential case (PMT disposes the previous accelerator before creating the next).
 
+**Module-cache flush — bounds `_modulesById` accumulation (2026-06-14).** Persistent workers keep every
+distinct kernel's compiled `WebAssembly.Module` (`_modulesById`) for the tab's life. Each per-test
+accelerator's kernels get fresh ids, so across a long lane the cache grows UNBOUNDED (Tuvok's ML trace:
+`TotalKernelsCompiled` 2→1057 monotonic; committed shared linear memory was flat@96 MiB — the module
+cache, not the working set, drove late-heavy-test memory-pressure timeouts). Fix: when
+`_nextKernelId - s_lastFlushKernelId >= WasmBackend.ModuleCacheFlushThreshold` (default 256, 0=off), the
+host sets `clearModuleCache=true` on the worker messages of the **next fresh accelerator's FIRST
+dispatch**; the worker drops `_modulesById`/`_instancesById` (+ nulls `_lastMemoryBuffer`) then recompiles
+from the re-sent bytes. **SAFE only at a first dispatch** — the accelerator's worker-init tracking is empty
+there so it re-sends its own kernels; the cleared modules are disposed accelerators' dead weight. NEVER
+flush mid-accelerator (would orphan modules it already told workers it had → "module not cached").
+Sequential-accelerator assumption (like the rest of the shared pool — concurrent live accelerators could
+see a peer's flush). Short workloads never cross the threshold → never flush → stay fully warm (the ILGPU
+library Wasm lane is unaffected). Guard: `WasmTests.Wasm_ModuleCacheFlush_DoesNotBreakCorrectness`
+(threshold=1, CPU-oracle). Diagnostic: `WasmAccelerator.TotalKernelsCompiled`.
+
 ## Process-static SHARED linear memory (2026-06-14) — `s_sharedWasmMemory`
 
 The memory analog of the worker pool, and the **second half** the pool fix unmasked. A

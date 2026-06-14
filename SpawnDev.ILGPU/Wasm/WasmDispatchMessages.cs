@@ -29,6 +29,12 @@ namespace SpawnDev.ILGPU.Wasm
         /// can keep multiple compiled modules in their per-kernel cache and skip re-compile on every switch.
         /// 2026-05-04 root-cause fix for Data's StyleMosaic Wasm 10+ minute hang at rc.16.</summary>
         public int kernelId { get; init; }
+        /// <summary>When true, the worker drops its entire per-kernel module/instance cache BEFORE
+        /// handling this dispatch (then re-compiles from the wasmBytes carried here). Set by the host
+        /// at a fresh accelerator's first dispatch once cumulative kernels cross
+        /// WasmBackend.ModuleCacheFlushThreshold, to bound the persistent-worker _modulesById
+        /// accumulation that drives late-lane memory pressure (Tuvok trace 2026-06-14).</summary>
+        public bool clearModuleCache { get; init; }
         /// <summary>SharedArrayBuffer-backed WebAssembly.Memory shared across all workers.</summary>
         public JSObject memory { get; init; } = null!;
         /// <summary>Inclusive thread range start for this worker's fiber band.</summary>
@@ -57,6 +63,9 @@ namespace SpawnDev.ILGPU.Wasm
         public byte[]? wasmBytes { get; init; }
         /// <summary>Stable identifier for the kernel — see WasmBarrierDispatchMessage.kernelId.</summary>
         public int kernelId { get; init; }
+        /// <summary>Drop the worker's module/instance cache before this dispatch — see
+        /// WasmBarrierDispatchMessage.clearModuleCache.</summary>
+        public bool clearModuleCache { get; init; }
         /// <summary>SharedArrayBuffer-backed WebAssembly.Memory shared across all workers.</summary>
         public JSObject memory { get; init; } = null!;
         /// <summary>Inclusive item index start for this worker's range.</summary>

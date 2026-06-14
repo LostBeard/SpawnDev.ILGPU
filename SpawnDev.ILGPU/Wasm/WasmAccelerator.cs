@@ -313,6 +313,17 @@ namespace SpawnDev.ILGPU.Wasm
         /// </summary>
         public static int TotalKernelsCompiled => _nextKernelId;
 
+        /// <summary><see cref="_nextKernelId"/> value at the last module-cache flush. The host flushes the
+        /// persistent workers' module caches when <c>_nextKernelId - s_lastFlushKernelId</c> exceeds
+        /// <see cref="WasmBackend.ModuleCacheFlushThreshold"/> — see that flag + the flush in RunKernelAsync.</summary>
+        private static int s_lastFlushKernelId = 0;
+
+        /// <summary>Per-accelerator: has this accelerator dispatched yet? The module-cache flush check runs
+        /// ONLY on a fresh accelerator's FIRST dispatch (where its own worker-init tracking is still empty,
+        /// so dropping all cached modules is safe — it re-sends its kernels; mid-accelerator a flush would
+        /// orphan modules this accelerator already told workers it had → "module not cached").</summary>
+        private bool _firstDispatchDone = false;
+
         /// <summary>
         /// Worker-init tracking for one distinct kernel (keyed by its <c>wasmBytes</c> reference in
         /// <see cref="_initializedWorkersByKernel"/>). Carries a stable, unique <see cref="KernelId"/>
@@ -2031,6 +2042,32 @@ namespace SpawnDev.ILGPU.Wasm
             }
             int kernelId = kernelCacheEntry.KernelId;
 
+            // Module-cache flush decision (bounds persistent-worker _modulesById accumulation; Tuvok
+            // trace 2026-06-14). ONLY on a fresh default-pool accelerator's FIRST dispatch (tracking
+            // empty ⇒ safe to drop all cached modules; this dispatch re-sends its kernel). When set,
+            // every worker message below carries clearModuleCache=true; the worker drops its caches then
+            // recompiles from the wasmBytes it's re-sent here. Sequential-accelerator assumption (like the
+            // rest of the shared pool). Short workloads never cross the threshold ⇒ never flush ⇒ stay warm.
+            bool clearCacheThisDispatch = false;
+            if (_useSharedPool && !_firstDispatchDone)
+            {
+                _firstDispatchDone = true;
+                int flushThreshold = WasmBackend.ModuleCacheFlushThreshold;
+                if (flushThreshold > 0)
+                {
+                    lock (s_sharedMemoryLock)
+                    {
+                        if (_nextKernelId - s_lastFlushKernelId >= flushThreshold)
+                        {
+                            clearCacheThisDispatch = true;
+                            s_lastFlushKernelId = _nextKernelId;
+                        }
+                    }
+                    if (clearCacheThisDispatch && WasmBackend.VerboseLogging)
+                        WasmBackend.Log($"[Wasm-MODFLUSH] disp={dispNum} clearing worker module caches at kernels={_nextKernelId} (threshold={flushThreshold})");
+                }
+            }
+
             var tasks = new List<Task>();
 
             if (hasBarriers)
@@ -2080,6 +2117,7 @@ namespace SpawnDev.ILGPU.Wasm
                         script = workerScript,
                         wasmBytes = firstTimeOnWorker ? wasmBytes : null,
                         kernelId = kernelId,
+                        clearModuleCache = clearCacheThisDispatch,
                         memory = wasmMemory,
                         threadStart = threadStart,
                         threadEnd = threadEnd,
@@ -2127,6 +2165,7 @@ namespace SpawnDev.ILGPU.Wasm
                         script = workerScript,
                         wasmBytes = firstTimeOnWorker ? wasmBytes : null,
                         kernelId = kernelId,
+                        clearModuleCache = clearCacheThisDispatch,
                         memory = wasmMemory,
                         startIdx = startIdx,
                         endIdx = endIdx,
