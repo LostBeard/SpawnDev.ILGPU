@@ -224,6 +224,32 @@ self.onmessage = async function(e) {
         }
 
         /// <summary>
+        /// Permanently removes a worker from the pool (both the all-workers roster and the
+        /// available queue). The caller owns terminating/disposing the worker. Used when an
+        /// accelerator reclaims a checked-out worker that may be running an orphaned kernel at
+        /// Dispose: it must NOT be returned to the pool for another accelerator to message.
+        /// </summary>
+        public void Remove(Worker worker)
+        {
+            lock (_lock)
+            {
+                _allWorkers.Remove(worker);
+                // Rebuild the available queue without the removed worker (Queue has no random
+                // remove). The available set is small (<= pool size), so this is cheap.
+                if (_available.Count > 0)
+                {
+                    var kept = new Queue<Worker>(_available.Count);
+                    while (_available.Count > 0)
+                    {
+                        var w = _available.Dequeue();
+                        if (!ReferenceEquals(w, worker)) kept.Enqueue(w);
+                    }
+                    while (kept.Count > 0) _available.Enqueue(kept.Dequeue());
+                }
+            }
+        }
+
+        /// <summary>
         /// Ensures the pool has at least the specified number of workers.
         /// Creates additional workers if needed.
         /// </summary>

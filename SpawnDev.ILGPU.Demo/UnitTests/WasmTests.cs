@@ -1522,5 +1522,120 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                 context.Dispose();
             }
         }
+
+        // Persistent shared worker pool (2026-06-13, Geordi). The Wasm Web Worker pool is
+        // process-static and reused across EVERY accelerator instead of being recreated +
+        // terminated per accelerator. PMT creates a fresh accelerator per test (~569 in the
+        // Wasm lane); the old per-accelerator pool terminated its whole worker pool on Dispose,
+        // but Worker.terminate() is an ASYNC browser signal — so the next test spun up a fresh
+        // hardwareConcurrency pool while the previous pool's threads were still dying → transient
+        // worker oversubscription that starved compute-heavy tests late in the lane (Tuvok's
+        // full-sweep report: heavy tests pass scoped in ~4s, time out at 30s in-lane).
+        //
+        // This test locks BOTH halves of the fix:
+        //  (1) BOUNDED: creating + dispatching + disposing K accelerators leaves the shared pool
+        //      at ~one accelerator's worth of workers, NOT K× (the old design would have churned
+        //      K separate pools through create/terminate).
+        //  (2) CORRECT-ON-REUSE: a dispatch on accelerators 2..K (which adopt the SAME persistent
+        //      workers freed by the disposed earlier accelerators) still matches the CPU oracle —
+        //      proving the worker-side module cache (keyed by the process-static monotonic
+        //      kernelId) and the memory-buffer-change instance invalidation handle cross-
+        //      accelerator reuse with no stale module / stale memory.
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_SharedWorkerPool_PersistsAndStaysBoundedAcrossAccelerators()
+        {
+            const int count = 4096;
+            const int accelerators = 5;
+
+            // A single accelerator's worker request — the pool must never exceed this regardless
+            // of how many accelerators come and go.
+            int oneAccWorkerCount;
+            {
+                using var probeCtx = Context.Create().Wasm().ToContext();
+                using var probeAcc = await probeCtx.CreateWasmAcceleratorAsync();
+                oneAccWorkerCount = ((WasmAccelerator)probeAcc).WorkerCount;
+            }
+            if (oneAccWorkerCount < 1)
+                throw new Exception($"Unexpected WorkerCount {oneAccWorkerCount} (expected >= 1).");
+
+            var oracle = new int[count];
+            for (int i = 0; i < count; i++) oracle[i] = i * 3 + 7;
+
+            int maxSizeSeen = 0;
+            for (int a = 0; a < accelerators; a++)
+            {
+                var context = Context.Create().Wasm().ToContext();
+                var accelerator = await context.CreateWasmAcceleratorAsync();
+                try
+                {
+                    using var buf = accelerator.Allocate1D<int>(count);
+                    var fill = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(
+                        (i, v) => v[i] = i * 3 + 7);
+                    fill((Index1D)count, buf.View);
+                    await accelerator.SynchronizeAsync();
+                    var result = await buf.CopyToHostAsync<int>();
+
+                    // Correctness on a (re)used worker pool — iterations 1..K-1 adopt workers freed
+                    // by the previous disposed accelerator.
+                    for (int i = 0; i < count; i++)
+                        if (result[i] != oracle[i])
+                            throw new Exception(
+                                $"Accelerator #{a}: result[{i}]={result[i]} expected {oracle[i]} — " +
+                                $"reused worker produced wrong output (stale module or stale memory?).");
+
+                    int sizeNow = WasmAccelerator.SharedWorkerPoolSize;
+                    if (sizeNow > maxSizeSeen) maxSizeSeen = sizeNow;
+                }
+                finally
+                {
+                    accelerator.Dispose();
+                    context.Dispose();
+                }
+            }
+
+            // BOUNDED invariant: the shared pool settled at one accelerator's worth, not K×.
+            // (The pool is process-global so other lane tests may have already grown it to
+            // oneAccWorkerCount before this test ran — that's the steady state we expect.)
+            if (maxSizeSeen > oneAccWorkerCount)
+                throw new Exception(
+                    $"Shared worker pool grew to {maxSizeSeen} across {accelerators} accelerators, " +
+                    $"exceeding a single accelerator's {oneAccWorkerCount} workers — it is accumulating " +
+                    $"per-accelerator instead of persisting (the per-accelerator-pool regression).");
+            if (maxSizeSeen < 1)
+                throw new Exception(
+                    "Shared worker pool size never registered >= 1 after dispatching on " +
+                    $"{accelerators} accelerators — the persistent pool was not used.");
+
+            // ISOLATION invariant (order-independent): an accelerator with an EXPLICIT non-default
+            // WorkerCount must use a PRIVATE pool and leave the shared pool untouched — otherwise a
+            // single oversubscription stress test (16/48/3×cores) would permanently inflate the
+            // shared pool for the rest of the lane (the original 32-vs-10 ballooning).
+            int sizeBeforeExplicit = WasmAccelerator.SharedWorkerPoolSize;
+            {
+                var exCtx = Context.Create().Wasm().ToContext();
+                // +6 guarantees a count distinct from the default so it routes to a private pool.
+                var exAcc = await exCtx.CreateWasmAcceleratorAsync(
+                    new WasmBackendOptions { WorkerCount = oneAccWorkerCount + 6 });
+                try
+                {
+                    using var b = exAcc.Allocate1D<int>(count);
+                    var k = exAcc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(
+                        (i, v) => v[i] = i * 3 + 7);
+                    k((Index1D)count, b.View);
+                    await exAcc.SynchronizeAsync();
+                    var r = await b.CopyToHostAsync<int>();
+                    for (int i = 0; i < count; i++)
+                        if (r[i] != oracle[i])
+                            throw new Exception(
+                                $"Explicit-WorkerCount accelerator: result[{i}]={r[i]} expected {oracle[i]}.");
+                }
+                finally { exAcc.Dispose(); exCtx.Dispose(); }
+            }
+            int sizeAfterExplicit = WasmAccelerator.SharedWorkerPoolSize;
+            if (sizeAfterExplicit > sizeBeforeExplicit)
+                throw new Exception(
+                    $"An explicit-WorkerCount accelerator grew the SHARED pool ({sizeBeforeExplicit} -> " +
+                    $"{sizeAfterExplicit}) — it must use a private pool and leave the shared pool untouched.");
+        }
     }
 }

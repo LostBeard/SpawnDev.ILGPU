@@ -77,10 +77,77 @@ namespace SpawnDev.ILGPU.Wasm
         public int MaxLinearMemoryPages => _maxLinearMemoryPages;
 
         /// <summary>
-        /// Reusable worker pool — lazily initialized on first dispatch.
-        /// Workers are created once and reused across kernel dispatches.
+        /// Process-persistent shared Web Worker pool — created ONCE per tab and reused across every
+        /// DEFAULT-WorkerCount <see cref="WasmAccelerator"/> instance (the PMT/production common
+        /// case), not spun up/torn down per accelerator. Accelerators created with an explicit
+        /// <see cref="WasmBackendOptions.WorkerCount"/> (oversubscription stress tests) use a
+        /// private <see cref="_ownPool"/> instead — see <see cref="_useSharedPool"/>.
+        ///
+        /// Why static (2026-06-13, Geordi): PMT creates a fresh accelerator per test (~569 in
+        /// the Wasm lane). The old per-accelerator pool called <c>Worker.terminate()</c> on its
+        /// whole pool at Dispose — but <c>terminate()</c> is an ASYNCHRONOUS browser signal: the
+        /// OS thread + its SharedArrayBuffer/Wasm-memory references wind down AFTER Dispose
+        /// returns. So the NEXT test immediately spun up a fresh <c>hardwareConcurrency</c> pool
+        /// while the previous pool's threads were still dying → transient worker OVERSUBSCRIPTION
+        /// that compounds across a long sequential lane → the pure-spin barrier can't get all
+        /// workers scheduled inside its spin window → compute-HEAVY tests starve and time out late
+        /// in the phase (light tests still squeak in — a throughput tax, not a flat per-test tax;
+        /// matches Tuvok's full-lane evidence: scoped passes in ~4s, in-lane times out at 30s).
+        /// A shared persistent pool removes BOTH the terminate churn AND the per-test re-create cost.
+        ///
+        /// Why it's SAFE across accelerators:
+        ///  - the worker-side module-cache key (<see cref="KernelCacheEntry.KernelId"/>) is the
+        ///    process-static monotonic <see cref="_nextKernelId"/>, so two different accelerators
+        ///    can never hand a worker the same id → never a stale/stomped module;
+        ///  - a memory-buffer change invalidates the worker's cached instances (WorkerPool.cs),
+        ///    so a worker reused by a new accelerator re-instantiates against the new memory;
+        ///  - each accelerator installs its OWN per-worker message handlers on adoption
+        ///    (<see cref="EnsurePersistentHandlers"/>) and DETACHES them on Dispose (see
+        ///    <see cref="DisposeAccelerator_SyncRoot"/>) — so a reused worker carries exactly one
+        ///    accelerator's handlers at a time. The pool is NOT disposed on accelerator Dispose;
+        ///    it outlives accelerators by design (tab teardown / <see cref="DisposeSharedWorkerPool"/>).
         /// </summary>
-        private WorkerPool? _workerPool;
+        private static WorkerPool? s_sharedWorkerPool;
+        private static readonly object s_sharedWorkerPoolLock = new();
+
+        /// <summary>
+        /// Returns the process-shared worker pool, creating it on first use and growing it to at
+        /// least <paramref name="minWorkers"/>. Never disposed on accelerator Dispose.
+        /// </summary>
+        private static WorkerPool GetSharedWorkerPool(int minWorkers)
+        {
+            lock (s_sharedWorkerPoolLock)
+            {
+                if (s_sharedWorkerPool == null)
+                    s_sharedWorkerPool = new WorkerPool(minWorkers, useAsync: true);
+                else
+                    s_sharedWorkerPool.EnsureSize(minWorkers, useAsync: true);
+                return s_sharedWorkerPool;
+            }
+        }
+
+        /// <summary>
+        /// Current number of workers in the process-shared pool (0 if not yet created). Test/diag
+        /// hook: a correct persistent pool stays bounded (≈ hardwareConcurrency) no matter how many
+        /// accelerators are created and disposed — it does NOT grow per accelerator.
+        /// </summary>
+        public static int SharedWorkerPoolSize
+        {
+            get { lock (s_sharedWorkerPoolLock) { return s_sharedWorkerPool?.Size ?? 0; } }
+        }
+
+        /// <summary>
+        /// Terminates and clears the process-shared worker pool. For explicit shutdown / test
+        /// teardown only — normal accelerator Dispose leaves the pool alive for reuse.
+        /// </summary>
+        public static void DisposeSharedWorkerPool()
+        {
+            lock (s_sharedWorkerPoolLock)
+            {
+                s_sharedWorkerPool?.Dispose();
+                s_sharedWorkerPool = null;
+            }
+        }
 
         /// <summary>
         /// Tracks which pool workers have already received and cached
@@ -143,6 +210,33 @@ namespace SpawnDev.ILGPU.Wasm
         /// CurrentTcs.
         /// </summary>
         private readonly Dictionary<Worker, WorkerDispatchState> _workerHandlers = new();
+
+        /// <summary>
+        /// Workers this accelerator has Acquired from its active pool but not yet Returned (a
+        /// dispatch is in flight on them). A worker is added on Acquire and removed when its
+        /// response handler Returns it. On Dispose, whatever remains here was checked out with a
+        /// dispatch still in flight (abnormal/fire-and-forget dispose) and is reclaimed by
+        /// terminate-and-remove rather than left stranded — without this the shared pool's
+        /// available queue drains and the shortfall-grow path balloons the pool (caught 32-vs-10
+        /// by Wasm_SharedWorkerPool_PersistsAndStaysBoundedAcrossAccelerators).
+        /// </summary>
+        private readonly HashSet<Worker> _acquiredWorkers = new();
+
+        /// <summary>
+        /// True iff this accelerator uses the process-shared persistent pool (the common case:
+        /// a DEFAULT-WorkerCount accelerator, e.g. every PMT test). An accelerator created with an
+        /// explicit <see cref="WasmBackendOptions.WorkerCount"/> (the oversubscription stress tests
+        /// at 16/48/3×cores) gets its OWN private pool instead, created on first dispatch and
+        /// terminated on Dispose (the old per-accelerator lifecycle) — so a stress test's large
+        /// worker count does NOT permanently inflate the shared pool for the rest of the lane.
+        /// </summary>
+        private bool _useSharedPool = true;
+
+        /// <summary>Private worker pool for explicit-WorkerCount accelerators (null when <see cref="_useSharedPool"/>).</summary>
+        private WorkerPool? _ownPool;
+
+        /// <summary>The pool this accelerator is currently dispatching against (shared or own). Set per dispatch; read by the response handlers to Return workers to the right pool.</summary>
+        private WorkerPool? _activePool;
 
         /// <summary>
         /// Per-worker mutable dispatch state. The TCS is swapped per dispatch; the handlers
@@ -267,14 +361,20 @@ namespace SpawnDev.ILGPU.Wasm
             // scenarios (each tab's pure-spin barrier needs the OS scheduler
             // to actually run all workers within the spin window). Override
             // with WasmBackendOptions.WorkerCount.
-            int hwConcurrency = 4;
-            try
-            {
-                var js = BlazorJSRuntime.JS;
-                hwConcurrency = js.Get<int>("navigator.hardwareConcurrency");
-            }
-            catch { }
-            accelerator._workerCount = options?.WorkerCount ?? Math.Max(2, hwConcurrency - 2);
+            // Single source for hardware concurrency — the SAME function WasmBackendOptions uses
+            // for its default WorkerCount — so the default-vs-explicit comparison below is exact.
+            // (Has its own try/catch; falls back to 4 on the offline/no-JS path, e.g. wasm-dump.)
+            int hwConcurrency = WasmILGPUDevice.GetHardwareConcurrency();
+            int defaultWorkerCount = Math.Max(2, hwConcurrency - 2);
+            accelerator._workerCount = options?.WorkerCount ?? defaultWorkerCount;
+            // The process-shared persistent pool serves the DEFAULT worker count (the PMT/production
+            // common case — what fixes the heavy-test starvation: no per-test worker create/terminate
+            // churn). An accelerator whose RESOLVED worker count differs from the default (the
+            // oversubscription stress tests at 16/48/3×cores) gets a PRIVATE pool so its non-default
+            // count can't inflate the shared pool for the rest of the lane. NB: WasmBackendOptions
+            // defaults WorkerCount to this same value, so a no-options accelerator IS shared (the
+            // `options?.WorkerCount == null` check was wrong — the option is a non-null defaulted int).
+            accelerator._useSharedPool = accelerator._workerCount == defaultWorkerCount;
             accelerator._maxLinearMemoryPages = options?.MaxLinearMemoryPages ?? 16384;
             // Variant C (Trip 2026-05-27, revised after TJ's Fallout76 contention repro):
             // default to ENABLED. The original section-9 design auto-gated on
@@ -1562,7 +1662,8 @@ namespace SpawnDev.ILGPU.Wasm
                 var tcs = state.CurrentTcs;
                 if (tcs == null) return; // No in-flight dispatch; ignore late or stray message.
                 state.CurrentTcs = null;
-                _workerPool?.Return(worker);
+                _acquiredWorkers.Remove(worker);
+                _activePool?.Return(worker);
                 UnregisterTcs(tcs);
 
                 var response = msg.GetData<WasmDispatchResponse>();
@@ -1590,7 +1691,8 @@ namespace SpawnDev.ILGPU.Wasm
                 var tcs = state.CurrentTcs;
                 if (tcs == null) return;
                 state.CurrentTcs = null;
-                _workerPool?.Return(worker);
+                _acquiredWorkers.Remove(worker);
+                _activePool?.Return(worker);
                 UnregisterTcs(tcs);
                 tcs.TrySetException(new Exception($"[Wasm] Worker {state.WorkerIdx} error during kernel execution | kernel={state.KernelName} disp={state.DispNum}"));
             });
@@ -1681,21 +1783,38 @@ namespace SpawnDev.ILGPU.Wasm
                 // Fence slots self-manage via the barrier protocol (last worker resets).
                 fenceSlot - sharedMemBase);
 
-            // Lazily initialize the worker pool, or grow it if needed
-            if (_workerPool == null)
-                _workerPool = new WorkerPool(workerCount, useAsync: true);
+            // Resolve the pool: the process-shared persistent pool for default-WorkerCount
+            // accelerators (created once per tab, reused across every accelerator — no per-test
+            // create/terminate churn; see s_sharedWorkerPool), or a private pool for explicit-
+            // WorkerCount accelerators (so a stress test's large count can't inflate the shared pool).
+            WorkerPool pool;
+            if (_useSharedPool)
+            {
+                pool = GetSharedWorkerPool(workerCount);
+            }
             else
-                _workerPool.EnsureSize(workerCount, useAsync: true);
-
-            var workers = _workerPool.Acquire(workerCount);
-            // If pool didn't have enough idle workers, grow and re-acquire
+            {
+                if (_ownPool == null)
+                    _ownPool = new WorkerPool(workerCount, useAsync: true);
+                else
+                    _ownPool.EnsureSize(workerCount, useAsync: true);
+                pool = _ownPool;
+            }
+            _activePool = pool;
+            var workers = pool.Acquire(workerCount);
+            // If the pool didn't have enough idle workers (e.g. another live accelerator holds
+            // some — not the PMT sequential case), grow and re-acquire.
             if (workers.Count < workerCount)
             {
                 var shortfall = workerCount - workers.Count;
-                _workerPool.EnsureSize(_workerPool.Size + shortfall, useAsync: true);
-                var extra = _workerPool.Acquire(shortfall);
+                pool.EnsureSize(pool.Size + shortfall, useAsync: true);
+                var extra = pool.Acquire(shortfall);
                 workers.AddRange(extra);
             }
+            // Track checked-out workers so Dispose can reclaim any still in flight instead of
+            // stranding them (which would drain the shared pool's available queue and balloon it).
+            foreach (var acquired in workers)
+                _acquiredWorkers.Add(acquired);
 
             // Per-kernel worker initialization tracking. Look up (or create) the
             // KernelCacheEntry for this kernel's wasmBytes — it carries a stable unique
@@ -2773,8 +2892,62 @@ namespace SpawnDev.ILGPU.Wasm
                 _cachedWasmMemory?.Dispose();
                 _cachedWasmMemory = null;
                 _cachedWasmPages = 0;
-                _workerPool?.Dispose();
-                _workerPool = null;
+
+                // Detach THIS accelerator's per-worker handlers from the process-shared pool —
+                // do NOT terminate idle workers (they outlive this accelerator and are reused by
+                // the next one; see s_sharedWorkerPool). Without detaching, each disposed
+                // accelerator's handler closures would stay attached to the persistent workers
+                // (a managed leak that also keeps the disposed accelerator alive) and pile up as
+                // dead no-op listeners on every worker, growing the per-response work each test.
+                foreach (var kvp in _workerHandlers)
+                {
+                    var worker = kvp.Key;
+                    var st = kvp.Value;
+                    st.CurrentTcs = null;
+                    try
+                    {
+                        if (st.MsgHandler != null) worker.OnMessage -= st.MsgHandler;
+                        if (st.ErrHandler != null) worker.OnError -= st.ErrHandler;
+                    }
+                    catch
+                    {
+                        // Detach is best-effort cleanup; a failure leaves a benign dead listener,
+                        // never a wrong result. Swallow rather than risk surfacing teardown noise.
+                    }
+                }
+                _workerHandlers.Clear();
+
+                if (_useSharedPool)
+                {
+                    // Shared pool: reclaim any workers still CHECKED OUT (a dispatch was in flight
+                    // at Dispose — abnormal/fire-and-forget dispose, not the drained common path).
+                    // Such a worker may be running an orphaned kernel (e.g. a parked barrier fiber
+                    // waiting on a gen counter that will never advance), so it must NOT be returned
+                    // to the shared pool for the next accelerator to message — that would hand over
+                    // a permanently-stuck worker. TERMINATE + REMOVE it from the pool instead; the
+                    // pool regrows a fresh worker on the next shortfall. At a clean (drained)
+                    // dispose this set is empty, so nothing is terminated and the shared pool stays
+                    // bounded — the whole point of the persistent pool (no per-test create/terminate
+                    // churn). The idle workers stay pooled for the next accelerator.
+                    if (_acquiredWorkers.Count > 0)
+                    {
+                        foreach (var worker in _acquiredWorkers)
+                        {
+                            try { s_sharedWorkerPool?.Remove(worker); } catch { }
+                            try { worker.Terminate(); worker.Dispose(); } catch { }
+                        }
+                    }
+                }
+                else
+                {
+                    // Private pool (explicit-WorkerCount accelerator): terminate its entire pool,
+                    // the old per-accelerator lifecycle. Nothing is shared, so this can't affect
+                    // any other accelerator.
+                    _ownPool?.Dispose();
+                    _ownPool = null;
+                }
+                _acquiredWorkers.Clear();
+                _activePool = null;
             }
         }
 

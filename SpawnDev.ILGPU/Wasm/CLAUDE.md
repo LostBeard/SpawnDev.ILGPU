@@ -52,6 +52,52 @@ Compiles ILGPU IR → WebAssembly binary. Dispatches via Web Workers with Shared
 - `WasmMemoryBuffer.cs` — SharedArrayBuffer-backed memory, zero-copy sharing
 - `WasmILGPUDevice.cs` — device config (`MaxNumThreadsPerGroup = 256`, `MaxGroupSize = (256,1,1)`). NOTE: an earlier version of this line said 64 — that was stale; the device has set 256 (verified `WasmILGPUDevice.cs:68-69` + offline compile dump 2026-06-09). RadixSortKernel1's `scanMemory` is `int[groupSize*UnrollFactor]` = `int[1024]` at groupSize 256, UnrollFactor 4.
 
+## Persistent Shared Worker Pool (2026-06-13) — `s_sharedWorkerPool`
+
+The Web Worker pool is **process-static** (`WasmAccelerator.s_sharedWorkerPool`), created ONCE
+per tab and reused across every **default-WorkerCount** `WasmAccelerator` (the PMT/production
+common case). It is **not** recreated/terminated per accelerator. An accelerator created with an
+explicit `WasmBackendOptions.WorkerCount` (the oversubscription stress tests at 16/48/3×cores)
+uses a **private** pool (`_ownPool`, old create-on-first-dispatch / terminate-on-Dispose
+lifecycle) so its large worker count can't permanently inflate the shared pool for the rest of
+the lane. Two leak guards keep the shared pool bounded at ≈`hardwareConcurrency-2`: (a) only
+default accelerators touch it, and (b) on Dispose any worker still **checked out** (dispatch in
+flight at an abnormal/fire-and-forget dispose) is **terminated + removed** (not stranded — a
+stranded worker drains the available queue and the shortfall-grow path balloons the pool; this
+was caught 32-vs-10 by the regression test below before the guards were added). **Why:** PMT creates a fresh accelerator per test (~569 in the Wasm lane). The old
+per-accelerator pool called `Worker.terminate()` on its whole pool at Dispose, but
+`terminate()` is an **asynchronous** browser signal — the OS thread + its SharedArrayBuffer/Wasm-
+memory references wind down *after* Dispose returns. So the next test immediately spun up a fresh
+`hardwareConcurrency` pool while the previous pool's threads were still dying → transient worker
+**oversubscription** that compounds across a long sequential lane → the pure-spin barrier can't get
+all workers scheduled in its spin window → compute-**heavy** tests starve and time out late in
+Phase B (light tests still squeak in — a throughput tax, not a flat tax). Tuvok's full-sweep
+report: `TurboQuant_*` pass 128/128 in ~4s scoped, time out at 30s late in the 569-test lane.
+
+**Why cross-accelerator reuse is SAFE:**
+- the worker-side module-cache key (`KernelCacheEntry.KernelId`) is the **process-static** monotonic
+  `_nextKernelId`, so two different accelerators can never hand a worker the same id → never a
+  stale/stomped module (same reason the GC-hash kernelId bug was fixed — see "kernelId MUST be a
+  monotonic unique id");
+- a memory-buffer change invalidates the worker's cached instances (`_instancesById = {}` in
+  `WorkerPool.cs` when `d.memory.buffer` differs), so a worker reused by a new accelerator
+  re-instantiates against the new accelerator's `WebAssembly.Memory`;
+- each accelerator installs its OWN per-worker message handlers on adoption
+  (`EnsurePersistentHandlers`) and **DETACHES** them on Dispose (`DisposeAccelerator_SyncRoot`:
+  `worker.OnMessage -= state.MsgHandler`). Detach (not terminate) is what frees the accelerator —
+  without it, each disposed accelerator's handler closures stay attached to the persistent workers
+  (a managed leak that keeps the disposed accelerator alive) and pile up as dead no-op listeners.
+  So a reused worker carries exactly one accelerator's handlers at a time.
+
+The pool is **never** disposed on accelerator Dispose (it outlives accelerators by design); tear it
+down only via `WasmAccelerator.DisposeSharedWorkerPool()` (test/shutdown) or tab teardown.
+`WasmAccelerator.SharedWorkerPoolSize` is a diagnostic: a correct pool stays bounded
+(≈ `hardwareConcurrency - 2`) no matter how many accelerators come and go — it does NOT grow per
+accelerator. Locked by `WasmTests.Wasm_SharedWorkerPool_PersistsAndStaysBoundedAcrossAccelerators`
+(bounded-size + correct-on-reuse). **Caveat (not the PMT case):** if two accelerators are *concurrently*
+alive and both adopt the same worker, both install handlers — detach-on-dispose only cleans the
+dominant sequential case (PMT disposes the previous accelerator before creating the next).
+
 ## Offline compile dump (desktop, no browser) — `wasm-dump`
 
 `SpawnDev.ILGPU.DemoConsole -- wasm-dump` compiles RadixSort kernels on the DESKTOP and prints the emitted shared-memory alloca table + flags any `GenerateCode(Alloca)` type+size fallback aliasing or offset overlap. Works because `WasmAccelerator.Create` wraps the `BlazorJSRuntime.JS` lookup in try/catch (defaults to 4 cores) and `CreateRadixSort*` compiles its kernels eagerly via `LoadKernel` BEFORE any dispatch — so the IL→wasm compile path runs fully offline (no workers, no Chromium, no dispatch). Reusable for any shared-memory layout audit. Source: `SpawnDev.ILGPU.DemoConsole/WasmCompileDump.cs`.
