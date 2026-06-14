@@ -105,6 +105,26 @@ emission. Decisions locked after reading the dispatch ABI + the scalar emitter:
   structural one (don't sit on a numerically-ungated new path). Pairs with running the queued Phase-1
   PMT gate + `4.12.1-local.5` ship.
 
+### Inc-2 architecture LOCKED (2026-06-14, after reading the kernel-gen entry point)
+The Stage-3a-vectorizable class is exactly the single-block / no-barrier path at
+`WasmKernelFunctionGenerator.cs:1087` (`if (_blockCount == 1 && !singleBlockHasBarriers) { foreach value
+GenerateCodeFor(value); ... }`). Locating it showed the cut spans codegen AND dispatch, and the tail
+(count % 4 != 0) needs a decision. **Decision — TWO-FUNCTION emission + scalar-tail dispatch (keeps the
+scalar path PROVABLY intact, no masks, no padding, no OOB):**
+- Codegen: ALWAYS emit the existing scalar `kernel` (byte-identical to today). ADDITIONALLY, when
+  `EffectiveWasmSimd && analysis.Vectorizable`, emit a second exported `kernel_simd` that processes 4
+  consecutive lanes/call (the vectorized body via the new emitter). The scalar `kernel` is untouched.
+- Dispatch (BuildWasmWorkerScript / WasmAccelerator): thread a per-dispatch `hasSimd` flag. When set,
+  the worker loop runs `for (i=start; i+4<=end; i+=4) kernel_simd(i,...)` for full groups, then
+  `for (; i<end; i++) kernel(i,...)` — the EXISTING scalar kernel handles the `count % 4` tail. When
+  unset (non-SIMD device, or non-vectorizable kernel), the loop is exactly today's scalar `for` → zero
+  change. So: scalar path byte-identical; SIMD is purely additive; the tail reuses the proven scalar
+  kernel (no lane masks — those are Stage 3b).
+- Why two functions (not one masked kernel): a masked/padded single kernel would either need lane masks
+  (Stage 3b) or write OOB past `count`. The scalar tail sidesteps both and reuses code we already trust.
+- Gate stays dual: `wasm-validate` the emitted `kernel_simd` offline (structural), then a `WasmTests`
+  CPU-oracle test dispatches it (`ForceSimd` on) and asserts == scalar == reference (numerical).
+
 ## Constraints (unchanged)
 Core SIMD128 only; cross-mode determinism (no one-mode FMA — wasm core has no v128 FMA, use mul+add to
 match scalar); v128 stores non-atomic (barrier-ordered data stays scalar-verified; UNIFORM STORE REGIMES
