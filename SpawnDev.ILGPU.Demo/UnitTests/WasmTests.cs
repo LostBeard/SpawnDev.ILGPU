@@ -1740,6 +1740,58 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                     $"-> {createAfterExplicit}) — it must use a private memory and leave the shared one untouched.");
         }
 
+        // Custom-MaxLinearMemoryPages sharing (2026-06-14, Geordi). The original shared-memory fix only
+        // shared the DEFAULT max (16384), so the ML lane — which creates ~569 per-test accelerators at a
+        // CUSTOM max (32768 = 2 GiB, DA3-Small needs it) — took the PRIVATE path and re-accumulated the
+        // 2 GiB reservation leak (Tuvok's full ML sweep on local.4: 88->91, unchanged). The fix keys the
+        // shared memory by max-pages so each max-group collapses to ONE reservation. This test locks that:
+        // K accelerators at a NON-default max construct AT MOST ONE shared memory for that max. (The test
+        // above only exercised the default max, which is why the custom-max gap slipped through green.)
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_SharedLinearMemory_CustomMaxPages_AlsoBounded()
+        {
+            const int count = 4096;
+            const int accelerators = 5;
+            const int customMaxPages = 32768; // 2 GiB — the ML DA3-Small value
+
+            var oracle = new int[count];
+            for (int i = 0; i < count; i++) oracle[i] = i * 7 + 1;
+
+            int createCountBefore = WasmAccelerator.SharedWasmMemoryCreateCount;
+            for (int a = 0; a < accelerators; a++)
+            {
+                var context = Context.Create().Wasm().ToContext();
+                // Default WorkerCount (so it uses the shared pool) but a CUSTOM max-pages.
+                var accelerator = await context.CreateWasmAcceleratorAsync(
+                    new WasmBackendOptions { MaxLinearMemoryPages = customMaxPages });
+                try
+                {
+                    if (((WasmAccelerator)accelerator).MaxLinearMemoryPages != customMaxPages)
+                        throw new Exception("custom MaxLinearMemoryPages did not take effect.");
+                    using var buf = accelerator.Allocate1D<int>(count);
+                    var fill = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(
+                        (i, v) => v[i] = i * 7 + 1);
+                    fill((Index1D)count, buf.View);
+                    await accelerator.SynchronizeAsync();
+                    var result = await buf.CopyToHostAsync<int>();
+                    for (int i = 0; i < count; i++)
+                        if (result[i] != oracle[i])
+                            throw new Exception(
+                                $"Custom-max accelerator #{a}: result[{i}]={result[i]} expected {oracle[i]} — " +
+                                $"shared (per-max) linear memory produced wrong output.");
+                }
+                finally { accelerator.Dispose(); context.Dispose(); }
+            }
+            int created = WasmAccelerator.SharedWasmMemoryCreateCount - createCountBefore;
+            // At most ONE 32768 memory constructed across all K (0 if a prior test already built the
+            // 32768 group). Pre-fix this would have been K (one private 2 GiB memory per accelerator) and
+            // the reservations would accumulate to the V8 cap on a long lane.
+            if (created > 1)
+                throw new Exception(
+                    $"{created} shared memories were constructed across {accelerators} custom-max ({customMaxPages}) " +
+                    $"accelerators — the custom-max reservation leak (Tuvok's ML-lane 88->91) has regressed (expected <= 1).");
+        }
+
         // Wasm SIMD128 emitter foundation (Phase 1, 2026-06-14, Geordi). Pure-CPU regression guard on
         // the v128 encoding — NO browser/GPU needed, just byte assertions. Locks the part most likely
         // to silently break: SIMD sub-opcodes are u32-LEB128 after the 0xFD prefix (NOT single bytes

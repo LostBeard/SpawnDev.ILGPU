@@ -119,13 +119,17 @@ state), so sharing is correct. Bonus: with persistent workers AND one persistent
 only changes on `grow()`, so after high-water the workers **stop re-instantiating kernels entirely**
 (per-test new-memory→instance-cache-clear churn gone).
 
-- **Routing:** `UsesSharedMemory` = `_useSharedPool && _maxLinearMemoryPages == 16384`. The whole
-  create/grow/reuse block + Dispose read/write through `CachedWasmMemory`/`CachedMemoryBuffer`/
-  `CachedWasmPages` properties that pick static-vs-instance backing. A custom-`MaxLinearMemoryPages`
-  accelerator (e.g. ML DA3 at 32768) or explicit-`WorkerCount` accelerator keeps a PRIVATE
-  `_cachedWasmMemory` — required, since the kernel module declares its import max = its own
-  MaxLinearMemoryPages and the spec needs supplied-max ≤ module-declared-max (a 16384 memory can't
-  back 32768 modules or vice-versa), and these are rare/long-lived so no accumulation.
+- **Routing:** `UsesSharedMemory` = `_useSharedPool` (any default-WorkerCount accel). The shared memory
+  is keyed by `MaxLinearMemoryPages` in `s_sharedByMaxPages` (Dictionary<int, SharedMemEntry>) — ONE
+  shared memory PER distinct max. The create/grow/reuse block + Dispose read/write through
+  `CachedWasmMemory`/`CachedMemoryBuffer`/`CachedWasmPages` → `SharedEntry` (this accel's max-group) when
+  shared, else the private `_cachedWasmMemory`. Keyed by max because the kernel module declares its
+  import max = its own MaxLinearMemoryPages and the spec needs supplied-max == module-declared-max — so
+  all 16384 accels share a 16384 memory, all 32768 (ML DA3) share a 32768 memory. Only explicit-
+  `WorkerCount` accels (want worker isolation) keep PRIVATE memory. **History:** originally only the
+  default 16384 was shared (`== 16384` gate), which missed the ML lane's ~569 accels at a custom 32768 max
+  — they took the private path and re-accumulated the leak at 2 GiB each (Tuvok's full ML sweep on
+  local.4: 88→91, unchanged); generalized to per-max 2026-06-14.
 - **Concurrency:** `s_sharedMemoryGate` (a `SemaphoreSlim(1,1)`) serializes the shared-memory dispatch
   window (acquire→zero→copy-IN→exec→copy-OUT) across accelerators — within one accelerator dispatches
   already serialize via `_pendingWork`; this extends that to two concurrently-alive default

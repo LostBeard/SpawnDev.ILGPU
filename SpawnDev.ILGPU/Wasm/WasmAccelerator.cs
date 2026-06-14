@@ -166,91 +166,108 @@ namespace SpawnDev.ILGPU.Wasm
         /// </summary>
         private const int DefaultMaxLinearMemoryPages = 16384;
 
-        /// <summary>
-        /// Process-static SHARED linear memory — the memory analog of <see cref="s_sharedWorkerPool"/>.
-        ///
-        /// A <c>WebAssembly.Memory({ shared: true })</c> reserves its FULL <c>maximum</c> of virtual
-        /// address space at construction and can never be relocated, so each default accelerator that
-        /// allocated its own 1 GiB memory burned a full 1 GiB reservation. Before the persistent worker
-        /// pool, <c>Worker.terminate()</c> on every accelerator Dispose dropped the workers' references
-        /// to that memory, so the old reservation was freed (and GC'd) per test. With the persistent
-        /// pool the workers now PIN the last memory they instantiated against (<c>_lastMemoryBuffer</c> +
-        /// <c>_instancesById</c> in WorkerPool.cs) until they next swap — so across the ~569-test PMT
-        /// Wasm lane the per-accelerator memories accumulated up to <c>workerCount</c> live 1 GiB
-        /// reservations (plus JS-GC lag) until V8's address-space cap was hit and the
-        /// <c>new WebAssembly.Memory(...)</c> CONSTRUCTOR threw "could not allocate memory" — Tuvok's
-        /// 88 RangeErrors (2026-06-14), the memory half the pool fix unmasked.
-        ///
-        /// The linear memory is per-dispatch TRANSIENT working/staging memory (each dispatch zeroes its
-        /// region, copies buffers IN, runs, copies OUT — it carries no state between accelerators), so a
-        /// single process-static memory shared by all default accelerators is correct: ONE reservation
-        /// per tab, grown to the lane high-water and never re-created. As a bonus it is a perf win — with
-        /// persistent workers AND one persistent memory the buffer only changes on <c>grow()</c>, so
-        /// after high-water the workers stop re-instantiating kernels entirely (the per-test
-        /// new-memory → worker instance-cache-clear churn is gone).
-        ///
-        /// SCOPE: only default-WorkerCount accelerators (<see cref="_useSharedPool"/>) whose
-        /// <see cref="_maxLinearMemoryPages"/> equals <see cref="DefaultMaxLinearMemoryPages"/> share it
-        /// (see <see cref="UsesSharedMemory"/>). The kernel module declares its memory-import maximum =
-        /// its own <c>MaxLinearMemoryPages</c>, and the spec requires the supplied memory's maximum be
-        /// &lt;= the import's declared maximum, so a memory created at 16384 cannot back an accelerator
-        /// whose modules declare a smaller max and vice-versa. A custom-max accelerator (rare: one
-        /// long-lived ML accelerator, not 569) keeps its own private <see cref="_cachedWasmMemory"/> —
-        /// no accumulation, behavior unchanged.
-        /// </summary>
-        private static JSObject? s_sharedWasmMemory;
-        private static SharedArrayBuffer? s_sharedMemoryBuffer;
-        private static int s_sharedWasmPages;
-        private static int s_sharedMemoryCreateCount;
+        // Process-static SHARED linear memory — the memory analog of s_sharedWorkerPool.
+        //
+        // A `WebAssembly.Memory({ shared: true })` reserves its FULL maximum of virtual address space at
+        // construction and can never be relocated, so each accelerator that allocated its own memory
+        // burned a full reservation (1 GiB at the default 16384 pages, 2 GiB at ML's 32768). Before the
+        // persistent worker pool, Worker.terminate() per Dispose dropped the workers' references so the
+        // old reservation was freed/GC'd per test. With the persistent pool the workers PIN the last
+        // memory they instantiated against (_lastMemoryBuffer + _instancesById, WorkerPool.cs) until they
+        // next swap — so across a ~569-test lane the per-accelerator memories accumulate up to
+        // workerCount live reservations (plus JS-GC lag) until V8's address-space cap is hit and the
+        // `new WebAssembly.Memory(...)` CONSTRUCTOR throws "could not allocate memory" (Tuvok's 88
+        // RangeErrors, 2026-06-14).
+        //
+        // The linear memory is per-dispatch TRANSIENT working/staging memory (each dispatch zeroes its
+        // region, copies buffers IN, runs, copies OUT — no state carries between accelerators), so a
+        // shared memory is correct. Bonus perf: with persistent workers + a persistent memory the buffer
+        // only changes on grow(), so after high-water the workers stop re-instantiating kernels entirely.
+        //
+        // SCOPE: default-WorkerCount accelerators (_useSharedPool ⇒ UsesSharedMemory) share, keyed by
+        // their MaxLinearMemoryPages — one shared memory PER distinct max. The kernel module declares its
+        // memory-import maximum = its own MaxLinearMemoryPages, and the spec requires supplied-max ==
+        // declared-max, so each max-group must (and does) share a memory of exactly that max. An
+        // explicit-WorkerCount accelerator (oversubscription stress tests, which want worker isolation)
+        // keeps its own PRIVATE _cachedWasmMemory. (Originally only the default 16384 was shared, which
+        // missed the ML lane's 569 × 32768 accelerators — generalized to per-max 2026-06-14.)
+        //
+        // Per-distinct-MaxLinearMemoryPages shared linear memory (2026-06-14, generalized). Each entry
+        // is ONE WebAssembly.Memory shared by all default-WorkerCount accelerators that declare the same
+        // max-pages, plus a gate serializing that group's dispatch window. Generalizes the original
+        // single 16384-only static: the ML lane creates ~569 per-test accelerators at a CUSTOM max
+        // (DA3-Small needs 32768 = 2 GiB), which took the PRIVATE path and re-accumulated the exact
+        // reservation leak at 2 GiB each (Tuvok, full ML sweep on local.4: 88→91, unchanged). Keying by
+        // max-pages collapses each max-group to ONE reservation while honoring the spec rule that the
+        // supplied memory's maximum must equal each kernel module's declared import maximum (every
+        // accelerator in a group declares the same max).
+        private sealed class SharedMemEntry
+        {
+            public JSObject? Memory;
+            public SharedArrayBuffer? Buffer;
+            public int Pages;
+            public int CreateCount;
+            // Serializes this max-group's dispatch window (acquire → zero → copy-IN → exec → copy-OUT)
+            // across concurrently-alive accelerators sharing this memory. Different max-groups use
+            // different memories, so independent gates are correct (no cross-group contention). Within
+            // one accelerator dispatches already serialize via _pendingWork; this extends that to two
+            // concurrently-alive same-max accelerators (overlapping region-[0..) writes would corrupt).
+            // Uncontended/zero-cost in the sequential PMT/production case.
+            public readonly SemaphoreSlim Gate = new(1, 1);
+        }
+        private static readonly Dictionary<int, SharedMemEntry> s_sharedByMaxPages = new();
         private static readonly object s_sharedMemoryLock = new();
 
-        /// <summary>
-        /// Serializes the shared-linear-memory dispatch window (memory acquire → zero → copy-IN →
-        /// worker execution → copy-OUT) ACROSS accelerators that share <see cref="s_sharedWasmMemory"/>.
-        /// Within one accelerator dispatches already serialize via <see cref="_pendingWork"/>; this
-        /// extends the same guarantee to two concurrently-alive default accelerators sharing the one
-        /// linear memory — overlapping windows on a single memory (both regions start at offset 0)
-        /// would corrupt each other. Uncontended (and therefore zero-cost) in the PMT/production
-        /// sequential case where only one accelerator dispatches at a time. Private-memory accelerators
-        /// never take it.
-        /// </summary>
-        private static readonly SemaphoreSlim s_sharedMemoryGate = new(1, 1);
+        /// <summary>Returns (creating on first use) the shared-memory entry for a max-pages value.</summary>
+        private static SharedMemEntry GetSharedMemEntry(int maxPages)
+        {
+            lock (s_sharedMemoryLock)
+            {
+                if (!s_sharedByMaxPages.TryGetValue(maxPages, out var e))
+                    s_sharedByMaxPages[maxPages] = e = new SharedMemEntry();
+                return e;
+            }
+        }
 
         /// <summary>
-        /// Number of distinct shared <c>WebAssembly.Memory</c> objects constructed this session.
-        /// Test/diag hook: with the fix this stays at 1 no matter how many default accelerators come
-        /// and go (it grows only when the shared memory is torn down and rebuilt). Pre-fix it grew per
-        /// accelerator. Locked by the shared-linear-memory regression test.
+        /// Total number of shared <c>WebAssembly.Memory</c> objects constructed this session, summed
+        /// across all max-pages groups. Test/diag hook: with the fix this stays at the number of DISTINCT
+        /// max-pages values in use (1 per group, e.g. 1 for a default-only lane, 2 for default+32768),
+        /// no matter how many accelerators come and go — pre-fix (and the local.4 custom-max gap) it grew
+        /// per accelerator. Locked by the shared-linear-memory regression tests.
         /// </summary>
         public static int SharedWasmMemoryCreateCount
         {
-            get { lock (s_sharedMemoryLock) { return s_sharedMemoryCreateCount; } }
+            get { lock (s_sharedMemoryLock) { int n = 0; foreach (var e in s_sharedByMaxPages.Values) n += e.CreateCount; return n; } }
         }
 
         /// <summary>
-        /// Current committed page count of the shared linear memory (0 if not yet created). A correct
-        /// shared memory grows to the lane high-water and stays there — it does NOT reset per accelerator.
+        /// Total committed page count summed across all shared-memory groups (0 if none created). Each
+        /// group grows to its lane high-water and stays there — it does NOT reset per accelerator.
         /// </summary>
         public static int SharedWasmMemoryPages
         {
-            get { lock (s_sharedMemoryLock) { return s_sharedWasmPages; } }
+            get { lock (s_sharedMemoryLock) { int n = 0; foreach (var e in s_sharedByMaxPages.Values) n += e.Pages; return n; } }
         }
 
         /// <summary>
-        /// Releases the process-shared linear memory (test/shutdown only — normal accelerator Dispose
-        /// leaves it alive for reuse, like the shared worker pool). Disposing the .NET handles drops the
-        /// host references; the JS <c>WebAssembly.Memory</c> is freed once the persistent workers also
-        /// drop it (next memory swap / pool teardown).
+        /// Releases ALL process-shared linear-memory groups (test/shutdown only — normal accelerator
+        /// Dispose leaves them alive for reuse, like the shared worker pool). Disposing the .NET handles
+        /// drops the host references; each JS <c>WebAssembly.Memory</c> is freed once the persistent
+        /// workers also drop it (next memory swap / pool teardown). The per-group gates are left to GC
+        /// (never disposed while a dispatch might await them).
         /// </summary>
         public static void DisposeSharedWasmMemory()
         {
             lock (s_sharedMemoryLock)
             {
-                s_sharedMemoryBuffer?.Dispose();
-                s_sharedMemoryBuffer = null;
-                s_sharedWasmMemory?.Dispose();
-                s_sharedWasmMemory = null;
-                s_sharedWasmPages = 0;
+                foreach (var e in s_sharedByMaxPages.Values)
+                {
+                    e.Buffer?.Dispose(); e.Buffer = null;
+                    e.Memory?.Dispose(); e.Memory = null;
+                    e.Pages = 0;
+                }
+                s_sharedByMaxPages.Clear();
             }
         }
 
@@ -378,37 +395,40 @@ namespace SpawnDev.ILGPU.Wasm
         private int _cachedWasmPages;
 
         /// <summary>
-        /// True when this accelerator backs its dispatches with the process-static
-        /// <see cref="s_sharedWasmMemory"/> instead of a private per-accelerator memory. Requires the
-        /// shared worker pool (default WorkerCount) AND the default memory ceiling — see the scope note
-        /// on <see cref="s_sharedWasmMemory"/>. Stable for the accelerator's lifetime (both inputs are
-        /// fixed at construction), so the cached-memory routing properties below never flip mid-life.
+        /// True when this accelerator backs its dispatches with the process-static shared memory (keyed
+        /// by its <see cref="_maxLinearMemoryPages"/>) instead of a private per-accelerator memory.
+        /// Requires the shared worker pool (default WorkerCount); the memory is shared per-max, so ANY
+        /// max qualifies (the ML lane's 32768 shares a 32768 memory). Explicit-WorkerCount accelerators
+        /// (which want worker isolation) keep a private memory. Stable for the accelerator's lifetime
+        /// (both inputs fixed at construction), so the routing properties below never flip mid-life.
         /// </summary>
-        private bool UsesSharedMemory => _useSharedPool && _maxLinearMemoryPages == DefaultMaxLinearMemoryPages;
+        private bool UsesSharedMemory => _useSharedPool;
+
+        /// <summary>The shared-memory group entry for this accelerator's max-pages (created on first use).</summary>
+        private SharedMemEntry SharedEntry => GetSharedMemEntry(_maxLinearMemoryPages);
 
         /// <summary>
-        /// The active linear memory for this dispatch — the process-static shared memory when
+        /// The active linear memory for this dispatch — the per-max shared memory when
         /// <see cref="UsesSharedMemory"/>, else this accelerator's private memory. The whole
         /// memory-management block (create / grow / reuse) and the Dispose path read and write through
-        /// these properties so the same code services both paths. The shared backing fields are guarded
-        /// by <see cref="s_sharedMemoryLock"/>; concurrent dispatch into the shared memory is serialized
-        /// by <see cref="s_sharedMemoryGate"/>, so the lock here only protects the create/grow mutation
-        /// against the diagnostic readers.
+        /// these properties so the same code services both paths. The shared-group's create/grow window
+        /// is serialized by its <see cref="SharedMemEntry.Gate"/>; the .NET side is single-threaded, so
+        /// field access on the obtained entry needs no further lock (only the dictionary lookup locks).
         /// </summary>
         private JSObject? CachedWasmMemory
         {
-            get { if (UsesSharedMemory) { lock (s_sharedMemoryLock) return s_sharedWasmMemory; } return _cachedWasmMemory; }
-            set { if (UsesSharedMemory) { lock (s_sharedMemoryLock) s_sharedWasmMemory = value; } else _cachedWasmMemory = value; }
+            get => UsesSharedMemory ? SharedEntry.Memory : _cachedWasmMemory;
+            set { if (UsesSharedMemory) SharedEntry.Memory = value; else _cachedWasmMemory = value; }
         }
         private SharedArrayBuffer? CachedMemoryBuffer
         {
-            get { if (UsesSharedMemory) { lock (s_sharedMemoryLock) return s_sharedMemoryBuffer; } return _cachedMemoryBuffer; }
-            set { if (UsesSharedMemory) { lock (s_sharedMemoryLock) s_sharedMemoryBuffer = value; } else _cachedMemoryBuffer = value; }
+            get => UsesSharedMemory ? SharedEntry.Buffer : _cachedMemoryBuffer;
+            set { if (UsesSharedMemory) SharedEntry.Buffer = value; else _cachedMemoryBuffer = value; }
         }
         private int CachedWasmPages
         {
-            get { if (UsesSharedMemory) { lock (s_sharedMemoryLock) return s_sharedWasmPages; } return _cachedWasmPages; }
-            set { if (UsesSharedMemory) { lock (s_sharedMemoryLock) s_sharedWasmPages = value; } else _cachedWasmPages = value; }
+            get => UsesSharedMemory ? SharedEntry.Pages : _cachedWasmPages;
+            set { if (UsesSharedMemory) SharedEntry.Pages = value; else _cachedWasmPages = value; }
         }
 
         /// <summary>
@@ -709,10 +729,10 @@ namespace SpawnDev.ILGPU.Wasm
             if (_disposed)
                 throw new ObjectDisposedException(nameof(WasmAccelerator));
 
-            // Tracks whether THIS dispatch holds the process-wide shared-memory gate (see
-            // s_sharedMemoryGate) so the finally releases it exactly once. Declared outside the
-            // try so the finally sees it regardless of where an exception is thrown.
-            bool sharedMemoryGateHeld = false;
+            // The per-max shared-memory gate THIS dispatch holds (null if none / private memory), so the
+            // finally releases exactly the one it acquired. Captured (not re-fetched) so a release can
+            // never hit a different group's gate. Declared outside the try so the finally always sees it.
+            SemaphoreSlim? heldSharedGate = null;
             try
             {
                 var js = BlazorJSRuntime.JS;
@@ -1155,14 +1175,14 @@ namespace SpawnDev.ILGPU.Wasm
                 int wasmPages = wasmPagesExact + 1; // 1-page (64 KB) absolute safety pad
                 if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-MEM] disp={dispNum} totalLayout={totalWithBarriers} exactPages={wasmPagesExact} pages={wasmPages} bytes={wasmPages * 65536} cap={_maxLinearMemoryPages * 65536} buf={totalMemoryBytes} scratch={scratchBase}+{scratchSize} struct={structRegionBase}+{totalStructBytes} shared={sharedMemBase}+{sharedMemSize} barrier={barrierBase}+{barrierSize} fence={fenceSlot} spt={scratchPerThread} gs={groupSize} _wc={_workerCount}");
 
-                // Serialize the shared-linear-memory window across accelerators (see
-                // s_sharedMemoryGate). Acquired BEFORE any shared-memory read/create/grow and
-                // released in the finally after copy-OUT. Uncontended (zero cost) for a private
-                // memory or when only one accelerator dispatches at a time (the PMT/production case).
+                // Serialize this max-group's shared-linear-memory window across accelerators (see
+                // SharedMemEntry.Gate). Acquired BEFORE any shared-memory read/create/grow and released
+                // in the finally after copy-OUT. Uncontended (zero cost) for a private memory or when
+                // only one accelerator of this max dispatches at a time (the PMT/production case).
                 if (UsesSharedMemory)
                 {
-                    await s_sharedMemoryGate.WaitAsync();
-                    sharedMemoryGateHeld = true;
+                    heldSharedGate = SharedEntry.Gate;
+                    await heldSharedGate.WaitAsync();
                 }
 
                 // DIAGNOSTIC (Tuvok 2026-05-26): force a real 1-page memory.grow on every
@@ -1218,7 +1238,7 @@ namespace SpawnDev.ILGPU.Wasm
                             "eval",
                             $"new WebAssembly.Memory({{ initial: {initialPages}, maximum: {_maxLinearMemoryPages}, shared: true }})");
                         CachedMemoryBuffer = CachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
-                        if (UsesSharedMemory) lock (s_sharedMemoryLock) s_sharedMemoryCreateCount++;
+                        if (UsesSharedMemory) SharedEntry.CreateCount++;
                         _initializedWorkersByKernel.Clear();
                         if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-MEM-INIT] disp={dispNum} pages={initialPages} (need={wasmPages}) bytes={initialPages * 65536} cap={_maxLinearMemoryPages} shared={UsesSharedMemory}");
                     }
@@ -1260,7 +1280,7 @@ namespace SpawnDev.ILGPU.Wasm
                             "eval",
                             $"new WebAssembly.Memory({{ initial: {initialPages}, maximum: {_maxLinearMemoryPages}, shared: true }})");
                         CachedMemoryBuffer = CachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
-                        if (UsesSharedMemory) lock (s_sharedMemoryLock) s_sharedMemoryCreateCount++;
+                        if (UsesSharedMemory) SharedEntry.CreateCount++;
                         _initializedWorkersByKernel.Clear();
                         if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-MEM-INIT-CC] disp={dispNum} pages={initialPages} (need={wasmPages}) bytes={initialPages * 65536} cap={_maxLinearMemoryPages} shared={UsesSharedMemory}");
                     }
@@ -1790,10 +1810,9 @@ namespace SpawnDev.ILGPU.Wasm
                     foreach (var kv in argDispatchIntents)
                         kv.Key.CompleteDispatchIntent(kv.Value);
                 }
-                // Release the shared-linear-memory gate (if this dispatch took it) so the next
-                // shared-memory dispatch — this accelerator's or another's — can proceed.
-                if (sharedMemoryGateHeld)
-                    s_sharedMemoryGate.Release();
+                // Release this max-group's shared-linear-memory gate (if this dispatch took it) so the
+                // next same-max dispatch — this accelerator's or another's — can proceed.
+                heldSharedGate?.Release();
             }
         }
 
