@@ -1179,8 +1179,15 @@ namespace SpawnDev.ILGPU.Wasm
                     }
                     else
                     {
-                        if (value is float fv) flatArgs.Add(fv.ToString("G9"));
-                        else if (value is double dv) flatArgs.Add(dv.ToString("G17"));
+                        // INVARIANT culture is REQUIRED: flatArgs are spliced into the worker script
+                        // as JS call-expression tokens (kernel(..., <arg>)). The current culture's ICU
+                        // number format breaks the generated JS two ways: (1) ±inf/NaN format as the
+                        // Unicode "-∞"/"∞"/"NaN" symbols (".NET 5+ en-US uses "∞") → "Invalid or
+                        // unexpected token"; invariant gives the JS-valid globals "-Infinity"/"Infinity"/
+                        // "NaN". (2) decimal-comma cultures format "3,14" → a broken 2-arg list. Invariant
+                        // yields a JS-parseable token for every finite + special float/double.
+                        if (value is float fv) flatArgs.Add(fv.ToString("G9", System.Globalization.CultureInfo.InvariantCulture));
+                        else if (value is double dv) flatArgs.Add(dv.ToString("G17", System.Globalization.CultureInfo.InvariantCulture));
                         else if (value is long lv) flatArgs.Add($"{lv}n"); // BigInt for i64
                         else if (value is ulong ulv) flatArgs.Add($"{ulv}n"); // BigInt for i64
                         else if (value != null && !value.GetType().IsPrimitive && !value.GetType().IsEnum
@@ -1219,8 +1226,8 @@ namespace SpawnDev.ILGPU.Wasm
                                 }
                                 if (innerVal != null && innerVal.GetType().IsPrimitive)
                                 {
-                                    if (innerVal is float fvi) flatArgs.Add(fvi.ToString("G9"));
-                                    else if (innerVal is double dvi) flatArgs.Add(dvi.ToString("G17"));
+                                    if (innerVal is float fvi) flatArgs.Add(fvi.ToString("G9", System.Globalization.CultureInfo.InvariantCulture));
+                                    else if (innerVal is double dvi) flatArgs.Add(dvi.ToString("G17", System.Globalization.CultureInfo.InvariantCulture));
                                     else if (innerVal is long lvi) flatArgs.Add($"{lvi}n");
                                     else if (innerVal is ulong ulvi) flatArgs.Add($"{ulvi}n");
                                     else flatArgs.Add(innerVal.ToString() ?? "0");

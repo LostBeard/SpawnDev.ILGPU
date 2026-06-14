@@ -1014,7 +1014,7 @@ namespace SpawnDev.ILGPU.WebGL
                                 kind = "scalar",
                                 paramIndex = glslParamIndex,
                                 scalarType,
-                                value
+                                value = EncodeUniformScalarValue(value, scalarType)
                             });
                         }
                         else if (arg != null && arg.GetType().IsDefined(
@@ -1068,7 +1068,7 @@ namespace SpawnDev.ILGPU.WebGL
                                     kind = "scalar",
                                     paramIndex = glslParamIndex,
                                     scalarType = st,
-                                    value = vl
+                                    value = EncodeUniformScalarValue(vl, st)
                                 });
                             }
                             else
@@ -1350,6 +1350,31 @@ namespace SpawnDev.ILGPU.WebGL
         /// struct_X { int field_0; int field_1; float field_2; }
         /// So uniform paths must be: field_0, field_1, field_2 (NOT field_0.field_0 etc.)
         /// </summary>
+        /// <summary>
+        /// Encodes a scalar uniform value for the dispatch postMessage. float/double values are sent as
+        /// their int32 BIT PATTERN (JSON-safe) instead of the raw number: the worker message is marshaled
+        /// .NET→JS via System.Text.Json (RuntimeJsonSerializerOptions), which REJECTS float ±inf/NaN
+        /// (SpecialNumberValuesNotSupported) - the silent WebGL-only failure for kernels with a ±inf/NaN
+        /// scalar (e.g. ConstantOfShape(-inf)). glWorker.js reconstructs the exact float via a Float32Array
+        /// view (`_bitsToFloat`), so ±inf/NaN round-trip bit-perfectly. int/uint scalars are returned
+        /// unchanged (every int32/uint32 is valid JSON). WebGPU is unaffected (it packs scalars in a buffer).
+        /// </summary>
+        private static object EncodeUniformScalarValue(object? value, string scalarType)
+        {
+            if (scalarType == "float" || scalarType == "double")
+            {
+                float f = value switch
+                {
+                    float ff => ff,
+                    double dd => (float)dd,
+                    null => 0f,
+                    _ => Convert.ToSingle(value)
+                };
+                return BitConverter.SingleToInt32Bits(f);
+            }
+            return value ?? 0;
+        }
+
         private static void FlattenStructFieldsForUniform(object structValue, string prefix, List<object> results)
         {
             // Ignore the prefix parameter — we use a sequential counter instead
@@ -1401,7 +1426,7 @@ namespace SpawnDev.ILGPU.WebGL
                         ulong ulv => (uint)ulv,
                         _ => fieldVal ?? 0
                     };
-                    results.Add(new { path, scalarType, value });
+                    results.Add(new { path, scalarType, value = EncodeUniformScalarValue(value, scalarType) });
                     fieldCounter++;
                 }
             }
@@ -1521,7 +1546,7 @@ namespace SpawnDev.ILGPU.WebGL
                         kind = "scalar",
                         paramIndex = entry.SyntheticParamIndex,
                         scalarType,
-                        value = scalarValue
+                        value = EncodeUniformScalarValue(scalarValue, scalarType)
                     });
                 }
             }

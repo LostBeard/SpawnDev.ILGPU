@@ -7,6 +7,14 @@ const programCache = {};
 // Maps bufferId → { texture, width, height, glslType, byteSize, data: Uint8Array }
 const bufferRegistry = {};
 
+// ---- float scalar uniform decode ----
+// float/double scalar uniforms arrive as their int32 BIT PATTERN (WebGLAccelerator.EncodeUniformScalarValue):
+// the .NET→JS dispatch message is JSON-marshaled and System.Text.Json rejects float ±inf/NaN, so the bits
+// travel as a JSON-safe int and we reconstruct the exact float here. ±inf/NaN round-trip bit-perfectly.
+const _f32rein = new Float32Array(1);
+const _i32rein = new Int32Array(_f32rein.buffer);
+function _bitsToFloat(bits) { _i32rein[0] = bits | 0; return _f32rein[0]; }
+
 // ---- Cached GL objects (reused across dispatches) ----
 let cachedTFBuffer = null;
 let cachedTFBufferSize = 0;
@@ -527,7 +535,7 @@ function dispatchKernel(msg) {
                 } else if (p.scalarType === 'uint' || p.scalarType === 'ulong') {
                     gl.uniform1ui(loc, p.value >>> 0);
                 } else if (p.scalarType === 'float' || p.scalarType === 'double') {
-                    gl.uniform1f(loc, p.value);
+                    gl.uniform1f(loc, _bitsToFloat(p.value)); // value is the float's int32 bit pattern
                 } else {
                     console.warn('[GLWorker] Unknown scalar type:', p.scalarType, 'param:', p.paramIndex);
                 }
@@ -547,7 +555,7 @@ function dispatchKernel(msg) {
                     } else if (f.scalarType === 'uint') {
                         gl.uniform1ui(fieldLoc, f.value >>> 0);
                     } else {
-                        gl.uniform1f(fieldLoc, f.value);
+                        gl.uniform1f(fieldLoc, _bitsToFloat(f.value)); // float field: int32 bit pattern
                     }
                 }
             }

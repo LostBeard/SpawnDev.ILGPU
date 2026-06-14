@@ -10,6 +10,10 @@ try
     if (args.Length > 0 && args[0] == "wasm-dump")
         return await WasmCompileDump.Run();
 
+    // Offline Wasm +inf codegen probe (Tuvok finding #2). No browser, no dispatch.
+    if (args.Length > 0 && args[0] == "wasm-inf")
+        return await WasmInfProbe.Run();
+
     // Offline WGSL generation probe (precompiled-shaders Layer 1). No device/browser.
     if (args.Length > 0 && args[0] == "shader-gen")
         return await ShaderGenDump.Run();
