@@ -47,6 +47,19 @@ the correct shape for GPU-style kernels:
   reference model). SIMD multiplies kernel ALU only; the known reference-model slowness is
   substantially interpreted-IL host overhead, which v128 does not touch. This phase names the
   workloads where 4× kernel ALU translates to real wall-clock and sets the A/B expectations.
+  - **FIRST MEASUREMENT DONE (2026-06-14, Geordi) — ALU-sensitivity microbench.** A per-element
+    kernel `out[i] = fold of R FMAs over in[i]` (fixed 1 read + 1 write; only register-ALU scales
+    with R), N=256K, 10 iters, on the real Wasm backend: **R=1 = 35.5 ms, R=64 = 39.4 ms, R=256 =
+    73.2 ms** → 256× more ALU = only **2.1×** time. So at R=1 (typical elementwise) ALU ≈ 0% of
+    time; at R=256 (256 FMA/element) ALU ≈ 51%. There is a **~35 ms FIXED host/dispatch/memory/
+    worker-round-trip floor** at this shape that SIMD128 cannot touch. **Refined go/no-go: SIMD128
+    pays off ONLY on genuinely ALU-DENSE kernels (large GEMM, dequant-matmul / FusedDequantMatMul,
+    the gemma4 decode hot path), and even there expect ~1.5-2× (NOT 4×) because ~half the time is
+    the fixed floor. Light/elementwise kernels gain ~nothing — for those the lever is the dispatch/
+    host overhead, not ALU.** This empirically confirms the "honest ceiling" below. NEXT Phase-0
+    step (needs the machine): measure the SAME split on the ACTUAL hot kernels (FusedDequantMatMul,
+    FusedFFN GEMM, RadixSort) to pick the 1-2 highest-intensity targets for the Phase-2 prototype.
+    (Microbench was a one-shot — reverted from the tree; restore from this commit's history if needed.)
 - **Phase 1 — emitter foundation:** v128 opcode + type support in `WasmModuleBuilder`
   (sections, locals, 0xFD encodings), the runtime detector + capability flag, and a
   hand-built probe kernel verified via the offline `wasm-dump` path + `wasm2wat
