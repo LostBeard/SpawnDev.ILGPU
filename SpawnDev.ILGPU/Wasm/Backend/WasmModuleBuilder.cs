@@ -426,6 +426,86 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             EmitU32Leb128(code, offset);
         }
 
+        // ── SIMD (v128) emit helpers ──────────────────────────────────────────────────
+        // Every SIMD instruction is the 0xFD prefix followed by a u32 LEB128 sub-opcode
+        // (WasmOpCodes.Simd* constants), then any immediates. The LEB128 step is mandatory —
+        // sub-opcodes >= 128 (most arithmetic ops) are multi-byte. These are the only correct
+        // way to emit v128 ops; do NOT hand-write 0xFD + a raw byte. (Phase 1 emitter foundation
+        // for the Wasm SIMD128 port — see Plans/wasm-simd128-velocity-port-plan-2026-06-12.md.)
+
+        /// <summary>
+        /// Writes a SIMD op that takes no immediate (arithmetic / bitwise / splat):
+        /// 0xFD prefix + u32 LEB128 sub-opcode. e.g. f32x4.add, v128.bitselect, i32x4.splat.
+        /// </summary>
+        public static void EmitSimd(List<byte> code, uint simdOpcode)
+        {
+            code.Add(WasmOpCodes.SimdPrefix);
+            EmitU32Leb128(code, simdOpcode);
+        }
+
+        /// <summary>
+        /// Writes a SIMD memory op (v128.load / v128.store): 0xFD prefix + sub-opcode + memarg
+        /// (align + offset), matching the scalar load/store memarg format. Natural alignment for
+        /// a full v128 access is 4 (2^4 = 16 bytes); pass a smaller align for unaligned access.
+        /// </summary>
+        public static void EmitSimdMem(List<byte> code, uint simdOpcode, uint align, uint offset)
+        {
+            code.Add(WasmOpCodes.SimdPrefix);
+            EmitU32Leb128(code, simdOpcode);
+            EmitU32Leb128(code, align);
+            EmitU32Leb128(code, offset);
+        }
+
+        /// <summary>
+        /// Writes a SIMD lane op (extract_lane / replace_lane): 0xFD prefix + sub-opcode + a
+        /// single 1-byte lane index immediate (0..lanes-1 for the shape).
+        /// </summary>
+        public static void EmitSimdLane(List<byte> code, uint simdOpcode, byte lane)
+        {
+            code.Add(WasmOpCodes.SimdPrefix);
+            EmitU32Leb128(code, simdOpcode);
+            code.Add(lane);
+        }
+
+        /// <summary>
+        /// Writes a v128.const: 0xFD prefix + sub-opcode 12 + exactly 16 immediate bytes (the
+        /// little-endian vector literal).
+        /// </summary>
+        public static void EmitV128Const(List<byte> code, byte[] sixteenBytes)
+        {
+            if (sixteenBytes == null || sixteenBytes.Length != 16)
+                throw new ArgumentException("v128.const requires exactly 16 immediate bytes", nameof(sixteenBytes));
+            code.Add(WasmOpCodes.SimdPrefix);
+            EmitU32Leb128(code, WasmOpCodes.V128Const);
+            code.AddRange(sixteenBytes);
+        }
+
+        /// <summary>
+        /// Splats a single f32 across all 4 lanes via v128.const (4 copies of the same f32 bits).
+        /// Convenience over push-scalar + f32x4.splat when the value is a compile-time constant.
+        /// </summary>
+        public static void EmitF32x4ConstSplat(List<byte> code, float value)
+        {
+            var b = BitConverter.GetBytes(value); // little-endian on the wasm target
+            var v = new byte[16];
+            for (int lane = 0; lane < 4; lane++)
+                Array.Copy(b, 0, v, lane * 4, 4);
+            EmitV128Const(code, v);
+        }
+
+        /// <summary>
+        /// Writes an i8x16.shuffle: 0xFD prefix + sub-opcode 13 + 16 lane-select bytes
+        /// (each 0..31 picking a byte from the two input vectors).
+        /// </summary>
+        public static void EmitI8x16Shuffle(List<byte> code, byte[] sixteenLaneIndices)
+        {
+            if (sixteenLaneIndices == null || sixteenLaneIndices.Length != 16)
+                throw new ArgumentException("i8x16.shuffle requires exactly 16 lane indices", nameof(sixteenLaneIndices));
+            code.Add(WasmOpCodes.SimdPrefix);
+            EmitU32Leb128(code, WasmOpCodes.I8x16Shuffle);
+            code.AddRange(sixteenLaneIndices);
+        }
+
         /// <summary>
         /// Writes a call instruction to a byte list.
         /// </summary>

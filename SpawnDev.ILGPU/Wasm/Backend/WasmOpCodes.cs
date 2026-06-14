@@ -20,6 +20,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public const byte I64 = 0x7E;
         public const byte F32 = 0x7D;
         public const byte F64 = 0x7C;
+        public const byte V128 = 0x7B;  // SIMD 128-bit vector value type
         public const byte FuncRef = 0x70;
         public const byte Void = 0x40;  // block type: void
 
@@ -324,6 +325,68 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public const byte I64AtomicRmw8CmpxchgU = 0x4C;  // i64.atomic.rmw8.cmpxchg_u
         public const byte I64AtomicRmw16CmpxchgU = 0x4D; // i64.atomic.rmw16.cmpxchg_u
         public const byte I64AtomicRmw32CmpxchgU = 0x4E; // i64.atomic.rmw32.cmpxchg_u
+
+        // === SIMD Instructions (0xFD prefix) ===
+        // Ref: https://github.com/WebAssembly/simd/blob/main/proposals/simd/BinarySIMD.md
+        // (opcode values verified against the spec table 2026-06-14).
+        // CRITICAL: unlike the atomic 0xFE sub-opcodes (single byte), the SIMD sub-opcode is a
+        // u32 LEB128 after the 0xFD prefix — values >= 128 (e.g. f32x4.add = 228) encode to TWO
+        // LEB bytes (0xE4 0x01). These constants are the RAW decimal sub-opcode; always emit them
+        // through EmitU32Leb128, never as a raw byte. Stored as uint because core SIMD opcodes
+        // exceed 255 (and to make the LEB requirement explicit at the call site).
+        public const byte SimdPrefix = 0xFD;
+
+        // Memory (take a memarg: align + offset)
+        public const uint V128Load = 0;          // v128.load
+        public const uint V128Store = 11;        // v128.store
+        // Const (16 immediate bytes) / shuffle (16 lane-index bytes)
+        public const uint V128Const = 12;        // v128.const
+        public const uint I8x16Shuffle = 13;     // i8x16.shuffle
+        // Splat (lane -> all lanes)
+        public const uint I8x16Splat = 15;       // i8x16.splat
+        public const uint I16x8Splat = 16;       // i16x8.splat
+        public const uint I32x4Splat = 17;       // i32x4.splat
+        public const uint I64x2Splat = 18;       // i64x2.splat
+        public const uint F32x4Splat = 19;       // f32x4.splat
+        public const uint F64x2Splat = 20;       // f64x2.splat
+        // Extract/replace lane (take a 1-byte lane index immediate)
+        public const uint I32x4ExtractLane = 27; // i32x4.extract_lane
+        public const uint I32x4ReplaceLane = 28; // i32x4.replace_lane
+        public const uint I64x2ExtractLane = 29; // i64x2.extract_lane
+        public const uint I64x2ReplaceLane = 30; // i64x2.replace_lane
+        public const uint F32x4ExtractLane = 31; // f32x4.extract_lane
+        public const uint F32x4ReplaceLane = 32; // f32x4.replace_lane
+        public const uint F64x2ExtractLane = 33; // f64x2.extract_lane
+        public const uint F64x2ReplaceLane = 34; // f64x2.replace_lane
+        // Bitwise (whole-vector)
+        public const uint V128Not = 77;          // v128.not
+        public const uint V128And = 78;          // v128.and
+        public const uint V128AndNot = 79;       // v128.andnot
+        public const uint V128Or = 80;           // v128.or
+        public const uint V128Xor = 81;          // v128.xor
+        public const uint V128Bitselect = 82;    // v128.bitselect (a, b, mask) -> per-bit select
+        // i32x4 arithmetic
+        public const uint I32x4Neg = 161;        // i32x4.neg
+        public const uint I32x4Add = 174;        // i32x4.add
+        public const uint I32x4Sub = 177;        // i32x4.sub
+        public const uint I32x4Mul = 181;        // i32x4.mul
+        // f32x4 arithmetic
+        public const uint F32x4Abs = 224;        // f32x4.abs
+        public const uint F32x4Neg = 225;        // f32x4.neg
+        public const uint F32x4Sqrt = 227;       // f32x4.sqrt
+        public const uint F32x4Add = 228;        // f32x4.add
+        public const uint F32x4Sub = 229;        // f32x4.sub
+        public const uint F32x4Mul = 230;        // f32x4.mul
+        public const uint F32x4Div = 231;        // f32x4.div
+        public const uint F32x4Min = 232;        // f32x4.min
+        public const uint F32x4Max = 233;        // f32x4.max
+        // f64x2 arithmetic
+        public const uint F64x2Add = 240;        // f64x2.add
+        public const uint F64x2Sub = 241;        // f64x2.sub
+        public const uint F64x2Mul = 242;        // f64x2.mul
+        public const uint F64x2Div = 243;        // f64x2.div
+        public const uint F64x2Min = 244;        // f64x2.min
+        public const uint F64x2Max = 245;        // f64x2.max
 
         // === Section IDs ===
         public const byte SectionCustom = 0;

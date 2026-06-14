@@ -14,6 +14,11 @@ try
     if (args.Length > 0 && args[0] == "wasm-inf")
         return await WasmInfProbe.Run();
 
+    // Offline Wasm SIMD128 emitter probe (SIMD port Phase 1). Hand-builds a v128 module and writes
+    // it for wasm-validate/wasm2wat verification. No browser, no dispatch.
+    if (args.Length > 0 && args[0] == "wasm-simd-probe")
+        return await WasmSimdProbe.Run(args);
+
     // Offline WGSL generation probe (precompiled-shaders Layer 1). No device/browser.
     if (args.Length > 0 && args[0] == "shader-gen")
         return await ShaderGenDump.Run();

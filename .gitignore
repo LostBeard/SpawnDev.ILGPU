@@ -376,4 +376,5 @@ FodyWeavers.xsd
 /_dump
 _subgroup_reduce_probe/
 _wasm_inf_probe/
+_wasm_simd_probe/
 _threadB_wip_backup/

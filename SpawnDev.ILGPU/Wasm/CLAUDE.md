@@ -138,6 +138,36 @@ only changes on `grow()`, so after high-water the workers **stop re-instantiatin
   `WasmTests.Wasm_SharedLinearMemory_PersistsAndStaysBoundedAcrossAccelerators` (≤1 construction across
   K accelerators + correct-on-reuse + explicit-count isolation).
 
+## SIMD128 (v128) — emitter foundation (Phase 1, 2026-06-14)
+
+Phase 1 of the Wasm SIMD128 port (`Plans/wasm-simd128-velocity-port-plan-2026-06-12.md`). **Additive
+only — no production kernel emits v128 yet; the scalar path is byte-identical.** What landed:
+- **`WasmOpCodes`:** `V128` value type (0x7B) + the `Simd*` sub-opcode set. **CRITICAL:** SIMD uses the
+  `0xFD` prefix followed by a **u32 LEB128** sub-opcode (NOT a single byte like the 0xFE atomic
+  sub-opcodes). Sub-opcodes ≥ 128 (most arithmetic — `f32x4.add`=228) are multi-byte LEB. Stored as
+  `uint`; always emit via `EmitU32Leb128`. Values spec-verified (BinarySIMD.md, 2026-06-14).
+- **`WasmModuleBuilder`:** `EmitSimd` (no-immediate ops), `EmitSimdMem` (v128.load/store memarg — same
+  align/offset format as scalar; natural align for 16 bytes is 4=log2(16)), `EmitSimdLane`
+  (extract/replace_lane, 1-byte lane immediate), `EmitV128Const`/`EmitF32x4ConstSplat` (16 immediate
+  bytes), `EmitI8x16Shuffle` (16 lane-index bytes). v128 locals/func-types just use the 0x7B byte in
+  the existing encoders — no encoder change needed.
+- **Detection (per Captain):** `WasmBackend.RuntimeSupportsWasmSimd` = `System.Runtime.Intrinsics.Wasm.PackedSimd.IsSupported`.
+  If the running Blazor WASM build has SIMD enabled, the browser (and its workers — same engine) accept
+  v128; the compat build / SIMD-less browser / desktop CLR report false → scalar path. In-process
+  equivalent of the app-level `wasmFeatureDetect.simd` build-picker in `BlazorWASMSIMDDetectExample`.
+  Overrides: `ForceScalar` (off, mirrors `WebGPUBackend.ForceEmulatedF16`), `ForceSimd` (on, for
+  offline codegen verification on desktop). `EffectiveWasmSimd` = `!ForceScalar && (ForceSimd || RuntimeSupportsWasmSimd)`.
+  Surfaced as `WasmCapabilityContext.WasmSimd` + `WasmAccelerator.SupportsSimd`.
+- **HARD REQUIREMENT (Captain):** non-SIMD devices stay FIRST-CLASS forever — the scalar path is a
+  supported mode, never a deprecated fallback (AMD Phenom II X6, Firefox-on-Android-9, etc.).
+- **Offline verify:** `DemoConsole -- wasm-simd-probe` (`WasmSimdProbe.cs`) hand-builds a v128 module →
+  `wasm-validate` (clean) + `wasm2wat` (decodes to the intended instructions). SIMD is default-on in
+  wabt 1.0.39 (no `--enable-simd` flag; use `--enable-threads` for the shared-memory import).
+
+NEXT (Phase 2): vectorize ONE hot ALU-dense kernel behind `EffectiveWasmSimd`, CPU-oracle correct in
+BOTH modes, A/B on SIMD hardware. Phase-0 measured the ceiling at ~1.5-2× (not 4×) on ALU-dense kernels
+only — light/elementwise kernels are dispatch/host-bound, not ALU-bound.
+
 ## Offline compile dump (desktop, no browser) — `wasm-dump`
 
 `SpawnDev.ILGPU.DemoConsole -- wasm-dump` compiles RadixSort kernels on the DESKTOP and prints the emitted shared-memory alloca table + flags any `GenerateCode(Alloca)` type+size fallback aliasing or offset overlap. Works because `WasmAccelerator.Create` wraps the `BlazorJSRuntime.JS` lookup in try/catch (defaults to 4 cores) and `CreateRadixSort*` compiles its kernels eagerly via `LoadKernel` BEFORE any dispatch — so the IL→wasm compile path runs fully offline (no workers, no Chromium, no dispatch). Reusable for any shared-memory layout audit. Source: `SpawnDev.ILGPU.DemoConsole/WasmCompileDump.cs`.

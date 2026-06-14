@@ -1739,5 +1739,91 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                     $"An explicit-WorkerCount accelerator constructed a SHARED memory ({createBeforeExplicit} " +
                     $"-> {createAfterExplicit}) — it must use a private memory and leave the shared one untouched.");
         }
+
+        // Wasm SIMD128 emitter foundation (Phase 1, 2026-06-14, Geordi). Pure-CPU regression guard on
+        // the v128 encoding — NO browser/GPU needed, just byte assertions. Locks the part most likely
+        // to silently break: SIMD sub-opcodes are u32-LEB128 after the 0xFD prefix (NOT single bytes
+        // like atomics), so a >=128 sub-opcode like f32x4.add (228) MUST encode to two LEB bytes
+        // (0xE4 0x01). A regression here would emit a malformed/wrong module that only fails at
+        // browser instantiation. Also locks the ForceScalar/ForceSimd/EffectiveWasmSimd decision and
+        // the v128 value-type constant. Mirrors the offline `DemoConsole -- wasm-simd-probe` check.
+        [TestMethod]
+        public void Wasm_Simd128_EmitterEncodesV128OpcodesCorrectly()
+        {
+            void Expect(string what, List<byte> got, byte[] want)
+            {
+                if (got.Count != want.Length)
+                    throw new Exception($"{what}: emitted {got.Count} bytes, expected {want.Length} ({BitConverter.ToString(got.ToArray())} vs {BitConverter.ToString(want)})");
+                for (int i = 0; i < want.Length; i++)
+                    if (got[i] != want[i])
+                        throw new Exception($"{what}: byte {i} = 0x{got[i]:X2}, expected 0x{want[i]:X2} ({BitConverter.ToString(got.ToArray())})");
+            }
+
+            // v128 value type constant.
+            if (WasmOpCodes.V128 != 0x7B)
+                throw new Exception($"v128 value type = 0x{WasmOpCodes.V128:X2}, expected 0x7B");
+
+            // f32x4.add (228) — the canonical multi-byte-LEB sub-opcode: 0xFD, then LEB128(228) = 0xE4 0x01.
+            var c = new List<byte>();
+            WasmModuleBuilder.EmitSimd(c, WasmOpCodes.F32x4Add);
+            Expect("f32x4.add", c, new byte[] { 0xFD, 0xE4, 0x01 });
+
+            // i32x4.add (174) — also multi-byte: LEB128(174) = 0xAE 0x01.
+            c = new List<byte>();
+            WasmModuleBuilder.EmitSimd(c, WasmOpCodes.I32x4Add);
+            Expect("i32x4.add", c, new byte[] { 0xFD, 0xAE, 0x01 });
+
+            // f32x4.splat (19) — single-byte sub-opcode: 0xFD 0x13.
+            c = new List<byte>();
+            WasmModuleBuilder.EmitSimd(c, WasmOpCodes.F32x4Splat);
+            Expect("f32x4.splat", c, new byte[] { 0xFD, 0x13 });
+
+            // v128.load (0) with align=4, offset=0: 0xFD 0x00 0x04 0x00.
+            c = new List<byte>();
+            WasmModuleBuilder.EmitSimdMem(c, WasmOpCodes.V128Load, 4, 0);
+            Expect("v128.load", c, new byte[] { 0xFD, 0x00, 0x04, 0x00 });
+
+            // v128.store (11) with align=4, offset=16: 0xFD 0x0B 0x04 0x10.
+            c = new List<byte>();
+            WasmModuleBuilder.EmitSimdMem(c, WasmOpCodes.V128Store, 4, 16);
+            Expect("v128.store", c, new byte[] { 0xFD, 0x0B, 0x04, 0x10 });
+
+            // f32x4.extract_lane (31) lane 2: 0xFD 0x1F 0x02.
+            c = new List<byte>();
+            WasmModuleBuilder.EmitSimdLane(c, WasmOpCodes.F32x4ExtractLane, 2);
+            Expect("f32x4.extract_lane", c, new byte[] { 0xFD, 0x1F, 0x02 });
+
+            // v128.const splat of 1.0f: 0xFD 0x0C then 16 bytes (1.0f = 0x3F800000, little-endian, x4).
+            c = new List<byte>();
+            WasmModuleBuilder.EmitF32x4ConstSplat(c, 1.0f);
+            Expect("f32x4 const splat 1.0", c, new byte[]
+            {
+                0xFD, 0x0C,
+                0x00, 0x00, 0x80, 0x3F,  0x00, 0x00, 0x80, 0x3F,
+                0x00, 0x00, 0x80, 0x3F,  0x00, 0x00, 0x80, 0x3F,
+            });
+
+            // i8x16.shuffle identity: 0xFD 0x0D then 16 lane bytes 0..15.
+            c = new List<byte>();
+            var ident = new byte[16]; for (byte i = 0; i < 16; i++) ident[i] = i;
+            WasmModuleBuilder.EmitI8x16Shuffle(c, ident);
+            var wantShuffle = new byte[18]; wantShuffle[0] = 0xFD; wantShuffle[1] = 0x0D;
+            for (int i = 0; i < 16; i++) wantShuffle[2 + i] = (byte)i;
+            Expect("i8x16.shuffle", c, wantShuffle);
+
+            // EffectiveWasmSimd decision table (ForceScalar wins, then ForceSimd, then runtime detect).
+            bool savedScalar = WasmBackend.ForceScalar, savedSimd = WasmBackend.ForceSimd;
+            try
+            {
+                WasmBackend.ForceScalar = true; WasmBackend.ForceSimd = true;
+                if (WasmBackend.EffectiveWasmSimd) throw new Exception("ForceScalar must win over ForceSimd (expected SIMD off).");
+                WasmBackend.ForceScalar = false; WasmBackend.ForceSimd = true;
+                if (!WasmBackend.EffectiveWasmSimd) throw new Exception("ForceSimd should force SIMD on when ForceScalar is off.");
+                WasmBackend.ForceScalar = false; WasmBackend.ForceSimd = false;
+                if (WasmBackend.EffectiveWasmSimd != WasmBackend.RuntimeSupportsWasmSimd)
+                    throw new Exception("With no overrides, EffectiveWasmSimd must equal RuntimeSupportsWasmSimd.");
+            }
+            finally { WasmBackend.ForceScalar = savedScalar; WasmBackend.ForceSimd = savedSimd; }
+        }
     }
 }

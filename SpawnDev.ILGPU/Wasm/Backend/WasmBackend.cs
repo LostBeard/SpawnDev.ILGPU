@@ -119,6 +119,52 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// </summary>
         public static int PreGrowPages { get; set; } = 0;
 
+        // ── Wasm SIMD128 capability + test overrides (Phase 1, 2026-06-14) ──────────────
+        // HARD REQUIREMENT (Captain): non-SIMD devices stay FIRST-CLASS forever. Real hardware
+        // runs without wasm SIMD (AMD Phenom II X6 on Win10; Firefox 118 on Android 9 has no
+        // SIMD while Chrome on the same device does — support is fractured). The scalar path is
+        // a supported mode, not a fallback to deprecate. See Captain's BlazorWASMSIMDDetectExample
+        // for the app-level dual-build technique; the backend half is simpler because we compile
+        // kernels at runtime — detect once, then per-kernel codegen selects the path.
+
+        /// <summary>
+        /// True when the running Blazor WASM runtime build has SIMD enabled
+        /// (<see cref="System.Runtime.Intrinsics.Wasm.PackedSimd.IsSupported"/>). This is the
+        /// in-process equivalent of the app-level <c>wasmFeatureDetect.simd</c> check in Captain's
+        /// BlazorWASMSIMDDetectExample: if the SIMD runtime build loaded and is executing, the
+        /// browser (and its Web Workers — same engine) accept v128 opcodes, so our worker-side
+        /// kernel modules can use them. The compat (non-SIMD) build, or a SIMD-less browser running
+        /// the default build, reports <c>false</c> → we emit the scalar path. On the desktop CLR
+        /// (offline <c>wasm-dump</c> path) this is <c>false</c> too; use <see cref="ForceSimd"/> to
+        /// exercise the SIMD emitter offline.
+        /// </summary>
+        public static bool RuntimeSupportsWasmSimd
+        {
+            get { try { return System.Runtime.Intrinsics.Wasm.PackedSimd.IsSupported; } catch { return false; } }
+        }
+
+        /// <summary>
+        /// Forces the SCALAR (non-SIMD) codegen path even on SIMD-capable hardware, so the scalar
+        /// path stays testable on the dev machine (mirrors <see cref="WebGPU.Backend.WebGPUBackend.ForceEmulatedF16"/>).
+        /// Wins over <see cref="ForceSimd"/>. Default false.
+        /// </summary>
+        public static bool ForceScalar { get; set; } = false;
+
+        /// <summary>
+        /// Forces the SIMD codegen path ON regardless of runtime detection — for OFFLINE codegen
+        /// verification (the <c>wasm-dump</c> / DemoConsole path where <see cref="RuntimeSupportsWasmSimd"/>
+        /// is false because it's the desktop CLR, not browser-wasm). Do NOT enable in a browser whose
+        /// engine lacks SIMD — emitting v128 to such a worker fails instantiation. <see cref="ForceScalar"/>
+        /// wins if both are set. Default false.
+        /// </summary>
+        public static bool ForceSimd { get; set; } = false;
+
+        /// <summary>
+        /// The effective SIMD decision consulted by codegen: <see cref="ForceScalar"/> wins (off),
+        /// then <see cref="ForceSimd"/> (on), then runtime detection (<see cref="RuntimeSupportsWasmSimd"/>).
+        /// </summary>
+        public static bool EffectiveWasmSimd => !ForceScalar && (ForceSimd || RuntimeSupportsWasmSimd);
+
         /// <summary>
         /// When set, dumps generated Wasm binaries to this directory. Desktop only.
         /// </summary>
@@ -1768,11 +1814,20 @@ namespace SpawnDev.ILGPU.Wasm.Backend
     /// </summary>
     public class WasmCapabilityContext : CapabilityContext
     {
+        /// <summary>
+        /// True when this accelerator may emit wasm SIMD128 (v128) kernel codegen — i.e. the
+        /// running Blazor WASM build has SIMD enabled (or it was force-enabled for testing). False
+        /// means the scalar path is used (the FIRST-CLASS non-SIMD mode, never deprecated). Snapshot
+        /// of <see cref="WasmBackend.EffectiveWasmSimd"/> at construction.
+        /// </summary>
+        public bool WasmSimd { get; }
+
         public WasmCapabilityContext() : base()
         {
             // Half (Float16) is emulated via f32 promotion in the Wasm codegen.
             // BasicValueType.Float16 maps to WasmOpCodes.F32 with 2-byte element size.
             Float16 = true;
+            WasmSimd = WasmBackend.EffectiveWasmSimd;
         }
     }
 }

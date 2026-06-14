@@ -77,6 +77,16 @@ namespace SpawnDev.ILGPU.Wasm
         public int MaxLinearMemoryPages => _maxLinearMemoryPages;
 
         /// <summary>
+        /// True when this accelerator may emit wasm SIMD128 (v128) kernel codegen — the running
+        /// Blazor WASM build has SIMD enabled (<see cref="WasmBackend.RuntimeSupportsWasmSimd"/>),
+        /// or it was force-enabled via <see cref="WasmBackend.ForceSimd"/>; <see cref="WasmBackend.ForceScalar"/>
+        /// forces it off. False = the FIRST-CLASS non-SIMD scalar path (never deprecated; required for
+        /// SIMD-less hardware/browsers — see Captain's BlazorWASMSIMDDetectExample). Phase 1 surfaces
+        /// this; production codegen begins consulting it in Phase 2/3 of the SIMD port.
+        /// </summary>
+        public bool SupportsSimd => WasmBackend.EffectiveWasmSimd;
+
+        /// <summary>
         /// Process-persistent shared Web Worker pool — created ONCE per tab and reused across every
         /// DEFAULT-WorkerCount <see cref="WasmAccelerator"/> instance (the PMT/production common
         /// case), not spun up/torn down per accelerator. Accelerators created with an explicit

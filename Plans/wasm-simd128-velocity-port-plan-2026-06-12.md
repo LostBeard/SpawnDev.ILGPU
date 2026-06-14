@@ -33,13 +33,24 @@ the correct shape for GPU-style kernels:
   Warp tests' CPU oracle).
 
 ## Runtime detection + capability surface
-- At `WasmAccelerator` init, instantiate a minimal probe module containing one v128 op (the
-  wasm-feature-detect technique from Captain's repo, done inline — no JS dependency).
-- Expose `Capabilities.WasmSimd` (and wire `AcceleratorRequirements` if a consumer ever needs
-  to require it). Detection failure → scalar codegen, byte-for-byte today's behavior.
+- **Detection (REVISED 2026-06-14 per Captain): use `System.Runtime.Intrinsics.Wasm.PackedSimd.IsSupported`,
+  NOT a hand-built probe module.** The insight: if the Blazor WASM app running the accelerator has
+  SIMD enabled, SIMD is supported; if not, assume it isn't. `PackedSimd.IsSupported` is exactly that
+  signal in-process — it is `true` only when the running .NET wasm build has SIMD enabled, and a
+  SIMD-enabled build only loads/executes if the browser accepts v128 (else the whole app dies before
+  our code runs). The Web Workers that instantiate our kernel modules share the same browser engine,
+  so main-thread `IsSupported == true` ⇒ workers accept v128. This is the in-process equivalent of the
+  app-level `wasmFeatureDetect.simd` check in Captain's `BlazorWASMSIMDDetectExample` (which picks the
+  SIMD vs compat *build* at startup); our backend just reads which build won. No JS dependency, works
+  worker-side. The compat build / SIMD-less browser / desktop CLR all report `false` → scalar codegen,
+  byte-for-byte today's behavior. **SHIPPED** as `WasmBackend.RuntimeSupportsWasmSimd`.
+- Expose `Capabilities.WasmSimd` (`WasmCapabilityContext.WasmSimd`) + `WasmAccelerator.SupportsSimd`
+  (and wire `AcceleratorRequirements` if a consumer ever needs to require it). **SHIPPED.**
 - Per-kernel: codegen consults the accelerator's detected capability; `WasmBackend.ForceScalar`
-  test flag forces the scalar path on SIMD hardware (mirrors `WebGPUBackend.ForceEmulatedF16`)
-  so BOTH paths are testable on the dev machine.
+  forces the scalar path on SIMD hardware (mirrors `WebGPUBackend.ForceEmulatedF16`) and
+  `WasmBackend.ForceSimd` forces the SIMD path for OFFLINE codegen verification (desktop CLR, where
+  `IsSupported` is false) — so BOTH paths are testable on the dev machine. `EffectiveWasmSimd` =
+  `!ForceScalar && (ForceSimd || RuntimeSupportsWasmSimd)`. **SHIPPED.**
 
 ## Phases (each gated; no phase starts until the previous gate is green)
 - **Phase 0 — MEASURE (gate for everything):** profile the kernel-vs-host time split on
@@ -60,10 +71,17 @@ the correct shape for GPU-style kernels:
     step (needs the machine): measure the SAME split on the ACTUAL hot kernels (FusedDequantMatMul,
     FusedFFN GEMM, RadixSort) to pick the 1-2 highest-intensity targets for the Phase-2 prototype.
     (Microbench was a one-shot — reverted from the tree; restore from this commit's history if needed.)
-- **Phase 1 — emitter foundation:** v128 opcode + type support in `WasmModuleBuilder`
-  (sections, locals, 0xFD encodings), the runtime detector + capability flag, and a
-  hand-built probe kernel verified via the offline `wasm-dump` path + `wasm2wat
-  --enable-threads` disassembly.
+- **Phase 1 — emitter foundation: ✅ DONE (2026-06-14, Geordi).** v128 value type (`WasmOpCodes.V128`
+  = 0x7B) + the 0xFD-prefixed SIMD sub-opcodes (spec-verified values, stored as `uint` because they're
+  u32-LEB128 after the prefix — f32x4.add=228 etc. are multi-byte) in `WasmOpCodes`; emit helpers in
+  `WasmModuleBuilder` (`EmitSimd`/`EmitSimdMem`/`EmitSimdLane`/`EmitV128Const`/`EmitF32x4ConstSplat`/
+  `EmitI8x16Shuffle`); runtime detection (`RuntimeSupportsWasmSimd` via `PackedSimd.IsSupported`) +
+  `ForceScalar`/`ForceSimd`/`EffectiveWasmSimd` + `WasmCapabilityContext.WasmSimd` +
+  `WasmAccelerator.SupportsSimd`. Verified by `DemoConsole -- wasm-simd-probe` (`WasmSimdProbe.cs`): a
+  hand-built v128 module **`wasm-validate`-clean** and **`wasm2wat`-decoded** to exactly the intended
+  instructions (v128 local, splat/add/mul, v128.const, store/load, bitselect, i8x16.shuffle,
+  extract/replace_lane, i32x4.add/neg). Purely additive — nothing in production codegen emits v128 yet,
+  so the scalar path is byte-identical. PMT_FILTER=WasmTests gate + ship as a `-local` bump.
 - **Phase 2 — one-kernel prototype (decision gate):** vectorize ONE hot kernel shape
   end-to-end behind the flag (the flat element-wise family or MatMul inner loop), CPU-oracle
   correctness in BOTH modes, A/B wall-clock on SIMD hardware at production sizes. **Proceed to
