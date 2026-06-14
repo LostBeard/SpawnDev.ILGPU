@@ -63,6 +63,36 @@ internal static class SubgroupReduceProbe
         if (Group.IsFirstThread) output[0] = r;
     }
 
+    // GEMV shape (plan #4): explicitly-grouped, Grid.IdxX = output column, inner strided K-loop
+    // `k = tid; k < K; k += G` accumulate, shared-mem reduce. The K-loop is BARRIER-FREE (reduction
+    // barriers are AFTER it) → must keep its NATURAL `k < K` break, not the group grid-stride form.
+    private const int GemvG = 64;
+    private static void GemvGroupReduceProbe(
+        ArrayView<float> input, ArrayView<float> matrix, ArrayView<float> output, ArrayView<int> p)
+    {
+        int K = p[0], N = p[1];
+        int n = Grid.IdxX, tid = Group.IdxX;
+        var sh = SharedMemory.Allocate<float>(GemvG);
+        float partial = 0f;
+        if (n < N) { int rowBase = n * K; for (int k = tid; k < K; k += GemvG) partial += input[k] * matrix[rowBase + k]; }
+        sh[tid] = partial; Group.Barrier();
+        for (int stride = GemvG / 2; stride > 0; stride >>= 1) { if (tid < stride) sh[tid] += sh[tid + stride]; Group.Barrier(); }
+        if (tid == 0 && n < N) output[n] = sh[0];
+    }
+
+    // Grid-stride loop that BARRIERS via an inlined helper INSIDE the loop (the scan/radix shape) →
+    // must KEEP the uniform break (transitive/post-emission barrier detection).
+    private static void GridStrideScanWithBarrierProbe(ArrayView<int> input, ArrayView<int> output, ArrayView<int> p)
+    {
+        int N = p[0];
+        int stride = Grid.DimX * Group.DimX;
+        for (int i = Grid.GlobalIndex.X; i < N; i += stride)
+        {
+            int s = GroupExtensions.InclusiveScan<int, AddInt32>(input[i]);
+            output[i] = s;
+        }
+    }
+
     private record Probe(string Name, Delegate Kernel);
 
     public static Task<int> Run(string[] args)
@@ -70,6 +100,29 @@ internal static class SubgroupReduceProbe
         string outDir = args.Length > 1
             ? args[1]
             : Path.Combine(Directory.GetCurrentDirectory(), "_subgroup_reduce_probe");
+        Directory.CreateDirectory(outDir);
+
+        // GEMV/uniform-break emitter probe (plan #4): GEMV K-loop must get the NATURAL break (no
+        // `_uf_group_iter * workgroup_size`), scan-in-loop must KEEP the uniform transform.
+        if (args.Contains("gemv"))
+        {
+            var gemvWgsl = ShaderCompiler.Generate(
+                (Action<ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<int>>)GemvGroupReduceProbe,
+                CapabilityProfiles.WebGPUFull, new KernelSpecialization(64, null)).Source ?? "";
+            File.WriteAllText(Path.Combine(outDir, "GemvGroupReduce__WebGPUFull.wgsl"), gemvWgsl);
+            // The BREAK must use the natural condition, not the uniform `_uf_break_*` (the unused
+            // `let _uf_break_*` / `_uf_group_iter` left behind when natural wins are harmless dead code).
+            bool gemvBad = gemvWgsl.Contains("if (_uf_break", StringComparison.Ordinal)
+                || gemvWgsl.Contains("if (!_uf_break", StringComparison.Ordinal);
+            Console.WriteLine($"[gemv] len={gemvWgsl.Length} breakUsesUniform(BAD)={gemvBad} (MUST be False)");
+
+            var scanWgsl = ShaderCompiler.Generate(
+                (Action<ArrayView<int>, ArrayView<int>, ArrayView<int>>)GridStrideScanWithBarrierProbe,
+                CapabilityProfiles.WebGPUFull, new KernelSpecialization(64, null)).Source ?? "";
+            bool scanKept = scanWgsl.Contains("_uf_");
+            Console.WriteLine($"[gridstride-scan-with-barrier] len={scanWgsl.Length} transformKept(_uf_)={scanKept} (MUST be True)");
+            return Task.FromResult((!gemvBad && scanKept) ? 0 : 1);
+        }
         Directory.CreateDirectory(outDir);
 
         bool verbose = args.Contains("-v");

@@ -154,6 +154,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         // Set to true during GenerateCode() for scan/sort kernels to enable
         // block-level WGSL comments and structured code gen tracing.
         private bool _isScanKernel = false;
+        // Unique-per-loop sentinel id for the two-pass uniform-break resolution (GenerateLoopConstruct).
+        private int _ufBreakSentinelCounter = 0;
 
         /// <summary>
         /// Describes one field of a decomposed body struct parameter.
@@ -8198,6 +8200,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             AppendLine("loop {");
             PushIndent();
 
+            // ─── Two-pass uniform-break (GEMV grid-stride fix) ───
+            // The synthetic uniform break + group/tile counter (init above, increment below) are
+            // emitted UNCONDITIONALLY for a thread-dependent loop, but whether the loop's break
+            // actually USES the uniform form is decided AFTER the body is emitted: only a loop that
+            // contains a barrier needs uniform control flow. We can't know that pre-emission —
+            // cooperative-op barriers (Group/Warp Scan/Reduce) are produced by intrinsic HANDLERS at
+            // codegen time, not as IR — so we emit a sentinel for the break condition now and patch it
+            // from the EMITTED body text once the loop is closed (workgroupBarrier()/storageBarrier()
+            // are real text by then, incl. inlined-helper barriers). Barrier-free loops (e.g. a
+            // cooperative GEMV's K-tile loop, barriers in the post-loop reduction) keep their natural
+            // thread-dependent break instead of being conflated with the group grid-stride counter.
+            int _ufBodyStartPos = Builder.Length;
+            string _ufBreakSentinel = null;
+            string _ufUniformBreak = null;
+            string _ufNaturalBreak = null;
+
             // Emit the header block's body (instructions)
             GenerateBasicBlockCode(headerBlock);
 
@@ -8310,7 +8328,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 if (trueIsExit)
                 {
                     // True branch exits → break when condition is true
-                    string condExpr = breakConditionExpr ?? Load(headerBranch.Condition).ToString();
+                    string _natCond = Load(headerBranch.Condition).ToString();
+                    string condExpr;
+                    if (breakConditionExpr != null)
+                    {
+                        // Defer uniform-vs-natural to the post-body barrier scan (see two-pass note).
+                        _ufBreakSentinel = $"/*__UFBRK{_ufBreakSentinelCounter++}__*/";
+                        _ufUniformBreak = breakConditionExpr;
+                        _ufNaturalBreak = _natCond;
+                        condExpr = _ufBreakSentinel;
+                    }
+                    else condExpr = _natCond;
                     AppendLine($"if ({condExpr}) {{");
                     PushIndent();
                     EmitIntermediateBlocksToExit(trueTarget, trueHeaderExit, headerBlock, loopNode, visited);
@@ -8325,9 +8353,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 else if (falseIsExit)
                 {
                     // False branch exits → break when condition is false
-                    string condExpr = breakConditionExpr != null 
-                        ? $"!{breakConditionExpr}" 
-                        : $"!{Load(headerBranch.Condition)}";
+                    string _natCond = $"!{Load(headerBranch.Condition)}";
+                    string condExpr;
+                    if (breakConditionExpr != null)
+                    {
+                        _ufBreakSentinel = $"/*__UFBRK{_ufBreakSentinelCounter++}__*/";
+                        _ufUniformBreak = $"!{breakConditionExpr}";
+                        _ufNaturalBreak = _natCond;
+                        condExpr = _ufBreakSentinel;
+                    }
+                    else condExpr = _natCond;
                     AppendLine($"if ({condExpr}) {{");
                     PushIndent();
                     EmitIntermediateBlocksToExit(falseTarget, falseHeaderExit, headerBlock, loopNode, visited);
@@ -8383,6 +8418,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             PopIndent();
             AppendLine("}");
+
+            // ─── Two-pass uniform-break resolution ───
+            // Body fully emitted. Patch the deferred break sentinel from the ACTUAL emitted body:
+            // a loop that contains a barrier (workgroupBarrier/storageBarrier — incl. ones from
+            // inlined cooperative-op helpers, which are real text by now) keeps the synthetic UNIFORM
+            // break (so the barrier stays in uniform control flow); a barrier-free loop reverts to its
+            // NATURAL thread-dependent break (fixes the GEMV K-loop conflation). The unconditionally
+            // emitted synthetic counter/let are harmless (written-but-unread) when the natural break wins.
+            if (_ufBreakSentinel != null)
+            {
+                string _ufBody = Builder.ToString(_ufBodyStartPos, Builder.Length - _ufBodyStartPos);
+                bool _ufLoopHasBarrier = _ufBody.Contains("workgroupBarrier(", StringComparison.Ordinal)
+                    || _ufBody.Contains("storageBarrier(", StringComparison.Ordinal);
+                Builder.Replace(_ufBreakSentinel, _ufLoopHasBarrier ? _ufUniformBreak : _ufNaturalBreak);
+            }
+
             _currentLoopHeaderExitTarget = null;
             return headerExitTarget;
         }
