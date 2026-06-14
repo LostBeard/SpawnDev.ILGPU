@@ -98,6 +98,46 @@ accelerator. Locked by `WasmTests.Wasm_SharedWorkerPool_PersistsAndStaysBoundedA
 alive and both adopt the same worker, both install handlers — detach-on-dispose only cleans the
 dominant sequential case (PMT disposes the previous accelerator before creating the next).
 
+## Process-static SHARED linear memory (2026-06-14) — `s_sharedWasmMemory`
+
+The memory analog of the worker pool, and the **second half** the pool fix unmasked. A
+`new WebAssembly.Memory({ shared: true })` reserves its FULL `maximum` (default 16384 pages = 1 GiB)
+of virtual address space at construction and can **never relocate**, so each accelerator that built
+its own memory burned a full 1 GiB reservation. Before the persistent pool, `Worker.terminate()` per
+accelerator Dispose dropped the workers' references so the old reservation was freed/GC'd per test;
+with the persistent pool the workers **pin** the last memory they instantiated against
+(`_lastMemoryBuffer` + `_instancesById`, `WorkerPool.cs`) until they next swap. Across the ~569-test
+lane, per-accelerator memories accumulated up to `workerCount` live 1 GiB reservations (plus JS-GC lag)
+until V8's address-space cap was hit and the **`new WebAssembly.Memory(...)` CONSTRUCTOR** threw
+`could not allocate memory` (Tuvok's 88 `RangeError`s, the memory half). NB: the constructor failing
+(not `grow()` → our `OutOfMemoryException`) is the tell — accumulation, not single-memory high-water.
+
+**Fix:** default accelerators share **ONE** process-static `s_sharedWasmMemory` per tab (grown to the
+lane high-water, never re-created → exactly one reservation). The linear memory is per-dispatch
+**transient** working/staging memory (zero region → copy-IN → run → copy-OUT; no cross-accelerator
+state), so sharing is correct. Bonus: with persistent workers AND one persistent memory the buffer
+only changes on `grow()`, so after high-water the workers **stop re-instantiating kernels entirely**
+(per-test new-memory→instance-cache-clear churn gone).
+
+- **Routing:** `UsesSharedMemory` = `_useSharedPool && _maxLinearMemoryPages == 16384`. The whole
+  create/grow/reuse block + Dispose read/write through `CachedWasmMemory`/`CachedMemoryBuffer`/
+  `CachedWasmPages` properties that pick static-vs-instance backing. A custom-`MaxLinearMemoryPages`
+  accelerator (e.g. ML DA3 at 32768) or explicit-`WorkerCount` accelerator keeps a PRIVATE
+  `_cachedWasmMemory` — required, since the kernel module declares its import max = its own
+  MaxLinearMemoryPages and the spec needs supplied-max ≤ module-declared-max (a 16384 memory can't
+  back 32768 modules or vice-versa), and these are rare/long-lived so no accumulation.
+- **Concurrency:** `s_sharedMemoryGate` (a `SemaphoreSlim(1,1)`) serializes the shared-memory dispatch
+  window (acquire→zero→copy-IN→exec→copy-OUT) across accelerators — within one accelerator dispatches
+  already serialize via `_pendingWork`; this extends that to two concurrently-alive default
+  accelerators sharing the one memory (overlapping region-[0..) writes would corrupt). Uncontended /
+  zero-cost in the sequential PMT/production case.
+- **Lifetime:** never disposed on accelerator Dispose (shared accelerators leave the instance handles
+  null; private accelerators dispose their own); torn down only via `WasmAccelerator.DisposeSharedWasmMemory()`
+  (also called by `DisposeSharedWorkerPool()`) or tab teardown. Diagnostics: `SharedWasmMemoryCreateCount`
+  (stays 1 across the lane), `SharedWasmMemoryPages` (high-water). Locked by
+  `WasmTests.Wasm_SharedLinearMemory_PersistsAndStaysBoundedAcrossAccelerators` (≤1 construction across
+  K accelerators + correct-on-reuse + explicit-count isolation).
+
 ## Offline compile dump (desktop, no browser) — `wasm-dump`
 
 `SpawnDev.ILGPU.DemoConsole -- wasm-dump` compiles RadixSort kernels on the DESKTOP and prints the emitted shared-memory alloca table + flags any `GenerateCode(Alloca)` type+size fallback aliasing or offset overlap. Works because `WasmAccelerator.Create` wraps the `BlazorJSRuntime.JS` lookup in try/catch (defaults to 4 cores) and `CreateRadixSort*` compiles its kernels eagerly via `LoadKernel` BEFORE any dispatch — so the IL→wasm compile path runs fully offline (no workers, no Chromium, no dispatch). Reusable for any shared-memory layout audit. Source: `SpawnDev.ILGPU.DemoConsole/WasmCompileDump.cs`.

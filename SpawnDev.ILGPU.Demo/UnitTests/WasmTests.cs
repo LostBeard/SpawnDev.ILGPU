@@ -1637,5 +1637,107 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                     $"An explicit-WorkerCount accelerator grew the SHARED pool ({sizeBeforeExplicit} -> " +
                     $"{sizeAfterExplicit}) — it must use a private pool and leave the shared pool untouched.");
         }
+
+        // Process-static SHARED linear memory (2026-06-14, Geordi). A `WebAssembly.Memory({shared:true})`
+        // reserves its full `maximum` (default 1 GiB) of virtual address space at construction and can
+        // never relocate. Before the persistent worker pool, Worker.terminate() per accelerator dropped
+        // the workers' references each test so the old reservation was freed; with persistent workers the
+        // workers PIN the last memory they instantiated against, so per-accelerator memories accumulated
+        // up to workerCount live 1 GiB reservations across the ~569-test Wasm lane until V8's address-
+        // space cap was hit and `new WebAssembly.Memory()` threw "could not allocate memory" (Tuvok's 88
+        // RangeErrors — the memory half the pool fix unmasked). The fix: default accelerators share ONE
+        // process-static linear memory (grown to the lane high-water, never re-created).
+        //
+        // This locks BOTH halves:
+        //  (1) BOUNDED: creating + dispatching + disposing K default accelerators constructs AT MOST ONE
+        //      new shared memory (then reuses it), NOT K — directly the reservation-accumulation fix.
+        //  (2) CORRECT-ON-REUSE: every accelerator's dispatch into the shared memory matches the CPU
+        //      oracle, proving the shared linear memory carries no stale cross-accelerator state.
+        // Plus ISOLATION: an explicit-WorkerCount accelerator (private pool → private memory) must NOT
+        // construct a shared memory.
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_SharedLinearMemory_PersistsAndStaysBoundedAcrossAccelerators()
+        {
+            const int count = 4096;
+            const int accelerators = 5;
+
+            var oracle = new int[count];
+            for (int i = 0; i < count; i++) oracle[i] = i * 5 + 3;
+
+            int createCountBefore = WasmAccelerator.SharedWasmMemoryCreateCount;
+            for (int a = 0; a < accelerators; a++)
+            {
+                var context = Context.Create().Wasm().ToContext();
+                var accelerator = await context.CreateWasmAcceleratorAsync();
+                try
+                {
+                    using var buf = accelerator.Allocate1D<int>(count);
+                    var fill = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(
+                        (i, v) => v[i] = i * 5 + 3);
+                    fill((Index1D)count, buf.View);
+                    await accelerator.SynchronizeAsync();
+                    var result = await buf.CopyToHostAsync<int>();
+
+                    for (int i = 0; i < count; i++)
+                        if (result[i] != oracle[i])
+                            throw new Exception(
+                                $"Accelerator #{a}: result[{i}]={result[i]} expected {oracle[i]} — " +
+                                $"shared linear memory produced wrong output (stale cross-accelerator state?).");
+                }
+                finally
+                {
+                    accelerator.Dispose();
+                    context.Dispose();
+                }
+            }
+            int createCountAfter = WasmAccelerator.SharedWasmMemoryCreateCount;
+
+            // BOUNDED invariant: across K default accelerators, at most ONE shared memory was
+            // constructed (0 if a prior lane test already built it; 1 if this test was first). The
+            // pre-fix per-accelerator design would have constructed K (one per accelerator).
+            int created = createCountAfter - createCountBefore;
+            if (created > 1)
+                throw new Exception(
+                    $"{created} shared WebAssembly.Memory objects were constructed across {accelerators} " +
+                    $"accelerators — the per-accelerator-memory reservation leak has regressed (expected <= 1).");
+            if (WasmAccelerator.SharedWasmMemoryPages < 1)
+                throw new Exception(
+                    "Shared linear memory page count never registered >= 1 after dispatching on " +
+                    $"{accelerators} default accelerators — the shared memory was not used.");
+
+            // ISOLATION invariant: an explicit-WorkerCount accelerator uses a private pool AND a private
+            // memory, so it must NOT construct a shared memory.
+            int createBeforeExplicit = WasmAccelerator.SharedWasmMemoryCreateCount;
+            {
+                int defaultWorkerCount;
+                {
+                    using var probeCtx = Context.Create().Wasm().ToContext();
+                    using var probeAcc = await probeCtx.CreateWasmAcceleratorAsync();
+                    defaultWorkerCount = ((WasmAccelerator)probeAcc).WorkerCount;
+                }
+                var exCtx = Context.Create().Wasm().ToContext();
+                var exAcc = await exCtx.CreateWasmAcceleratorAsync(
+                    new WasmBackendOptions { WorkerCount = defaultWorkerCount + 6 });
+                try
+                {
+                    using var b = exAcc.Allocate1D<int>(count);
+                    var k = exAcc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(
+                        (i, v) => v[i] = i * 5 + 3);
+                    k((Index1D)count, b.View);
+                    await exAcc.SynchronizeAsync();
+                    var r = await b.CopyToHostAsync<int>();
+                    for (int i = 0; i < count; i++)
+                        if (r[i] != oracle[i])
+                            throw new Exception(
+                                $"Explicit-WorkerCount accelerator: result[{i}]={r[i]} expected {oracle[i]}.");
+                }
+                finally { exAcc.Dispose(); exCtx.Dispose(); }
+            }
+            int createAfterExplicit = WasmAccelerator.SharedWasmMemoryCreateCount;
+            if (createAfterExplicit > createBeforeExplicit)
+                throw new Exception(
+                    $"An explicit-WorkerCount accelerator constructed a SHARED memory ({createBeforeExplicit} " +
+                    $"-> {createAfterExplicit}) — it must use a private memory and leave the shared one untouched.");
+        }
     }
 }
