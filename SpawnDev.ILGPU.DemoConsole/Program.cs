@@ -19,6 +19,11 @@ try
     if (args.Length > 0 && args[0] == "wasm-simd-probe")
         return await WasmSimdProbe.Run(args);
 
+    // Wasm SIMD128 Phase 2 decision-gate A/B: emit scalar + f32x4 FMA-fold kernels + a Node harness
+    // (run-bench.mjs) that times scalar-vs-SIMD on the same ALU-dense workload. No browser.
+    if (args.Length > 0 && args[0] == "simd-bench-emit")
+        return await WasmSimdBench.Run(args);
+
     // Offline WGSL generation probe (precompiled-shaders Layer 1). No device/browser.
     if (args.Length > 0 && args[0] == "shader-gen")
         return await ShaderGenDump.Run();
