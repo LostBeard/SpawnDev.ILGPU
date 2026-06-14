@@ -71,6 +71,40 @@ plan constraint). Concretely:
 4. **Gate:** real elementwise ILGPU kernel, CPU-oracle in both modes + Node A/B; then `FusedDequantMatMul`
    decode arithmetic. `WasmTests` green in both modes. Ship as `-local` bumps per stage.
 
+## Stage 3a increment 2 — IMPLEMENTATION SPEC (measured 2026-06-14; ready to cut)
+Increment 1 (uniformity analysis + predicate) shipped + validated (`c503d0a`). Increment 2 = the v128
+emission. Decisions locked after reading the dispatch ABI + the scalar emitter:
+
+- **Architecture: a SEPARATE vectorized emitter** (`WasmSimdKernelEmitter`), NOT inline `if(simd)`
+  branches threaded through the scalar `GenerateCode(*)` methods. Selected by ONE guard at the top of
+  kernel generation: `if (EffectiveWasmSimd && analysis.Vectorizable) emit vectorized; else scalar`.
+  ⇒ the scalar emitter is PROVABLY untouched (one if), so scalar-path regression risk ≈ 0 regardless of
+  the new path's state. Only the new path awaits the numerical gate.
+- **ABI reuse:** the vectorized kernel keeps the SAME dispatch ABI + memory layout as scalar
+  (`kernel(i, gridDimX, gridDimY, scratch, groupSize, i%groupSize, 0,0,0,0, realGroupDimX, realGroupDimY,
+  ...viewArgs)`), so the EXISTING `WasmAccelerator` dispatch + buffer copy-in/out + the PMT CPU-oracle
+  work unchanged — no new dispatch path, no hand-rebuilt harness. One fiber processes 4 consecutive
+  thread-ids: the worker loop advances `i` by 4 (in SIMD mode) over the vector body + a scalar remainder
+  for `count % 4` (handled inside the emitted kernel via a uniform tail loop, OR the dispatch passes a
+  vector-count + tail-count — decide at cut time; in-kernel tail is simpler and keeps the ABI identical).
+- **Value coverage (Stage-3a class):** index → v128 `(base,base+1,base+2,base+3)`; `PrimitiveValue` /
+  lane-invariant → scalar + `f32x4.splat`/`i32x4.splat` at the vector-op boundary; `Load` unit-stride
+  (address = base + index*elemSize, index lane-variant) → `v128.load`; `Load` indexed/gather → extract-
+  lane addr → scalar load → replace-lane ×4; `Store` unit-stride → `v128.store`; `BinaryArithmeticValue`/
+  `UnaryArithmeticValue` on lane-variant → `f32x4`/`i32x4` (mul+add, NO fused FMA — cross-mode
+  determinism); `CompareValue`+`Predicate`/select → `v128.bitselect` (uniform-condition selects only in
+  3a); `ConvertValue` → the f32x4/i32x4 convert ops; LEA/view field access reuses the scalar address math
+  on the scalar lane-base then splat+lane-offset. Anything outside this set ⇒ analysis already returned
+  not-vectorizable ⇒ scalar fallback.
+- **Dual validation gate:** (1) STRUCTURAL, offline now — emit the vectorized kernel + `wasm-validate`
+  (catches encoding/type/stack bugs immediately, the most likely emitter mistakes). (2) NUMERICAL, via
+  PMT — a `WasmTests` test dispatches the vectorized elementwise kernel and asserts == CPU reference in
+  BOTH modes (`ForceSimd` on/off); uses the existing correct oracle, zero ABI reconstruction. First
+  target: `o[i]=a[i]*c+b[i]` (pure unit-stride), then a gather kernel, then the dequant decode.
+- **Timing:** execute the cut when the machine is free so the numerical gate runs immediately after the
+  structural one (don't sit on a numerically-ungated new path). Pairs with running the queued Phase-1
+  PMT gate + `4.12.1-local.5` ship.
+
 ## Constraints (unchanged)
 Core SIMD128 only; cross-mode determinism (no one-mode FMA — wasm core has no v128 FMA, use mul+add to
 match scalar); v128 stores non-atomic (barrier-ordered data stays scalar-verified; UNIFORM STORE REGIMES
