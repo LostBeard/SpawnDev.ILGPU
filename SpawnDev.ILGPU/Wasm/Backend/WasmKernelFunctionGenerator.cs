@@ -654,6 +654,16 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 }
             }
 
+            // Stage-3a SIMD uniformity analysis (read-only diagnostic; does NOT drive emission yet).
+            // Only the top-level kernel (has the index param mapped) records it, so helper functions
+            // don't clobber the kernel's result. Wrapped — a diagnostic must NEVER break a compile.
+            // See WasmSimdAnalysis + the phase-3 design doc.
+            if (_indexParam != null)
+            {
+                try { WasmBackend.LastSimdAnalysis = WasmSimdAnalysis.Analyze(Method, _indexParam, out _); }
+                catch { /* diagnostic only — never fail codegen over it */ }
+            }
+
             for (int i = startIdx; i < parameters.Count; i++)
             {
                 var param = parameters[i];

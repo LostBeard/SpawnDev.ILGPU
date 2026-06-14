@@ -24,6 +24,10 @@ try
     if (args.Length > 0 && args[0] == "simd-bench-emit")
         return await WasmSimdBench.Run(args);
 
+    // Wasm SIMD128 Phase 3 Stage-3a: validate the uniformity analysis on real kernel IR. No browser.
+    if (args.Length > 0 && args[0] == "simd-analyze")
+        return await WasmSimdAnalyzeProbe.Run();
+
     // Offline WGSL generation probe (precompiled-shaders Layer 1). No device/browser.
     if (args.Length > 0 && args[0] == "shader-gen")
         return await ShaderGenDump.Run();

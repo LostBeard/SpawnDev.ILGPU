@@ -166,6 +166,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public static bool EffectiveWasmSimd => !ForceScalar && (ForceSimd || RuntimeSupportsWasmSimd);
 
         /// <summary>
+        /// Stage-3a SIMD uniformity analysis result for the most recently compiled kernel
+        /// (<see cref="WasmSimdAnalysis"/>). DIAGNOSTIC ONLY — computed read-only during codegen; it
+        /// does NOT yet drive emission (the v128 emitter is the next Stage-3a increment). Lets the
+        /// offline probe + tests see which kernels are Stage-3a-vectorizable. Default = not vectorizable.
+        /// </summary>
+        public static WasmSimdAnalysisResult LastSimdAnalysis { get; set; }
+
+        /// <summary>
         /// When set, dumps generated Wasm binaries to this directory. Desktop only.
         /// </summary>
         public static string? WasmDumpPath { get; set; }
