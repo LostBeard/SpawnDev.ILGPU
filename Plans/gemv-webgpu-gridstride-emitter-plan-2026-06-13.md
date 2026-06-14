@@ -1,6 +1,17 @@
 # Plan: Fix the WebGPU GEMV grid-stride emitter bug (#4) — re-enable the fast grouped GEMV on WebGPU
 
-**Status:** OPEN. Not urgent — Tuvok shipped a correct fallback (`SpawnDev.ILGPU.ML` master `2752c3b`); WebGPU GEMV currently routes to the per-element kernel. This plan re-enables the fast cooperative GEMV on WebGPU.
+## ⛔ FIX ATTEMPTED + REVERTED (Geordi, 2026-06-13) — barrier-gating is the WRONG approach; needs design work
+**What I tried (option b, two variants) and why it FAILED — do NOT repeat:**
+- Gated the synthetic-uniform-break transform on the loop containing a barrier (`WGSLKernelFunctionGenerator.cs` ~8115 pre-loop block + ~8239 break-rewrite, using `loopHasIRBarriers` already computed at 8017). Hypothesis: the transform exists only to keep in-loop barriers uniform, so a barrier-free loop (GEMV K-tile loop) should keep its natural `k < K` break.
+- Offline this looked perfect: GEMV probe → broken `(_uf_group_iter * workgroup_size.x) < K` GONE, natural `v_6 < v_0` restored; and a grid-stride-scan-with-helper-barrier probe kept the transform.
+- **But the FULL SWEEP found 72 regressions: ALL RadixSort* + GlobalInclusiveScan* on WebGPU + WebGPUNoSubgroups** (`[WebGPU] 115 GPU errors during dispatch` = WGSL uniformity validation: barrier in non-uniform control flow). GEMV itself was FIXED (passed all backends), but scan/radix broke.
+- **Root reason (the architectural wall):** cooperative-op barriers (`GroupExtensions.Scan/Reduce`, and RadixSort's barrier mechanism) are emitted by the WGSL INTRINSIC HANDLER at codegen time — they are NOT IR `MemoryBarrier` values, and the callee IR bodies at this point are just thin intrinsic wrappers (verified: `InclusiveScan_15 blocks=1`). So NO pre-emission barrier signal is reliable: direct IR check misses them; transitive IR recursion misses them (no body); a cooperative-type-list (`GroupExtensions`/`WarpExtensions`) caught the scan probe but STILL missed RadixSort's barrier source (62 RadixSort failures remained). 
+- Tile-counter path (option a) is ALSO wrong for the GEMV: it forces all threads to thread-0's trip count → out-of-bounds reads when `K % step != 0` (the natural per-thread `k < K` is the only correct break, and it's barrier-free-safe).
+- **REVERTED** both codegen files to `63e288d` (green). Repro test removed (it fails until #4 is properly fixed). No regression shipped. ML fallback (master `2752c3b`) keeps WebGPU GEMV correct → #4 stays non-urgent.
+
+**The CORRECT fix needs a reliable "this loop will contain a barrier after inlining" signal** — which the current architecture lacks (barriers materialize at emission). Candidate directions for a fresh, focused session: (1) TWO-PASS loop emission — emit the loop body first, detect emitted `workgroupBarrier()`, then choose the break (biggest, cleanest, but a refactor); (2) have the cooperative-op intrinsic REGISTRATIONS declare "emits barrier" so a pre-pass can query the registry (single-source, no name-list drift) and find them transitively through the call graph including RadixSort's kernels; (3) compute per-loop trip-count-uniformity + barrier-presence together (the transform is needed iff non-uniform-trip AND barrier-inside). The mechanism + the offline probe harness (`DemoConsole subgroup-reduce ... gemv`) are reusable. The minimal repro to re-add when fixing: explicitly-grouped, `Grid.IdxX`-column + inner `k=tid;k<K;k+=64` + shared-mem reduce, CPU oracle (K=512/N=96) — passes on CPU/CUDA/OpenCL/Wasm, was the WebGPU failure.
+
+**Status (orig):** OPEN. Not urgent — Tuvok shipped a correct fallback (`SpawnDev.ILGPU.ML` master `2752c3b`); WebGPU GEMV currently routes to the per-element kernel. This plan re-enables the fast cooperative GEMV on WebGPU.
 **Author:** Geordi (ILGPU). Diagnosis by: Tuvok (`_DevComms/global/tuvok-to-geordi-GEMV-wgsl-reduction-is-CORRECT-bug-is-emitter-gridstride-2026-06-13.md`).
 **Priority:** TJ's order #2(done) → #1(planned) → **#4 (this)** → #3.
 
@@ -15,6 +26,18 @@ Dump: `SpawnDev.ILGPU.ML/_mldump/2026-06-13_12-16-46/wgsl/007_GemvDequantQ4_KImp
   - `1089: var _uf_group_iter : i32 = i32(group_id.x + group_id.y * num_workgroups.x);  // = column n`
   - `1092: _uf_break_v_329 = (_uf_group_iter * i32(workgroup_size.x)) < v_4;`  ← the K-loop break uses `_uf_group_iter * workgroup_size`, conflating the group iterator with K
   - `1457: _uf_group_iter = _uf_group_iter + i32(num_workgroups.x * num_workgroups.y);  // grid-stride increment`
+
+## ✅ MECHANISM CONFIRMED from the dump (Geordi, 2026-06-13)
+Read `007_GemvDequantQ4_KImpl.wgsl` end-to-end. The inner K-loop induction `v_40` (= `k`, init `tid`=v_8, `v_40 = v_40 + 64` at line 1454-1455, accumulate `v_41` at 1452/1456) is INTACT and correct. The bug is purely the **break + a stray counter**:
+- line 1091: `v_329 = v_40 < v_4;` ← the CORRECT condition (`k < K`, v_4=K) is computed... and then DISCARDED.
+- line 1092-1093: break uses `_uf_break_v_329 = (_uf_group_iter * workgroup_size.x) < v_4;` ← the WRONG grid-stride break.
+- line 1089: `var _uf_group_iter = group_id.x + group_id.y*num_workgroups.x;` (= column n) and line 1457: `_uf_group_iter += num_workgroups.x*num_workgroups.y;` ← a stray grid-stride counter fused into the K-loop. So the loop runs while `_uf_group_iter*64 < K` (starts at n, strides by #groups) → for n≥1 it breaks almost immediately → ~34× short accumulation.
+
+**Why the wrong path is taken (`WGSLKernelFunctionGenerator.cs` ~8133-8186 + `UniformityAnalyzer.cs`):** the transform has a CORRECT tile-loop path (`_uf_tile_iter`, DIRECT comparison `iter compOp limit`, no `*workgroup_size`) but the GEMV K-loop misses it twice:
+1. `ClassifyLoopType` (`UniformityAnalyzer.cs:193-242`) returns `TileLoop` only when the loop STEP `stepTrace == GroupDimension`. The GEMV steps by the **literal `GemvGroupSize` (64)**, not `Group.DimX`, so it classifies as **GridStrideLoop** → grid-stride break path.
+2. Even forcing the tile path, the tile-counter init decomposition bails: the phi init is `k = tid` = PURE `Group.IdxX`, so `TryRemoveGroupIndex` returns `""` (`UniformityAnalyzer.cs:323-324`); the transform guard `if (uniformInit != null && uniformInit != "")` (`WGSLKernelFunctionGenerator.cs:8144`) then FALLS BACK to `_uf_group_iter`. A pure-GroupIndex init should decompose to `"0"` (thread 0's start), not `""`.
+
+**Also note:** the GEMV K-loop has NO barrier inside it (the reduction's `workgroupBarrier` is AFTER the loop), so a non-uniform break (`k < K`) is actually LEGAL WGSL here — the uniform-break transform arguably should not fire for a barrier-free loop at all. Three candidate fixes to weigh (verify with the repro, don't regress the auto-tile fold): (a) make `TryRemoveGroupIndex` return `"0"` for pure-GroupIndex + make `ClassifyLoopType` recognize a constant step equal to the (specialized) workgroup size as a TileLoop; (b) only apply the synthetic-uniform-break transform to loops that CONTAIN a barrier; (c) when the original condition is already uniform-safe (no barrier in body), keep the original `k < K` break. Option (b)/(c) are the most principled (the transform exists to satisfy barrier uniformity); (a) is the most localized.
 
 ## The kernel shape that triggers it
 An **explicitly-grouped** kernel (`LoadStreamKernel` + `KernelConfig(N, 64)`) where:
