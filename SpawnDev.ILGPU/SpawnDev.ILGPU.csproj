@@ -4,7 +4,7 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.12.1-local.5</Version>
+		<Version>4.12.1-local.6</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
 		<PackageReleaseNotes>4.12.1: WebGPU cooperative GEMV grid-stride fix; ±inf/NaN scalar kernel params on WebGL+Wasm; AcceleratorRequirements.RequiresScatterStores flag; Wasm process-persistent shared Web Worker pool AND shared linear memory keyed per MaxLinearMemoryPages (default-WorkerCount accelerators share one pool + one WebAssembly.Memory per distinct max per tab, fixing worker-churn starvation and the WebAssembly.Memory-reservation accumulation across long test lanes — at both the default 1 GiB and custom maxes like 2 GiB); Wasm SIMD128 emitter foundation (additive groundwork, scalar path unchanged). Forks stay 2.0.16. Full per-version history with details: CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
