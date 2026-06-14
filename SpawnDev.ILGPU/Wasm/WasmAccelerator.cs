@@ -304,6 +304,16 @@ namespace SpawnDev.ILGPU.Wasm
         private static int _nextKernelId = 0;
 
         /// <summary>
+        /// Total distinct kernels compiled this session (the monotonic kernelId high-water). DIAGNOSTIC:
+        /// a proxy for the worker-side <c>_modulesById</c> accumulation — each distinct kernel stays
+        /// cached as a compiled <c>WebAssembly.Module</c> on every persistent worker for the tab's life
+        /// (never evicted), so this counts the modules piling up per worker across a long test lane.
+        /// Pair with <see cref="SharedWasmMemoryPages"/> (held shared-memory high-water) to attribute
+        /// late-lane process-memory pressure (the heavy-test full-sweep timeout investigation, 2026-06-14).
+        /// </summary>
+        public static int TotalKernelsCompiled => _nextKernelId;
+
+        /// <summary>
         /// Worker-init tracking for one distinct kernel (keyed by its <c>wasmBytes</c> reference in
         /// <see cref="_initializedWorkersByKernel"/>). Carries a stable, unique <see cref="KernelId"/>
         /// (the worker-side <c>_modulesById</c> key) plus the set of workers that have already received
