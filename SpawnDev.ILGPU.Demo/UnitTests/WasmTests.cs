@@ -1888,10 +1888,12 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         // persistent OnMessage/OnError handlers on each worker; every worker response delivers a MessageEvent
         // JSObject that the handler OWNS — SpawnDev.BlazorJS ActionCallback<T1>.Invoke calls the delegate and
         // does NOT dispose the arg (verified ActionCallback.cs:59-63). Before the fix the handler never disposed
-        // msg/err, so every (dispatch x worker) response pinned a MessageEvent (+ its .data graph) in the V8 JS
-        // heap until finalization — which JS-heap growth alone never triggers under a long Wasm lane → the
-        // ~1.6 GiB ML-lane late-test memory-pressure leak (Tuvok CDP). Fix = `using` on msg+err so each disposes
-        // in-handler on every path (incl. the stray-message early return).
+        // msg/err, so every (dispatch x worker) response left a MessageEvent reclaimable only by the finalizer.
+        // This is correct disposal HYGIENE. NOTE (2026-06-15): it was initially suspected of driving the ML
+        // heavy-test timeouts, but a follow-up DISPROVED a memory leak entirely — end-of-lane live managed
+        // retention is ~69 MiB (GC.GetTotalMemory true) while usedJSHeapSize reads ~650 MiB+ only because the
+        // Mono WASM heap never shrinks (high-water, not accumulating objects). So this guard locks deterministic
+        // disposal, NOT a timeout fix. Fix = `using` on msg+err so each disposes on every path (incl. early return).
         //
         // This guard uses BlazorJS IDisposableTracker to count ALIVE MessageEvent JSObjects after N dispatches.
         // It enables ONLY UndisposedHandleVerboseMode (NOT CreatedHandleVerboseMode) so the tracker's
