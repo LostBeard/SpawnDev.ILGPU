@@ -19,15 +19,16 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
     public abstract partial class BackendTestBase
     {
         /// <summary>
-        /// Phase 0 covers only the CPU reference path. Skip on every transpiling backend until that
-        /// backend's bfloat16 codegen phase lands.
+        /// bfloat16 codegen is implemented on CPU (Phase 0, managed struct) and WebGPU (Phase 1, WGSL
+        /// emulated). WebGL / Wasm / CUDA / OpenCL are later phases - skip cleanly there for now.
         /// </summary>
-        private static void RequireCpuForBFloat16Phase0(Accelerator accelerator)
+        private static void RequireBFloat16SupportedBackend(Accelerator accelerator)
         {
-            if (accelerator.AcceleratorType != AcceleratorType.CPU)
+            if (accelerator.AcceleratorType != AcceleratorType.CPU &&
+                accelerator.AcceleratorType != AcceleratorType.WebGPU)
                 throw new UnsupportedTestException(
-                    "BFloat16 Phase 0 verifies the CPU reference path; GPU/transpiling backend codegen " +
-                    "is Phase 1+ (see Plans/bfloat16-support-plan-2026-06-15.md).");
+                    "BFloat16 codegen is implemented on CPU (Phase 0) and WebGPU (Phase 1); " +
+                    "WebGL/Wasm/CUDA/OpenCL are later phases (see Plans/bfloat16-support-plan-2026-06-15.md).");
         }
 
         /// <summary>
@@ -89,7 +90,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task BFloat16_BufferRoundTrip() => await RunTest(async accelerator =>
         {
-            RequireCpuForBFloat16Phase0(accelerator);
+            RequireBFloat16SupportedBackend(accelerator);
 
             var floats = new[]
             {
@@ -129,7 +130,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task BFloat16_Arithmetic() => await RunTest(async accelerator =>
         {
-            RequireCpuForBFloat16Phase0(accelerator);
+            RequireBFloat16SupportedBackend(accelerator);
 
             // Conditioned inputs: no catastrophic cancellation, no divide-by-near-zero.
             var af = new[] { 1.5f, 8f, -3.25f, 100f, 0.5f, -7f, 40f, 2.5f };
@@ -184,7 +185,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task BFloat16_MinMax() => await RunTest(async accelerator =>
         {
-            RequireCpuForBFloat16Phase0(accelerator);
+            RequireBFloat16SupportedBackend(accelerator);
 
             var af = new[] { 1.5f, -8f, 3.25f, 100f, -0.5f, 7f, -40f, 0f };
             var bf = new[] { 2.5f, 3f, -4f, -8f, 0.25f, 7f, 5f, -1f };
@@ -227,7 +228,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task BFloat16_RangeAndSpecials() => await RunTest(async accelerator =>
         {
-            RequireCpuForBFloat16Phase0(accelerator);
+            RequireBFloat16SupportedBackend(accelerator);
 
             // --- Range: values fp16 (max ~65504, min normal ~6.1e-5) cannot represent ---
             float big = 1e30f, tiny = 1e-30f;

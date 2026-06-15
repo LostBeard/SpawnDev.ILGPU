@@ -201,7 +201,8 @@ namespace ILGPU.Backends.PTX
             ImmutableArray.Create(
                 string.Empty, "pred",
                 "b8", "b16", "b32", "b64",
-                "f16", "f32", "f64");
+                "f16", "f32", "f64",
+                "f16"); // BFloat16 (ordinal 9) - placeholder; native bf16 PTX codegen is Phase 3
 
         /// <summary>
         /// Maps basic types to constant-loading target basic types.
@@ -212,7 +213,8 @@ namespace ILGPU.Backends.PTX
                 default, BasicValueType.Int1,
                 BasicValueType.Int16, BasicValueType.Int16,
                 BasicValueType.Int32, BasicValueType.Int64,
-                BasicValueType.Int16, BasicValueType.Float32, BasicValueType.Float64);
+                BasicValueType.Int16, BasicValueType.Float32, BasicValueType.Float64,
+                BasicValueType.Int16); // BFloat16 (ordinal 9) - placeholder (Phase 3)
 
         /// <summary>
         /// Maps basic types to constant-loading target basic types.
@@ -223,7 +225,8 @@ namespace ILGPU.Backends.PTX
                 default, BasicValueType.Int8,
                 BasicValueType.Int8, BasicValueType.Int16,
                 BasicValueType.Int32, BasicValueType.Int64,
-                BasicValueType.Int16, BasicValueType.Float32, BasicValueType.Float64);
+                BasicValueType.Int16, BasicValueType.Float32, BasicValueType.Float64,
+                BasicValueType.Int16); // BFloat16 (ordinal 9) - placeholder (Phase 3)
 
         /// <summary>
         /// Resolves the PTX suffix for the given basic value type.

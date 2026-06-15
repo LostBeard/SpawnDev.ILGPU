@@ -80,6 +80,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private Dictionary<int, int> _subWordParams = new Dictionary<int, int>(); // paramIndex -> elementByteSize
         // Float16 sub-word params need f16-to-f32 conversion instead of sign extension
         private HashSet<int> _subWordFloat16Params = new HashSet<int>();
+        private HashSet<int> _subWordBFloat16Params = new HashSet<int>();
         // Unsigned sub-word params need zero-extension instead of sign extension
         private HashSet<int> _subWordUnsignedParams = new HashSet<int>();
         // Maps LEA variable names to their sub-word param index (for Load/Store extraction)
@@ -1153,6 +1154,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             break;
                         }
                         continue; // native f16 not supported in v2 yet
+                    case BasicValueType.BFloat16:
+                        // bfloat16: always emulated (no native WGSL bf16). Reuse the 2-byte
+                        // sub-word storage classification; the "swbf16" typeKey keeps it in its
+                        // own coalesce bucket so the Add below routes it to _subWordBFloat16Params.
+                        typeKey = "swbf16"; subWordElemSize = 2; isSubWord = true;
+                        subWordIsFloat16 = true;
+                        bindingType = "atomic<u32>"; stride = 1;
+                        break;
                     default:
                         {
                             var wgslElem = TypeGenerator[elemType];
@@ -1219,7 +1228,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (cand.isSubWord)
                     {
                         _subWordParams[p.Index] = cand.subWordElemSize;
-                        if (cand.subWordIsFloat16) _subWordFloat16Params.Add(p.Index);
+                        if (cand.subWordIsFloat16)
+                        {
+                            // "swbf16" bucket = bfloat16 (different conversion helper at load/store).
+                            if (cand.typeKey == "swbf16") _subWordBFloat16Params.Add(p.Index);
+                            else _subWordFloat16Params.Add(p.Index);
+                        }
                         _subWordBodyStructBindingNames[p.Index] = bindingName;
                     }
                 }
@@ -1563,9 +1577,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // not a direct parameter, so _subWordFloat16Params stays empty. Track that case
             // via _kernelReferencesF16Helpers set at emit time.
             bool needsF16Emulation = _subWordFloat16Params.Count > 0 || _kernelReferencesF16Helpers;
+            bool needsBF16Emulation = _subWordBFloat16Params.Count > 0 || _kernelReferencesBF16Helpers;
 
             // Emit minimal emulation library: only functions actually used by the kernel body
-            if (needsF64Emulation || needsI64Emulation || needsF16Emulation)
+            if (needsF64Emulation || needsI64Emulation || needsF16Emulation || needsBF16Emulation)
             {
                 builder.AppendLine("// ============ Emulation Library ============");
                 builder.AppendLine(WGSLEmulationLibrary.GetMinimalEmulationLibrary(
@@ -1573,7 +1588,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     Backend.UseOzakiF64Emulation,
                     needsI64Emulation,
                     needsF16Emulation,
-                    Builder.ToString()));
+                    Builder.ToString(),
+                    includeBF16: needsBF16Emulation));
             }
 
             // F32 Inf/NaN literal helpers - always available because:
@@ -1956,6 +1972,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                     _subWordParams[param.Index] = 2; // emulated f16 = 2 bytes
                                     _subWordFloat16Params.Add(param.Index);
                                 }
+                                break;
+                            case BasicValueType.BFloat16:
+                                _subWordParams[param.Index] = 2; // bfloat16 always emulated = 2 bytes
+                                _subWordBFloat16Params.Add(param.Index);
                                 break;
                         }
                     }
@@ -4303,6 +4323,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 _subWordFloat16Params.Add(param.Index);
                             }
                             break;
+                        case BasicValueType.BFloat16:
+                            _subWordParams[param.Index] = 2;
+                            _subWordBFloat16Params.Add(param.Index);
+                            break;
                     }
                 }
             }
@@ -4984,12 +5008,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     {
                         int bsLeaElemSize = 0;
                         bool bsLeaIsFloat16 = false;
+                        bool bsLeaIsBFloat16 = false;
                         switch (bsLeaPt.BasicValueType)
                         {
                             case BasicValueType.Int8: bsLeaElemSize = 1; break;
                             case BasicValueType.Int16: bsLeaElemSize = 2; break;
                             case BasicValueType.Float16:
                                 if (!Backend.HasShaderF16) { bsLeaElemSize = 2; bsLeaIsFloat16 = true; }
+                                break;
+                            case BasicValueType.BFloat16:
+                                bsLeaElemSize = 2; bsLeaIsBFloat16 = true; // always emulated
                                 break;
                         }
                         if (bsLeaElemSize > 0)
@@ -5001,6 +5029,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 _subWordParams[synthIdx] = bsLeaElemSize;
                             if (bsLeaIsFloat16)
                                 _subWordFloat16Params.Add(synthIdx);
+                            if (bsLeaIsBFloat16)
+                                _subWordBFloat16Params.Add(synthIdx);
                             _subWordBodyStructBindingNames[synthIdx] = bindingName;
                             _subWordLEAVars[target.Name] = synthIdx;
                             // Sub-word LEA stores the i32 element index, not a pointer (matches
@@ -5144,6 +5174,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             {
                                 elemSize = 2;
                                 _subWordFloat16Params.Add(param.Index);
+                            }
+                            else if (leaPt.BasicValueType == BasicValueType.BFloat16)
+                            {
+                                elemSize = 2;
+                                _subWordBFloat16Params.Add(param.Index);
                             }
                             if (elemSize > 0)
                                 _subWordParams[param.Index] = elemSize; // register for Load/Store
@@ -5428,6 +5463,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     var rawExpr = $"((u32(atomicLoad(&{subWordBinding}[{wordIdx}])) >> {shift}) & 0xFFFFu)";
                     extractExpr = $"_f16_to_f32({rawExpr})";
                 }
+                else if (_subWordBFloat16Params.Contains(subWordParamIdx))
+                {
+                    // bfloat16 extraction: 2 bf16 per atomic<u32> word, call _bf16_to_f32 helper
+                    // (same 2-byte sub-word layout as Float16, different conversion).
+                    var wordIdx = $"(u32({idx}) / 2u)";
+                    var shift = $"((u32({idx}) % 2u) * 16u)";
+                    var rawExpr = $"((u32(atomicLoad(&{subWordBinding}[{wordIdx}])) >> {shift}) & 0xFFFFu)";
+                    extractExpr = $"_bf16_to_f32({rawExpr})";
+                }
                 else if (_subWordUnsignedParams.Contains(subWordParamIdx))
                 {
                     // UInt16 extraction: 2 ushorts per atomic<u32> word, zero-extension
@@ -5631,6 +5675,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     var shift = $"((u32({idx}) % 2u) * 16u)";
                     AppendLine($"atomicAnd(&{subWordBinding}[{wordIdx}], ~(0xFFFFu << {shift}));");
                     AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], ((_f32_to_f16({val}) & 0xFFFFu) << {shift}));");
+                }
+                else if (_subWordBFloat16Params.Contains(storeParamIdx))
+                {
+                    // bfloat16 store: _f32_to_bf16 conversion, then pack into the atomic<u32>
+                    // word via RMW (same 2-byte sub-word layout as Float16).
+                    var wordIdx = $"(u32({idx}) / 2u)";
+                    var shift = $"((u32({idx}) % 2u) * 16u)";
+                    AppendLine($"atomicAnd(&{subWordBinding}[{wordIdx}], ~(0xFFFFu << {shift}));");
+                    AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], ((_f32_to_bf16({val}) & 0xFFFFu) << {shift}));");
                 }
                 else // elemSize == 2, Int16/UInt16
                 {

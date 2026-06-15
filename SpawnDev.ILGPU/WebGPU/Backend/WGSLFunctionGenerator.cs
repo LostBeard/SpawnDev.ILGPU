@@ -46,6 +46,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private readonly Dictionary<int, int> _subWordParams = new();           // paramIdx -> elemSize (1 byte / 2 short / 2 emu-f16)
         private readonly HashSet<int> _subWordUnsignedParams = new();           // byte / ushort
         private readonly HashSet<int> _subWordFloat16Params = new();            // emulated f16 (no shader-f16)
+        private readonly HashSet<int> _subWordBFloat16Params = new();           // emulated bf16 (always - no native WGSL bf16)
         private readonly Dictionary<string, int> _subWordLEAVars = new();       // LEA target Variable name -> paramIdx
         private readonly Dictionary<int, string> _paramIndexToLocalVar = new(); // paramIdx -> "v_X" (the helper's `let v_X : ptr<...> = p_Y;` local name)
 
@@ -525,6 +526,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             _subWordFloat16Params.Add(param.Index);
                         }
                         break;
+                    case BasicValueType.BFloat16:
+                        // bfloat16 is always emulated (no native WGSL bf16) - 2-byte sub-word.
+                        _subWordParams[param.Index] = 2;
+                        _subWordBFloat16Params.Add(param.Index);
+                        break;
                 }
             }
         }
@@ -798,6 +804,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     var rawExpr = $"((u32(atomicLoad(&{subWordBinding}[{wordIdx}])) >> {shift}) & 0xFFFFu)";
                     extractExpr = $"_f16_to_f32({rawExpr})";
                 }
+                else if (_subWordBFloat16Params.Contains(subWordParamIdx))
+                {
+                    var wordIdx = $"(u32({idx}) / 2u)";
+                    var shift = $"((u32({idx}) % 2u) * 16u)";
+                    var rawExpr = $"((u32(atomicLoad(&{subWordBinding}[{wordIdx}])) >> {shift}) & 0xFFFFu)";
+                    extractExpr = $"_bf16_to_f32({rawExpr})";
+                }
                 else if (_subWordUnsignedParams.Contains(subWordParamIdx))
                 {
                     var wordIdx = $"(u32({idx}) / 2u)";
@@ -883,6 +896,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     var shift = $"((u32({idx}) % 2u) * 16u)";
                     AppendLine($"atomicAnd(&{subWordBinding}[{wordIdx}], ~(0xFFFFu << {shift}));");
                     AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], ((_f32_to_f16({val}) & 0xFFFFu) << {shift}));");
+                }
+                else if (_subWordBFloat16Params.Contains(storeParamIdx))
+                {
+                    var wordIdx = $"(u32({idx}) / 2u)";
+                    var shift = $"((u32({idx}) % 2u) * 16u)";
+                    AppendLine($"atomicAnd(&{subWordBinding}[{wordIdx}], ~(0xFFFFu << {shift}));");
+                    AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], ((_f32_to_bf16({val}) & 0xFFFFu) << {shift}));");
                 }
                 else // Int16 / UInt16
                 {

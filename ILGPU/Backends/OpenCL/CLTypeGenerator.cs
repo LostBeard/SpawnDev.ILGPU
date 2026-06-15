@@ -73,7 +73,8 @@ namespace ILGPU.Backends.OpenCL
                 "long",
                 "half",
                 "float",
-                "double");
+                "double",
+                "float"); // BFloat16 (ordinal 9) - emulated as float on OpenCL (no native cl bf16)
 
         /// <summary>
         /// Maps arithmetic-basic value types to OpenCL language types.
@@ -92,7 +93,8 @@ namespace ILGPU.Backends.OpenCL
                 "uchar",
                 "ushort",
                 "uint",
-                "ulong");
+                "ulong",
+                "float"); // BFloat16 (ordinal 13) - emulated as float on OpenCL
 
         /// <summary>
         /// Maps arithmetic-basic value types to atomic OpenCL language types.
@@ -111,7 +113,8 @@ namespace ILGPU.Backends.OpenCL
                 null,
                 null,
                 "atomic_uint",
-                "atomic_ulong");
+                "atomic_ulong",
+                null); // BFloat16 (ordinal 13) - no bf16 atomics
 
         /// <summary>
         /// Resolves the given basic-value type to an OpenCL type name.

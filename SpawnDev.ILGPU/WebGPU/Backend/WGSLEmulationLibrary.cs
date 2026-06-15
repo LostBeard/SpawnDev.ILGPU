@@ -1098,6 +1098,38 @@ fn _f32_to_f16(f: f32) -> u32 {
 }
 ";
 
+        /// <summary>
+        /// WGSL helpers that convert between the 16-bit bfloat16 bit pattern (held in the
+        /// low 16 bits of a u32) and f32 at buffer load/store boundaries. bfloat16 is the
+        /// top 16 bits of an fp32, so conversion is pure bit-shifting - no exponent rebias
+        /// or table. Matches ILGPU.BFloat16's managed ConvertBFloat16ToFloat /
+        /// ConvertFloatToBFloat16 (and the Wasm reference) byte-for-byte.
+        /// </summary>
+        public const string BF16Functions = @"
+// ============================================================================
+// BFloat16 Emulation Functions (top-16-bits-of-fp32 in u32, f32 arithmetic)
+// ============================================================================
+
+// Expand a 16-bit bfloat16 bit pattern (low 16 bits of a u32) into f32 by
+// shifting it back into the high half of the fp32 encoding (exact).
+fn _bf16_to_f32(h: u32) -> f32 {
+    return bitcast<f32>((h & 0xFFFFu) << 16u);
+}
+
+// Compress a native f32 into the 16-bit bfloat16 bit pattern (low 16 bits of the
+// u32) using round-to-nearest-even. NaN is preserved (a naive truncate could
+// collapse some NaNs to Inf, so force a mantissa bit).
+fn _f32_to_bf16(f: f32) -> u32 {
+    let bits = bitcast<u32>(f);
+    if ((bits & 0x7FFFFFFFu) > 0x7F800000u) {
+        return ((bits >> 16u) | 0x0040u) & 0xFFFFu;
+    }
+    let lsb = (bits >> 16u) & 1u;
+    let rounded = bits + 0x7FFFu + lsb;
+    return (rounded >> 16u) & 0xFFFFu;
+}
+";
+
         #endregion
 
         #region Combined Library
@@ -1115,7 +1147,7 @@ fn _f32_to_f16(f: f32) -> u32 {
         /// <param name="includeF16">When true, emits the Float16 bit-conversion helpers
         /// (<c>_f16_to_f32</c>, <c>_f32_to_f16</c>). Required when the kernel touches
         /// Float16 and the browser lacks the <c>shader-f16</c> feature.</param>
-        public static string GetEmulationLibrary(bool includeF64, bool useOzakiF64, bool includeI64, bool includeF16)
+        public static string GetEmulationLibrary(bool includeF64, bool useOzakiF64, bool includeI64, bool includeF16, bool includeBF16 = false)
         {
             var sb = new System.Text.StringBuilder();
 
@@ -1145,6 +1177,11 @@ fn _f32_to_f16(f: f32) -> u32 {
                 sb.AppendLine(F16Functions);
             }
 
+            if (includeBF16)
+            {
+                sb.AppendLine(BF16Functions);
+            }
+
             return sb.ToString();
         }
 
@@ -1158,10 +1195,12 @@ fn _f32_to_f16(f: f32) -> u32 {
         private static readonly List<EmulationFunc> _ozakiF64Funcs;
         private static readonly List<EmulationFunc> _i64Funcs;
         private static readonly List<EmulationFunc> _f16Funcs;
+        private static readonly List<EmulationFunc> _bf16Funcs;
         private static readonly Dictionary<string, HashSet<string>> _dekkerF64Deps;
         private static readonly Dictionary<string, HashSet<string>> _ozakiF64Deps;
         private static readonly Dictionary<string, HashSet<string>> _i64Deps;
         private static readonly Dictionary<string, HashSet<string>> _f16Deps;
+        private static readonly Dictionary<string, HashSet<string>> _bf16Deps;
 
         static WGSLEmulationLibrary()
         {
@@ -1169,10 +1208,12 @@ fn _f32_to_f16(f: f32) -> u32 {
             _ozakiF64Funcs = SplitIntoFunctions(OzakiF64Functions);
             _i64Funcs = SplitIntoFunctions(I64Functions);
             _f16Funcs = SplitIntoFunctions(F16Functions);
+            _bf16Funcs = SplitIntoFunctions(BF16Functions);
             _dekkerF64Deps = BuildDependencies(_dekkerF64Funcs);
             _ozakiF64Deps = BuildDependencies(_ozakiF64Funcs);
             _i64Deps = BuildDependencies(_i64Funcs);
             _f16Deps = BuildDependencies(_f16Funcs);
+            _bf16Deps = BuildDependencies(_bf16Funcs);
         }
 
         /// <summary>
@@ -1196,7 +1237,7 @@ fn _f32_to_f16(f: f32) -> u32 {
         /// emitted only if the kernel body actually calls it.</param>
         public static string GetMinimalEmulationLibrary(
             bool includeF64, bool useOzakiF64, bool includeI64, bool includeF16,
-            string kernelBody)
+            string kernelBody, bool includeBF16 = false)
         {
             var sb = new System.Text.StringBuilder();
 
@@ -1249,6 +1290,14 @@ fn _f32_to_f16(f: f32) -> u32 {
                 //     itself is correctly raised; trimming the unused subset
                 //     stays safe.
                 AppendUsedFunctions(sb, _f16Funcs, _f16Deps, kernelBody);
+            }
+
+            if (includeBF16)
+            {
+                // bfloat16 helpers (_bf16_to_f32 / _f32_to_bf16) — same minimal-trim path
+                // as f16: emitted only when the kernel/helper body references them, with
+                // includeBF16 raised by needsBF16Emulation upstream.
+                AppendUsedFunctions(sb, _bf16Funcs, _bf16Deps, kernelBody);
             }
 
             return sb.ToString();

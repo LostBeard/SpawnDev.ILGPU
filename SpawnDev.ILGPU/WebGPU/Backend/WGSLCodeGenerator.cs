@@ -305,6 +305,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// for correct bit extraction).
         /// </summary>
         protected bool _kernelReferencesF16Helpers { get; set; } = false;
+        protected bool _kernelReferencesBF16Helpers { get; set; } = false;
 
         private StringBuilder prefixBuilder = new StringBuilder();
         private StringBuilder suffixBuilder = new StringBuilder();
@@ -2103,6 +2104,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 BasicValueType.Int32 => value.Int32Value.ToString(),
                 BasicValueType.Int64 => value.Int64Value.ToString(),
                 BasicValueType.Float16 => FormatFloat((float)value.Float16Value),
+                BasicValueType.BFloat16 => FormatFloat((float)value.BFloat16Value),
                 BasicValueType.Float32 => FormatFloat(value.Float32Value),
                 BasicValueType.Float64 => FormatFloat((float)value.Float64Value),
                 _ => "0"
