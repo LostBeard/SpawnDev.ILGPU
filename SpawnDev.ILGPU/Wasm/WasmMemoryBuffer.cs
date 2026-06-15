@@ -4,8 +4,11 @@
 //
 // File: WasmMemoryBuffer.cs
 //
-// Manages GPU memory buffers backed by SharedArrayBuffer regions.
-// Each buffer is a slice of a SharedArrayBuffer for zero-copy sharing across workers.
+// Manages GPU memory buffers, each backed by its OWN SharedArrayBuffer (persistent device storage).
+// Per dispatch the SAB is staged into/out of the shared WebAssembly linear memory on the MAIN thread
+// (copy-IN before, copy-OUT after); workers run against the linear memory, NOT against per-buffer SABs
+// (only the shared linear memory is PostMessage'd to workers). The SharedArrayBuffer backing enables
+// zero-copy host-side reads/writes and SAB-to-SAB (Wasm-to-Wasm) device copies.
 // ---------------------------------------------------------------------------------------
 
 using global::ILGPU;
@@ -17,7 +20,8 @@ using SpawnDev.BlazorJS.Toolbox;
 namespace SpawnDev.ILGPU.Wasm
 {
     /// <summary>
-    /// Wasm memory buffer backed by a SharedArrayBuffer for zero-copy sharing across workers.
+    /// Wasm memory buffer backed by its own SharedArrayBuffer. Staged into/out of the shared
+    /// WebAssembly linear memory per dispatch (workers run against the linear memory, not this SAB).
     /// </summary>
     public class WasmMemoryBuffer : MemoryBuffer, IBrowserMemoryBuffer
     {

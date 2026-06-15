@@ -1884,6 +1884,80 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             finally { accelerator.Dispose(); context.Dispose(); }
         }
 
+        // Wasm per-dispatch MessageEvent leak guard (2026-06-15, Geordi). EnsurePersistentHandlers installs
+        // persistent OnMessage/OnError handlers on each worker; every worker response delivers a MessageEvent
+        // JSObject that the handler OWNS — SpawnDev.BlazorJS ActionCallback<T1>.Invoke calls the delegate and
+        // does NOT dispose the arg (verified ActionCallback.cs:59-63). Before the fix the handler never disposed
+        // msg/err, so every (dispatch x worker) response pinned a MessageEvent (+ its .data graph) in the V8 JS
+        // heap until finalization — which JS-heap growth alone never triggers under a long Wasm lane → the
+        // ~1.6 GiB ML-lane late-test memory-pressure leak (Tuvok CDP). Fix = `using` on msg+err so each disposes
+        // in-handler on every path (incl. the stray-message early return).
+        //
+        // This guard uses BlazorJS IDisposableTracker to count ALIVE MessageEvent JSObjects after N dispatches.
+        // It enables ONLY UndisposedHandleVerboseMode (NOT CreatedHandleVerboseMode) so the tracker's
+        // Console.WriteLine paths — which trip #blazor-error-ui and would false-FAIL the run — never fire: the
+        // created-notice (line 95) is gated on CreatedHandleVerboseMode (kept off), and the finalizer-warning
+        // (line 37) only fires for TRACKED objects disposed via finalizer; with the fix every MessageEvent is
+        // DisposedProper in-handler, and objects created while the flag was off carry a null tracker so their
+        // disposal short-circuits before the Console path. We never force GC inside the measured window.
+        // With the fix: alive MessageEvents ≈ 0. Without it: ≈ dispatches * workerCount (hundreds).
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_DispatchResponse_DoesNotLeakMessageEvent()
+        {
+            const int count = 4096;
+            const int dispatches = 40;
+            bool savedUndisposed = SpawnDev.BlazorJS.IDisposableTracker.UndisposedHandleVerboseMode;
+            bool savedCreated = SpawnDev.BlazorJS.IDisposableTracker.CreatedHandleVerboseMode;
+            var context = Context.Create().Wasm().ToContext();
+            var accelerator = await context.CreateWasmAcceleratorAsync();
+            try
+            {
+                // Warm-up dispatch (tracking OFF): installs the persistent handlers + compiles the worker module
+                // so their one-time JSObjects are not in the measured window.
+                using (var warm = accelerator.Allocate1D<int>(count))
+                {
+                    var wk = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>((i, v) => v[i] = i);
+                    wk((Index1D)count, warm.View);
+                    await accelerator.SynchronizeAsync();
+                }
+
+                // Enable tracking with the Console-safe flag only, then clear for a clean baseline.
+                SpawnDev.BlazorJS.IDisposableTracker.CreatedHandleVerboseMode = false;
+                SpawnDev.BlazorJS.IDisposableTracker.UndisposedHandleVerboseMode = true;
+                SpawnDev.BlazorJS.IDisposableTracker.JSObjectTraces.Clear();
+
+                var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>((i, v) => v[i] = i * 3);
+                for (int r = 0; r < dispatches; r++)
+                {
+                    using var buf = accelerator.Allocate1D<int>(count);
+                    k((Index1D)count, buf.View);
+                    await accelerator.SynchronizeAsync();
+                }
+                // Let any inline TCS continuation unwind so the final handler lambda exits and its `using` disposes.
+                await Task.Yield();
+
+                long aliveMsgEvents = 0;
+                foreach (var t in SpawnDev.BlazorJS.IDisposableTracker.JSObjectTraces.Values)
+                    if (t.Type != null && t.Type.Contains("MessageEvent"))
+                        aliveMsgEvents += t.AliveCount;
+
+                // Fix → ~0 (at most a straggler); bug → dispatches*workerCount (>=160). Bound cleanly separates.
+                const long bound = 8;
+                if (aliveMsgEvents > bound)
+                    throw new Exception(
+                        $"Per-dispatch MessageEvent JSObjects leaked: {aliveMsgEvents} alive after {dispatches} dispatches " +
+                        $"(bound {bound}). WasmAccelerator.EnsurePersistentHandlers must Dispose the MessageEvent/Event " +
+                        $"arg in MsgHandler/ErrHandler on every path (the ML-lane ~1.6 GiB V8-heap leak has regressed).");
+            }
+            finally
+            {
+                SpawnDev.BlazorJS.IDisposableTracker.UndisposedHandleVerboseMode = savedUndisposed;
+                SpawnDev.BlazorJS.IDisposableTracker.CreatedHandleVerboseMode = savedCreated;
+                SpawnDev.BlazorJS.IDisposableTracker.JSObjectTraces.Clear();
+                accelerator.Dispose(); context.Dispose();
+            }
+        }
+
         // Wasm SIMD128 emitter foundation (Phase 1, 2026-06-14, Geordi). Pure-CPU regression guard on
         // the v128 encoding — NO browser/GPU needed, just byte assertions. Locks the part most likely
         // to silently break: SIMD sub-opcodes are u32-LEB128 after the 0xFD prefix (NOT single bytes

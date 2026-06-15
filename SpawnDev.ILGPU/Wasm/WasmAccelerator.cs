@@ -1869,6 +1869,15 @@ namespace SpawnDev.ILGPU.Wasm
 
             state.MsgHandler = new Action<MessageEvent>((msg) =>
             {
+                // The MessageEvent JSObject is created per worker-response by the SpawnDev.BlazorJS
+                // callback marshaller and is OWNED by this handler: ActionCallback<T1>.Invoke calls
+                // the delegate and does NOT dispose the arg (verified in SpawnDev.BlazorJS/ActionCallback.cs).
+                // Without disposing it, every (dispatch x worker) response pins a MessageEvent (and its
+                // .data graph) in the V8 JS heap until finalization - which JS-heap growth alone never
+                // triggers under a long Wasm dispatch lane -> the late-lane memory-pressure leak. Dispose
+                // on EVERY exit path, including the stray-message early return below. WasmDispatchResponse
+                // is a plain C# DTO (no JSObjects), so it stays valid after msg is disposed.
+                using var _msgScope = msg;
                 var tcs = state.CurrentTcs;
                 if (tcs == null) return; // No in-flight dispatch; ignore late or stray message.
                 state.CurrentTcs = null;
@@ -1898,6 +1907,9 @@ namespace SpawnDev.ILGPU.Wasm
 
             state.ErrHandler = new Action<Event>((err) =>
             {
+                // Same ownership rule as MsgHandler: the Event JSObject is handler-owned and must be
+                // disposed on every path (rare - only fires on a worker-level error - but still leaks if not).
+                using var _errScope = err;
                 var tcs = state.CurrentTcs;
                 if (tcs == null) return;
                 state.CurrentTcs = null;
