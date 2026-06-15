@@ -252,6 +252,12 @@ namespace ILGPU.Backends.OpenCL
                 {
                     paramTypeName = "half";
                 }
+                else if (elementType == typeof(BFloat16))
+                {
+                    // bf16 is always emulated (no native OpenCL bf16 type): raw 2-byte storage.
+                    // Load/Store convert via _bf16_bits_to_f32 / _f32_to_bf16_bits.
+                    paramTypeName = "ushort";
+                }
                 else
                 {
                     paramTypeName = TypeGenerator[elementType];

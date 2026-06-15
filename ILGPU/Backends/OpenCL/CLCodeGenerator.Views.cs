@@ -47,6 +47,24 @@ namespace ILGPU.Backends.OpenCL
                 return;
             }
 
+            // BFloat16 emulation: bf16 has no native OpenCL type, so views are ushort* and
+            // load/store convert via shift helpers. Track (basePtr, index) like the Half path.
+            if (value.Type is PointerType ptrTypeBf
+                && ptrTypeBf.ElementType is PrimitiveType ptElemBf
+                && ptElemBf.BasicValueType == BasicValueType.BFloat16)
+            {
+                var targetBf = AllocatePointerType(ptrTypeBf);
+                using (var statement = BeginStatement(targetBf))
+                {
+                    statement.AppendCommand(CLInstructions.AddressOfOperation);
+                    statement.Append(source);
+                    statement.AppendIndexer(elementIndex);
+                }
+                Bind(value, targetBf);
+                _bf16EmulatedLEAs[targetBf.ToString()] = (source, elementIndex);
+                return;
+            }
+
             var target2 = AllocatePointerType(value.Type.AsNotNullCast<PointerType>());
 
             using (var statement = BeginStatement(target2))

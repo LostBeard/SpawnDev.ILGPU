@@ -28,9 +28,10 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             if (accelerator.AcceleratorType != AcceleratorType.CPU &&
                 accelerator.AcceleratorType != AcceleratorType.WebGPU &&
                 accelerator.AcceleratorType != AcceleratorType.WebGL &&
-                accelerator.AcceleratorType != AcceleratorType.Wasm)
+                accelerator.AcceleratorType != AcceleratorType.Wasm &&
+                accelerator.AcceleratorType != AcceleratorType.OpenCL)
                 throw new UnsupportedTestException(
-                    "BFloat16 codegen is implemented on CPU + WebGPU + WebGL + Wasm; native CUDA/OpenCL is a " +
+                    "BFloat16 codegen is implemented on CPU + WebGPU + WebGL + Wasm + OpenCL; CUDA is a " +
                     "later phase (see Plans/bfloat16-support-plan-2026-06-15.md).");
         }
 

@@ -127,6 +127,23 @@ namespace ILGPU.Backends.OpenCL
                 extensionBuilder.AppendLine();
             }
 
+            // BFloat16 bit-conversion helpers - bf16 is ALWAYS emulated on OpenCL (no native bf16 type;
+            // bf16 is the top 16 bits of an fp32, so conversion is pure shifting, not the f16 rebias above).
+            // Matches the managed / WGSL / GLSL / Wasm bf16 paths byte-for-byte. NaN preserved (force a
+            // mantissa bit). static inline -> the OpenCL compiler strips these if the kernel uses no bf16.
+            extensionBuilder.AppendLine();
+            extensionBuilder.AppendLine("// BFloat16 bit-conversion helpers (bf16 always emulated as float).");
+            extensionBuilder.AppendLine("static inline float _bf16_bits_to_f32(ushort h) {");
+            extensionBuilder.AppendLine("    return as_float((uint)h << 16);");
+            extensionBuilder.AppendLine("}");
+            extensionBuilder.AppendLine("static inline ushort _f32_to_bf16_bits(float f) {");
+            extensionBuilder.AppendLine("    uint bits = as_uint(f);");
+            extensionBuilder.AppendLine("    if ((bits & 0x7FFFFFFFu) > 0x7F800000u) { return (ushort)((bits >> 16) | 0x0040u); }");
+            extensionBuilder.AppendLine("    uint lsb = (bits >> 16) & 1u;");
+            extensionBuilder.AppendLine("    return (ushort)((bits + 0x7FFFu + lsb) >> 16);");
+            extensionBuilder.AppendLine("}");
+            extensionBuilder.AppendLine();
+
             extensions = extensionBuilder.ToString();
         }
 

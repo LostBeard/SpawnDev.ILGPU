@@ -204,6 +204,10 @@ namespace ILGPU.Backends.OpenCL
         // Used by Load/Store to emit vload_half/vstore_half with correct index.
         internal readonly Dictionary<string, (Variable BasePtr, Variable Index)> _f16EmulatedLEAs = new();
 
+        // BFloat16 emulation (always emulated - no native OpenCL bf16 type): tracks LEAs into
+        // ushort* buffers. Load/Store convert via _bf16_bits_to_f32 / _f32_to_bf16_bits helpers.
+        internal readonly Dictionary<string, (Variable BasePtr, Variable Index)> _bf16EmulatedLEAs = new();
+
         private StringBuilder prefixBuilder = new StringBuilder();
         private StringBuilder suffixBuilder = new StringBuilder();
 

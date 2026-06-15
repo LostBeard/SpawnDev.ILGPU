@@ -453,6 +453,26 @@ namespace ILGPU.Backends.OpenCL
                 return;
             }
 
+            // BFloat16 emulation: read the raw ushort and convert to f32 via shift helper.
+            if (_bf16EmulatedLEAs.TryGetValue(address.ToString(), out var bf16Lea))
+            {
+                using var statement = BeginStatement(target);
+                statement.AppendCommand("_bf16_bits_to_f32(");
+                statement.AppendArgument(bf16Lea.BasePtr);
+                statement.AppendIndexer(bf16Lea.Index);
+                statement.AppendCommand(")");
+                return;
+            }
+            if (IsBFloat16PointerEmulated(load.Source.Type))
+            {
+                using var statement = BeginStatement(target);
+                statement.AppendCommand("_bf16_bits_to_f32(");
+                statement.AppendCommand(CLInstructions.DereferenceOperation);
+                statement.AppendArgument(address);
+                statement.AppendCommand(")");
+                return;
+            }
+
             using var statement2 = BeginStatement(target);
             statement2.AppendCommand(CLInstructions.DereferenceOperation);
             statement2.AppendArgument(address);
@@ -491,6 +511,26 @@ namespace ILGPU.Backends.OpenCL
                 return;
             }
 
+            // BFloat16 emulation: convert f32 -> bf16 bits (RNE) and store as raw ushort.
+            if (_bf16EmulatedLEAs.TryGetValue(address.ToString(), out var bf16StoreLea))
+            {
+                using var statement = BeginStatement(bf16StoreLea.BasePtr, bf16StoreLea.Index);
+                statement.AppendCommand("_f32_to_bf16_bits(");
+                statement.AppendArgument(value);
+                statement.AppendCommand(")");
+                return;
+            }
+            if (IsBFloat16PointerEmulated(store.Target.Type))
+            {
+                using var statement = BeginStatement(CLInstructions.DereferenceOperation);
+                statement.AppendArgument(address);
+                statement.AppendCommand(CLInstructions.AssignmentOperation);
+                statement.AppendCommand("_f32_to_bf16_bits(");
+                statement.AppendArgument(value);
+                statement.AppendCommand(")");
+                return;
+            }
+
             using var statement2 = BeginStatement(CLInstructions.DereferenceOperation);
             statement2.AppendArgument(address);
             statement2.AppendCommand(CLInstructions.AssignmentOperation);
@@ -502,6 +542,11 @@ namespace ILGPU.Backends.OpenCL
             && ptr.ElementType is PrimitiveType pe
             && pe.BasicValueType == BasicValueType.Float16
             && !TypeGenerator.Capabilities.Float16Native;
+
+        private static bool IsBFloat16PointerEmulated(TypeNode type) =>
+            type is PointerType ptr
+            && ptr.ElementType is PrimitiveType pe
+            && pe.BasicValueType == BasicValueType.BFloat16;
 
         /// <summary cref="IBackendCodeGenerator.GenerateCode(LoadFieldAddress)"/>
         public void GenerateCode(LoadFieldAddress value)

@@ -335,7 +335,14 @@ namespace ILGPU.Backends.OpenCL
                             CLInstructions.GetAddressSpacePrefix(
                                 pointerType.AddressSpace));
                         builder.Append(' ');
-                        builder.Append(mapping[pointerType.ElementType]);
+                        // bf16 is stored as raw 2-byte ushort (values compute as float, but the
+                        // STORAGE pointer must be ushort* for correct 2-byte stride). The bf16
+                        // load/store handlers convert via _bf16_bits_to_f32 / _f32_to_bf16_bits.
+                        if (pointerType.ElementType is PrimitiveType bf16Elem
+                            && bf16Elem.BasicValueType == BasicValueType.BFloat16)
+                            builder.Append("ushort");
+                        else
+                            builder.Append(mapping[pointerType.ElementType]);
                         builder.Append(CLInstructions.DereferenceOperation);
                         builder.Append(' ');
                         builder.Append(entry.Value);
