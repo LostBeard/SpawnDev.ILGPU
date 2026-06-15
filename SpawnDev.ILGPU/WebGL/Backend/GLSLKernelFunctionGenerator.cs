@@ -93,6 +93,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         private readonly Dictionary<int, int> _subWordParams = new();
         // Float16 sub-word params need f16-to-f32 conversion instead of sign extension
         private readonly HashSet<int> _subWordFloat16Params = new();
+        private readonly HashSet<int> _subWordBFloat16Params = new();
         // Unsigned sub-word params need zero-extension instead of sign extension
         private readonly HashSet<int> _subWordUnsignedParams = new();
         // Maps LEA variable names to their sub-word param index
@@ -569,20 +570,21 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // 4. Emit emulation library only if the kernel actually uses f64/i64/f16 types.
             //    Including the library unconditionally produces a massive vertex shader
             //    that ANGLE's D3D11 backend cannot compile with Transform Feedback.
-            var (kernelNeedsF64, kernelNeedsI64, kernelNeedsF16) = KernelUsesEmulatedTypes();
+            var (kernelNeedsF64, kernelNeedsI64, kernelNeedsF16, kernelNeedsBF16) = KernelUsesEmulatedTypes();
             // Float16 emulation is always active on WebGL when the kernel uses Half
             // types - GLSL ES 3.0 has no hardware f16 path. Detected via IR scan above,
             // not just _subWordFloat16Params (which is populated AFTER library emission).
             if ((Backend.EnableF64Emulation && kernelNeedsF64) ||
                 (Backend.EnableI64Emulation && kernelNeedsI64) ||
-                kernelNeedsF16)
+                kernelNeedsF16 || kernelNeedsBF16)
             {
                 Builder.AppendLine("// ============ Emulation Library ============");
                 Builder.AppendLine(GLSLEmulationLibrary.GetEmulationLibrary(
                     Backend.EnableF64Emulation && kernelNeedsF64,
                     Backend.UseOzakiF64Emulation,
                     Backend.EnableI64Emulation && kernelNeedsI64,
-                    kernelNeedsF16));
+                    kernelNeedsF16,
+                    includeBF16: kernelNeedsBF16));
             }
 
             // 5. Insert a placeholder for struct type definitions.
@@ -653,14 +655,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// the entire emulation library for simple float32 kernels, which causes
         /// ANGLE D3D11 to fail compiling the large vertex shader.
         /// </summary>
-        private (bool needsF64, bool needsI64, bool needsF16) KernelUsesEmulatedTypes()
+        private (bool needsF64, bool needsI64, bool needsF16, bool needsBF16) KernelUsesEmulatedTypes()
         {
             bool needsF64 = _emulatedF64Params.Count > 0;
             bool needsI64 = _emulatedI64Params.Count > 0;
             bool needsF16 = _subWordFloat16Params.Count > 0;
+            bool needsBF16 = _subWordBFloat16Params.Count > 0;
 
-            // Early exit if all three already detected from parameters
-            if (needsF64 && needsI64 && needsF16) return (needsF64, needsI64, needsF16);
+            // Early exit if all already detected from parameters
+            if (needsF64 && needsI64 && needsF16 && needsBF16) return (needsF64, needsI64, needsF16, needsBF16);
 
             // Scan all values in the kernel's IR blocks for f64/i64/f16 usage
             foreach (var block in Method.Blocks)
@@ -674,12 +677,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         needsI64 = true;
                     if (!needsF16 && bvt == BasicValueType.Float16)
                         needsF16 = true;
+                    if (!needsBF16 && bvt == BasicValueType.BFloat16)
+                        needsBF16 = true;
 
-                    if (needsF64 && needsI64 && needsF16) return (needsF64, needsI64, needsF16);
+                    if (needsF64 && needsI64 && needsF16 && needsBF16) return (needsF64, needsI64, needsF16, needsBF16);
                 }
             }
 
-            return (needsF64, needsI64, needsF16);
+            return (needsF64, needsI64, needsF16, needsBF16);
         }
 
         private static TypeNode UnwrapType(TypeNode type)
@@ -761,6 +766,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             public bool IsUnsignedSubWord { get; set; }
             /// <summary>True when sub-word and Float16-emulated.</summary>
             public bool IsFloat16 { get; set; }
+            /// <summary>True when sub-word and bfloat16-emulated.</summary>
+            public bool IsBFloat16 { get; set; }
             /// <summary>The raw element type (PrimitiveType or StructureType) of the view.</summary>
             public TypeNode? ViewElementType { get; set; }
             /// <summary>The C# field type from the user's struct (used by host-side reflection).</summary>
@@ -999,6 +1006,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                                     info.GlslElementType = "int";
                                     info.IsFloat16 = true;
                                     break;
+                                case BasicValueType.BFloat16:
+                                    info.SubWordElemSize = 2;
+                                    info.GlslElementType = "int";
+                                    info.IsBFloat16 = true;
+                                    break;
                                 case BasicValueType.Float32:
                                     info.GlslElementType = "float";
                                     break;
@@ -1144,6 +1156,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                             _subWordFloat16Params.Add(param.Index);
                             glslType = "int"; // Force R32I texture for packed sub-word bit data
                         }
+                        else if (swPt.BasicValueType == BasicValueType.BFloat16)
+                        {
+                            _subWordParams[param.Index] = 2; // WebGL has no native bf16
+                            _subWordBFloat16Params.Add(param.Index);
+                            glslType = "int"; // Force R32I texture for packed sub-word bit data
+                        }
                     }
 
                     // Only declare a sampler uniform for buffers that are actually READ.
@@ -1272,6 +1290,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     SubWordElemSize = f.SubWordElemSize,
                     IsUnsignedSubWord = f.IsUnsignedSubWord,
                     IsFloat16 = f.IsFloat16,
+                    IsBFloat16 = f.IsBFloat16,
                     IsOutputBuffer = isOutputForManifest,
                     ClrFieldName = f.ClrFieldName,
                 });
@@ -1300,6 +1319,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         _subWordParams[synth] = f.SubWordElemSize;
                         if (f.IsUnsignedSubWord) _subWordUnsignedParams.Add(synth);
                         if (f.IsFloat16) _subWordFloat16Params.Add(synth);
+                        if (f.IsBFloat16) _subWordBFloat16Params.Add(synth);
                     }
 
                     if (isInputBuffer)
@@ -2992,6 +3012,16 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     var rawExpr = $"uint((({fetch}) >> ({shift})) & 0xFFFF)";
                     extractExpr = $"_f16_to_f32({rawExpr})";
                 }
+                else if (_subWordBFloat16Params.Contains(subWordParamIdx))
+                {
+                    // bfloat16 extraction: 2 bf16 per texel, call _bf16_to_f32 helper
+                    // (same 2-byte sub-word texel layout as Float16, different conversion).
+                    var texelIdx = $"({idx} / 2 + {swBn}_offset)";
+                    var shift = $"(({idx}) % 2) * 16";
+                    var fetch = $"texelFetch({swBn}, ivec2({texelIdx} % {swBn}_tileW, {texelIdx} / {swBn}_tileW), 0).r";
+                    var rawExpr = $"uint((({fetch}) >> ({shift})) & 0xFFFF)";
+                    extractExpr = $"_bf16_to_f32({rawExpr})";
+                }
                 else if (_subWordUnsignedParams.Contains(subWordParamIdx))
                 {
                     // UInt16 extraction: 2 ushorts per texel, zero-extension
@@ -3181,6 +3211,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     if (_subWordFloat16Params.Contains(leaParamIdx))
                     {
                         AppendLine($"{output.VaryingName} = int(_f32_to_f16({val}));");
+                        return;
+                    }
+                    if (_subWordBFloat16Params.Contains(leaParamIdx))
+                    {
+                        AppendLine($"{output.VaryingName} = int(_f32_to_bf16({val}));");
                         return;
                     }
 
@@ -4212,6 +4247,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         public bool IsUnsignedSubWord { get; set; }
         /// <summary>True when the sub-word field is Float16-emulated.</summary>
         public bool IsFloat16 { get; set; }
+        /// <summary>True when the sub-word field is bfloat16-emulated.</summary>
+        public bool IsBFloat16 { get; set; }
         /// <summary>True when the kernel writes to this field (needs TF varying).</summary>
         public bool IsOutputBuffer { get; set; }
         /// <summary>The C# field name from the user's body struct (debug clarity).</summary>

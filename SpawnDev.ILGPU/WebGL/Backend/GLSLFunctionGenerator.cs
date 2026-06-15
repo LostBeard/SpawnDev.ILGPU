@@ -78,6 +78,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             Builder.AppendLine("uvec2 f64_to_ieee754_bits(vec2 v);");
             Builder.AppendLine("float _f16_to_f32(uint bits);");
             Builder.AppendLine("uint _f32_to_f16(float v);");
+            Builder.AppendLine("float _bf16_to_f32(uint bits);");
+            Builder.AppendLine("uint _f32_to_bf16(float v);");
             Builder.AppendLine();
 
             GenerateHeaderStub(Builder);

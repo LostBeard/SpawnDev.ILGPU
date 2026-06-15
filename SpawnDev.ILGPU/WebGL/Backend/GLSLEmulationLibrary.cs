@@ -931,6 +931,34 @@ uint _f32_to_f16(float f) {
 }
 ";
 
+        /// <summary>
+        /// GLSL helpers that convert between the 16-bit bfloat16 bit pattern (low 16 bits of
+        /// a uint) and float. bfloat16 is the top 16 bits of an fp32, so conversion is pure
+        /// bit-shifting - no rebias or table. Matches the WGSL / managed BFloat16 byte-for-byte.
+        /// </summary>
+        public const string BF16Functions = @"
+// ============================================================================
+// BFloat16 Emulation Functions (top-16-bits-of-fp32 in uint, float arithmetic)
+// ============================================================================
+
+// Expand a 16-bit bfloat16 bit pattern (low 16 bits of a uint) into float (exact).
+float _bf16_to_f32(uint h) {
+    return uintBitsToFloat((h & 0xFFFFu) << 16u);
+}
+
+// Compress a native float into the 16-bit bfloat16 bit pattern (low 16 bits of the
+// uint) using round-to-nearest-even. NaN preserved (force a mantissa bit).
+uint _f32_to_bf16(float f) {
+    uint bits = floatBitsToUint(f);
+    if ((bits & 0x7FFFFFFFu) > 0x7F800000u) {
+        return ((bits >> 16u) | 0x0040u) & 0xFFFFu;
+    }
+    uint lsb = (bits >> 16u) & 1u;
+    uint rounded = bits + 0x7FFFu + lsb;
+    return (rounded >> 16u) & 0xFFFFu;
+}
+";
+
         #endregion
 
         #region Combined Library
@@ -948,7 +976,7 @@ uint _f32_to_f16(float f) {
         /// <param name="includeF16">When true, emits the Float16 bit-conversion helpers
         /// (<c>_f16_to_f32</c>, <c>_f32_to_f16</c>). WebGL has no native f16, so this is
         /// the only f16 path available on this backend.</param>
-        public static string GetEmulationLibrary(bool includeF64, bool useOzakiF64, bool includeI64, bool includeF16)
+        public static string GetEmulationLibrary(bool includeF64, bool useOzakiF64, bool includeI64, bool includeF16, bool includeBF16 = false)
         {
             var sb = new System.Text.StringBuilder();
 
@@ -972,6 +1000,11 @@ uint _f32_to_f16(float f) {
             if (includeF16)
             {
                 sb.AppendLine(F16Functions);
+            }
+
+            if (includeBF16)
+            {
+                sb.AppendLine(BF16Functions);
             }
 
             return sb.ToString();
