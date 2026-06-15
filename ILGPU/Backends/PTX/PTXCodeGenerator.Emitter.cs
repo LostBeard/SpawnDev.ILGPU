@@ -174,6 +174,12 @@ namespace ILGPU.Backends.PTX
                         // hardware register to be interpreted as a FP16 value.
                         AppendConstant(value.UInt16Value);
                         break;
+                    case BasicValueType.BFloat16:
+                        // bf16 is held in an f32 register on PTX (the value computes as
+                        // f32, rounds back to bf16 only at the store boundary). Emit the
+                        // f32 magnitude as the immediate.
+                        AppendConstant((float)value.BFloat16Value);
+                        break;
                     case BasicValueType.Float32:
                         AppendConstant(value.Float32Value);
                         break;

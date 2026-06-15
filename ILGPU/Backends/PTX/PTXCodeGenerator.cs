@@ -202,7 +202,7 @@ namespace ILGPU.Backends.PTX
                 string.Empty, "pred",
                 "b8", "b16", "b32", "b64",
                 "f16", "f32", "f64",
-                "f16"); // BFloat16 (ordinal 9) - placeholder; native bf16 PTX codegen is Phase 3
+                "f32"); // BFloat16 (ordinal 9) - bf16 value held in an f32 register (storage uses literal b16)
 
         /// <summary>
         /// Maps basic types to constant-loading target basic types.
@@ -214,7 +214,7 @@ namespace ILGPU.Backends.PTX
                 BasicValueType.Int16, BasicValueType.Int16,
                 BasicValueType.Int32, BasicValueType.Int64,
                 BasicValueType.Int16, BasicValueType.Float32, BasicValueType.Float64,
-                BasicValueType.Int16); // BFloat16 (ordinal 9) - placeholder (Phase 3)
+                BasicValueType.Float32); // BFloat16 (ordinal 9) - f32-register model (mov as f32)
 
         /// <summary>
         /// Maps basic types to constant-loading target basic types.

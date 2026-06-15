@@ -105,7 +105,7 @@ namespace ILGPU.Backends.PTX
                 PTXRegisterKind.Int16, PTXRegisterKind.Int16,
                 PTXRegisterKind.Int32, PTXRegisterKind.Int64,
                 PTXRegisterKind.Int16, PTXRegisterKind.Float32, PTXRegisterKind.Float64,
-                PTXRegisterKind.Int16); // BFloat16 (ordinal 9) - placeholder (Phase 3)
+                PTXRegisterKind.Float32); // BFloat16 (ordinal 9) - f32-register model (bf16 value held in f32 reg)
 
         /// <summary>
         /// Maps basic value types to their PTX-specific parameter-type counterparts.
@@ -116,7 +116,7 @@ namespace ILGPU.Backends.PTX
                 BasicValueType.Int8, BasicValueType.Int16,
                 BasicValueType.Int32, BasicValueType.Int64,
                 BasicValueType.Int16, BasicValueType.Float32, BasicValueType.Float64,
-                BasicValueType.Int16); // BFloat16 (ordinal 9) - placeholder (Phase 3)
+                BasicValueType.Float32); // BFloat16 (ordinal 9) - f32-register model
 
         /// <summary>
         /// Declares all register kinds for which register declarations have to be

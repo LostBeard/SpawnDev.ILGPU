@@ -48,6 +48,10 @@ namespace ILGPU.Backends.PTX
             CompareFlags flags,
             ArithmeticBasicValueType type)
         {
+            // bf16 has no native PTX arithmetic/compare; it computes as f32 (values held in
+            // f32 registers, converted at load/store). Route bf16 ops through the f32 tables.
+            if (type == ArithmeticBasicValueType.BFloat16)
+                type = ArithmeticBasicValueType.Float32;
             var unorderedFloatComparison = type.IsFloat()
                 && flags.HasFlag(CompareFlags.UnsignedOrUnordered);
             if (unorderedFloatComparison)
@@ -94,6 +98,8 @@ namespace ILGPU.Backends.PTX
             CudaCapabilityContext capabilities,
             bool fastMath)
         {
+            if (type == ArithmeticBasicValueType.BFloat16)
+                type = ArithmeticBasicValueType.Float32; // bf16 computes as f32 on PTX
             if (kind == UnaryArithmeticKind.TanhF &&
                 type == ArithmeticBasicValueType.Float32 &&
                 !capabilities.Float32_TanH)
@@ -131,6 +137,8 @@ namespace ILGPU.Backends.PTX
             CudaCapabilityContext capabilities,
             bool fastMath)
         {
+            if (type == ArithmeticBasicValueType.BFloat16)
+                type = ArithmeticBasicValueType.Float32; // bf16 computes as f32 on PTX
             if (kind == BinaryArithmeticKind.Min &&
                type == ArithmeticBasicValueType.Float16 &&
                !capabilities.Float16_Min)
@@ -162,10 +170,14 @@ namespace ILGPU.Backends.PTX
         /// <returns>The resolved arithmetic operation.</returns>
         public static string GetArithmeticOperation(
             TernaryArithmeticKind kind,
-            ArithmeticBasicValueType type) =>
-            TernaryArithmeticOperations.TryGetValue((kind, type), out string? operation)
-            ? operation
-            : throw new NotSupportedIntrinsicException(kind.ToString());
+            ArithmeticBasicValueType type)
+        {
+            if (type == ArithmeticBasicValueType.BFloat16)
+                type = ArithmeticBasicValueType.Float32; // bf16 computes as f32 on PTX
+            return TernaryArithmeticOperations.TryGetValue((kind, type), out string? operation)
+                ? operation
+                : throw new NotSupportedIntrinsicException(kind.ToString());
+        }
 
         /// <summary>
         /// Resolves an atomic operation.

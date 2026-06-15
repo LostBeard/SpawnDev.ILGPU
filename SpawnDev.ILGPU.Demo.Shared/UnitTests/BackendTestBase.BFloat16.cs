@@ -19,20 +19,14 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
     public abstract partial class BackendTestBase
     {
         /// <summary>
-        /// bfloat16 codegen is implemented on CPU (Phase 0, managed struct), WebGPU (Phase 1, WGSL),
-        /// WebGL (Phase 2, GLSL) and Wasm (Phase 2b, WebAssembly bytecode) - all emulated via the same bit
-        /// conversion. Native CUDA / OpenCL are a later phase - skip cleanly there for now.
+        /// bfloat16 codegen is implemented on all 6 backends: CPU (managed struct), WebGPU (WGSL),
+        /// WebGL (GLSL), Wasm (WebAssembly bytecode) and OpenCL - all emulated via the same exact bit
+        /// conversion - plus CUDA, which holds bf16 in an f32 register and converts at the load/store
+        /// boundary via PTX cvt.f32.bf16 / cvt.rn.bf16.f32 (Ampere+ native). No backend is skipped.
         /// </summary>
         private static void RequireBFloat16SupportedBackend(Accelerator accelerator)
         {
-            if (accelerator.AcceleratorType != AcceleratorType.CPU &&
-                accelerator.AcceleratorType != AcceleratorType.WebGPU &&
-                accelerator.AcceleratorType != AcceleratorType.WebGL &&
-                accelerator.AcceleratorType != AcceleratorType.Wasm &&
-                accelerator.AcceleratorType != AcceleratorType.OpenCL)
-                throw new UnsupportedTestException(
-                    "BFloat16 codegen is implemented on CPU + WebGPU + WebGL + Wasm + OpenCL; CUDA is a " +
-                    "later phase (see Plans/bfloat16-support-plan-2026-06-15.md).");
+            // BFloat16 is supported on every backend; nothing to gate.
         }
 
         /// <summary>

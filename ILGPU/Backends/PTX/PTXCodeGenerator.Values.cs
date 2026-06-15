@@ -219,11 +219,33 @@ namespace ILGPU.Backends.PTX
         /// <summary cref="IBackendCodeGenerator.GenerateCode(ConvertValue)"/>
         public void GenerateCode(ConvertValue value)
         {
+            var sourceType = value.SourceType;
+            var targetType = value.TargetType;
+
+            // bf16 is held in an f32 register on PTX. It computes as f32 and is rounded
+            // back to bf16 only at the store boundary - identical to the WGSL/WebGL/Wasm/
+            // OpenCL backends, which all keep bf16 as an f32 local and pack at load/store.
+            // Treat the bf16 endpoint(s) as f32 for the conversion.
+            if (sourceType == ArithmeticBasicValueType.BFloat16 ||
+                targetType == ArithmeticBasicValueType.BFloat16)
+            {
+                if (sourceType == ArithmeticBasicValueType.BFloat16)
+                    sourceType = ArithmeticBasicValueType.Float32;
+                if (targetType == ArithmeticBasicValueType.BFloat16)
+                    targetType = ArithmeticBasicValueType.Float32;
+                // bf16<->f32 reduces to a register no-op (the rounding happens at store).
+                if (sourceType == targetType)
+                {
+                    Alias(value, value.Value);
+                    return;
+                }
+            }
+
             var sourceValue = LoadPrimitive(value.Value);
 
             var convertOperation = PTXInstructions.GetConvertOperation(
-                value.SourceType,
-                value.TargetType);
+                sourceType,
+                targetType);
 
             var targetRegister = AllocateHardware(value);
             using var command = BeginCommand(convertOperation);
@@ -513,6 +535,34 @@ namespace ILGPU.Backends.PTX
         {
             var address = LoadHardware(load.Source);
             var sourceType = load.Source.Type.AsNotNullCast<PointerType>();
+
+            if (load.Type.BasicValueType == BasicValueType.BFloat16)
+            {
+                // bf16 storage is a packed 16-bit value (the top half of an fp32). Load the
+                // raw 16 bits into a temp .b16 register, then widen to the f32 value
+                // register via cvt.f32.bf16 (Ampere+ native bf16 convert). bf16 computes as
+                // f32 in-register and is re-rounded only at the store boundary - matching
+                // the WGSL/WebGL/Wasm/OpenCL backends.
+                var bf16Target = AllocateHardware(load);
+                var rawReg = AllocateRegister(
+                    BasicValueType.Int16,
+                    PTXRegisterKind.Int16);
+                using (var cmd = BeginCommand(PTXInstructions.LoadOperation))
+                {
+                    cmd.AppendAddressSpace(sourceType.AddressSpace);
+                    cmd.AppendSuffix("b16");
+                    cmd.AppendArgument(rawReg);
+                    cmd.AppendArgumentValue(address, 0);
+                }
+                using (var cmd = BeginCommand("cvt.f32.bf16"))
+                {
+                    cmd.AppendArgument(bf16Target);
+                    cmd.AppendArgument(rawReg);
+                }
+                FreeRegister(rawReg);
+                return;
+            }
+
             var targetRegister = Allocate(load);
 
             EmitVectorizedCommand(
@@ -614,6 +664,33 @@ namespace ILGPU.Backends.PTX
             var address = LoadHardware(store.Target);
             var targetType = store.Target.Type.AsNotNullCast<PointerType>();
             var value = Load(store.Value);
+
+            if (store.Value.Type.BasicValueType == BasicValueType.BFloat16)
+            {
+                // bf16 store: round the f32 value register to bf16 via cvt.rn.bf16.f32 into
+                // a temp .b16 register, then write the raw 16 bits. EnsureHardwareRegister
+                // materializes a bf16 constant into an f32 register first (cvt cannot take
+                // an immediate source). Rounds identically to every other backend.
+                var valueReg = EnsureHardwareRegister(
+                    value.AsNotNullCast<PrimitiveRegister>());
+                var rawReg = AllocateRegister(
+                    BasicValueType.Int16,
+                    PTXRegisterKind.Int16);
+                using (var cmd = BeginCommand("cvt.rn.bf16.f32"))
+                {
+                    cmd.AppendArgument(rawReg);
+                    cmd.AppendArgument(valueReg);
+                }
+                using (var cmd = BeginCommand(PTXInstructions.StoreOperation))
+                {
+                    cmd.AppendAddressSpace(targetType.AddressSpace);
+                    cmd.AppendSuffix("b16");
+                    cmd.AppendArgumentValue(address, 0);
+                    cmd.AppendArgument(rawReg);
+                }
+                FreeRegister(rawReg);
+                return;
+            }
 
             EmitVectorizedCommand(
                 store.Target,
