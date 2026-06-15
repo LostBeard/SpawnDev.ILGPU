@@ -1847,6 +1847,43 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             finally { WasmBackend.ModuleCacheFlushThreshold = savedThreshold; }
         }
 
+        // Host-write snapshot SAB leak guard (2026-06-14, Geordi). The lazy host-write snapshot
+        // (WasmMemoryBuffer.PrepareHostWrite) allocates a FULL-buffer-size SharedArrayBuffer when a host
+        // write lands while a dispatch is in flight on that buffer. CompleteDispatchIntent used to
+        // Remove() the snapshot from its dict but NEVER Dispose() the SAB (despite its doc claiming it
+        // did) → every snapshot leaked a full-buffer SAB → the ~1.5 GiB ML-lane late-test JS-heap leak
+        // (Tuvok trio trace). This guard deterministically materializes snapshots (launch a dispatch —
+        // which registers the intent synchronously — then host-write the buffer mid-flight) and asserts
+        // LiveSnapshotBytes returns to baseline after the dispatch completes + buffers dispose.
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_HostWriteSnapshot_DoesNotLeakSAB()
+        {
+            const int count = 8192;
+            var context = Context.Create().Wasm().ToContext();
+            var accelerator = await context.CreateWasmAcceleratorAsync();
+            try
+            {
+                long baseline = SpawnDev.ILGPU.Wasm.WasmMemoryBuffer.LiveSnapshotBytes;
+                var data = new int[count];
+                for (int r = 0; r < 8; r++)
+                {
+                    using var buf = accelerator.Allocate1D<int>(count);
+                    var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(
+                        (i, v) => v[i] = i * 3);
+                    k((Index1D)count, buf.View);          // launch → registers the dispatch intent (synchronous)
+                    buf.View.CopyFromCPU(data);            // host write while in-flight → materializes a snapshot
+                    await accelerator.SynchronizeAsync();  // dispatch completes → snapshot must be Disposed
+                }
+                long leaked = SpawnDev.ILGPU.Wasm.WasmMemoryBuffer.LiveSnapshotBytes - baseline;
+                if (leaked != 0)
+                    throw new Exception(
+                        $"Host-write snapshot SABs leaked {leaked} bytes after dispatch-complete + buffer dispose — " +
+                        $"CompleteDispatchIntent/DisposeAcceleratorObject must Dispose the snapshot SharedArrayBuffers " +
+                        $"(the ML-lane ~1.5 GiB JS-heap leak has regressed).");
+            }
+            finally { accelerator.Dispose(); context.Dispose(); }
+        }
+
         // Wasm SIMD128 emitter foundation (Phase 1, 2026-06-14, Geordi). Pure-CPU regression guard on
         // the v128 encoding — NO browser/GPU needed, just byte assertions. Locks the part most likely
         // to silently break: SIMD sub-opcodes are u32-LEB128 after the 0xFD prefix (NOT single bytes

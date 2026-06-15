@@ -90,6 +90,7 @@ namespace SpawnDev.ILGPU.Wasm
             dst.JSRef!.CallVoid("set", src);
             _snapshotsByHWC[hwcKey] = fresh;
             _snapshotRefCounts[hwcKey] = _pendingSnapshotIntents; // every pending intent shares this tier
+            s_liveSnapshotBytes += LengthInBytes; // resident-SAB diagnostic (see LiveSnapshotBytes)
         }
 
         /// <summary>
@@ -198,7 +199,18 @@ namespace SpawnDev.ILGPU.Wasm
                 if (rc <= 0)
                 {
                     _snapshotRefCounts.Remove(queueTimeHostWriteCounter);
-                    _snapshotsByHWC?.Remove(queueTimeHostWriteCounter);
+                    // BUGFIX 2026-06-14: actually free the snapshot SAB. The previous code Remove()'d
+                    // the dict entry but never Disposed the SharedArrayBuffer (despite this method's
+                    // doc claiming "that tier's SAB is freed"), so every full-buffer-size host-write
+                    // snapshot leaked in the JS heap — the ~1.5 GiB ML-lane late-test leak (Tuvok trace
+                    // 2026-06-14; invisible to LiveBufferBytes because it's a separate SAB path).
+                    if (_snapshotsByHWC != null
+                        && _snapshotsByHWC.TryGetValue(queueTimeHostWriteCounter, out var doneSnap))
+                    {
+                        _snapshotsByHWC.Remove(queueTimeHostWriteCounter);
+                        doneSnap.Dispose();
+                        s_liveSnapshotBytes -= LengthInBytes;
+                    }
                 }
                 else
                 {
@@ -207,9 +219,25 @@ namespace SpawnDev.ILGPU.Wasm
             }
             if (_pendingSnapshotIntents == 0)
             {
+                // Dispose any snapshot SABs still resident (tiers not released by refcount) before
+                // dropping the dicts — otherwise their JS SharedArrayBuffers leak (same root bug).
+                DisposeAllSnapshots();
                 _snapshotsByHWC = null;
                 _snapshotRefCounts = null;
             }
+        }
+
+        /// <summary>Disposes every snapshot SAB still in <see cref="_snapshotsByHWC"/> and clears the
+        /// resident-bytes accounting. Idempotent. Called on the last-intent-completes path and on Dispose.</summary>
+        private void DisposeAllSnapshots()
+        {
+            if (_snapshotsByHWC == null) return;
+            foreach (var kv in _snapshotsByHWC)
+            {
+                kv.Value.Dispose();
+                s_liveSnapshotBytes -= LengthInBytes;
+            }
+            _snapshotsByHWC.Clear();
         }
 
         /// <summary>
@@ -531,12 +559,18 @@ namespace SpawnDev.ILGPU.Wasm
         // (TotalKernelsCompiled) is NOT a memory proxy; these are the real resident measure.
         private static int s_liveBufferCount;
         private static long s_liveBufferBytes;
+        private static long s_liveSnapshotBytes;
         private readonly int _liveBytes;
         private bool _liveCounted;
         /// <summary>Number of WasmMemoryBuffers currently alive (constructed, not yet disposed).</summary>
         public static int LiveBufferCount => s_liveBufferCount;
-        /// <summary>Total resident bytes across all live WasmMemoryBuffers (≈ SharedArrayBuffer bytes held).</summary>
+        /// <summary>Total resident bytes across all live WasmMemoryBuffers' primary SharedArrayBuffers.</summary>
         public static long LiveBufferBytes => s_liveBufferBytes;
+        /// <summary>Total resident bytes of host-write SNAPSHOT SharedArrayBuffers (the SEPARATE SAB path —
+        /// full-buffer-size copies materialized by <see cref="PrepareHostWrite"/>). This was the invisible
+        /// ML-lane leak: snapshots were removed from the dict but never Disposed. If this climbs across a
+        /// lane, snapshot SABs are leaking; it should now return to ~0 between tests.</summary>
+        public static long LiveSnapshotBytes => s_liveSnapshotBytes;
 
         /// <inheritdoc/>
         protected override void DisposeAcceleratorObject(bool disposing)
@@ -545,6 +579,11 @@ namespace SpawnDev.ILGPU.Wasm
             {
                 TypedArrayView?.Dispose();
                 SharedBuffer?.Dispose();
+                // Free any snapshot SABs still resident (buffer disposed with pending host-write
+                // snapshots) — otherwise their full-buffer-size JS SharedArrayBuffers leak.
+                DisposeAllSnapshots();
+                _snapshotsByHWC = null;
+                _snapshotRefCounts = null;
             }
             // Decrement the resident counters exactly once (dispose may run on the finalizer path too).
             if (_liveCounted)

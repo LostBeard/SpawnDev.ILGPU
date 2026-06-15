@@ -114,6 +114,19 @@ see a peer's flush). Short workloads never cross the threshold → never flush �
 library Wasm lane is unaffected). Guard: `WasmTests.Wasm_ModuleCacheFlush_DoesNotBreakCorrectness`
 (threshold=1, CPU-oracle). Diagnostic: `WasmAccelerator.TotalKernelsCompiled`.
 
+**Host-write snapshot SABs MUST be Disposed (2026-06-14 leak fix).** `WasmMemoryBuffer.PrepareHostWrite`
+allocates a FULL-buffer-size `new SharedArrayBuffer` (`WasmMemoryBuffer.cs:87`) when a host write lands
+while a dispatch is in flight on that buffer (the lazy copy-out-race snapshot). This is a SECOND SAB path
+distinct from the buffer's primary `SharedBuffer` — easy to miss. The original `CompleteDispatchIntent`
+Remove()'d the snapshot from `_snapshotsByHWC` but NEVER `Dispose()`d the SAB (its doc lied: "that tier's
+SAB is freed"), and the intents==0 path nulled the dict without disposing → every snapshot leaked a
+full-buffer JS SharedArrayBuffer → ~1.5 GiB across the ML lane → late-test timeouts (root-caused by a
+resident-memory trace; it was invisible to a primary-SAB byte counter). RULE: any `new SharedArrayBuffer`
+(or JSObject) created here must be `.Dispose()`d on EVERY exit path (release + buffer dispose) —
+`DisposeAllSnapshots()` does it now. Diagnostic `WasmMemoryBuffer.LiveSnapshotBytes`; guard
+`WasmTests.Wasm_HostWriteSnapshot_DoesNotLeakSAB`. Lesson: a monotonic counter is not a memory proxy, and
+a buffer's primary-SAB counter won't see a SECOND SAB path — measure the actual resident bytes per path.
+
 ## Process-static SHARED linear memory (2026-06-14) — `s_sharedWasmMemory`
 
 The memory analog of the worker pool, and the **second half** the pool fix unmasked. A
