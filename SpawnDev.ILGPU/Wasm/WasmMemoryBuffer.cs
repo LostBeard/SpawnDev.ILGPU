@@ -258,6 +258,16 @@ namespace SpawnDev.ILGPU.Wasm
             // Create a Uint8Array view for raw data access
             TypedArrayView = new Uint8Array(SharedBuffer);
 
+            // Resident-count diagnostic (2026-06-14): RESIDENT live-buffer count + bytes (inc here,
+            // dec on dispose — NOT cumulative), to attribute the ML Wasm late-lane JS-heap leak
+            // (Tuvok trace: heap 154→1644 MiB, ~2.9 MiB/test). If LiveBufferBytes does NOT return to
+            // ~baseline after each test's accelerator.Dispose, undisposed SharedArrayBuffer-backed
+            // buffers are the leak (accelerator.Dispose not freeing children, or callers not disposing).
+            _liveBytes = totalBytes;
+            _liveCounted = true;
+            s_liveBufferCount++;
+            s_liveBufferBytes += totalBytes;
+
             // NativePtr = 0: Wasm buffers don't use native pointers.
             // ArrayView.LoadEffectiveAddressAsPtr() returns NativePtr + Index * ElementSize.
             // With NativePtr=0, SubView offsets are purely Index-based (correct for Wasm).
@@ -514,6 +524,20 @@ namespace SpawnDev.ILGPU.Wasm
                 sourceOffsetInBytes, targetOffsetInBytes, lengthInBytes);
         }
 
+        // ── Resident-count diagnostics (2026-06-14) ──
+        // Live (currently-undisposed) WasmMemoryBuffer count + total resident bytes. RESIDENT, not
+        // cumulative — they go back down on dispose, so a climbing curve across a test lane means a
+        // genuine leak (see the ctor note). Lesson from the prior mis-diagnosis: a monotonic counter
+        // (TotalKernelsCompiled) is NOT a memory proxy; these are the real resident measure.
+        private static int s_liveBufferCount;
+        private static long s_liveBufferBytes;
+        private readonly int _liveBytes;
+        private bool _liveCounted;
+        /// <summary>Number of WasmMemoryBuffers currently alive (constructed, not yet disposed).</summary>
+        public static int LiveBufferCount => s_liveBufferCount;
+        /// <summary>Total resident bytes across all live WasmMemoryBuffers (≈ SharedArrayBuffer bytes held).</summary>
+        public static long LiveBufferBytes => s_liveBufferBytes;
+
         /// <inheritdoc/>
         protected override void DisposeAcceleratorObject(bool disposing)
         {
@@ -521,6 +545,13 @@ namespace SpawnDev.ILGPU.Wasm
             {
                 TypedArrayView?.Dispose();
                 SharedBuffer?.Dispose();
+            }
+            // Decrement the resident counters exactly once (dispose may run on the finalizer path too).
+            if (_liveCounted)
+            {
+                _liveCounted = false;
+                s_liveBufferCount--;
+                s_liveBufferBytes -= _liveBytes;
             }
         }
     }

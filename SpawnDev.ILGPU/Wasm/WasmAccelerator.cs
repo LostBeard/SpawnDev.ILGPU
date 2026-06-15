@@ -313,6 +313,15 @@ namespace SpawnDev.ILGPU.Wasm
         /// </summary>
         public static int TotalKernelsCompiled => _nextKernelId;
 
+        /// <summary>Number of WasmAccelerators currently alive (Created, not yet Disposed). RESIDENT
+        /// diagnostic for the ML Wasm late-lane JS-heap leak (Tuvok trace 2026-06-14): if this does NOT
+        /// return to baseline after each test's accelerator.Dispose, accelerators are leaking (Dispose
+        /// not running / something keeps them alive); if it's flat but LiveBufferBytes climbs, the leak
+        /// is buffers/JSObjects, not the accelerator object. NOT cumulative — inc on Create, dec on Dispose.</summary>
+        public static int LiveAcceleratorCount => s_liveAcceleratorCount;
+        private static int s_liveAcceleratorCount;
+        private bool _liveAccelCounted;
+
         /// <summary><see cref="_nextKernelId"/> value at the last module-cache flush. The host flushes the
         /// persistent workers' module caches when <c>_nextKernelId - s_lastFlushKernelId</c> exceeds
         /// <see cref="WasmBackend.ModuleCacheFlushThreshold"/> — see that flag + the flush in RunKernelAsync.</summary>
@@ -576,6 +585,8 @@ namespace SpawnDev.ILGPU.Wasm
             accelerator.Backend = backend;
             accelerator.Init(backend);
             accelerator.DefaultStream = accelerator.CreateStreamInternal();
+            accelerator._liveAccelCounted = true;
+            s_liveAcceleratorCount++; // resident diagnostic (see LiveAcceleratorCount)
             return accelerator;
         }
 
@@ -3096,6 +3107,9 @@ namespace SpawnDev.ILGPU.Wasm
                 // Mark disposed before tearing down workers so any in-flight RunKernel call
                 // rejects cleanly instead of queuing work onto a dead pool.
                 _disposed = true;
+
+                // Resident diagnostic: this accelerator is no longer live (see LiveAcceleratorCount).
+                if (_liveAccelCounted) { _liveAccelCounted = false; s_liveAcceleratorCount--; }
 
                 // Fault every TCS that's still waiting on a worker response. Worker.Terminate()
                 // below kills the Promise chain without replying, so without this the awaiting
