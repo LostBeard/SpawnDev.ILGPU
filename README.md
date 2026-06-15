@@ -9,7 +9,11 @@ Write parallel compute code in C# and let the library pick the best available ba
 
 ## Recent Highlights
 
-**4.10.0 (current):** **Wasm multi-worker correctness overhaul** - the large-sort / barrier race family is dead (verified atomic stores + liveness-reduced, checksum-gated spill restore; `WasmTests` 510/510). **Precompiled shaders** - generate a kernel's WGSL/GLSL/Wasm offline with no device on any host OS, precompile at build time via an MSBuild task, and load the artifact at runtime to skip IL->shader transpilation. Plus WebGPU `GridDim.X > 65535` 2D-grid auto-tile, WebGL `Half` RadixSort, and `Float16`/`Float64`/`Int64` reported on every backend (emulated where not native). Bundles forks **2.0.15**.
+**4.13.0 (newest):** **BFloat16 (`ILGPU.BFloat16`) on all 6 backends** - a kernel-native "brain float" (1 sign / 8 exponent / 7 mantissa = the top 16 bits of an fp32, so it keeps fp32's *full dynamic range* - the right trade for ML weights/activations where fp16's tiny range overflows/underflows). `BasicValueType.BFloat16` IR primitive + `INumber<BFloat16>` for generic-math kernels. The bf16<->f32 conversion (exact zero-extend + round-to-nearest-even) is byte-identical across every backend; CUDA uses native `cvt.*.bf16` (sm_80+) with an f32-register-compute model since PTX has no native bf16 arithmetic. Bundles forks **2.0.18**.
+
+**4.12.0:** **Sync/async contract** - operations that *wait* or *read a result back* are async-only; the sync form now throws on the browser (`Synchronize()` -> use `await SynchronizeAsync()`) instead of silently returning wrong data, while fire-and-forget work (dispatch / alloc / upload / `Flush`-submit) stays sync. Plus `AcceleratorRequirements.RequiresScatterStores` (4.12.1) to gate WebGL out of in-kernel scatter kernels at selection time.
+
+**4.10.0:** **Precompiled shaders** - generate a kernel's WGSL/GLSL/Wasm offline with no device on any host OS, precompile at build time via an MSBuild task, and load the artifact at runtime to skip IL->shader transpilation. Plus a Wasm multi-worker correctness overhaul (the large-sort / barrier race family is dead), WebGPU `GridDim.X > 65535` 2D-grid auto-tile, and WebGL `Half` RadixSort.
 
 **See [CHANGELOG.md](CHANGELOG.md)** for the full per-version history - every release, code samples, and per-backend implementation detail.
 
@@ -79,11 +83,11 @@ Six backends from one NuGet package - the same C# kernel runs on all of them:
 |---|---|
 | **WebGPU** (WGSL compute) · **WebGL** (GLSL Transform-Feedback) · **Wasm** (multi-worker WebAssembly) | **CUDA** (PTX) · **OpenCL** (incl. 3.0) · **CPU** |
 
-All support sub-word + `Half` types, 64-bit (native on Wasm/CUDA/OpenCL/CPU, emulated on WebGPU/WebGL), and the ILGPU Algorithms. **WebGL is the exception** - no shared memory / barriers / atomics, so in-kernel group/warp ops throw (host `RadixSort`/`Scan`/`Reduce` still work, all key types incl. `Half`). Auto-selection: WebGPU->WebGL->Wasm (browser), CUDA->OpenCL->CPU (desktop), via `CreatePreferredAcceleratorAsync`. Full per-backend capability matrix + setup: **[Docs/backends.md](Docs/backends.md)**.
+All support sub-word + `Half` + `BFloat16` types, 64-bit (native on Wasm/CUDA/OpenCL/CPU, emulated on WebGPU/WebGL), and the ILGPU Algorithms. **WebGL is the exception** - no shared memory / barriers / atomics, so in-kernel group/warp ops throw (host `RadixSort`/`Scan`/`Reduce` still work, all key types incl. `Half`). Auto-selection: WebGPU->WebGL->Wasm (browser), CUDA->OpenCL->CPU (desktop), via `CreatePreferredAcceleratorAsync`. Full per-backend capability matrix + setup: **[Docs/backends.md](Docs/backends.md)**.
 
 ## Features
 
-- **Sub-word data types** - `Int8`, `UInt8`, `Int16`, `UInt16`, and `Float16` (`ILGPU.Half`) buffer access on all 6 backends. Packed storage with correct stride handling per backend. `Half.Abs`, `Half.Min`, `Half.Max`, `Half.Clamp` intrinsics
+- **Sub-word data types** - `Int8`, `UInt8`, `Int16`, `UInt16`, `Float16` (`ILGPU.Half`), and `BFloat16` (`ILGPU.BFloat16`) buffer access on all 6 backends. Packed storage with correct stride handling per backend. `Half.Abs`, `Half.Min`, `Half.Max`, `Half.Clamp` intrinsics. `BFloat16` keeps fp32's full dynamic range (top 16 bits of an fp32) - the ML-weights trade
 - **CopyFromJS** - Write JavaScript `TypedArray` or `ArrayBuffer` data directly to GPU memory without .NET heap allocation. Available on all browser backends
 - **Lambda kernels** - Write kernels as capturing C# lambdas - captured scalar values are automatically passed to the GPU at dispatch time. No boilerplate, all 6 backends
 - **Higher-order kernels** - `DelegateSpecialization<Func<T,R>>` lets you pass operations as kernel parameters. The delegate is resolved and inlined at compile time - one kernel, many behaviors
@@ -270,7 +274,7 @@ dotnet run --project SpawnDev.ILGPU.Demo
 
 ## Test Coverage
 
-Every feature is tested on all 6 backends (WebGPU, WebGPU-no-subgroups, WebGL, Wasm, CUDA, OpenCL, CPU) through the unified **PlaywrightMultiTest** runner in one `dotnet test`: memory, indexing, arithmetic/bitwise/math, atomics, control flow, structs, sub-word + `Half` types, 64-bit emulation, shared memory, broadcast/subgroups, the full ILGPU Algorithms (RadixSort/Scan/Reduce/Histogram), lambda + delegate specialization, and more. Latest full cross-backend sweep: **3367 pass / 0 fail**.
+Every feature is tested on all 6 backends (WebGPU, WebGPU-no-subgroups, WebGL, Wasm, CUDA, OpenCL, CPU) through the unified **PlaywrightMultiTest** runner in one `dotnet test`: memory, indexing, arithmetic/bitwise/math, atomics, control flow, structs, sub-word + `Half` + `BFloat16` types, 64-bit emulation, shared memory, broadcast/subgroups, the full ILGPU Algorithms (RadixSort/Scan/Reduce/Histogram), lambda + delegate specialization, and more. Latest full cross-backend sweep: **3367 pass / 0 fail**.
 
 ## Browser Requirements
 

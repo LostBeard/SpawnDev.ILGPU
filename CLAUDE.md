@@ -145,9 +145,9 @@ If total > 10: `InvalidOperationException` at dispatch time (v4.9.1+). Before v4
 
 ## Sub-Word Data Types (v4.9.0+)
 
-`ArrayView<byte>`, `ArrayView<sbyte>`, `ArrayView<short>`, `ArrayView<ushort>`, `ArrayView<Half>` (ILGPU.Half) supported on all 6 backends.
+`ArrayView<byte>`, `ArrayView<sbyte>`, `ArrayView<short>`, `ArrayView<ushort>`, `ArrayView<Half>` (ILGPU.Half), `ArrayView<BFloat16>` (ILGPU.BFloat16) supported on all 6 backends.
 
-**Use `ILGPU.Half`, NOT `System.Half`** in kernel signatures. Implicit conversion operators exist for interop.
+**Use `ILGPU.Half`, NOT `System.Half`** in kernel signatures. Implicit conversion operators exist for interop. Same for **`ILGPU.BFloat16`** (the "brain float": top 16 bits of an fp32, so fp32's full dynamic range - the ML-weights trade vs `Half`). bf16 detail: [Docs/data-type-support.md](Docs/data-type-support.md). On CUDA bf16 uses an f32-register-compute model (no native PTX bf16 arithmetic; `cvt.*.bf16` at load/store, sm_80+); the browser/OpenCL backends emulate it via the same exact bf16<->f32 + RNE conversion, byte-identical to CUDA.
 
 **Per-backend implementation:**
 - **WebGPU:** Packed into `array<atomic<u32>>`. Load via atomicLoad + shift + mask. Store via atomicAnd + atomicOr (thread-safe sub-word writes). Float16 load/store calls `_f16_to_f32` / `_f32_to_f16` helpers from `WGSLEmulationLibrary.F16Functions` when `!shader-f16`; native WGSL `f16` type otherwise. `WebGPUBackend.ForceEmulatedF16` test flag forces the emulation path for verification.
@@ -208,6 +208,7 @@ var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>>(
 | f64 native | No (emulated) | No (emulated) | Yes | Yes | Yes | Yes |
 | i64 native | No (emulated) | No (emulated) | Yes | Yes | Yes | Yes |
 | f16 native | Native or emulated** | No (emulated)*** | No (emulated) | Yes | Native or emulated**** | Yes |
+| bf16 | Emulated | Emulated | Emulated | f32-reg + native cvt (sm_80+) | Emulated | Native (managed) |
 
 *Subgroups: WebGPU requires browser support + adapter feature. OpenCL: device-dependent.
 *****Wasm subgroups are EMULATED (no hardware warps): `WarpSize = 8` (mirrors CPU), `Warp.Shuffle`/`SubWarpShuffle` lower to a shared-memory exchange (write per-lane slot → barrier → read source-lane slot) — see `WasmBackend.WasmWarpSize` + `EmitWarpShuffle` in `WasmKernelFunctionGenerator.cs`. `LaneIdx = threadIdX % WarpSize`; `WarpIdx`/`IsFirstLane` derive in IL. Algorithm-layer warp Reduce/Scan route through `WasmWarpExtensions` (also shared-memory). Verified vs the CPU oracle (`SubgroupShuffleTest`, `ReduceMinMaxTest`). Fixed 2026-06-07 (`116c789`).

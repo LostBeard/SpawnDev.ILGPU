@@ -1,7 +1,7 @@
 # Data Type Support by Backend
 
 Tracks verified support for all data types across all 7 backends.
-Updated: 2026-04-13
+Updated: 2026-06-15
 
 **Legend:**
 - [x] PASS - verified with unit tests (real data, real kernels, real verification)
@@ -25,6 +25,7 @@ Updated: 2026-04-13
 | Int64 | long | 8B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | UInt64 | ulong | 8B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float16 | Half | 2B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| BFloat16 | BFloat16 | 2B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float32 | float | 4B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float64 | double | 8B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 
@@ -41,6 +42,7 @@ Updated: 2026-04-13
 | Int64 | long | 8B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | UInt64 | ulong | 8B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float16 | Half | 2B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| BFloat16 | BFloat16 | 2B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float32 | float | 4B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float64 | double | 8B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 
@@ -57,6 +59,7 @@ Updated: 2026-04-13
 | Int64 | long | 8B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | UInt64 | ulong | 8B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float16 | Half | 2B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| BFloat16 | BFloat16 | 2B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float32 | float | 4B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float64 | double | 8B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 
@@ -69,6 +72,7 @@ Updated: 2026-04-13
 | Int16 | short | 2B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | UInt16 | ushort | 2B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float16 | Half | 2B | [-] | [-] | [-] | [-] | [-] | [-] | [-] |
+| BFloat16 | BFloat16 | 2B | [-] | [-] | [-] | [-] | [-] | [-] | [-] |
 
 ## Half Math Intrinsics
 
@@ -77,6 +81,19 @@ Updated: 2026-04-13
 | Abs | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Min/Max | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Clamp | [-] | [-] | [-] | [-] | [-] | [-] | [-] |
+
+## BFloat16 Arithmetic / Min-Max (kernel-side, all compute as f32)
+
+`ILGPU.BFloat16` carries fp32's full dynamic range (1 sign / 8 exponent / 7 mantissa - the top 16 bits
+of an fp32), so values ~1e30 / ~1e-30 that `Half` cannot hold round-trip exactly. Verified end-to-end by
+the 4 `BFloat16_*` tests (round-trip storage, `+ - * /` cross-checked vs the true f64 result with
+round-to-nearest-even, min/max, and range + `±Inf`/`NaN`/zero/RNE-tie specials).
+
+| Op | WebGPU | WebGPU NoSub | Wasm | WebGL | CUDA | OpenCL | CPU |
+|----|:------:|:------------:|:----:|:-----:|:----:|:------:|:---:|
+| Add/Sub/Mul/Div | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| Min/Max | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| `(float)`/`(BFloat16)` convert | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 
 ## CopyFromJS (Browser-only: JS TypedArray/ArrayBuffer -> GPU)
 
@@ -116,6 +133,24 @@ All sub-word types now have **complete Read/Write/EndToEnd support on ALL 7 back
 | **OpenCL** | Native types for Int8/UInt8/Int16/UInt16. Float16 via `vload_half`/`vstore_half` with tracked LEA base pointer. | Native type support |
 | **CPU/CUDA** | Native sub-word support, no special handling needed. | Native |
 
+### BFloat16 (bf16 / "brain float") buffer access
+
+`ILGPU.BFloat16` + the `BasicValueType.BFloat16` IR primitive add a second 16-bit float that, unlike
+`Half`, keeps **fp32's full dynamic range** (it is literally the top 16 bits of an fp32) - the right
+trade for ML weights/activations where fp16's tiny range overflows/underflows. **Complete
+Read/Write/EndToEnd support on ALL 7 backends.** The bf16<->f32 conversion is byte-identical across every
+backend: `bf16->f32` is an exact zero-extend `<<16`; `f32->bf16` is round-to-nearest-even truncate with a
+NaN-preservation guard. Values compute as f32 everywhere; only the storage is 2-byte.
+
+| Backend | Mechanism |
+|---------|-----------|
+| **WebGPU** | Always emulated (no native WGSL `bf16`). Packed 2 bf16 per `array<atomic<u32>>` word (reuses f16's sub-word storage via a parallel `_subWordBFloat16Params` set); `_bf16_to_f32` / `_f32_to_bf16` WGSL helpers at the load/store boundary. |
+| **Wasm** | `EmitBF16ToF32` / `EmitF32ToBF16` emit the conversion as inline WebAssembly bytecode; 2-byte `i32.load16_u` / `i32.store16` (atomic in barrier kernels). |
+| **WebGL** | Packed-u16 in an R32I texel; `texelFetch` + shift/mask load, Transform-Feedback varying store; `_bf16_to_f32` / `_f32_to_bf16` GLSL helpers. |
+| **OpenCL** | Emulated (no common native bf16 extension; `cl_khr_fp16` is fp16, not bf16). View params are `ushort*` (2-byte storage stride - a `float*` typedef silently corrupts), `_bf16_bits_to_f32` / `_f32_to_bf16_bits` OpenCL-C helpers + tracked LEA base pointer. |
+| **CUDA** | **f32-register-compute model** (PTX has no native bf16 *arithmetic*, only `cvt.*.bf16`): the value lives in an `.f32` register and computes as f32; arithmetic/compare route through the f32 tables; `ConvertValue` bf16<->f32 is a register no-op. Load = `ld.global.b16` + `cvt.f32.bf16`; store = `cvt.rn.bf16.f32` (RNE) + `st.global.b16`. `cvt.*.bf16` is native on sm_80+ (Ampere/Ada/Hopper). |
+| **CPU** | Native - the managed `BFloat16` struct runs directly (`DefaultILBackend`). |
+
 ### Sub-Word Usage Notes
 
 These apply to any kernel using `ArrayView<byte>`, `ArrayView<sbyte>`, `ArrayView<short>`, `ArrayView<ushort>`, or `ArrayView<Half>`:
@@ -130,7 +165,7 @@ These apply to any kernel using `ArrayView<byte>`, `ArrayView<sbyte>`, `ArrayVie
 
 ### Test Coverage
 
-**147 tests total** across 10 sub-word test methods x 7 backends + Half intrinsics:
+**175 tests total** across the sub-word test methods + Half intrinsics + BFloat16, all x 7 backends:
 - Int8: 28 tests (RoundTrip + Read + Write + EndToEnd x 7 backends)
 - UInt8: 28 tests
 - Int16: 35 tests (+ existing CopyFromJS tests)
@@ -138,12 +173,17 @@ These apply to any kernel using `ArrayView<byte>`, `ArrayView<sbyte>`, `ArrayVie
 - Float16: 21 tests (Read + Write + EndToEnd x 7 backends)
 - Half Abs: 7 tests
 - Half MinMax: 7 tests
+- BFloat16: 28 tests (BufferRoundTrip + Arithmetic + MinMax + RangeAndSpecials x 7 backends)
 
-### Test File
-`SpawnDev.ILGPU.Demo.Shared/UnitTests/BackendTestBase.Tests17.BrowserBuffer.cs`
+### Test Files
+- `SpawnDev.ILGPU.Demo.Shared/UnitTests/BackendTestBase.Tests17.BrowserBuffer.cs` (sub-word + Half)
+- `SpawnDev.ILGPU.Demo.Shared/UnitTests/BackendTestBase.BFloat16.cs` (bf16)
 
 ### How to Run
 ```bash
-# All sub-word tests
+# All sub-word + Half tests
 dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj --filter "FullyQualifiedName~Int8|FullyQualifiedName~UInt8|FullyQualifiedName~Int16|FullyQualifiedName~UInt16|FullyQualifiedName~Float16|FullyQualifiedName~Half_"
+
+# All BFloat16 tests
+dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj --filter "FullyQualifiedName~BFloat16"
 ```

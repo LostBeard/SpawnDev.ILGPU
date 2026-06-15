@@ -185,7 +185,7 @@ public sealed class Vp9Idct16x16Kernel
 The fn-definition codegen path (4.9.2-rc.18+) supports:
 
 - `int`, `long`, `float`, `double`, `bool` and other scalar value types as input params
-- `short` / `byte` / `Half` and other sub-word scalars (with sign-extending narrowing on cast)
+- `short` / `byte` / `Half` / `BFloat16` and other sub-word scalars (with sign-extending narrowing on cast)
 - `ref T` / `out T` for primitive value types — lowers to `ptr<function, T>` in WGSL, `inout T` in GLSL
 - Struct value types (lowered field-by-field)
 - Multiple call sites (each gets its own scratch slot for ref/out params)

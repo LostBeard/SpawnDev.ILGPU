@@ -36,7 +36,7 @@ If no backend on this host satisfies the requirements, `CreatePreferredAccelerat
 
 Use it when **your kernel relies on features that aren't universal**:
 
-- Sub-word writes (`ArrayView<byte>`, `ArrayView<short>`, `ArrayView<Half>`) — the codegen synthesizes atomic RMW for thread-safe partial-word writes. Set `RequiresAtomics = true`.
+- Sub-word writes (`ArrayView<byte>`, `ArrayView<short>`, `ArrayView<Half>`, `ArrayView<BFloat16>`) — the codegen synthesizes atomic RMW for thread-safe partial-word writes. Set `RequiresAtomics = true`.
 - `Group.Barrier` / `SharedMemory.Allocate` / `SharedMemory.GetDynamic` — set `RequiresBarriers = true` / `RequiresSharedMemory = true`.
 - `Warp.Shuffle` / `Group.Broadcast` — set `RequiresSubGroups = true`.
 - Native `double` / `long` performance (vs. emulation) — set `RequiresFloat64Native = true` / `RequiresInt64Native = true`. The emulated paths are correct but slower.
