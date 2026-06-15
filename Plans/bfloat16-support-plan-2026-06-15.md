@@ -151,7 +151,7 @@ Each is a core `ILGPU.*` struct + `BasicValueType` + per-backend convert helper 
 |---|---|---|---|---|
 | **bf16** | 1/8/7 | train + inference | Ampere+, RDNA2+ | **this plan** (core type) |
 | **FP8 E4M3** | 1/4/3 | forward / inference | Hopper+, Blackwell | core type `ILGPU.Float8E4M3` (1-byte; reuse `ArrayView<byte>` sub-word storage). NB: E4M3 has **no Inf** + a special NaN encoding — convert helper differs from IEEE. |
-| **FP8 E5M2** | 1/5/2 | backward / gradients | Hopper+, Blackwell | core type `ILGPU.Float8E5M2` (IEEE-style Inf/NaN). **Lower priority for us — gradients are a TRAINING concern; we're inference-focused.** |
+| **FP8 E5M2** | 1/5/2 | backward / gradients | Hopper+, Blackwell | core type `ILGPU.Float8E5M2` (IEEE-style Inf/NaN). **In scope — SpawnDev.ILGPU.ML supports TRAINING (Blazor WASM training demo exists), and FP8 training is the canonical E4M3-forward + E5M2-backward recipe, so both FP8 variants matter.** |
 
 ### Category B — block-quantization schemes → ML DEQUANT layer (the GGUF Q4_K model, NOT core types)
 These are NOT per-element primitives — they're **packed blocks + shared metadata**, decoded by a dequant kernel
@@ -172,16 +172,20 @@ or dequant), so the "native" column is mostly irrelevant to us today. That flips
   block-quant DEQUANT layer (NF4, MXFP4, and the GGUF Q-formats we already do) is the higher-value work** — it's
   what crams a 7B model into limited browser/VRAM memory, and it runs everywhere in software. NF4 especially
   (no HW dependency, QLoRA-grade compression) fits the "first-class big-model apps in the browser" vision.
-- **bf16 (Category A) is still the right first step** — it's the base ML storage type, broadly native (Ampere/
-  RDNA2 incl. many consumer GPUs), and the cheapest to add (this plan). FP8 E4M3 is a reasonable Category-A
-  follow-on (inference); FP8 E5M2 is training-only → deprioritize for an inference stack.
+- **bf16 (Category A) is the right first step** — base ML type for BOTH inference and **training stability**
+  (SpawnDev.ILGPU.ML does training — Blazor WASM training demo), broadly native (Ampere/RDNA2 incl. many
+  consumer GPUs), cheapest to add (this plan). **FP8 is a Category-A follow-on for BOTH passes** (E4M3 forward,
+  E5M2 backward — the standard FP8 training recipe; both variants in scope since we train). Caveat: FP8's big
+  win is faster matmuls on **native** FP8 HW (Hopper/Blackwell); on our browser/consumer targets FP8 is a
+  storage/bandwidth play (8-bit store, f32 compute), so it ranks behind the block-quant compression for our
+  near-term mission.
 
 ### Suggested sequencing
-1. **bf16** (this plan) — core type, biggest near-term ML win, cheapest.
-2. **NF4 / MXFP4 dequant** in the ML layer — the real "big models on consumer/browser GPUs" enabler; extends
-   the existing GGUF dequant-matmul (gemma4 decode) pattern. (Likely Tuvok's ML lane + my dequant-kernel help.)
-3. **FP8 E4M3** core type — inference compute, native on the newest desktop HW, emulated elsewhere.
-4. **FP8 E5M2** — only if/when we do on-device training. Lowest.
+1. **bf16** (this plan) — core type, biggest near-term win (inference + training stability), cheapest.
+2. **NF4 / MXFP4 dequant** in the ML layer — the "big models on consumer/browser GPUs" enabler; extends the
+   existing GGUF dequant-matmul (gemma4 decode) pattern. (Likely Tuvok's ML lane + my dequant-kernel help.)
+3. **FP8 E4M3 + E5M2** core types — the FP8 training/inference pair; biggest payoff on native FP8 desktop HW,
+   storage/bandwidth benefit (emulated) elsewhere. Both ship together (FP8 training needs both).
 
 (This roadmap section is informational; only bf16 §1-§9 is the approval-pending work item. The others are
 captured so the family is on record and we sequence deliberately.)
