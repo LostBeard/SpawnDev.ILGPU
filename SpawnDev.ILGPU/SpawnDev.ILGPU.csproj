@@ -6,7 +6,7 @@
 		<Nullable>enable</Nullable>
 		<Version>4.13.0-local.1</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>4.13.0: BFloat16 (bf16 "brain float") - new ILGPU.BFloat16 kernel-native type + BasicValueType.BFloat16 IR primitive. Works on CPU + WebGPU + WebGL + Wasm + OpenCL (5 of 6 backends; native CUDA/PTX is in progress). Emulated everywhere via the same exact-shift bf16<->f32 + round-to-nearest-even conversion; carries fp32's full dynamic range (the right trade for ML weights). Forks bump to 2.0.17. Full per-version history: CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
+		<PackageReleaseNotes>4.13.0: BFloat16 (bf16 "brain float") - new ILGPU.BFloat16 kernel-native type + BasicValueType.BFloat16 IR primitive. Works on CPU + WebGPU + WebGL + Wasm + OpenCL (5 of 6 backends; native CUDA/PTX is in progress). Emulated everywhere via the same exact-shift bf16/f32 + round-to-nearest-even conversion; carries fp32's full dynamic range (the right trade for ML weights). Forks bump to 2.0.17. Full per-version history: CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
