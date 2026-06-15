@@ -2,7 +2,14 @@
 
 **Author:** Geordi (from Captain's idea, 2026-06-15)
 **Date:** 2026-06-15
-**Status:** **APPROVED (Captain, 2026-06-15). Phases 0-2b COMPLETE + verified (Geordi) — bf16 works on CPU + all 3 browser backends (WebGPU, WebGL, Wasm).**
+**Status:** **APPROVED (Captain, 2026-06-15). COMPLETE on ALL 6 BACKENDS + verified (Geordi) — Phases 0-2b (CPU + WebGPU + WebGL + Wasm) + 3a (OpenCL) + 3b (native CUDA/PTX). Shipped `SpawnDev.ILGPU 4.13.0-local.2` (forks 2.0.18), master `1382a04`. Gates: `PMT_FILTER=BFloat16` all 6 lanes 28/0/0; `PMT_FILTER=Half` 181/0/8 (no f16 regression).**
+- **Phase 3b (CUDA/PTX):** f32-register-compute model (PTX has no native bf16 arithmetic, only `cvt.*.bf16`):
+  bf16 value→`.f32` register (RegisterTypeMapping/ParameterTypeRemapping/movement-remap); arithmetic+compare
+  remap bf16→f32 at the `PTXInstructions` chokepoint; `ConvertValue` bf16↔f32 = register no-op; custom Load
+  (`ld.global.b16`+`cvt.f32.bf16`) / Store (`cvt.rn.bf16.f32`+`st.global.b16`); bf16 constant emits the f32
+  magnitude. Byte-identical round-trip to the emulated backends; native cvt on sm_80+, verified sm_89.
+  *Remaining follow-ups (not blocking):* Wasm bf16-struct-field + `FloatAsInt`/`IntAsFloat` parity, capability
+  flags (`Capabilities.BFloat16`/`BFloat16Native`, `RequiresBFloat16`), const-fold.
 - **Phase 0 (CPU):** `ILGPU.BFloat16` core type + `BasicValueType.BFloat16` IR primitive. The CPU accelerator
   runs the managed struct directly. (Also fixed the ordinal-array regression this introduced on OpenCL/CUDA/Velocity.)
 - **Phase 1 (WebGPU):** WGSL `_bf16_to_f32`/`_f32_to_bf16` emulation (always emulated; reuses f16's packed-u16
