@@ -4,9 +4,9 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.12.1-local.10</Version>
+		<Version>4.13.0-local.1</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>4.12.1: Wasm process-persistent shared worker pool + shared linear memory (per MaxLinearMemoryPages) — fixes worker-churn starvation and WebAssembly.Memory accumulation across long test lanes; Wasm dispatch-response handlers now dispose the per-dispatch MessageEvent/Event JSObject (removes per-dispatch JS-object churn); WebGPU GEMV grid-stride fix; ±inf/NaN scalar kernel params on WebGL+Wasm; AcceleratorRequirements.RequiresScatterStores; Wasm SIMD128 emitter foundation (additive, scalar path unchanged). Forks stay 2.0.16. Full per-version history: CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
+		<PackageReleaseNotes>4.13.0: BFloat16 (bf16 "brain float") - new ILGPU.BFloat16 kernel-native type + BasicValueType.BFloat16 IR primitive. Works on CPU + WebGPU + WebGL + Wasm + OpenCL (5 of 6 backends; native CUDA/PTX is in progress). Emulated everywhere via the same exact-shift bf16<->f32 + round-to-nearest-even conversion; carries fp32's full dynamic range (the right trade for ML weights). Forks bump to 2.0.17. Full per-version history: CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -65,8 +65,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.16" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.16" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.17" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.17" />
 	</ItemGroup>
 
 	<ItemGroup>
