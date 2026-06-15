@@ -2,7 +2,7 @@
 
 **Author:** Geordi (from Captain's idea, 2026-06-15)
 **Date:** 2026-06-15
-**Status:** **APPROVED (Captain, 2026-06-15). Phases 0-2 COMPLETE + verified (Geordi).**
+**Status:** **APPROVED (Captain, 2026-06-15). Phases 0-2b COMPLETE + verified (Geordi) — bf16 works on CPU + all 3 browser backends (WebGPU, WebGL, Wasm).**
 - **Phase 0 (CPU):** `ILGPU.BFloat16` core type + `BasicValueType.BFloat16` IR primitive. The CPU accelerator
   runs the managed struct directly. (Also fixed the ordinal-array regression this introduced on OpenCL/CUDA/Velocity.)
 - **Phase 1 (WebGPU):** WGSL `_bf16_to_f32`/`_f32_to_bf16` emulation (always emulated; reuses f16's packed-u16
@@ -10,10 +10,15 @@
   emitter, all sub-word classification sites, and minimal-library inclusion).
 - **Phase 2 (WebGL):** GLSL `_bf16_to_f32`/`_f32_to_bf16` emulation, mirroring WebGPU — packed-u16 in R32I texel,
   texelFetch load + Transform-Feedback varying store, same `_subWordBFloat16Params`/`IsBFloat16` pattern.
-- **Verified:** `PMT_FILTER=BFloat16` → CPU 4/4 + WebGPU 4/4 + WebGPU-NoSubgroups 4/4 + WebGL 4/4 PASS (round-trip,
-  arithmetic w/ RNE f64 cross-check, min/max, range+specials incl. 1e30/1e-30 + NaN preservation).
-- **NEXT:** Phase 2b = Wasm (the last browser backend; `EmitBF16ToF32`/`EmitF32ToBF16` mirroring `EmitF16ToF32`);
-  Phase 3 = native CUDA/OpenCL (OpenCL needs raw-ushort storage — no `vload_bf16` builtin); capability flags + const-fold.
+- **Phase 2b (Wasm):** `EmitBF16ToF32`/`EmitF32ToBF16` emit the conversion as inline WebAssembly bytecode
+  (mirroring `EmitF16ToF32`/`EmitF32ToF16`); wired the `ArrayView<BFloat16>` load/store + type/size/constant maps.
+  *Storage-first (plan §7):* load/store shipped; bf16-struct-field + `FloatAsInt`/`IntAsFloat` (radix-sort key)
+  Wasm sites are a tracked follow-up for full f16 parity.
+- **Verified:** `PMT_FILTER=BFloat16` → CPU 4/4 + WebGPU 4/4 + WebGPU-NoSubgroups 4/4 + WebGL 4/4 + **Wasm 4/4** PASS
+  (20/0; round-trip, arithmetic w/ RNE f64 cross-check, min/max, range+specials incl. 1e30/1e-30 + NaN preservation).
+  No f16 regression (`PMT_FILTER=Half` 183/0/8).
+- **NEXT:** Phase 3 = native CUDA/OpenCL (OpenCL needs raw-ushort storage — no `vload_bf16` builtin) + the Wasm
+  struct-field/FloatAsInt parity follow-up; capability flags + const-fold.
 **Owner (implementation):** Geordi (SpawnDev.ILGPU / core ILGPU fork editor)
 **Target version:** Floating — fold into the WebGPU-ML hardening lane (bf16 is most valuable exactly where the
 ML push is pointed). Does not gate any current release.

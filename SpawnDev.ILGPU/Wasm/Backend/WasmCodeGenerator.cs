@@ -296,6 +296,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     BasicValueType.Int32 => WasmOpCodes.I32,
                     BasicValueType.Int64 => WasmOpCodes.I64,
                     BasicValueType.Float16 => WasmOpCodes.F32,
+                    BasicValueType.BFloat16 => WasmOpCodes.F32, // bf16 promoted to f32 for compute
                     BasicValueType.Float32 => WasmOpCodes.F32,
                     BasicValueType.Float64 => WasmOpCodes.F64,
                     _ => WasmOpCodes.I32,
@@ -318,6 +319,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 BasicValueType.Int32 => 4,
                 BasicValueType.Int64 => 8,
                 BasicValueType.Float16 => 2,
+                BasicValueType.BFloat16 => 2, // bf16: 2-byte storage
                 BasicValueType.Float32 => 4,
                 BasicValueType.Float64 => 8,
                 _ => 4,
@@ -1327,10 +1329,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     WasmModuleBuilder.EmitI64Const(Code, value.Int64Value);
                     break;
                 case WasmOpCodes.F32:
-                    // Float16 constants store raw half bits in rawValue — Float32Value
-                    // reinterprets those bits as float (garbage). Promote via Float16Value.
+                    // Float16/BFloat16 constants store raw 16-bit bits in rawValue — Float32Value
+                    // reinterprets those bits as float (garbage). Promote via Float16Value/BFloat16Value.
                     float f32Const = value.BasicValueType == BasicValueType.Float16
                         ? (float)value.Float16Value
+                        : value.BasicValueType == BasicValueType.BFloat16
+                        ? (float)value.BFloat16Value
                         : value.Float32Value;
                     WasmModuleBuilder.EmitF32Const(Code, f32Const);
                     break;

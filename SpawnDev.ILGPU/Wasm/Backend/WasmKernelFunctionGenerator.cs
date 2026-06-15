@@ -1827,6 +1827,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             // Check if this is a Float16 load (2-byte element, promoted to f32)
             bool isFloat16 = value.Type is PrimitiveType pt2 && pt2.BasicValueType == BasicValueType.Float16;
+            // Check if this is a BFloat16 load (2-byte element, promoted to f32)
+            bool isBFloat16 = value.Type is PrimitiveType ptBf2 && ptBf2.BasicValueType == BasicValueType.BFloat16;
             // Check if this is an Int16 load (2-byte element, promoted to i32)
             bool isInt16 = value.Type is PrimitiveType ptI16 && ptI16.BasicValueType == BasicValueType.Int16;
             // Check if this is an Int8 load (1-byte element, promoted to i32)
@@ -1848,6 +1850,19 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 else
                     WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load16U, 1, 0);
                 EmitF16ToF32(); // inline conversion: i32 (f16 bits) → f32
+            }
+            else if (isBFloat16)
+            {
+                // bfloat16: load 2 bytes as u16, convert to f32 (shift into the fp32 high half)
+                if (_hasBarriers)
+                {
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad16U);
+                    Code.Add(0x01); Code.Add(0x00); // align=1 (2 bytes), offset=0
+                }
+                else
+                    WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load16U, 1, 0);
+                EmitBF16ToF32(); // inline conversion: i32 (bf16 bits) → f32
             }
             else if (isInt16)
             {
@@ -2801,6 +2816,23 @@ EmitSaveAllLocals();
                 EmitGetLocal(target);
                 EmitGetLocal(storeValue);
                 EmitF32ToF16(); // inline conversion: f32 → i32 (f16 bits)
+                if (_hasBarriers)
+                    EmitVerifiedAtomicStore(16);
+                else
+                    WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store16, 1, 0);
+                return;
+            }
+
+            // Check if this is a BFloat16 store (f32 value → 2-byte memory)
+            bool isBFloat16Store = target.Type is AddressSpaceType addrTypeBf16
+                && addrTypeBf16.ElementType is PrimitiveType ptBf16
+                && ptBf16.BasicValueType == BasicValueType.BFloat16;
+            if (isBFloat16Store)
+            {
+                // bfloat16: convert f32 → bf16 bits (RNE), store 2 bytes
+                EmitGetLocal(target);
+                EmitGetLocal(storeValue);
+                EmitF32ToBF16(); // inline conversion: f32 → i32 (bf16 bits)
                 if (_hasBarriers)
                     EmitVerifiedAtomicStore(16);
                 else
@@ -5449,6 +5481,74 @@ EmitSaveAllLocals();
             Code.Add(WasmOpCodes.I32Or);
             WasmModuleBuilder.EmitLocalGet(Code, mant);
             Code.Add(WasmOpCodes.I32Or);
+        }
+
+        /// <summary>
+        /// Emits inline Wasm code to convert bf16 bits (i32, low-16 value on stack) to f32.
+        /// bfloat16 is the top 16 bits of an fp32, so a zero-extending left shift by 16
+        /// reconstructs the fp32 bit pattern exactly. Mirrors ILGPU.BFloat16 + the WGSL/GLSL helpers.
+        /// </summary>
+        private void EmitBF16ToF32()
+        {
+            // Stack: i32 (bf16 bits). Produce: f32 = reinterpret(bits << 16).
+            WasmModuleBuilder.EmitI32Const(Code, 16);
+            Code.Add(WasmOpCodes.I32Shl);
+            Code.Add(WasmOpCodes.F32ReinterpretI32);
+        }
+
+        /// <summary>
+        /// Emits inline Wasm code to convert f32 (on stack) to bf16 bits (i32, low 16).
+        /// Round-to-nearest-even truncate with NaN preservation (a naive truncate would collapse
+        /// some NaNs to Inf). Mirrors ILGPU.BFloat16 + the WGSL/GLSL helpers byte-for-byte.
+        /// </summary>
+        private void EmitF32ToBF16()
+        {
+            // Stack: f32. Produce: i32 (bf16 bits, low 16).
+            var bits = AllocateNewLocal(WasmOpCodes.I32);
+            var result = AllocateNewLocal(WasmOpCodes.I32);
+
+            Code.Add(WasmOpCodes.I32ReinterpretF32);
+            WasmModuleBuilder.EmitLocalSet(Code, bits);
+
+            // Default (round-to-nearest-even):
+            //   lsb = (bits >> 16) & 1
+            //   result = ((bits + 0x7FFF + lsb) >> 16) & 0xFFFF
+            WasmModuleBuilder.EmitLocalGet(Code, bits);
+            WasmModuleBuilder.EmitI32Const(Code, 16);
+            Code.Add(WasmOpCodes.I32ShrU);
+            WasmModuleBuilder.EmitI32Const(Code, 1);
+            Code.Add(WasmOpCodes.I32And);            // lsb
+            WasmModuleBuilder.EmitLocalGet(Code, bits);
+            Code.Add(WasmOpCodes.I32Add);            // bits + lsb
+            WasmModuleBuilder.EmitI32Const(Code, 0x7FFF);
+            Code.Add(WasmOpCodes.I32Add);            // + 0x7FFF (RNE bias)
+            WasmModuleBuilder.EmitI32Const(Code, 16);
+            Code.Add(WasmOpCodes.I32ShrU);
+            WasmModuleBuilder.EmitI32Const(Code, 0xFFFF);
+            Code.Add(WasmOpCodes.I32And);
+            WasmModuleBuilder.EmitLocalSet(Code, result);
+
+            // NaN override: if ((bits & 0x7FFFFFFF) > 0x7F800000) it is NaN -
+            //   result = ((bits >> 16) | 0x0040) & 0xFFFF   (force a mantissa bit so it stays NaN).
+            // The masked value is always non-negative, so a signed compare is correct here.
+            WasmModuleBuilder.EmitLocalGet(Code, bits);
+            WasmModuleBuilder.EmitI32Const(Code, 0x7FFFFFFF);
+            Code.Add(WasmOpCodes.I32And);
+            WasmModuleBuilder.EmitI32Const(Code, 0x7F800000);
+            Code.Add(WasmOpCodes.I32GtS);
+            Code.Add(WasmOpCodes.If);
+            Code.Add(WasmOpCodes.Void);
+            WasmModuleBuilder.EmitLocalGet(Code, bits);
+            WasmModuleBuilder.EmitI32Const(Code, 16);
+            Code.Add(WasmOpCodes.I32ShrU);
+            WasmModuleBuilder.EmitI32Const(Code, 0x0040);
+            Code.Add(WasmOpCodes.I32Or);
+            WasmModuleBuilder.EmitI32Const(Code, 0xFFFF);
+            Code.Add(WasmOpCodes.I32And);
+            WasmModuleBuilder.EmitLocalSet(Code, result);
+            Code.Add(WasmOpCodes.End);
+
+            WasmModuleBuilder.EmitLocalGet(Code, result);
         }
 
         #endregion
