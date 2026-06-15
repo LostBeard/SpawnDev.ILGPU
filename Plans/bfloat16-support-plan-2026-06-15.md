@@ -2,7 +2,10 @@
 
 **Author:** Geordi (from Captain's idea, 2026-06-15)
 **Date:** 2026-06-15
-**Status:** **DRAFT — pending Captain approval**
+**Status:** **APPROVED (Captain, 2026-06-15). Phase 0 COMPLETE + verified (Geordi) — `ILGPU.BFloat16`
+core type + `BasicValueType.BFloat16` IR primitive land; 4 CPU-reference tests PASS on the CPU lane
+(round-trip, arithmetic, min/max, range+specials), clean-skip on the transpiling backends. Phase 1
+(WebGPU) next.**
 **Owner (implementation):** Geordi (SpawnDev.ILGPU / core ILGPU fork editor)
 **Target version:** Floating — fold into the WebGPU-ML hardening lane (bf16 is most valuable exactly where the
 ML push is pointed). Does not gate any current release.

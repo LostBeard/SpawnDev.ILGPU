@@ -192,6 +192,11 @@ namespace ILGPU.IR.Values
         public Half Float16Value => Unsafe.As<long, Half>(ref rawValue);
 
         /// <summary>
+        /// Returns the value as bf16 (bfloat16).
+        /// </summary>
+        public BFloat16 BFloat16Value => Unsafe.As<long, BFloat16>(ref rawValue);
+
+        /// <summary>
         /// Returns the value as f32.
         /// </summary>
         public float Float32Value => Unsafe.As<long, float>(ref rawValue);
@@ -253,6 +258,7 @@ namespace ILGPU.IR.Values
             BasicValueType switch
             {
                 BasicValueType.Float16 => Float16Value == f32Value,
+                BasicValueType.BFloat16 => BFloat16Value == f32Value,
                 BasicValueType.Float32 => Float32Value == f32Value,
                 BasicValueType.Float64 => Float64Value == f64Value,
                 _ => false
@@ -312,6 +318,7 @@ namespace ILGPU.IR.Values
                 BasicValueType.Int32 => Int32Value.ToString(),
                 BasicValueType.Int64 => Int64Value.ToString(),
                 BasicValueType.Float16 => Float16Value.ToString(),
+                BasicValueType.BFloat16 => BFloat16Value.ToString(),
                 BasicValueType.Float32 => Float32Value.ToString(),
                 BasicValueType.Float64 => Float64Value.ToString(),
                 _ => $"Raw({rawValue})",

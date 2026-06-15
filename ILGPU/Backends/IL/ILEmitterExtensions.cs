@@ -68,6 +68,20 @@ namespace ILGPU.Backends.IL
                     null)
                 .AsNotNull();
 
+        /// <summary>
+        /// Stores the constructor of the <see cref="BFloat16"/> type.
+        /// </summary>
+        private static readonly ConstructorInfo BFloat16Constructor =
+            typeof(BFloat16).GetConstructor(
+                    BindingFlags.NonPublic | BindingFlags.CreateInstance,
+                    null,
+                    new Type[]
+                    {
+                        typeof(ushort)
+                    },
+                    null)
+                .AsNotNull();
+
         #endregion
 
         #region Methods
@@ -119,6 +133,14 @@ namespace ILGPU.Backends.IL
                     emitter.EmitConstant(value.Float16Value.RawValue);
                     emitter.EmitNewObject(HalfConstructor);
                     emitter.Emit(LocalOperation.Load, temporaryHalf.Value);
+                    break;
+                case BasicValueType.BFloat16:
+                    // Allocate a temporary variable and invoke the bfloat16 constructor
+                    var temporaryBFloat16 = emitter.DeclareLocal(typeof(BFloat16));
+                    emitter.Emit(LocalOperation.LoadAddress, temporaryBFloat16);
+                    emitter.EmitConstant(value.BFloat16Value.RawValue);
+                    emitter.EmitNewObject(BFloat16Constructor);
+                    emitter.Emit(LocalOperation.Load, temporaryBFloat16);
                     break;
                 case BasicValueType.Float32:
                     emitter.EmitConstant(value.Float32Value);

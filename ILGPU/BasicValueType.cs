@@ -60,6 +60,12 @@ namespace ILGPU
         /// Represents a 64-bit float.
         /// </summary>
         Float64,
+
+        /// <summary>
+        /// Represents a 16-bit brain float (bfloat16). Appended at the end so existing
+        /// ordinals (and the positional type tables indexed by them) are unchanged.
+        /// </summary>
+        BFloat16,
     }
 
     /// <summary>
@@ -131,5 +137,11 @@ namespace ILGPU
         /// Represents a 64-bit unsigned integer.
         /// </summary>
         UInt64,
+
+        /// <summary>
+        /// Represents a 16-bit brain float (bfloat16). Appended at the end so existing
+        /// ordinals are unchanged.
+        /// </summary>
+        BFloat16,
     }
 }
