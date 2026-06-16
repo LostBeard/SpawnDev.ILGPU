@@ -112,9 +112,17 @@ namespace ILGPU.Runtime.CPU
             IsWasm = OperatingSystem.IsBrowser();
 #endif
 
+            // Auto now selects COOPERATIVE (sequential-within-group) execution always - not just
+            // under a debugger. Combined with NumMultiprocessors = core count, this runs one
+            // thread-group per core in parallel with cheap cooperative within-group barriers,
+            // instead of the old Parallel default that ran a full group's worth of OS threads (64)
+            // oversubscribed across all cores and thrashed on every in-kernel Group.Barrier
+            // (measured ~1.4s/launch with multi-second tail vs ~0.15s stable cooperatively).
+            // Explicit Parallel mode still selects the raw thread-per-lane model for callers that
+            // want it (best only for barrier-free kernels that fit the core count).
             UsesSequentialExecution =
                 Mode == CPUAcceleratorMode.Sequential ||
-                Mode == CPUAcceleratorMode.Auto && Debugger.IsAttached;
+                Mode == CPUAcceleratorMode.Auto;
 
             if (IsWasm)
             {

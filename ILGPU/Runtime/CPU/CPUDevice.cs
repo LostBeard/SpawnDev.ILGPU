@@ -73,9 +73,15 @@ namespace ILGPU.Runtime.CPU
         private const int DefaultNumWarpsPerMultiprocessor = 8;
 
         /// <summary>
-        /// The default number of 1 multiprocessor.
+        /// The default number of multiprocessors = the machine's logical processor count, so the
+        /// CPU simulator runs that many thread-groups in parallel (one group per core). Combined
+        /// with cooperative (sequential) within-group scheduling this gives cross-core parallelism
+        /// WITHOUT oversubscribing a single group's worth of threads across all cores - the cause
+        /// of the in-kernel-Group.Barrier thrash. Was a hardcoded 1 (all parallelism crammed into a
+        /// single oversubscribed group).
         /// </summary>
-        private const int DefaultNumMultiprocessors = 1;
+        private static readonly int DefaultNumMultiprocessors =
+            Math.Max(1, Environment.ProcessorCount);
 
         #endregion
 

@@ -4,9 +4,9 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.13.0-local.4</Version>
+		<Version>4.13.0-local.5</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>4.13.0: BFloat16 (bf16 "brain float") - new ILGPU.BFloat16 kernel-native type + BasicValueType.BFloat16 IR primitive. FULL type parity with Half on all 6 backends: load/store, arithmetic, comparisons, radix-sort keys (Ascending/DescendingBFloat16), struct fields, IR const-fold, and RequiresBFloat16. Emulated via the same exact-shift bf16/f32 + round-to-nearest-even conversion; CUDA holds bf16 in an f32 register and converts at the load/store boundary (native cvt.*.bf16 on sm_80+). bf16 radix sort runs NATIVELY on all backends. 4.13.0-local.4 fixes two bf16 correctness bugs: (1) a packed sub-word view.Length emitted the atomic&lt;u32&gt; WORD count on WebGPU, so native bf16/Int16/Int8 radix sorts processed only a fraction of their keys (removed the former f32-widen workaround); (2) a CUDA bf16-value store into a non-bf16 (e.g. float) buffer narrowed to a 2-byte st.b16 into the wider slot, so the value read back ~0. Carries fp32's full dynamic range (the right trade for ML weights). Forks bump to 2.0.20. Full per-version history: CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
+		<PackageReleaseNotes>4.13.0-local.5: CPU backend - cooperative multi-multiprocessor execution. The CPU accelerator simulated a GPU group of 64 threads as 64 OS threads in ONE multiprocessor; on a machine with fewer cores every in-kernel Group.Barrier oversubscribed and thrashed (~1.4s/launch with multi-second tails on barrier/reduction kernels - e.g. GGUF KV-cache decode timed out). Two fixes: (1) the default CPU device now uses NumMultiprocessors = logical-core-count (was hardcoded 1) so thread-groups run one-per-core in parallel; (2) Auto mode now selects cooperative (sequential-within-group) scheduling - one active thread per multiprocessor, cheap O(1) targeted-pulse barrier handoff (was an O(N^2) Monitor.PulseAll storm) - eliminating oversubscription while keeping cross-core parallelism. Measured: a 256-group x64 shared-memory reduction went 1381ms -> 146ms/launch with zero timing variance, results bit-identical. Explicit Parallel mode still available for barrier-free kernels. Forks bump to 2.0.21. Earlier in 4.13.0: BFloat16 full type parity on all 6 backends (see CHANGELOG). Full per-version history: CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -65,8 +65,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.20" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.20" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.21" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.21" />
 	</ItemGroup>
 
 	<ItemGroup>

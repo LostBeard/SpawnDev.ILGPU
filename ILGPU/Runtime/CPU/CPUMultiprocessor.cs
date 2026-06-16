@@ -433,11 +433,31 @@ namespace ILGPU.Runtime.CPU
             private volatile int activeThreadIndex;
 
             /// <summary>
+            /// Stable lock guarding <see cref="activitySet"/> scans/mutations and
+            /// <see cref="activeThreadIndex"/>. (Do NOT lock on activitySet.SyncRoot - that
+            /// object changes whenever activitySet is reallocated in BeginLaunch.)
+            /// </summary>
+            private readonly object scheduleLock = new object();
+
+            /// <summary>
+            /// Per-logical-thread monitors used to wake EXACTLY the next thread that takes
+            /// the cooperative baton (O(1) targeted Monitor.Pulse), instead of a single shared
+            /// monitor with Monitor.PulseAll (which woke all N threads on every handoff = O(N)
+            /// spurious wakeups per handoff, O(N^2) per barrier - the cause of the ~77s/launch
+            /// stall on barrier-heavy kernels). Sized to the MP's max thread count and reused.
+            /// </summary>
+            private readonly object[] threadLocks;
+
+            /// <summary>
             /// Creates a new sequential processor.
             /// </summary>
             public SequentialProcessor(CPUAccelerator accelerator, int processorIndex)
                 : base(accelerator, processorIndex)
-            { }
+            {
+                threadLocks = new object[MaxNumThreadsPerMultiprocessor];
+                for (int i = 0; i < threadLocks.Length; ++i)
+                    threadLocks[i] = new object();
+            }
 
             #endregion
 
@@ -459,9 +479,9 @@ namespace ILGPU.Runtime.CPU
                 Thread.MemoryBarrier();
 
                 // Determine the next thread that might become active
-                lock (activitySet.SyncRoot)
+                int next = -1;
+                lock (scheduleLock)
                 {
-                    // Determine the next thread that might become active
                     for (int i = 1; i < threadDimension; ++i)
                     {
                         // Compute absolute thread index
@@ -469,11 +489,20 @@ namespace ILGPU.Runtime.CPU
                         if (activitySet[index])
                         {
                             // This thread can become active
+                            next = index;
                             activeThreadIndex = index;
-                            Monitor.PulseAll(activitySet.SyncRoot);
                             break;
                         }
                     }
+                }
+
+                // Wake EXACTLY that thread (O(1) targeted pulse). If no other thread is active
+                // the baton stays with the caller (activeThreadIndex unchanged) - matching the
+                // original behavior where its own next wait returns immediately.
+                if (next >= 0)
+                {
+                    lock (threadLocks[next])
+                        Monitor.Pulse(threadLocks[next]);
                 }
 
                 // Commit memory operations
@@ -491,16 +520,17 @@ namespace ILGPU.Runtime.CPU
                 // Adjust relative thread index
                 threadIndex += threadOffset;
 
-                // NOTE: the current thread lock cannot be null
-                lock (activitySet.SyncRoot)
+                // Wait on THIS thread's own monitor until it holds the baton. The while-recheck
+                // of the volatile activeThreadIndex makes this robust to a Pulse that races ahead
+                // of the Wait (if the baton already arrived, we never wait at all).
+                lock (threadLocks[threadIndex])
                 {
-                    // Wait for our thread to become active
                     while (activeThreadIndex != threadIndex)
-                        Monitor.Wait(activitySet.SyncRoot);
-
-                    // We have become active... continue processing
-                    return activitySet.Count;
+                        Monitor.Wait(threadLocks[threadIndex]);
                 }
+
+                // We have become active... continue processing
+                return activitySet.Count;
             }
 
             #endregion
@@ -544,7 +574,7 @@ namespace ILGPU.Runtime.CPU
             protected override void FinishThreadProcessing()
             {
                 // Remove the current thread from the set
-                lock (activitySet.SyncRoot)
+                lock (scheduleLock)
                 {
                     activitySet.Set(
                         CPURuntimeThreadContext.Current.LinearGroupIndex,
