@@ -889,7 +889,8 @@ namespace ILGPU.Backends.PTX
         {
             // A bf16 field/value: storage is a packed 16 bits but the register is f32
             // (f32-register model). Load the raw 16 bits into a temp .b16 register, then
-            // widen via cvt.f32.bf16 into the f32 register. Covers bf16 struct fields +
+            // widen via portable bit-manip (EmitBF16BitsToF32 - every CUDA arch, not the
+            // sm_80+ cvt.f32.bf16) into the f32 register. Covers bf16 struct fields +
             // bf16 value params (a top-level ArrayView<bf16> element load is handled
             // directly in GenerateCode(Load), which returns before reaching here).
             if (register.BasicValueType == BasicValueType.BFloat16)
@@ -898,11 +899,7 @@ namespace ILGPU.Backends.PTX
                     BasicValueType.Int16,
                     PTXRegisterKind.Int16);
                 emitter.Emit(this, command, rawReg, userState);
-                using (var cmd = BeginCommand("cvt.f32.bf16"))
-                {
-                    cmd.AppendArgument(register);
-                    cmd.AppendArgument(rawReg);
-                }
+                EmitBF16BitsToF32(rawReg, register);
                 FreeRegister(rawReg);
                 return;
             }
@@ -949,7 +946,8 @@ namespace ILGPU.Backends.PTX
             where T : struct
         {
             // bf16 field/value store: round the f32 value to its 16-bit bf16 pattern via
-            // cvt.rn.bf16.f32 into a temp .b16 register, then write the raw 16 bits. Covers
+            // portable bit-manip (EmitF32ToBF16Bits - every CUDA arch, not the sm_80+
+            // cvt.rn.bf16.f32) into a temp .b16 register, then write the raw 16 bits. Covers
             // bf16 struct fields + bf16 value params (the top-level ArrayView<bf16> element
             // store is handled directly in GenerateCode(Store)).
             if (register.BasicValueType == BasicValueType.BFloat16)
@@ -958,11 +956,7 @@ namespace ILGPU.Backends.PTX
                 var rawReg = AllocateRegister(
                     BasicValueType.Int16,
                     PTXRegisterKind.Int16);
-                using (var cmd = BeginCommand("cvt.rn.bf16.f32"))
-                {
-                    cmd.AppendArgument(rawReg);
-                    cmd.AppendArgument(f32Register);
-                }
+                EmitF32ToBF16Bits(f32Register, rawReg);
                 emitter.Emit(this, command, rawReg, userState);
                 FreeRegister(rawReg);
                 return;

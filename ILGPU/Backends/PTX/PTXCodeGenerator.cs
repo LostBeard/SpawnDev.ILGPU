@@ -1008,11 +1008,8 @@ namespace ILGPU.Backends.PTX
                         cmd.AppendArgument(rawReg);
                         cmd.AppendRawValue(mappedParameter.PTXName, 0);
                     }
-                    using (var cmd = BeginCommand("cvt.f32.bf16"))
-                    {
-                        cmd.AppendArgument(bf16ValueRegister);
-                        cmd.AppendArgument(rawReg);
-                    }
+                    // Portable widen (every CUDA arch) instead of the sm_80+ cvt.f32.bf16.
+                    EmitBF16BitsToF32(rawReg, bf16ValueRegister);
                     FreeRegister(rawReg);
                     continue;
                 }
