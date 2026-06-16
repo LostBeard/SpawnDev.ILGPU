@@ -1960,6 +1960,108 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             }
         }
 
+        // Wasm SIMD128 Stage-3a numerical gate (Phase 3 inc.2, 2026-06-16, Geordi). The CPU-oracle
+        // correctness test for the WIRED v128 `kernel_simd` dispatch path. Compiles + dispatches a real
+        // f32 unit-stride elementwise kernel (o[i] = a[i]*2 + b[i]) on the REAL Wasm backend in BOTH
+        // modes — ForceScalar (pure scalar `kernel`) and ForceSimd (v128 `kernel_simd` by-4 + scalar
+        // tail) — and asserts the two are BIT-IDENTICAL to each other AND to a CPU reference. N=1003 is
+        // deliberately NOT a multiple of 4 so the scalar tail runs (and per-worker range remainders run
+        // it too). Cross-mode determinism is exact because both paths do f32 mul-then-add with NO fused
+        // FMA (Phase 2 bench proved cross-mode exact). The test FAILS LOUD if the ForceSimd compile did
+        // not actually emit a kernel_simd export — so it can never pass by silently falling back to scalar.
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_ElementwiseDispatchMatchesScalarAndReference()
+        {
+            const int N = 1003; // not a multiple of 4 -> exercises the scalar tail
+            var a = new float[N];
+            var b = new float[N];
+            for (int i = 0; i < N; i++) { a[i] = (i * 1.5f) - 700f; b[i] = MathF.Sin(i * 0.013f) * 12f; }
+
+            // CPU reference: f32 mul then add, no FMA (matches the Wasm scalar AND v128 paths exactly).
+            var reference = new float[N];
+            for (int i = 0; i < N; i++) reference[i] = a[i] * 2f + b[i];
+
+            var scalar = await RunSimdElementwise(a, b, N, forceSimd: false, requireSimdEmit: false);
+            var simd = await RunSimdElementwise(a, b, N, forceSimd: true, requireSimdEmit: true);
+
+            int mismS = 0, mismV = 0, firstS = -1, firstV = -1;
+            for (int i = 0; i < N; i++)
+            {
+                if (BitConverter.SingleToInt32Bits(scalar[i]) != BitConverter.SingleToInt32Bits(reference[i]))
+                { if (mismS == 0) firstS = i; mismS++; }
+                if (BitConverter.SingleToInt32Bits(simd[i]) != BitConverter.SingleToInt32Bits(reference[i]))
+                { if (mismV == 0) firstV = i; mismV++; }
+            }
+            if (mismS > 0)
+                throw new Exception($"Wasm SCALAR elementwise != reference: {mismS}/{N} mismatch, first@{firstS} " +
+                    $"got={scalar[firstS]} exp={reference[firstS]} (the baseline scalar path is wrong).");
+            if (mismV > 0)
+                throw new Exception($"Wasm SIMD (v128 kernel_simd) elementwise != reference: {mismV}/{N} mismatch, " +
+                    $"first@{firstV} got={simd[firstV]} exp={reference[firstV]} scalarHere={scalar[firstV]} " +
+                    $"(scalar matched reference, so the v128 by-4/tail dispatch diverges).");
+        }
+
+        // Compiles + dispatches the elementwise kernel under a forced SIMD mode and returns the output.
+        // When requireSimdEmit, asserts the compiled module actually exported kernel_simd (so the SIMD
+        // run cannot silently degrade to scalar and pass vacuously). A fresh Context+accelerator per call
+        // means the static Force* flags are read at this kernel's compile time and modules never collide.
+        private static async Task<float[]> RunSimdElementwise(float[] a, float[] b, int N, bool forceSimd, bool requireSimdEmit)
+        {
+            bool savedScalar = WasmBackend.ForceScalar, savedSimd = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd;   // scalar mode forces SIMD OFF (true scalar dispatch)
+            WasmBackend.ForceSimd = forceSimd;      // simd mode forces v128 emission (Chrome's worker accepts it)
+            try
+            {
+                var builder = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm();
+                using var ctx = builder.ToContext();
+                WasmBackend.VerboseLogging = false;
+                WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>>(
+                    Wasm_Simd_ElementwiseKernel);
+
+                if (requireSimdEmit)
+                {
+                    var bin = WasmBackend.LastWasmBinary;
+                    if (bin == null || !ContainsExportName(bin, "kernel_simd"))
+                        throw new Exception("ForceSimd compile did NOT emit a kernel_simd export — the SIMD path " +
+                            "is not actually under test (would pass vacuously via scalar fallback).");
+                }
+
+                using var aBuf = acc.Allocate1D(a);
+                using var bBuf = acc.Allocate1D(b);
+                using var oBuf = acc.Allocate1D<float>(N);
+                k((Index1D)N, aBuf.View, bBuf.View, oBuf.View);
+                await acc.SynchronizeAsync();
+                return await oBuf.CopyToHostAsync<float>();
+            }
+            finally
+            {
+                WasmBackend.ForceScalar = savedScalar;
+                WasmBackend.ForceSimd = savedSimd;
+            }
+        }
+
+        private static void Wasm_Simd_ElementwiseKernel(Index1D i, ArrayView<float> a, ArrayView<float> b, ArrayView<float> o)
+            => o[i] = a[i] * 2f + b[i];
+
+        // Scans a wasm binary for an exact length-prefixed export-name token (the export section encodes
+        // each name as len-byte + UTF-8 bytes). The length prefix (6 for "kernel", 11 for "kernel_simd")
+        // separates the two so "kernel" never matches the "kernel_simd" slice.
+        private static bool ContainsExportName(byte[] binary, string nameStr)
+        {
+            var name = System.Text.Encoding.ASCII.GetBytes(nameStr);
+            for (int i = 0; i + name.Length + 1 <= binary.Length; i++)
+            {
+                if (binary[i] != name.Length) continue;
+                int j = 0;
+                for (; j < name.Length; j++)
+                    if (binary[i + 1 + j] != name[j]) break;
+                if (j == name.Length) return true;
+            }
+            return false;
+        }
+
         // Wasm SIMD128 emitter foundation (Phase 1, 2026-06-14, Geordi). Pure-CPU regression guard on
         // the v128 encoding — NO browser/GPU needed, just byte assertions. Locks the part most likely
         // to silently break: SIMD sub-opcodes are u32-LEB128 after the 0xFD prefix (NOT single bytes

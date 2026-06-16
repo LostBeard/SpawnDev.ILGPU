@@ -2003,7 +2003,9 @@ namespace SpawnDev.ILGPU.Wasm
                 // immediately after the zero loop. If a slow worker zeroes the arrival
                 // counter after a fast worker already incremented it, both deadlock.
                 // Fence slots self-manage via the barrier protocol (last worker resets).
-                fenceSlot - sharedMemBase);
+                fenceSlot - sharedMemBase,
+                // SIMD by-4 + scalar tail when the module exported a v128 kernel_simd.
+                compiledKernel.HasSimdKernel);
 
             // Resolve the pool: the process-shared persistent pool for default-WorkerCount
             // accelerators (created once per tab, reused across every accelerator — no per-test
@@ -2363,7 +2365,8 @@ namespace SpawnDev.ILGPU.Wasm
             int workerCount = 1,
             int phaseCount = 1,
             int maxYieldIters = 10000,
-            int zeroRegionSize = 0)
+            int zeroRegionSize = 0,
+            bool hasSimd = false)
         {
             // Produces an async function body string that is sent as the 'script' field
             // in the message to the pool worker's async bootstrap.
@@ -2371,6 +2374,11 @@ namespace SpawnDev.ILGPU.Wasm
             // just uses the pre-cached instance from d._instance.
             var sb = new System.Text.StringBuilder();
             sb.AppendLine("    const kernel = d._instance.exports.kernel;");
+            // Wasm SIMD128 Stage-3a: when the module also exported a v128 `kernel_simd` (4 lanes/call;
+            // emitted only for the f32 unit-stride elementwise class, which has no barriers), grab it so
+            // the flat loop below can run it by-4 with a scalar tail. Never set for barrier kernels.
+            if (hasSimd && !hasBarriers)
+                sb.AppendLine("    const kernel_simd = d._instance.exports.kernel_simd;");
             sb.AppendLine();
 
             if (hasBarriers)
@@ -2464,19 +2472,36 @@ namespace SpawnDev.ILGPU.Wasm
                 sb.AppendLine("    const endIdx = d.endIdx;");
                 sb.AppendLine("    const myScratch = d.myScratch;");
                 sb.AppendLine();
-                sb.AppendLine("    for (let i = startIdx; i < endIdx; i++) {");
-                // For non-barrier kernels: pass groupSize (groupDimX) + realGroupDimX/Y so
-                // Grid.IdxX/Y and Group.IdxX/Y decompose correctly. Auto-grouped launches are 1D
-                // (realGroupDimX == groupSize, realGroupDimY == 1).
-                // Trailing zeros = sharedMemBase, barrierBase, dynamicSharedLen, phase.
-                sb.Append($"      kernel(i, {gridDimX}, {gridDimY}, myScratch, {groupSize}, i % {groupSize}, 0, 0, 0, 0, {realGroupDimX}, {realGroupDimY}");
+
+                // The kernel's trailing per-lane call args (same for scalar `kernel` and v128 `kernel_simd` —
+                // both share the ABI; kernel_simd just reads/writes 4 consecutive lanes from the base index).
+                // For non-barrier kernels: pass groupSize (groupDimX) + realGroupDimX/Y so Grid.IdxX/Y and
+                // Group.IdxX/Y decompose correctly. Auto-grouped launches are 1D (realGroupDimX == groupSize,
+                // realGroupDimY == 1). Trailing zeros = sharedMemBase, barrierBase, dynamicSharedLen, phase.
+                string callTail = $", {gridDimX}, {gridDimY}, myScratch, {groupSize}, i % {groupSize}, 0, 0, 0, 0, {realGroupDimX}, {realGroupDimY}";
                 if (argStr.Length > 0)
+                    callTail += ", " + argStr;
+
+                if (hasSimd)
                 {
-                    sb.Append(", ");
-                    sb.Append(argStr);
+                    // SIMD by-4: each worker processes its OWN contiguous [startIdx,endIdx) range — run
+                    // kernel_simd for full groups of 4 (it loads/stores 4 unit-stride lanes from base i),
+                    // then the scalar `kernel` for this worker's own count%4 tail (Stage 3b adds masks to
+                    // drop the tail loop). Per-worker ranges don't overlap, so no lane is skipped/doubled.
+                    sb.AppendLine("    let i = startIdx;");
+                    sb.AppendLine("    for (; i + 4 <= endIdx; i += 4) {");
+                    sb.AppendLine($"      kernel_simd(i{callTail});");
+                    sb.AppendLine("    }");
+                    sb.AppendLine("    for (; i < endIdx; i++) {");
+                    sb.AppendLine($"      kernel(i{callTail});");
+                    sb.AppendLine("    }");
                 }
-                sb.AppendLine(");");
-                sb.AppendLine("    }");
+                else
+                {
+                    sb.AppendLine("    for (let i = startIdx; i < endIdx; i++) {");
+                    sb.AppendLine($"      kernel(i{callTail});");
+                    sb.AppendLine("    }");
+                }
             }
 
             sb.AppendLine();

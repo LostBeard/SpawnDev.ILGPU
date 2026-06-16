@@ -89,6 +89,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public int IrUserParamIndexOffset { get; }
 
         /// <summary>
+        /// True iff the module ALSO exports a v128 <c>kernel_simd</c> (4 lanes/call) for the
+        /// Stage-3a f32 unit-stride elementwise class. When true, the non-barrier flat dispatch
+        /// runs <c>kernel_simd</c> by 4 then the scalar <c>kernel</c> for the <c>count % 4</c> tail.
+        /// False ⇒ pure scalar dispatch (no regression). Only set when SIMD was effective at
+        /// compile time AND the kernel was in-class — so the worker engine accepts v128.
+        /// </summary>
+        public bool HasSimdKernel { get; }
+
+        /// <summary>
         /// Creates a new compiled Wasm kernel.
         /// </summary>
         public WasmCompiledKernel(
@@ -105,7 +114,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             int phaseCount = 1,
             HashSet<int>? writtenParamIndices = null,
             List<string>? storeTargetTrace = null,
-            int irUserParamIndexOffset = 1)
+            int irUserParamIndexOffset = 1,
+            bool hasSimdKernel = false)
             : base(context, entryPoint, null)
         {
             WasmBinary = wasmBinary;
@@ -120,6 +130,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WrittenParamIndices = writtenParamIndices ?? new HashSet<int>();
             StoreTargetTrace = storeTargetTrace ?? new List<string>();
             IrUserParamIndexOffset = irUserParamIndexOffset;
+            HasSimdKernel = hasSimdKernel;
         }
     }
 

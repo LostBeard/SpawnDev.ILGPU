@@ -4,7 +4,9 @@ using System.Text;
 using System.Threading.Tasks;
 using ILGPU;
 using ILGPU.Algorithms;
+using ILGPU.Runtime;
 using SpawnDev.ILGPU;
+using SpawnDev.ILGPU.Wasm;
 using SpawnDev.ILGPU.Wasm.Backend;
 
 /// <summary>
@@ -69,11 +71,66 @@ internal static class WasmSimdEmitGateProbe
             WasmBackend.ForceScalar = prevScalar;
         }
 
+        // Decide which REAL accelerator launch path actually vectorizes: auto-grouped (ILGPU wraps the
+        // body in `if (index < length) { ... }` — a lane-variant branch that Stage 3a rejects) vs an
+        // explicit-group launch (branch-free body). This drives the numerical PMT test's kernel choice.
+        AcceleratorPathCheckAsync().GetAwaiter().GetResult();
+
         Console.WriteLine();
         Console.WriteLine(rc == 0
             ? "=== gate PASS (every expectSimd kernel emitted a kernel_simd export) ==="
             : "=== gate FAIL (an expectSimd kernel did NOT emit kernel_simd — see above) ===");
         return Task.FromResult(rc);
+    }
+
+    // Auto-grouped explicit elementwise body (same math) used for the auto-vs-explicit launch check.
+    private static void AddKernelExplicit(Index1D i, ArrayView<float> a, ArrayView<float> b, ArrayView<float> o)
+        => o[i] = a[i] * 2f + b[i];
+
+    private static async Task AcceleratorPathCheckAsync()
+    {
+        Console.WriteLine();
+        Console.WriteLine("---- real-accelerator launch-path check (auto-grouped vs explicit) ----");
+        var prevForce = WasmBackend.ForceSimd;
+        var prevScalar = WasmBackend.ForceScalar;
+        WasmBackend.ForceScalar = false;
+        WasmBackend.ForceSimd = true;
+        try
+        {
+            using var context = Context.Create().Wasm().ToContext();
+            WasmAccelerator acc;
+            try { acc = await context.CreateWasmAcceleratorAsync(); }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"  could not create Wasm accelerator offline: {ex.Message}");
+                return;
+            }
+            using (acc)
+            {
+                // Auto-grouped: ILGPU adds the implicit `index < length` bounds check.
+                WasmBackend.LastWasmBinary = null;
+                WasmBackend.LastSimdAnalysis = default;
+                acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>>(AddKernelExplicit);
+                bool autoSimd = WasmBackend.LastWasmBinary != null && ContainsExportName(WasmBackend.LastWasmBinary, "kernel_simd");
+                Console.WriteLine($"  auto-grouped: analysis={WasmBackend.LastSimdAnalysis}  kernel_simd={autoSimd}");
+
+                // Explicit-group: branch-free body.
+                WasmBackend.LastWasmBinary = null;
+                WasmBackend.LastSimdAnalysis = default;
+                acc.LoadStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>>(AddKernelExplicit);
+                bool explSimd = WasmBackend.LastWasmBinary != null && ContainsExportName(WasmBackend.LastWasmBinary, "kernel_simd");
+                Console.WriteLine($"  explicit:     analysis={WasmBackend.LastSimdAnalysis}  kernel_simd={explSimd}");
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  path check error: {ex.GetType().Name}: {ex.Message}");
+        }
+        finally
+        {
+            WasmBackend.ForceSimd = prevForce;
+            WasmBackend.ForceScalar = prevScalar;
+        }
     }
 
     private static int Emit(string dir, string name, string desc, Delegate kernel, bool expectSimd)
