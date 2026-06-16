@@ -4694,6 +4694,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 AppendLine($"var {fieldVarName} = _scalar_params[{slot}];");
                             else if (scalarWgslType == "i32")
                                 AppendLine($"var {fieldVarName} = bitcast<i32>(_scalar_params[{slot}]);");
+                            else if (scalarWgslType == "f32"
+                                && scalarElemType.BasicValueType == BasicValueType.BFloat16)
+                                // Sub-word emulated scalar field: widen the 2-byte storage bits (see the
+                                // direct-param case below) instead of bitcast<f32> (= near-zero denormal).
+                                AppendLine($"var {fieldVarName} = _bf16_to_f32(_scalar_params[{slot}] & 0xffffu);");
+                            else if (scalarWgslType == "f32"
+                                && scalarElemType.BasicValueType == BasicValueType.Float16)
+                                AppendLine($"var {fieldVarName} = _f16_to_f32(_scalar_params[{slot}] & 0xffffu);");
                             else if (scalarWgslType == "f32")
                                 AppendLine($"var {fieldVarName} = bitcast<f32>(_scalar_params[{slot}]);");
                             else
@@ -4733,7 +4741,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         }
                         else if (wgslType == "f32")
                         {
-                            AppendLine($"var {variable.Name} = bitcast<f32>(_scalar_params[{slot}]);");
+                            // A sub-word EMULATED scalar (bf16 always; Half without shader-f16) computes
+                            // as f32 (wgslType "f32") but the host packs its 2-byte STORAGE bits in the
+                            // slot's low 16 - a plain bitcast<f32> reads a near-zero denormal (the
+                            // scalar-arrives-as-0 bug). Widen the raw bits like a buffer-element load.
+                            if (param.BasicValueType == BasicValueType.BFloat16)
+                                AppendLine($"var {variable.Name} = _bf16_to_f32(_scalar_params[{slot}] & 0xffffu);");
+                            else if (param.BasicValueType == BasicValueType.Float16)
+                                AppendLine($"var {variable.Name} = _f16_to_f32(_scalar_params[{slot}] & 0xffffu);");
+                            else
+                                AppendLine($"var {variable.Name} = bitcast<f32>(_scalar_params[{slot}]);");
                         }
                         else
                         {

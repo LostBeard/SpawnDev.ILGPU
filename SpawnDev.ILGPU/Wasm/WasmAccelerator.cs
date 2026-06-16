@@ -1543,6 +1543,15 @@ namespace SpawnDev.ILGPU.Wasm
                         // yields a JS-parseable token for every finite + special float/double.
                         if (value is float fv) flatArgs.Add(fv.ToString("G9", System.Globalization.CultureInfo.InvariantCulture));
                         else if (value is double dv) flatArgs.Add(dv.ToString("G17", System.Globalization.CultureInfo.InvariantCulture));
+                        // Half/bf16 by-value SCALAR params: they compute as f32 in the kernel (the f32
+                        // register/local model), so pass the WIDENED f32 value - not the 2-byte struct.
+                        // Without this, a Half/bf16 scalar (a value-type struct) fell into the struct-
+                        // serialize-to-scratch branch below and the kernel read its raw 16 bits as the
+                        // value (got 38656 instead of ~0). Lossless: f16/bf16 are exact f32 subsets.
+                        else if (value is global::ILGPU.Half hv16)
+                            flatArgs.Add(((float)hv16).ToString("G9", System.Globalization.CultureInfo.InvariantCulture));
+                        else if (value is global::ILGPU.BFloat16 bf16v)
+                            flatArgs.Add(((float)bf16v).ToString("G9", System.Globalization.CultureInfo.InvariantCulture));
                         else if (value is long lv) flatArgs.Add($"{lv}n"); // BigInt for i64
                         else if (value is ulong ulv) flatArgs.Add($"{ulv}n"); // BigInt for i64
                         else if (value != null && !value.GetType().IsPrimitive && !value.GetType().IsEnum

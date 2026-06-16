@@ -967,6 +967,11 @@ namespace SpawnDev.ILGPU.WebGL
                             uint => "uint",
                             float => "float",
                             double => "double",
+                            // Half/bf16 map to GLSL `float` (emulated). Without these a by-value Half/bf16
+                            // scalar param fell to `_ => null` → the uniform was never sent → arrived as 0.
+                            // The arg-switch + EncodeUniformScalarValue below widen the value to f32.
+                            global::ILGPU.Half => "float",
+                            global::ILGPU.BFloat16 => "float",
                             bool => "bool",
                             byte => "int",
                             sbyte => "int",
@@ -999,6 +1004,12 @@ namespace SpawnDev.ILGPU.WebGL
                                 uint uiVal => scalarType == "int" ? (object)(int)uiVal : uiVal,
                                 float fVal => fVal,
                                 double dValFb => (float)dValFb,
+                                // Half/bf16 map to GLSL `float` (emulated). Widen via the explicit float
+                                // operator (lossless) so the f32-bits uniform path delivers the value; a
+                                // by-value Half/bf16 scalar param (scale/bias) otherwise hit the throw /
+                                // arrived as 0.
+                                global::ILGPU.Half hVal => (float)hVal,
+                                global::ILGPU.BFloat16 bfVal => (float)bfVal,
                                 bool blVal => blVal ? 1 : 0,
                                 byte bVal => (int)bVal,
                                 sbyte sbVal => (int)sbVal,
@@ -1375,6 +1386,12 @@ namespace SpawnDev.ILGPU.WebGL
                 {
                     float ff => ff,
                     double dd => (float)dd,
+                    // Half/bf16 map to GLSL `float` (emulated, f32 arithmetic). They do NOT implement
+                    // IConvertible, so Convert.ToSingle returned 0 -> a by-value Half/bf16 SCALAR param
+                    // (scale/bias) arrived as 0. Widen via the explicit float operator (lossless: f16/bf16
+                    // are exact f32 subsets) so the existing f32-bits uniform path delivers the value.
+                    global::ILGPU.Half h => (float)h,
+                    global::ILGPU.BFloat16 bf => (float)bf,
                     null => 0f,
                     _ => Convert.ToSingle(value)
                 };
