@@ -1130,6 +1130,115 @@ fn _f32_to_bf16(f: f32) -> u32 {
 }
 ";
 
+        /// <summary>
+        /// FP8 (OCP E5M2 + E4M3FN) bit-conversion helpers. Both FP8 formats are always emulated
+        /// (no native WGSL fp8). Direct WGSL ports of the managed ConvertFloat8E*M*ToFloat /
+        /// ConvertFloatToFloat8E*M* (CPU-verified idempotence 0/256, and the OpenCL C twins are
+        /// PMT-verified) so every representable value round-trips bit-identically. The raw 8-bit
+        /// pattern lives in the low 8 bits of a u32; values compute as f32 in-register.
+        /// </summary>
+        public const string FP8Functions = @"
+// ============================================================================
+// FP8 Emulation Functions (E5M2 = 1/5/2 bias 15 IEEE-style; E4M3FN = 1/4/3 bias 7, no Inf, sat 448)
+// ============================================================================
+
+fn _e5m2_to_f32(raw: u32) -> f32 {
+    let bits = raw & 0xFFu;
+    let sign = (bits & 0x80u) << 24u;
+    let expo = (bits >> 2u) & 0x1Fu;
+    let mant = bits & 0x03u;
+    if (expo == 0u) {
+        if (mant == 0u) { return bitcast<f32>(sign); }
+        var e: u32 = 127u - 15u + 1u;
+        var m: u32 = mant;
+        loop { if ((m & 0x04u) != 0u) { break; } m = m << 1u; e = e - 1u; }
+        m = m & 0x03u;
+        return bitcast<f32>(sign | (e << 23u) | (m << 21u));
+    }
+    if (expo == 0x1Fu) { return bitcast<f32>(sign | (0xFFu << 23u) | (mant << 21u)); }
+    let f32Exp = expo - 15u + 127u;
+    return bitcast<f32>(sign | (f32Exp << 23u) | (mant << 21u));
+}
+
+fn _f32_to_e5m2(f: f32) -> u32 {
+    let bits = bitcast<u32>(f);
+    let sign = (bits >> 24u) & 0x80u;
+    let rest = bits & 0x7FFFFFFFu;
+    if (rest > 0x7F800000u) { return sign | 0x7Fu; }
+    if (rest == 0x7F800000u) { return sign | 0x7Cu; }
+    let f32Exp = i32((rest >> 23u) & 0xFFu);
+    let f32Mant = rest & 0x7FFFFFu;
+    let e = f32Exp - 127;
+    if (e > 15) { return sign | 0x7Cu; }
+    if (e < -14) {
+        if (f32Exp == 0) { return sign; }
+        let signif = f32Mant | 0x800000u;
+        let shift = (-14 - e) + 21;
+        if (shift > 31) { return sign; }
+        var m: u32 = signif >> u32(shift);
+        let roundBit = (signif >> u32(shift - 1)) & 1u;
+        let sticky = select(0u, 1u, (signif & ((1u << u32(shift - 1)) - 1u)) != 0u);
+        if (roundBit == 1u && (sticky == 1u || (m & 1u) == 1u)) { m = m + 1u; }
+        return sign | (m & 0x03u) | ((m >> 2u) << 2u);
+    }
+    let mant2 = f32Mant >> 21u;
+    let roundB = (f32Mant >> 20u) & 1u;
+    let stick = select(0u, 1u, (f32Mant & 0xFFFFFu) != 0u);
+    let eField = u32(e + 15);
+    var outBits: u32 = (eField << 2u) | mant2;
+    if (roundB == 1u && (stick == 1u || (mant2 & 1u) == 1u)) { outBits = outBits + 1u; }
+    return sign | (outBits & 0x7Fu);
+}
+
+fn _e4m3_to_f32(raw: u32) -> f32 {
+    let bits = raw & 0xFFu;
+    let sign = (bits & 0x80u) << 24u;
+    let expo = (bits >> 3u) & 0x0Fu;
+    let mant = bits & 0x07u;
+    if ((bits & 0x7Fu) == 0x7Fu) { return bitcast<f32>(sign | 0x7FC00000u); }
+    if (expo == 0u) {
+        if (mant == 0u) { return bitcast<f32>(sign); }
+        var e: u32 = 127u - 7u + 1u;
+        var m: u32 = mant;
+        loop { if ((m & 0x08u) != 0u) { break; } m = m << 1u; e = e - 1u; }
+        m = m & 0x07u;
+        return bitcast<f32>(sign | (e << 23u) | (m << 20u));
+    }
+    let f32Exp = expo - 7u + 127u;
+    return bitcast<f32>(sign | (f32Exp << 23u) | (mant << 20u));
+}
+
+fn _f32_to_e4m3(f: f32) -> u32 {
+    let bits = bitcast<u32>(f);
+    let sign = (bits >> 24u) & 0x80u;
+    let rest = bits & 0x7FFFFFFFu;
+    if (rest >= 0x7F800000u) { return sign | 0x7Fu; }
+    let f32Exp = i32((rest >> 23u) & 0xFFu);
+    let f32Mant = rest & 0x7FFFFFu;
+    let e = f32Exp - 127;
+    if (e > 8 || (e == 8 && f32Mant > 0x600000u)) { return sign | 0x7Eu; }
+    if (e < -6) {
+        if (f32Exp == 0) { return sign; }
+        let signif = f32Mant | 0x800000u;
+        let shift = (-6 - e) + 20;
+        if (shift > 31) { return sign; }
+        var m: u32 = signif >> u32(shift);
+        let roundBit = (signif >> u32(shift - 1)) & 1u;
+        let sticky = select(0u, 1u, (signif & ((1u << u32(shift - 1)) - 1u)) != 0u);
+        if (roundBit == 1u && (sticky == 1u || (m & 1u) == 1u)) { m = m + 1u; }
+        return sign | (m & 0x7Fu);
+    }
+    let mant3 = f32Mant >> 20u;
+    let roundB = (f32Mant >> 19u) & 1u;
+    let stick = select(0u, 1u, (f32Mant & 0x7FFFFu) != 0u);
+    let eField = u32(e + 7);
+    var outBits: u32 = (eField << 3u) | mant3;
+    if (roundB == 1u && (stick == 1u || (mant3 & 1u) == 1u)) { outBits = outBits + 1u; }
+    if ((outBits & 0x7Fu) >= 0x7Fu) { outBits = 0x7Eu; }
+    return sign | (outBits & 0x7Fu);
+}
+";
+
         #endregion
 
         #region Combined Library
