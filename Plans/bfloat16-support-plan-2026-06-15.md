@@ -28,6 +28,24 @@
   No f16 regression (`PMT_FILTER=Half` 183/0/8).
 - **NEXT:** Phase 3 = native CUDA/OpenCL (OpenCL needs raw-ushort storage — no `vload_bf16` builtin) + the Wasm
   struct-field/FloatAsInt parity follow-up; capability flags + const-fold.
+
+### UPDATE 2026-06-16 — generic `INumber<T>` Half/bf16 on ALL 6 backends (`4.13.0-local.8`, forks 2.0.24, master `2eeffa5`)
+bf16 reached FULL native CUDA/OpenCL parity in local.2-local.4 (see CHANGELOG). Then Tuvok's
+`generic-INumber-kernel-codegen-gaps` exposed the LAST class the per-type parity work missed: a single generic
+`where T:INumber<T>` kernel for float/Half/bf16, with the gaps in the **generic-specialization compile path**
+and **by-value SUB-WORD SCALAR params** (distinct from sub-word BUFFER elements, which already worked). Closed:
+PTX bf16 `selp` remap; and the by-value scalar-param ABI on every backend (PTX `.b16`+`cvt`, OpenCL `ushort`+
+convert, WGSL/`_bf16_to_f32` read, WebGL host widen, Wasm pass-widened-f32). Gate: `BackendTestBase.GenericPrecision`
+**23/0 all 6**; no regression (BFloat16 100/0, Half 190/0/8). **⭐ This paved the FP8 path** — the reusable rule
+banked: *a by-value scalar of any emulated/non-native type reuses its BUFFER-ELEMENT storage + buffer-element
+conversion at the param boundary (host always packs storage bytes), keyed on the IR type.* So FP8/MXFP4 scalar
+params come for free once each type has a buffer-element conversion. Probes: `DemoConsole -- generic-precision-repro`
+(desktop, fast) + `PMT_FILTER=GenericPrecision`.
+
+**bf16 (Category A) is DONE.** Next per §9b sequencing = **FP8 E4M3 + E5M2 core types** (Category A, mirrors this
+plan exactly — 1-byte sub-word storage reusing `ArrayView<byte>`; E4M3 = no-Inf + special NaN so its convert
+helper differs from IEEE, E5M2 = IEEE-style) — both ship together (FP8 training needs forward E4M3 + backward
+E5M2). NF4/MXFP4 (Category B, ML dequant layer) is Tuvok's ML lane + my dequant-kernel help.
 **Owner (implementation):** Geordi (SpawnDev.ILGPU / core ILGPU fork editor)
 **Target version:** Floating — fold into the WebGPU-ML hardening lane (bf16 is most valuable exactly where the
 ML push is pointed). Does not gate any current release.
