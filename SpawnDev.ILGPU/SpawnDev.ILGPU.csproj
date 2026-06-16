@@ -4,9 +4,9 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.13.0-local.3</Version>
+		<Version>4.13.0-local.4</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>4.13.0: BFloat16 (bf16 "brain float") - new ILGPU.BFloat16 kernel-native type + BasicValueType.BFloat16 IR primitive. FULL type parity with Half on all 6 backends: load/store, arithmetic, comparisons, radix-sort keys (Ascending/DescendingBFloat16), struct fields, IR const-fold, and RequiresBFloat16. Emulated via the same exact-shift bf16/f32 + round-to-nearest-even conversion; CUDA holds bf16 in an f32 register and converts at the load/store boundary (native cvt.*.bf16 on sm_80+). On WebGPU, descending radix sort routes through a lossless f32-widen working representation (the WebGPU shader compiler mis-compiles the specialized descending kernel; ILGPU codegen is proven correct). Carries fp32's full dynamic range (the right trade for ML weights). Forks bump to 2.0.19. Full per-version history: CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
+		<PackageReleaseNotes>4.13.0: BFloat16 (bf16 "brain float") - new ILGPU.BFloat16 kernel-native type + BasicValueType.BFloat16 IR primitive. FULL type parity with Half on all 6 backends: load/store, arithmetic, comparisons, radix-sort keys (Ascending/DescendingBFloat16), struct fields, IR const-fold, and RequiresBFloat16. Emulated via the same exact-shift bf16/f32 + round-to-nearest-even conversion; CUDA holds bf16 in an f32 register and converts at the load/store boundary (native cvt.*.bf16 on sm_80+). bf16 radix sort runs NATIVELY on all backends. 4.13.0-local.4 fixes two bf16 correctness bugs: (1) a packed sub-word view.Length emitted the atomic&lt;u32&gt; WORD count on WebGPU, so native bf16/Int16/Int8 radix sorts processed only a fraction of their keys (removed the former f32-widen workaround); (2) a CUDA bf16-value store into a non-bf16 (e.g. float) buffer narrowed to a 2-byte st.b16 into the wider slot, so the value read back ~0. Carries fp32's full dynamic range (the right trade for ML weights). Forks bump to 2.0.20. Full per-version history: CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -65,8 +65,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.19" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.19" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.20" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.20" />
 	</ItemGroup>
 
 	<ItemGroup>
