@@ -72,7 +72,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         {
             // Mirror of FloatInfinityLiteralTest but for double precision. Exercises
             // FormatFloat/FormatDouble + the f64 emulation literal path on backends
-            // that emulate doubles (WebGPU Dekker / Ozaki, WebGL, Wasm). Naga's
+            // that emulate doubles (WebGPU Dekker / Ozaki, WebGL, Wasm). Tint's
             // shader-creation reject of non-finite const-expressions applies to f32
             // bitcast; emulated f64 routes through `f64_from_ieee754_bits(lo, hi)`
             // where `hi=0x7FF00000u` triggers the Inf branch. This test verifies
@@ -669,7 +669,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             // Tests the storage + conversion path (_f16→f32 must preserve
             // Inf and NaN bit patterns). Does NOT test GPU runtime division
             // because WGSL/GLSL spec says div-by-zero is implementation-
-            // defined and Naga in practice declines to follow IEEE for
+            // defined and Tint in practice declines to follow IEEE for
             // runtime f32 div-by-zero.
             using var inBuf = accelerator.Allocate1D(new global::ILGPU.Half[]
             {

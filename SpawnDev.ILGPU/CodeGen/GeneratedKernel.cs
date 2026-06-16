@@ -19,7 +19,7 @@ public enum GeneratedKernelDiagnosticSeverity
 
 /// <summary>
 /// A single diagnostic produced while generating a kernel (pre-validation result, an
-/// unsupported-feature note, etc.). When a backend pre-validator (e.g. Tint/naga for WGSL)
+/// unsupported-feature note, etc.). When a backend pre-validator (e.g. Tint for WGSL)
 /// is wired in, its messages surface here - which is how the offline path can report a
 /// shader-validation error (e.g. a WGSL <c>cannot assign 'f32' to 'i32'</c>) WITHOUT a
 /// device or a browser.

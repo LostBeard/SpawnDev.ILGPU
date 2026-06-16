@@ -691,7 +691,15 @@ namespace ILGPU.Backends.PTX
             var targetType = store.Target.Type.AsNotNullCast<PointerType>();
             var value = Load(store.Value);
 
-            if (store.Value.Type.BasicValueType == BasicValueType.BFloat16)
+            // Key the bf16-narrowing store off the TARGET BUFFER element type, NOT the value type.
+            // bf16 is held as f32 in-register, and the `(float)bf16` widening Convert is a no-op
+            // alias - so the VALUE reaching a `floatBuf[i] = (float)bf16Buf[i]` store is still typed
+            // BFloat16. Keying off the value type made that store narrow back to bf16 + st.b16 (2 bytes)
+            // into a 4-byte float slot -> the float read back ~0 (Tuvok's "bf16 store/load returns
+            // zeros" bug). The store must match the destination buffer: bf16* -> cvt.rn.bf16.f32 + st.b16;
+            // f32* -> plain st.f32 of the f32 value register. (Also fixes the inverse: storing an f32
+            // result into a bf16 buffer now narrows correctly instead of st.f32 overflowing the 2-byte slot.)
+            if (targetType.ElementType.BasicValueType == BasicValueType.BFloat16)
             {
                 // bf16 store: round the f32 value register to bf16 via cvt.rn.bf16.f32 into
                 // a temp .b16 register, then write the raw 16 bits. EnsureHardwareRegister
@@ -715,6 +723,26 @@ namespace ILGPU.Backends.PTX
                     cmd.AppendArgument(rawReg);
                 }
                 FreeRegister(rawReg);
+                return;
+            }
+
+            // A bf16-TYPED value stored to a NON-bf16 buffer (the target-bf16 case was handled above).
+            // bf16 is held in an f32 register and the `(float)bf16` widening Convert is a no-op alias
+            // that preserves the bf16 IR type, so `floatBuf[i] = (float)bf16Buf[i]` reaches here with a
+            // bf16-typed value register. Falling through to EmitIOStore would re-narrow it (cvt.rn.bf16.f32
+            // + st.b16) into the wider (e.g. 4-byte f32) destination slot -> the value reads back ~0
+            // (Tuvok's "bf16 store/load returns zeros" bug). Store the f32 bits directly as the target
+            // element type instead. (Struct-field bf16 stores keep using EmitIOStore: there the register
+            // type and the field storage type agree, so its register-type-keyed packing is correct.)
+            if (value is PrimitiveRegister bf16Value &&
+                bf16Value.BasicValueType == BasicValueType.BFloat16)
+            {
+                var f32Reg = EnsureHardwareRegister(bf16Value);
+                using var cmd = BeginCommand(PTXInstructions.StoreOperation);
+                cmd.AppendAddressSpace(targetType.AddressSpace);
+                cmd.AppendSuffix(ResolveIOType(targetType.ElementType.BasicValueType));
+                cmd.AppendArgumentValue(address, 0);
+                cmd.AppendArgument(f32Reg);
                 return;
             }
 

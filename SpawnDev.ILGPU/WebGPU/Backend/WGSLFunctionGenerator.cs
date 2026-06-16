@@ -182,7 +182,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // (see WGSLKernelFunctionGenerator.GenerateHeader line 1899-1903).
             // The kernel binds `array<u32>` so it can spinlock-protected access
             // each u32 half independently for atomic emu-64 ops; the helper
-            // signature must match or naga rejects the call site as a
+            // signature must match or Tint rejects the call site as a
             // ptr<array<u32>> vs ptr<array<emu_i64>> type mismatch.
             // Closes Tuvok's 2026-05-05 walker `EncodeFrameBody_*` arg type
             // mismatch at WGSL L44452 where arg N expected `array<vec2<u32>>`
@@ -265,7 +265,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // table when ILGPU's IR didn't propagate the right address space
                     // into the helper's parameter type. Without this, a workgroup
                     // ArrayView passed from the kernel emits as `ptr<storage, ...>`
-                    // and Naga rejects the type mismatch at the call site.
+                    // and Tint rejects the type mismatch at the call site.
                     var observedAS = _args.HelperParamAddressSpaces.TryGetValue(
                         (Method, param.Index), out var asValue) ? asValue : (MemoryAddressSpace?)null;
                     paramType = GetWgslViewParamType(
@@ -558,7 +558,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // (WGSLKernelFunctionGenerator.GenerateCode(LoadElementAddress) line 4445).
                 // Surfaced 2026-05-05 by Tuvok's AV1 walker on local.6: helper read
                 // `consts[cdfBase + N]` where `cdfBase` is `long`, so the offset arrived
-                // as emu_i64. The unwrapped `var v_X : i32 = v_Y;` emit failed Naga
+                // as emu_i64. The unwrapped `var v_X : i32 = v_Y;` emit failed Tint
                 // validation with "cannot initialize 'var' of type 'i32' with value of
                 // type 'vec2<u32>'".
                 bool offsetIsEmulatedI64 = Backend.EnableI64Emulation
@@ -637,7 +637,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // `unresolved value 'v_359'` at WGSL L19170, 2026-05-05): if the
                     // helper has multiple IR blocks (i.e. nested if/else/loop in the
                     // emitted WGSL fn body), `var v_X : i32 = ...;` is block-scoped and
-                    // a use in a sibling block fails Naga validation. Hoist the var
+                    // a use in a sibling block fails Tint validation. Hoist the var
                     // declaration to the helper fn body root via deferred-decl insertion
                     // and emit only the assignment locally.
                     _subWordLEAVars[target.Name] = param.Index;

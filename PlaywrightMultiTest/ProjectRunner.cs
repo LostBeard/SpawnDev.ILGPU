@@ -27,6 +27,39 @@ namespace PlaywrightMultiTest
         /// </summary>
         private ProjectRunner() { }
 
+        /// <summary>
+        /// Chromium launch args. When PMT_DAWN_DUMP=1, also enable Dawn's dump_shaders toggle so
+        /// Chrome's WGSL compiler (Tint) emits the translated backend shader (HLSL on D3D12 / SPIR-V
+        /// on Vulkan) AND the input WGSL to the Chrome log; disable_symbol_renaming keeps our v_NNN
+        /// names so the dump is greppable. The log is written to a file via --log-file so we can read
+        /// Tint's actual output and see where it diverges from the WGSL we emit (e.g. the bf16 radix
+        /// ordering-transform miscompile). Off by default — debug-only, no effect on normal runs.
+        /// </summary>
+        private static string[] BuildChromiumArgs()
+        {
+            var args = new System.Collections.Generic.List<string>
+            {
+                "--enable-unsafe-webgpu",
+                "--enable-features=Vulkan,WebGPUService,SkiaGraphite,FileSystemAccessPersistentPermission",
+                "--ignore-gpu-blocklist",
+                "--no-sandbox",
+                "--disable-features=FileSystemAccessPermissionPrompt",
+                "--allow-file-access-from-files"
+            };
+            if (Environment.GetEnvironmentVariable("PMT_DAWN_DUMP") == "1")
+            {
+                var logFile = Environment.GetEnvironmentVariable("PMT_DAWN_LOG")
+                    ?? Path.Combine(Path.GetTempPath(), "chrome_dawn_dump.log");
+                try { if (File.Exists(logFile)) File.Delete(logFile); } catch { }
+                args.Add("--enable-dawn-features=dump_shaders,disable_symbol_renaming");
+                args.Add("--enable-logging");
+                args.Add($"--log-file={logFile}");
+                args.Add("--v=1");
+                LogStatus($"[PMT_DAWN_DUMP] Tint shader dump ON -> {logFile}");
+            }
+            return args.ToArray();
+        }
+
         private static async Task<int> RunDotnetAsync(string args, string workingDir, int timeoutMs = 300000)
         {
             LogStatus($"RunDotnetAsync: dotnet {args.Split(' ')[0]} (timeout={timeoutMs/1000}s)");
@@ -190,16 +223,7 @@ namespace PlaywrightMultiTest
                                 // engine-level wasm issues; same precedent as WebTorrent's
                                 // H.264 Channel fix). Unset = bundled Chromium (default).
                                 Channel = Environment.GetEnvironmentVariable("PMT_BROWSER_CHANNEL"),
-                                Args = new[]
-                                {
-                                    "--enable-unsafe-webgpu",
-                                    "--enable-features=Vulkan,WebGPUService,SkiaGraphite,FileSystemAccessPersistentPermission",
-                                    "--ignore-gpu-blocklist",
-                                    "--no-sandbox",
-                                    // Auto-grant file system write permission (no prompt)
-                                    "--disable-features=FileSystemAccessPermissionPrompt",
-                                    "--allow-file-access-from-files"
-                                }
+                                Args = BuildChromiumArgs()
                             }).ConfigureAwait(false);
                         testableProject.Browser = testableProject.BrowserContext.Browser;
                         // Grant all available permissions to avoid prompts

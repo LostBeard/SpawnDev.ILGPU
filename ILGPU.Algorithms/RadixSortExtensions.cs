@@ -1126,24 +1126,10 @@ namespace ILGPU.Algorithms
             where TValueStride : struct, IStride1D
             where TRadixSortOperation : struct, IRadixSortOperation<TKey>
         {
-            // WebGPU: naga/Dawn mis-compiles the bf16 descending transform in the specialized pairs
-            // radix kernel (sorts keys as raw int16). bf16 codegen is proven correct (bucket-compare
-            // matches CPU), so route a bf16 KEY through an f32 working representation (lossless,
-            // order-preserving) + the correct f32 pairs radix sort, then narrow back. bf16 VALUE
-            // (rare, untested) falls through to the generic path. See RadixSortExtensions.BFloat16.cs.
-            if (accelerator.AcceleratorType == AcceleratorType.WebGPU &&
-                typeof(TKey) == typeof(BFloat16) &&
-                typeof(TValue) != typeof(BFloat16))
-            {
-                var handler = typeof(RadixSortExtensions)
-                    .GetMethod(nameof(CreateWebGPUWidenRadixSortPairsBFloat16Key),
-                        BindingFlags.NonPublic | BindingFlags.Static)!
-                    .MakeGenericMethod(
-                        typeof(TKeyStride), typeof(TValue), typeof(TValueStride),
-                        typeof(TRadixSortOperation))
-                    .Invoke(null, new object[] { accelerator })!;
-                return (RadixSortPairs<TKey, TKeyStride, TValue, TValueStride>)handler;
-            }
+            // bf16-KEY pairs on WebGPU sort NATIVELY (fall through to the generic specialized pairs
+            // radix kernel below). The former f32-widen workaround was removed: the real bug was a
+            // sub-word view.Length emitting arrayLength() (word count) instead of the element count,
+            // now fixed in the WGSL codegen. See the keys-only note above.
 
             // WebGL: gather-only transform feedback. Sort the pairs by SCATTER (the struct-packed
             // gather/scatter pairs path needs a multi-field scatter). Compute each element's stable
@@ -1254,23 +1240,13 @@ namespace ILGPU.Algorithms
                     ErrorMessages.NotSupportedNumberOfRadixSortBits);
             }
 
-            // WebGPU: the WebGPU shader compiler (naga/Dawn) MIS-COMPILES the bf16 DESCENDING
-            // transform inside the specialized radix kernel - it drops the float ordering and
-            // sorts the keys as raw signed int16. ILGPU's bf16 codegen is proven correct (the
-            // standalone ExtractRadixBits bucket-compare matches the CPU oracle on WebGPU for
-            // every key + pass), so this is a shader-compiler bug, not an ILGPU gap. bf16 widens
-            // to f32 LOSSLESSLY + order-preservingly, so route bf16 keys through an f32 working
-            // representation and the (correct) f32 radix sort, then narrow back - the same
-            // sub-word-key strategy WebGL uses. See RadixSortExtensions.BFloat16.cs.
-            if (accelerator.AcceleratorType == AcceleratorType.WebGPU && typeof(T) == typeof(BFloat16))
-            {
-                var handler = typeof(RadixSortExtensions)
-                    .GetMethod(nameof(CreateWebGPUWidenRadixSortBFloat16),
-                        BindingFlags.NonPublic | BindingFlags.Static)!
-                    .MakeGenericMethod(typeof(TStride), typeof(TRadixSortOperation))
-                    .Invoke(null, new object[] { accelerator })!;
-                return (RadixSort<T, TStride>)handler;
-            }
+            // bf16 on WebGPU sorts NATIVELY (falls through to the generic specialized radix kernel
+            // below, like Half). An earlier f32-widen workaround existed here under the WRONG belief
+            // that Tint/Dawn miscompiled the bf16 ordering transform; the real bug was that
+            // view.Length on a packed sub-word (bf16) buffer was emitted as a bare arrayLength()
+            // (the WORD count, half the element count), so the native sort processed only half its
+            // keys. Fixed in the WGSL codegen (sub-word view.Length now multiplies by elements-per-
+            // word), so the native path is correct and the widen workaround is removed.
 
             // WebGL: transform feedback is gather-only — no in-kernel scatter and limited loop
             // codegen (a gather + in-kernel binary search hangs the GL context). Use the backend's

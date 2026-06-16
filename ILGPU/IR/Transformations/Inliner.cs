@@ -46,7 +46,7 @@ namespace ILGPU.IR.Transformations
         /// of instruction bytes in a single Wasm/WGSL function. wabt's parser rejects
         /// at &gt;50K locals (`function local count exceeds maximum value`), V8's
         /// TurboFan tier-up compile latency dwarfs Playwright's 30s test budget, and
-        /// Naga + WebGPU shader-validators choke similarly on the WGSL side.
+        /// Tint + WebGPU shader-validators choke similarly on the WGSL side.
         ///
         /// Per-function cap alone is not enough: a 400-IL helper called 100 times via
         /// a recursive partition tree contributes 40K IL into the kernel even though

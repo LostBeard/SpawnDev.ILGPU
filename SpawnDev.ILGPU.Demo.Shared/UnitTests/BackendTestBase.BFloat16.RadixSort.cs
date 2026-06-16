@@ -200,6 +200,66 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         });
 
         /// <summary>
+        /// NATIVE bf16 radix-sort regression guard (keys-only desc + pairs asc in one test). On WebGPU
+        /// this exercises the native specialized radix kernel (the former f32-widen workaround is gone).
+        /// The bug this locks down: view.Length on a packed sub-word (bf16) buffer was emitted as a bare
+        /// arrayLength() = the WORD count (half the element count), so the native sort processed only half
+        /// its keys and mis-ordered. Fixed by the sub-word ×elements-per-word multiplier in the WGSL
+        /// view.Length codegen. Runs on every bf16-capable backend.
+        /// </summary>
+        [TestMethod]
+        public async Task BFloat16_RadixSort_Native_KeysAndPairs() => await RunTest(async accelerator =>
+        {
+            RequireBFloat16SupportedBackend(accelerator);
+            int n = 256;
+
+            // --- keys-only, descending ---
+            var keys = new BFloat16[n];
+            for (int i = 0; i < n; i++) keys[i] = (BFloat16)(float)(i - 128); // ascending input
+            using (var keysBuf = accelerator.Allocate1D(keys))
+            using (var tempBuf = accelerator.Allocate1D<int>(
+                accelerator.ComputeRadixSortTempStorageSize<BFloat16, DescendingBFloat16>(n)))
+            {
+                accelerator.CreateRadixSort<BFloat16, Stride1D.Dense, DescendingBFloat16>()(
+                    accelerator.DefaultStream, keysBuf.View, tempBuf.View.AsContiguous());
+                await accelerator.SynchronizeAsync();
+                var sorted = await keysBuf.CopyToHostAsync<BFloat16>();
+                for (int i = 0; i < n; i++)
+                {
+                    float expected = (float)(127 - i); // descending
+                    if (MathF.Abs((float)sorted[i] - expected) > 0.01f)
+                        throw new Exception(
+                            $"native bf16 RadixSort (desc) mismatch at [{i}]: expected={expected}, got={(float)sorted[i]} " +
+                            "(sub-word view.Length / arraySize regression?)");
+                }
+            }
+
+            // --- pairs (key + int value), ascending ---
+            var pkeys = new BFloat16[n];
+            var pvals = new int[n];
+            for (int i = 0; i < n; i++) { pkeys[i] = (BFloat16)(float)((n - 1 - i) - 128); pvals[i] = i; }
+            using (var keysBuf = accelerator.Allocate1D(pkeys))
+            using (var valsBuf = accelerator.Allocate1D(pvals))
+            using (var tempBuf = accelerator.Allocate1D<int>(
+                accelerator.ComputeRadixSortPairsTempStorageSize<BFloat16, int, AscendingBFloat16>(n)))
+            {
+                accelerator.CreateRadixSortPairs<BFloat16, Stride1D.Dense, int, Stride1D.Dense, AscendingBFloat16>()(
+                    accelerator.DefaultStream, keysBuf.View, valsBuf.View, tempBuf.View.AsContiguous());
+                await accelerator.SynchronizeAsync();
+                var sk = await keysBuf.CopyToHostAsync<BFloat16>();
+                var sv = await valsBuf.CopyToHostAsync<int>();
+                for (int i = 0; i < n; i++)
+                {
+                    float expected = (float)(i - 128);
+                    if (MathF.Abs((float)sk[i] - expected) > 0.01f)
+                        throw new Exception($"native bf16 RadixSortPairs key mismatch at [{i}]: expected={expected}, got={(float)sk[i]}");
+                    if (sv[i] != n - 1 - i)
+                        throw new Exception($"native bf16 RadixSortPairs value mismatch at [{i}]: expected={n - 1 - i}, got={sv[i]}");
+                }
+            }
+        });
+
+        /// <summary>
         /// Keys-only RadixSort with bf16 keys, descending, negative..positive input.
         /// </summary>
         [TestMethod]

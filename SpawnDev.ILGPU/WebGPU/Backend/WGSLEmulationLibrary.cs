@@ -21,19 +21,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// WGSL helper functions that materialise IEEE-754 special f32 values
         /// (positive infinity, negative infinity, quiet NaN) at runtime.
         ///
-        /// WGSL has no literal form for these values AND Naga (Chrome's WGSL
+        /// WGSL has no literal form for these values AND Tint (Chrome's WGSL
         /// parser) rejects ANY expression that const-evaluates to a non-finite
         /// f32 - even when the expression is inside a function body or wraps
         /// a pipeline-override constant. After override substitution at
         /// pipeline creation, `bitcast&lt;f32&gt;(0x7F800000u)` const-folds to
-        /// +Inf and Naga refuses with "value inf cannot be represented as
+        /// +Inf and Tint refuses with "value inf cannot be represented as
         /// 'f32'". So we cannot use any const-or-override-driven bit pattern.
         ///
         /// Workaround: take the bit pattern OR it with a runtime-only u32 that
         /// the const-evaluator cannot fold. `_ilgpu_runtime_zero` is a
         /// `var&lt;private&gt;` written from `local_id.x ^ local_id.x` at the
         /// top of the kernel main. The XOR-self always yields zero at
-        /// runtime, but Naga does not const-fold it because `local_id` is a
+        /// runtime, but Tint does not const-fold it because `local_id` is a
         /// `@builtin(local_invocation_id)` value (runtime, varies per thread).
         /// The bitcast input is therefore non-const at compile time and the
         /// resulting +Inf / -Inf / NaN is materialised at execution time
@@ -273,7 +273,7 @@ fn f64_div(a: emu_f64, b: emu_f64) -> emu_f64 {
 // emu_f64 comparison helpers - IEEE-strict NaN handling.
 //
 // Background: the f32 == / < / > operators in WGSL are spec'd to return
-// FALSE if either operand is NaN, but Naga / Chrome / some GPU drivers
+// FALSE if either operand is NaN, but Tint / Chrome / some GPU drivers
 // have been observed to return TRUE under unordered-comparison semantics
 // for f32 NaN compares. Diagnosed 2026-04-29 against
 // `BackendTestBase.DoubleNaNComparisonTest` where NaN_a == NaN_b returned
@@ -651,7 +651,7 @@ fn i64_abs(a: emu_i64) -> emu_i64 {
 
 // IEEE-strict NaN detection by f32 bit pattern. Comparison primitives use
 // this instead of relying on `x != x` because some WGSL implementations
-// (Naga / Chrome / certain GPU drivers) use unordered semantics on f32
+// (Tint / Chrome / certain GPU drivers) use unordered semantics on f32
 // `==` / `<` / `>` which makes those operators return TRUE in the
 // presence of NaN. See `BackendTestBase.DoubleNaNComparisonTest`.
 fn _f32_is_nan_bits(v: f32) -> bool {

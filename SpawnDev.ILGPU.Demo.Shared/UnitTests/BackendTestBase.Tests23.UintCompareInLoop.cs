@@ -1809,7 +1809,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         // (ftb > EC_UINT_BITS) with a 10-field state struct passed by ref through
         // 5 nested helper functions, each containing a `while` loop over an
         // ArrayView<byte>. Surfaced 2026-05-04 as a 30s WGSL cold-compile timeout
-        // on WebGPU when wgpu's Naga validator processes this kernel shape.
+        // on WebGPU when wgpu's Tint validator processes this kernel shape.
         // Mirrored here so we can profile the WGSL emit and fix codegen at source.
         public struct Tests23_OpusRangeState
         {
@@ -1990,7 +1990,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         // CODEGEN-shape regression: kernel must compile + run on every backend
         // in well under the PMT 30s/test budget. We don't assert bit-exactness
         // here — Codecs OpusRangeDecoderGpu_DecodeUint_*_BitExactVsCpu owns
-        // bit-correctness; this test owns "the WGSL Naga validator can compile
+        // bit-correctness; this test owns "the WGSL Tint validator can compile
         // this kernel shape inside the PMT 30s/test budget."
         //
         // CURRENTLY FAILING on WebGPU + WebGPUNoSubgroups (cold-compile > 30s,
@@ -1998,12 +1998,12 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         // (Aggressive default) inlines every helper method into the kernel
         // entry, producing a ~600-line WGSL fn with 217 var declarations + 5
         // nested loops + heavy bitcast<u32>/<i32> sign-toggle pairs. wgpu's
-        // Naga validator cold-compile of this shape exceeds 30s.
+        // Tint validator cold-compile of this shape exceeds 30s.
         //
         // The fix path is the rc.16 fn-def codegen Bug D
         // (Plans/rc16-fn-def-codegen-harden.md): ArrayView-as-fn-param
         // marshaling. With NoInlining attrs on each helper, the WGSL emit
-        // collapses to ~60 lines per fn (11 fns, fast Naga validation), but
+        // collapses to ~60 lines per fn (11 fns, fast Tint validation), but
         // ArrayView fn-params currently emit as `i32` instead of
         // `ptr<storage, array<atomic<u32>>, read_write>` and helper-to-helper
         // calls show "Unmapped fallback" — bug D in the rc.16 plan.
@@ -2045,7 +2045,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         // Tuvok's AV1 walker `EncodeFrameKernel` reads `constsUshort[cdfBase + N]` where
         // `cdfBase` is `long` (so the offset arithmetic widens to i64). On WebGPU this
         // surfaces as `var v_X : i32 = v_Y;` where v_Y is `vec2<u32>` (emu_i64) — i64 →
-        // i32 implicit truncation rejected by Naga. The fix is to ensure i64 IR values
+        // i32 implicit truncation rejected by Tint. The fix is to ensure i64 IR values
         // feeding into a non-LEA i32 sink get wrapped with `i64_to_i32(...)`.
         // Repro shape mirrors Tuvok's helper without sub-word coalesce dependency.
         [MethodImpl(MethodImplOptions.NoInlining)]
@@ -2089,10 +2089,10 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new System.Exception($"LongOffset sub-word: expected {expected}, got {got[0]}");
         });
 
-        // Tuvok's local.7 PMT exposed `vec2<u32> >> u32` Naga error in helper
+        // Tuvok's local.7 PMT exposed `vec2<u32> >> u32` Tint error in helper
         // arithmetic. Mirrors the shape via a NoInlining helper that does
         // `long bits = ...; long shifted = bits >> n;`. Without the i64-aware
-        // shift codegen, helper emits raw `>>` on vec2<u32> + u32 — Naga rejects.
+        // shift codegen, helper emits raw `>>` on vec2<u32> + u32 — Tint rejects.
         [MethodImpl(MethodImplOptions.NoInlining)]
         static long Tests23_I64ShiftHelper(long input, int amount)
         {
@@ -2126,7 +2126,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         // takes ArrayView<long> param, kernel binding for emu-i64 ArrayView is
         // `array<u32>` (raw bits, see WGSLKernelFunctionGenerator GenerateHeader
         // line 1899-1903), but pre-fix helper signature was `array<emu_i64>` —
-        // naga rejected the call site as "expected ptr<array<vec2<u32>>>, got
+        // Tint rejected the call site as "expected ptr<array<vec2<u32>>>, got
         // ptr<array<u32>>". Closes 2026-05-05 walker WGSL L44452 family.
         // Repro shape: helper with [NoInlining] taking ArrayView<long> + an int
         // index, doing read + write on the i64 view. Minimal pipeline mirrors
@@ -2162,11 +2162,11 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         });
 
         // Tuvok's local.13 walker WGSL L44455 — reproduces the "invalid aliased
-        // pointer argument" Naga error. Sub-word coalesce v2 (local.6) merges
+        // pointer argument" Tint error. Sub-word coalesce v2 (local.6) merges
         // 10+ same-element-size sub-word ArrayView kernel params into 1 shared
         // `array<atomic<u32>>` binding. When those params are then passed to a
         // [NoInlining] helper as positional ptr args, all the coalesced ones
-        // resolve to the SAME leader binding root — Naga rejects the call site.
+        // resolve to the SAME leader binding root — Tint rejects the call site.
         // Pre-fix on WebGPU only when the kernel exceeds the 10-binding cap and
         // sub-word v2 fires; below threshold, no coalesce → no aliasing.
         [MethodImpl(MethodImplOptions.NoInlining)]

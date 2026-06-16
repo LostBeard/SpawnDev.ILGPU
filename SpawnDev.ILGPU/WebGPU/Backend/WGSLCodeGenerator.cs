@@ -217,7 +217,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             ///
             /// The fix: when N coalesced ArrayView params are passed positionally to a
             /// NoInlining helper, each "let v_X = &leader_binding;" alias points to the
-            /// SAME WGSL ptr — Naga rejects with "invalid aliased pointer argument" or
+            /// SAME WGSL ptr — Tint rejects with "invalid aliased pointer argument" or
             /// (more subtly) the helper reads from the same slot N times because the
             /// kernel-side per-member offset isn't passed across the call.
             ///
@@ -792,7 +792,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 //
                 // The first pass keeps `let v_X = &(*v_Y)[idx];` as block-scoped because the
                 // index might reference a block-local variable. But when v_X is dereferenced
-                // in a sibling case (`v_R = *v_X;` or `*v_X = v_W;`), naga reports
+                // in a sibling case (`v_R = *v_X;` or `*v_X = v_W;`), Tint reports
                 // "unresolved value 'v_X'" — the let died with its case scope.
                 //
                 // Fix: text-substitute `*v_X` with `(*v_Y)[idx]` everywhere in the helper
@@ -1383,7 +1383,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // Use the i64/u64 emulation library helpers instead.
                 // Surfaced 2026-05-05 by Tuvok's AV1 walker on local.7: helper
                 // `cdfBase >> 1` (where cdfBase is `long`) emitted
-                // `vec2<u32> >> u32(...)` which Naga rejected. (Bug D follow-up.)
+                // `vec2<u32> >> u32(...)` which Tint rejected. (Bug D follow-up.)
                 string leftShType = TypeGenerator[value.Left.Type];
                 if (Backend.EnableI64Emulation && (leftShType == "emu_i64" || leftShType == "emu_u64"))
                 {

@@ -312,7 +312,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // ILGPU IR doesn't propagate `AddressSpace.Shared` into helper parameter types
             // at our optimization level, so the helper's signature defaults to
             // `ptr<storage, ...>` even when the kernel passes a workgroup pointer
-            // (Naga rejects the type mismatch at the call site). This scan runs in the
+            // (Tint rejects the type mismatch at the call site). This scan runs in the
             // kernel constructor (sequential, before parallel GenerateCode) and writes
             // into the shared `_args.HelperParamAddressSpaces` dict — the helper's
             // GenerateHeaderStub reads from it to override the WGSL ptr type.
@@ -366,7 +366,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// memory). The helper's `GenerateHeaderStub` reads this dict to override the
         /// WGSL ptr storage class — without it, ILGPU's IR doesn't propagate
         /// `Shared` into the helper's parameter type and the signature defaults to
-        /// `ptr&lt;storage, ...&gt;` which Naga rejects when the caller passes
+        /// `ptr&lt;storage, ...&gt;` which Tint rejects when the caller passes
         /// `ptr&lt;workgroup, ...&gt;`. (Bug D phase 7, 2026-05-05.)
         /// </summary>
         private void ScanCallSiteAddressSpaces()
@@ -3542,7 +3542,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 "    let num_workgroups = _ep_num_workgroups;\n" +
                 "    let local_index = _ep_local_index;\n" +
                 "    // Seed the runtime-zero used by F32 special-value helpers from a\n" +
-                "    // @builtin value so Naga's const-evaluator cannot fold it. Required\n" +
+                "    // @builtin value so Tint's const-evaluator cannot fold it. Required\n" +
                 "    // because `bitcast<f32>(const_u32_with_inf_bit_pattern)` is rejected\n" +
                 "    // at shader creation. See WGSLEmulationLibrary.F32SpecialValueFunctions.\n" +
                 "    _ilgpu_runtime_zero = local_id.x ^ local_id.x;\n" +
@@ -4644,6 +4644,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 else
                                 {
                                     lengthExpr = $"i32(arrayLength(&{fieldInfo.AssociatedViewBindingName}))";
+                                    // SUB-WORD VIEWS: the buffer is packed into atomic<u32> (N elements
+                                    // per word), so arrayLength() returns the WORD count, not the logical
+                                    // element count. Multiply by elements-per-word (4 / elementByteSize) to
+                                    // recover view.Length — mirrors the GetViewLength override, keyed off the
+                                    // same _subWordParams registration. Without this, view.Length read off
+                                    // the view-struct metadata field was HALF for bf16/Int16 (quarter for
+                                    // Int8), so e.g. the native bf16 radix sort only processed half its keys
+                                    // and sorted wrong. _subWordParams holds bf16/Int8/Int16 always and Half
+                                    // only when emulated (native shader-f16 = array<f16>, length is exact).
+                                    if (_subWordParams.TryGetValue(param.Index, out var swMetaElemSize))
+                                    {
+                                        int swElemsPerWord = 4 / swMetaElemSize; // 4 for Int8, 2 for Int16/Float16/bf16
+                                        if (swElemsPerWord > 1)
+                                            lengthExpr = $"({lengthExpr} * {swElemsPerWord})";
+                                    }
                                 }
 
                                 if (isEmuI64)
@@ -5201,7 +5216,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         // when the LEA result is used in a different basic block from
                         // where it's defined (added to _crossBlockPointers by
                         // HoistCrossBlockVariables), the block-local `var v_X : i32 = ...`
-                        // declaration is out of scope at the use site — Naga rejects with
+                        // declaration is out of scope at the use site — Tint rejects with
                         // "unresolved value 'v_X'". Hoist the var declaration to function
                         // scope (deferred-decl list) so it's visible everywhere, and emit
                         // only the assignment in the current block.
@@ -6652,7 +6667,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             //   1. Unordered LT/LE/GT/GE: emit `is_nan(l) || is_nan(r) || (l op r)`
             //      to force TRUE for NaN. Required because ILGPU's IR negates
             //      `clt+brfalse` to `cge+brtrue [Unordered]`.
-            //   2. Equal/NotEqual on f32 (ordered or unordered): Naga / Chrome
+            //   2. Equal/NotEqual on f32 (ordered or unordered): Tint / Chrome
             //      WGSL backend has a long-standing bug where bit-identical NaN
             //      operands compare equal. Always apply explicit NaN guard for
             //      IEEE-strict semantics. Equal returns FALSE for NaN, NotEqual
@@ -6681,7 +6696,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 // Equal: IEEE result is FALSE for NaN regardless of ordered or
                 // unordered. NotEqual: IEEE result is TRUE for NaN regardless.
-                // Naga compares NaN bit patterns directly so explicit NaN guard
+                // Tint compares NaN bit patterns directly so explicit NaN guard
                 // is required for both flag states.
                 string LIsNaN = WGSLCodeGenerator.WgslIsNaNExprPublic($"{left}", leftType);
                 string RIsNaN = WGSLCodeGenerator.WgslIsNaNExprPublic($"{right}", rightType);

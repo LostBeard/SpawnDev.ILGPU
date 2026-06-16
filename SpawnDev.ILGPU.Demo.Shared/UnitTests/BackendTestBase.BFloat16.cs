@@ -70,6 +70,43 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         /// (NotSupportedException) before the BFloat16 fold cases were added. Compiling + running it
         /// to the correct result proves the fold path works rather than throwing.
         /// </summary>
+        // Round-trips a float array through an ArrayView<BFloat16> and back: one AutoGrouped kernel
+        // stores (BFloat16)src[i] into a bf16 buffer, another reads (float)bf16[i] into a FLOAT buffer.
+        // The second kernel is the exact shape that mis-compiled on CUDA: the `(float)bf16` widening
+        // Convert is a no-op alias, so a bf16-typed value reached the float-buffer store and the codegen
+        // (keying bf16 packing off the value-register type, not the target buffer) narrowed it back to
+        // bf16 + st.b16 (2 bytes) into the 4-byte float slot -> every float read back ~0. N=256 spans
+        // multiple CUDA blocks. Reference is an independent BCL RNE round (no ILGPU.BFloat16), so a
+        // codegen OR a struct bug is caught. Runs on every backend.
+        static void BF16RoundTripStoreKernel(Index1D i, ArrayView<float> src, ArrayView<BFloat16> dst) => dst[i] = (BFloat16)src[i];
+        static void BF16RoundTripLoadKernel(Index1D i, ArrayView<BFloat16> src, ArrayView<float> dst) => dst[i] = (float)src[i];
+
+        [TestMethod]
+        public async Task BFloat16_ArrayViewRoundTrip_MatchesReference() => await RunTest(async accelerator =>
+        {
+            RequireBFloat16SupportedBackend(accelerator);
+            int n = 256;
+            var input = new float[n];
+            for (int i = 0; i < n; i++) input[i] = MathF.Sin(i) * 0.9f;
+            using var sBuf = accelerator.Allocate1D(input);
+            using var bBuf = accelerator.Allocate1D<BFloat16>(n);
+            using var oBuf = accelerator.Allocate1D<float>(n);
+            var kStore = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<BFloat16>>(BF16RoundTripStoreKernel);
+            var kLoad = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<BFloat16>, ArrayView<float>>(BF16RoundTripLoadKernel);
+            kStore(n, sBuf.View, bBuf.View);
+            kLoad(n, bBuf.View, oBuf.View);
+            await accelerator.SynchronizeAsync();
+            var got = await oBuf.CopyToHostAsync<float>();
+            for (int i = 0; i < n; i++)
+            {
+                float expected = RefRoundToBFloat16AsFloat(input[i]);
+                if (MathF.Abs(got[i] - expected) > 1e-3f)
+                    throw new Exception(
+                        $"bf16 ArrayView round-trip mismatch at [{i}]: in={input[i]} expected={expected} got={got[i]} " +
+                        "(bf16 store/load codegen bug - value stored as bf16 into a float buffer?)");
+            }
+        });
+
         [TestMethod]
         public async Task BFloat16_ConstFold_Arithmetic() => await RunTest(async accelerator =>
         {
