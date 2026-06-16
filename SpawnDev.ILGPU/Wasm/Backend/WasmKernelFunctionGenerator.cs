@@ -32,7 +32,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
     ///   [0..sync_region] [buffer0_offset..] [buffer1_offset..] [scalar_area..]
     ///   Offsets are computed by the accelerator at dispatch time.
     /// </summary>
-    public class WasmKernelFunctionGenerator : WasmCodeGenerator
+    public partial class WasmKernelFunctionGenerator : WasmCodeGenerator
     {
         /// <summary>
         /// Wasm function parameter types (built during Setup).

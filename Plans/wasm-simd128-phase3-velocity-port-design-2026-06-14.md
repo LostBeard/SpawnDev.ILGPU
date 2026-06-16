@@ -2,8 +2,10 @@
 
 **Date:** 2026-06-14 · **Owner:** Geordi · **Status: DESIGN — green-lit by Captain after the Phase 2 gate.**
 Parents: `wasm-simd128-velocity-port-plan-2026-06-12.md`, `wasm-simd128-phase2-design-2026-06-14.md`.
-Phase 2 gate (Node, pure ALU): f32x4 gives ~3.8–4.2× on ALU-dense kernels, cross-mode deterministic,
-correct → GO.
+Phase 2 gate MEASURED (2026-06-16, Node/V8 N=1M single-thread, pure ALU): f32x4 gives **3.0–3.6× on
+ALU-dense kernels** (R=64: 3.57×, R=256: 3.03×; R=16 mem-bound knee 1.73×), cross-mode deterministic
+(SIMD == scalar output, no one-mode FMA), within f32 ULP of the JS reference → **GO**. (The earlier
+3.8–4.2× here was a pre-measurement placeholder; the real number is 3x+ and still a clear go.)
 
 ## The model being ported (studied: ILGPU `Backends/Velocity`, ~20k LOC)
 ILGPU's Velocity backend is a **fully-vectorized, always-masked, if-converted** CPU-SIMD backend:
