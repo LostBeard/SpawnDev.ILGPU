@@ -33,8 +33,18 @@ namespace ILGPU.Backends.PTX
         /// </summary>
         /// <param name="type">The basic value type.</param>
         /// <returns>The resolved select-value operation.</returns>
-        public static string GetSelectValueOperation(BasicValueType type) =>
-            SelectValueOperations[type];
+        public static string GetSelectValueOperation(BasicValueType type)
+        {
+            // bf16 has no native PTX type; it computes in an f32 register (converted at load/store),
+            // so a select (predicated move, `selp`) on a bf16 value uses the f32 selp - mirrors the
+            // bf16->f32 remap in GetCompareOperation / GetArithmeticOperation. Without this a generic
+            // kernel whose body selects a bf16 (e.g. `v > T.Zero ? v : T.Zero`) threw
+            // KeyNotFoundException 'BFloat16' at PTX codegen (concrete-typed bf16 kernels that don't
+            // select were unaffected, so the bf16 parity work missed it).
+            if (type == BasicValueType.BFloat16)
+                type = BasicValueType.Float32;
+            return SelectValueOperations[type];
+        }
 
         /// <summary>
         /// Resolves a compare operation.

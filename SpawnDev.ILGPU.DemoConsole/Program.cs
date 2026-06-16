@@ -41,6 +41,10 @@ try
     if (args.Length > 0 && args[0] == "wasm-gridgroup-dump")
         return await WasmGridGroupDumpProbe.Run(args);
 
+    // Desktop repro for generic INumber<T> Half/bf16 codegen gaps (CUDA bf16 + OpenCL scalar param).
+    if (args.Length > 0 && args[0] == "generic-precision-repro")
+        return await GenericPrecisionRepro.Run();
+
     // Offline WGSL generation probe (precompiled-shaders Layer 1). No device/browser.
     if (args.Length > 0 && args[0] == "shader-gen")
         return await ShaderGenDump.Run();
