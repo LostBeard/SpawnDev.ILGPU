@@ -112,6 +112,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 BasicValueType.Int64 => Backend.EnableI64Emulation ? "uvec2" : "int",
                 BasicValueType.Float16 => "float", // Promoting
                 BasicValueType.BFloat16 => "float", // bfloat16 always emulated as float on WebGL
+                BasicValueType.Float8E4M3 => "float", // FP8 always emulated as float on WebGL
+                BasicValueType.Float8E5M2 => "float",
                 BasicValueType.Float32 => "float",
                 BasicValueType.Float64 => Backend.EnableF64Emulation ? (Backend.UseOzakiF64Emulation ? "vec4" : "vec2") : "float",
                 _ => null
@@ -135,6 +137,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 ArithmeticBasicValueType.UInt32 => "uint",
                 ArithmeticBasicValueType.UInt64 => Backend.EnableI64Emulation ? "uvec2" : "uint",
                 ArithmeticBasicValueType.Float16 => "float",
+                ArithmeticBasicValueType.BFloat16 => "float",
+                ArithmeticBasicValueType.Float8E4M3 => "float",
+                ArithmeticBasicValueType.Float8E5M2 => "float",
                 ArithmeticBasicValueType.Float32 => "float",
                 ArithmeticBasicValueType.Float64 => Backend.EnableF64Emulation ? (Backend.UseOzakiF64Emulation ? "vec4" : "vec2") : "float",
                 _ => null

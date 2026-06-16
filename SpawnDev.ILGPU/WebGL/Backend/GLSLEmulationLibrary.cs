@@ -959,6 +959,114 @@ uint _f32_to_bf16(float f) {
 }
 ";
 
+        /// <summary>
+        /// FP8 (OCP E5M2 + E4M3FN) bit-conversion helpers (GLSL ES 3.0). Always emulated (no native
+        /// GLSL fp8); direct ports of the managed / OpenCL / WGSL conversion (CPU-verified 0/256,
+        /// WebGPU PMT-verified), so every representable value round-trips bit-identically. The raw
+        /// 8-bit pattern is in the low 8 bits of a uint; values compute as float in-register.
+        /// </summary>
+        public const string FP8Functions = @"
+// ============================================================================
+// FP8 Emulation Functions (E5M2 = 1/5/2 bias 15 IEEE-style; E4M3FN = 1/4/3 bias 7, no Inf, sat 448)
+// ============================================================================
+
+float _e5m2_to_f32(uint raw) {
+    uint bits = raw & 0xFFu;
+    uint sign = (bits & 0x80u) << 24u;
+    uint expo = (bits >> 2u) & 0x1Fu;
+    uint mant = bits & 0x03u;
+    if (expo == 0u) {
+        if (mant == 0u) { return uintBitsToFloat(sign); }
+        uint e = 127u - 15u + 1u;
+        uint m = mant;
+        while ((m & 0x04u) == 0u) { m = m << 1u; e = e - 1u; }
+        m = m & 0x03u;
+        return uintBitsToFloat(sign | (e << 23u) | (m << 21u));
+    }
+    if (expo == 0x1Fu) { return uintBitsToFloat(sign | (0xFFu << 23u) | (mant << 21u)); }
+    uint f32Exp = expo - 15u + 127u;
+    return uintBitsToFloat(sign | (f32Exp << 23u) | (mant << 21u));
+}
+
+uint _f32_to_e5m2(float f) {
+    uint bits = floatBitsToUint(f);
+    uint sign = (bits >> 24u) & 0x80u;
+    uint rest = bits & 0x7FFFFFFFu;
+    if (rest > 0x7F800000u) { return sign | 0x7Fu; }
+    if (rest == 0x7F800000u) { return sign | 0x7Cu; }
+    int f32Exp = int((rest >> 23u) & 0xFFu);
+    uint f32Mant = rest & 0x7FFFFFu;
+    int e = f32Exp - 127;
+    if (e > 15) { return sign | 0x7Cu; }
+    if (e < -14) {
+        if (f32Exp == 0) { return sign; }
+        uint signif = f32Mant | 0x800000u;
+        int shift = (-14 - e) + 21;
+        if (shift > 31) { return sign; }
+        uint m = signif >> uint(shift);
+        uint roundBit = (signif >> uint(shift - 1)) & 1u;
+        uint sticky = ((signif & ((1u << uint(shift - 1)) - 1u)) != 0u) ? 1u : 0u;
+        if (roundBit == 1u && (sticky == 1u || (m & 1u) == 1u)) { m = m + 1u; }
+        return sign | (m & 0x03u) | ((m >> 2u) << 2u);
+    }
+    uint mant2 = f32Mant >> 21u;
+    uint roundB = (f32Mant >> 20u) & 1u;
+    uint stick = ((f32Mant & 0xFFFFFu) != 0u) ? 1u : 0u;
+    uint eField = uint(e + 15);
+    uint outBits = (eField << 2u) | mant2;
+    if (roundB == 1u && (stick == 1u || (mant2 & 1u) == 1u)) { outBits = outBits + 1u; }
+    return sign | (outBits & 0x7Fu);
+}
+
+float _e4m3_to_f32(uint raw) {
+    uint bits = raw & 0xFFu;
+    uint sign = (bits & 0x80u) << 24u;
+    uint expo = (bits >> 3u) & 0x0Fu;
+    uint mant = bits & 0x07u;
+    if ((bits & 0x7Fu) == 0x7Fu) { return uintBitsToFloat(sign | 0x7FC00000u); }
+    if (expo == 0u) {
+        if (mant == 0u) { return uintBitsToFloat(sign); }
+        uint e = 127u - 7u + 1u;
+        uint m = mant;
+        while ((m & 0x08u) == 0u) { m = m << 1u; e = e - 1u; }
+        m = m & 0x07u;
+        return uintBitsToFloat(sign | (e << 23u) | (m << 20u));
+    }
+    uint f32Exp = expo - 7u + 127u;
+    return uintBitsToFloat(sign | (f32Exp << 23u) | (mant << 20u));
+}
+
+uint _f32_to_e4m3(float f) {
+    uint bits = floatBitsToUint(f);
+    uint sign = (bits >> 24u) & 0x80u;
+    uint rest = bits & 0x7FFFFFFFu;
+    if (rest >= 0x7F800000u) { return sign | 0x7Fu; }
+    int f32Exp = int((rest >> 23u) & 0xFFu);
+    uint f32Mant = rest & 0x7FFFFFu;
+    int e = f32Exp - 127;
+    if (e > 8 || (e == 8 && f32Mant > 0x600000u)) { return sign | 0x7Eu; }
+    if (e < -6) {
+        if (f32Exp == 0) { return sign; }
+        uint signif = f32Mant | 0x800000u;
+        int shift = (-6 - e) + 20;
+        if (shift > 31) { return sign; }
+        uint m = signif >> uint(shift);
+        uint roundBit = (signif >> uint(shift - 1)) & 1u;
+        uint sticky = ((signif & ((1u << uint(shift - 1)) - 1u)) != 0u) ? 1u : 0u;
+        if (roundBit == 1u && (sticky == 1u || (m & 1u) == 1u)) { m = m + 1u; }
+        return sign | (m & 0x7Fu);
+    }
+    uint mant3 = f32Mant >> 20u;
+    uint roundB = (f32Mant >> 19u) & 1u;
+    uint stick = ((f32Mant & 0x7FFFFu) != 0u) ? 1u : 0u;
+    uint eField = uint(e + 7);
+    uint outBits = (eField << 3u) | mant3;
+    if (roundB == 1u && (stick == 1u || (mant3 & 1u) == 1u)) { outBits = outBits + 1u; }
+    if ((outBits & 0x7Fu) >= 0x7Fu) { outBits = 0x7Eu; }
+    return sign | (outBits & 0x7Fu);
+}
+";
+
         #endregion
 
         #region Combined Library
@@ -976,7 +1084,7 @@ uint _f32_to_bf16(float f) {
         /// <param name="includeF16">When true, emits the Float16 bit-conversion helpers
         /// (<c>_f16_to_f32</c>, <c>_f32_to_f16</c>). WebGL has no native f16, so this is
         /// the only f16 path available on this backend.</param>
-        public static string GetEmulationLibrary(bool includeF64, bool useOzakiF64, bool includeI64, bool includeF16, bool includeBF16 = false)
+        public static string GetEmulationLibrary(bool includeF64, bool useOzakiF64, bool includeI64, bool includeF16, bool includeBF16 = false, bool includeFP8 = false)
         {
             var sb = new System.Text.StringBuilder();
 
@@ -1005,6 +1113,11 @@ uint _f32_to_bf16(float f) {
             if (includeBF16)
             {
                 sb.AppendLine(BF16Functions);
+            }
+
+            if (includeFP8)
+            {
+                sb.AppendLine(FP8Functions);
             }
 
             return sb.ToString();

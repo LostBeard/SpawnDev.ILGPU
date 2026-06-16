@@ -1709,6 +1709,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 BasicValueType.Int64 => value.Int64Value.ToString(),
                 BasicValueType.Float16 => FormatFloat((float)value.Float16Value),
                 BasicValueType.BFloat16 => FormatFloat((float)value.BFloat16Value),
+                BasicValueType.Float8E4M3 => FormatFloat((float)value.Float8E4M3Value),
+                BasicValueType.Float8E5M2 => FormatFloat((float)value.Float8E5M2Value),
                 BasicValueType.Float32 => FormatFloat(value.Float32Value),
                 BasicValueType.Float64 => FormatFloat((float)value.Float64Value),
                 _ => "0"

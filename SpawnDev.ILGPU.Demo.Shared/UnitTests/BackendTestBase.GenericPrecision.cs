@@ -81,10 +81,10 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             where T : unmanaged, INumber<T>
             => await RunTest(async accelerator =>
         {
-            // FP8 GPU codegen wired on CPU/OpenCL/WebGPU so far; skip the rest until done.
+            // FP8 GPU codegen wired on CPU/OpenCL/WebGPU/WebGL so far; skip the rest until done.
             var at = accelerator.AcceleratorType;
             if (at != AcceleratorType.CPU && at != AcceleratorType.OpenCL &&
-                at != AcceleratorType.WebGPU)
+                at != AcceleratorType.WebGPU && at != AcceleratorType.WebGL)
                 return;
             await RunPrecisionRoundTripCore<T>(accelerator, toT, toF);
         });
