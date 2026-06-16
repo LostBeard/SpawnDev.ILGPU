@@ -49,6 +49,10 @@ try
     if (args.Length > 0 && args[0] == "fp8-verify")
         return await Float8Repro.Run();
 
+    // Generic in-kernel float<->T conversion (Tuvok's PrecisionConvert ask) on desktop backends.
+    if (args.Length > 0 && args[0] == "precision-convert")
+        return await GenericConvertRepro.Run();
+
     // Offline WGSL generation probe (precompiled-shaders Layer 1). No device/browser.
     if (args.Length > 0 && args[0] == "shader-gen")
         return await ShaderGenDump.Run();
