@@ -81,6 +81,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         // Float16 sub-word params need f16-to-f32 conversion instead of sign extension
         private HashSet<int> _subWordFloat16Params = new HashSet<int>();
         private HashSet<int> _subWordBFloat16Params = new HashSet<int>();
+        // FP8 sub-word params (1-byte storage, 4 per atomic<u32>): paramIdx -> isE4M3
+        // (true = Float8E4M3, false = Float8E5M2). Load/store apply _e4m3/_e5m2 conversion.
+        private Dictionary<int, bool> _subWordFloat8Params = new Dictionary<int, bool>();
+        private bool _kernelReferencesFP8Helpers = false;
         // Unsigned sub-word params need zero-extension instead of sign extension
         private HashSet<int> _subWordUnsignedParams = new HashSet<int>();
         // Maps LEA variable names to their sub-word param index (for Load/Store extraction)
@@ -1578,9 +1582,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // via _kernelReferencesF16Helpers set at emit time.
             bool needsF16Emulation = _subWordFloat16Params.Count > 0 || _kernelReferencesF16Helpers;
             bool needsBF16Emulation = _subWordBFloat16Params.Count > 0 || _kernelReferencesBF16Helpers;
+            bool needsFP8Emulation = _subWordFloat8Params.Count > 0 || _kernelReferencesFP8Helpers;
 
             // Emit minimal emulation library: only functions actually used by the kernel body
-            if (needsF64Emulation || needsI64Emulation || needsF16Emulation || needsBF16Emulation)
+            if (needsF64Emulation || needsI64Emulation || needsF16Emulation || needsBF16Emulation || needsFP8Emulation)
             {
                 builder.AppendLine("// ============ Emulation Library ============");
                 builder.AppendLine(WGSLEmulationLibrary.GetMinimalEmulationLibrary(
@@ -1589,7 +1594,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     needsI64Emulation,
                     needsF16Emulation,
                     Builder.ToString(),
-                    includeBF16: needsBF16Emulation));
+                    includeBF16: needsBF16Emulation,
+                    includeFP8: needsFP8Emulation));
             }
 
             // F32 Inf/NaN literal helpers - always available because:
@@ -1984,6 +1990,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             case BasicValueType.BFloat16:
                                 _subWordParams[param.Index] = 2; // bfloat16 always emulated = 2 bytes
                                 _subWordBFloat16Params.Add(param.Index);
+                                break;
+                            case BasicValueType.Float8E4M3:
+                                _subWordParams[param.Index] = 1; // FP8 always emulated = 1 byte
+                                _subWordFloat8Params[param.Index] = true;
+                                break;
+                            case BasicValueType.Float8E5M2:
+                                _subWordParams[param.Index] = 1;
+                                _subWordFloat8Params[param.Index] = false;
                                 break;
                         }
                     }
@@ -4335,6 +4349,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             _subWordParams[param.Index] = 2;
                             _subWordBFloat16Params.Add(param.Index);
                             break;
+                        case BasicValueType.Float8E4M3:
+                            _subWordParams[param.Index] = 1;
+                            _subWordFloat8Params[param.Index] = true;
+                            break;
+                        case BasicValueType.Float8E5M2:
+                            _subWordParams[param.Index] = 1;
+                            _subWordFloat8Params[param.Index] = false;
+                            break;
                     }
                 }
             }
@@ -4702,6 +4724,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             else if (scalarWgslType == "f32"
                                 && scalarElemType.BasicValueType == BasicValueType.Float16)
                                 AppendLine($"var {fieldVarName} = _f16_to_f32(_scalar_params[{slot}] & 0xffffu);");
+                            else if (scalarWgslType == "f32"
+                                && scalarElemType.BasicValueType == BasicValueType.Float8E4M3)
+                                AppendLine($"var {fieldVarName} = _e4m3_to_f32(_scalar_params[{slot}] & 0xffu);");
+                            else if (scalarWgslType == "f32"
+                                && scalarElemType.BasicValueType == BasicValueType.Float8E5M2)
+                                AppendLine($"var {fieldVarName} = _e5m2_to_f32(_scalar_params[{slot}] & 0xffu);");
                             else if (scalarWgslType == "f32")
                                 AppendLine($"var {fieldVarName} = bitcast<f32>(_scalar_params[{slot}]);");
                             else
@@ -4749,6 +4777,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 AppendLine($"var {variable.Name} = _bf16_to_f32(_scalar_params[{slot}] & 0xffffu);");
                             else if (param.BasicValueType == BasicValueType.Float16)
                                 AppendLine($"var {variable.Name} = _f16_to_f32(_scalar_params[{slot}] & 0xffffu);");
+                            else if (param.BasicValueType == BasicValueType.Float8E4M3)
+                                AppendLine($"var {variable.Name} = _e4m3_to_f32(_scalar_params[{slot}] & 0xffu);");
+                            else if (param.BasicValueType == BasicValueType.Float8E5M2)
+                                AppendLine($"var {variable.Name} = _e5m2_to_f32(_scalar_params[{slot}] & 0xffu);");
                             else
                                 AppendLine($"var {variable.Name} = bitcast<f32>(_scalar_params[{slot}]);");
                         }
@@ -5487,7 +5519,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     var wordIdx = $"(u32({idx}) / 4u)";
                     var shift = $"((u32({idx}) % 4u) * 8u)";
                     var rawByte = $"((u32(atomicLoad(&{subWordBinding}[{wordIdx}])) >> {shift}) & 0xFFu)";
-                    if (_subWordUnsignedParams.Contains(subWordParamIdx))
+                    if (_subWordFloat8Params.TryGetValue(subWordParamIdx, out bool fp8IsE4M3))
+                        // FP8: same 1-byte storage, but convert the raw byte to f32 (value computes as f32).
+                        extractExpr = $"{(fp8IsE4M3 ? "_e4m3_to_f32" : "_e5m2_to_f32")}({rawByte})";
+                    else if (_subWordUnsignedParams.Contains(subWordParamIdx))
                         extractExpr = $"i32({rawByte})"; // byte: zero-extend (0-255)
                     else
                         extractExpr = $"select(i32({rawByte}), (i32({rawByte}) - 256), ({rawByte}) >= 128u)"; // sbyte: sign-extend
@@ -5702,7 +5737,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     var wordIdx = $"(u32({idx}) / 4u)";
                     var shift = $"((u32({idx}) % 4u) * 8u)";
                     AppendLine($"atomicAnd(&{subWordBinding}[{wordIdx}], ~(0xFFu << {shift}));");
-                    AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], ((u32({val}) & 0xFFu) << {shift}));");
+                    if (_subWordFloat8Params.TryGetValue(storeParamIdx, out bool fp8IsE4M3))
+                        // FP8: convert the f32 value to the 8-bit pattern (RNE), then pack the byte.
+                        AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], (({(fp8IsE4M3 ? "_f32_to_e4m3" : "_f32_to_e5m2")}({val}) & 0xFFu) << {shift}));");
+                    else
+                        AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], ((u32({val}) & 0xFFu) << {shift}));");
                 }
                 else if (_subWordFloat16Params.Contains(storeParamIdx))
                 {

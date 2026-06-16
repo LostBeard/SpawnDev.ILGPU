@@ -64,9 +64,39 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             await RunPrecisionRoundTrip<global::ILGPU.BFloat16>(
                 v => (global::ILGPU.BFloat16)v, v => (float)v);
 
+        // FP8 round-trip on the backends where FP8 GPU codegen is wired (CPU, OpenCL, WebGPU as of
+        // local.9+). CUDA + WebGL + Wasm FP8 codegen is in progress - skip there until wired (a
+        // capability flag will replace this explicit gate). Bit-exact vs the concrete (T)(float)x cast.
+        [TestMethod]
+        public async Task PrecisionConvert_Float8E4M3_RoundTripBitExact() =>
+            await RunFP8RoundTrip<global::ILGPU.Float8E4M3>(
+                v => (global::ILGPU.Float8E4M3)v, v => (float)v);
+
+        [TestMethod]
+        public async Task PrecisionConvert_Float8E5M2_RoundTripBitExact() =>
+            await RunFP8RoundTrip<global::ILGPU.Float8E5M2>(
+                v => (global::ILGPU.Float8E5M2)v, v => (float)v);
+
+        private async Task RunFP8RoundTrip<T>(Func<float, T> toT, Func<T, float> toF)
+            where T : unmanaged, INumber<T>
+            => await RunTest(async accelerator =>
+        {
+            // FP8 GPU codegen wired on CPU/OpenCL/WebGPU so far; skip the rest until done.
+            var at = accelerator.AcceleratorType;
+            if (at != AcceleratorType.CPU && at != AcceleratorType.OpenCL &&
+                at != AcceleratorType.WebGPU)
+                return;
+            await RunPrecisionRoundTripCore<T>(accelerator, toT, toF);
+        });
+
         private async Task RunPrecisionRoundTrip<T>(Func<float, T> toT, Func<T, float> toF)
             where T : unmanaged, INumber<T>
             => await RunTest(async accelerator =>
+                await RunPrecisionRoundTripCore<T>(accelerator, toT, toF));
+
+        private async Task RunPrecisionRoundTripCore<T>(
+            Accelerator accelerator, Func<float, T> toT, Func<T, float> toF)
+            where T : unmanaged, INumber<T>
         {
             const int n = 251;
             var rng = new Random(13);
@@ -94,7 +124,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                         $"PrecisionConvert {typeof(T).Name} round-trip @{i} ({BackendName}): got {g}, " +
                         $"want {e} - generic float<->T convert must lower to the native cast (bit-exact).");
             }
-        });
+        }
 
         private async Task RunGenericPrecision<T>(Func<float, T> toT, Func<T, float> toF, float relTol)
             where T : unmanaged, INumber<T>

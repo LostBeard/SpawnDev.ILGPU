@@ -1305,11 +1305,13 @@ fn _f32_to_e4m3(f: f32) -> u32 {
         private static readonly List<EmulationFunc> _i64Funcs;
         private static readonly List<EmulationFunc> _f16Funcs;
         private static readonly List<EmulationFunc> _bf16Funcs;
+        private static readonly List<EmulationFunc> _fp8Funcs;
         private static readonly Dictionary<string, HashSet<string>> _dekkerF64Deps;
         private static readonly Dictionary<string, HashSet<string>> _ozakiF64Deps;
         private static readonly Dictionary<string, HashSet<string>> _i64Deps;
         private static readonly Dictionary<string, HashSet<string>> _f16Deps;
         private static readonly Dictionary<string, HashSet<string>> _bf16Deps;
+        private static readonly Dictionary<string, HashSet<string>> _fp8Deps;
 
         static WGSLEmulationLibrary()
         {
@@ -1318,11 +1320,13 @@ fn _f32_to_e4m3(f: f32) -> u32 {
             _i64Funcs = SplitIntoFunctions(I64Functions);
             _f16Funcs = SplitIntoFunctions(F16Functions);
             _bf16Funcs = SplitIntoFunctions(BF16Functions);
+            _fp8Funcs = SplitIntoFunctions(FP8Functions);
             _dekkerF64Deps = BuildDependencies(_dekkerF64Funcs);
             _ozakiF64Deps = BuildDependencies(_ozakiF64Funcs);
             _i64Deps = BuildDependencies(_i64Funcs);
             _f16Deps = BuildDependencies(_f16Funcs);
             _bf16Deps = BuildDependencies(_bf16Funcs);
+            _fp8Deps = BuildDependencies(_fp8Funcs);
         }
 
         /// <summary>
@@ -1346,7 +1350,7 @@ fn _f32_to_e4m3(f: f32) -> u32 {
         /// emitted only if the kernel body actually calls it.</param>
         public static string GetMinimalEmulationLibrary(
             bool includeF64, bool useOzakiF64, bool includeI64, bool includeF16,
-            string kernelBody, bool includeBF16 = false)
+            string kernelBody, bool includeBF16 = false, bool includeFP8 = false)
         {
             var sb = new System.Text.StringBuilder();
 
@@ -1407,6 +1411,14 @@ fn _f32_to_e4m3(f: f32) -> u32 {
                 // as f16: emitted only when the kernel/helper body references them, with
                 // includeBF16 raised by needsBF16Emulation upstream.
                 AppendUsedFunctions(sb, _bf16Funcs, _bf16Deps, kernelBody);
+            }
+
+            if (includeFP8)
+            {
+                // FP8 helpers (_e4m3/_e5m2 <-> f32) - same minimal-trim path as bf16; emitted
+                // only when the kernel/helper body references them, includeFP8 raised by
+                // needsFP8Emulation upstream.
+                AppendUsedFunctions(sb, _fp8Funcs, _fp8Deps, kernelBody);
             }
 
             return sb.ToString();
