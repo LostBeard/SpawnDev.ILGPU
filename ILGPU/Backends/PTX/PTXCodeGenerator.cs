@@ -1014,6 +1014,25 @@ namespace ILGPU.Backends.PTX
                     continue;
                 }
 
+                // FP8 scalar param: declared at 1-byte .b8 storage (AppendParamDeclaration). Load the
+                // raw byte (.u8) into a temp register, then widen to the f32 VALUE register via
+                // EmitFP8BitsToF32 - the same storage->compute conversion an FP8 buffer load uses.
+                var fp8ParamBvt = mappedParameter.Parameter.Type.BasicValueType;
+                if ((fp8ParamBvt == BasicValueType.Float8E4M3 || fp8ParamBvt == BasicValueType.Float8E5M2) &&
+                    mappedParameter.Register is HardwareRegister fp8ValueRegister)
+                {
+                    var rawReg = AllocateRegister(BasicValueType.Int16, PTXRegisterKind.Int16);
+                    using (var cmd = BeginCommand(PTXInstructions.LoadParamOperation))
+                    {
+                        cmd.AppendSuffix("u8");
+                        cmd.AppendArgument(rawReg);
+                        cmd.AppendRawValue(mappedParameter.PTXName, 0);
+                    }
+                    EmitFP8BitsToF32(rawReg, fp8ValueRegister, fp8ParamBvt == BasicValueType.Float8E4M3);
+                    FreeRegister(rawReg);
+                    continue;
+                }
+
                 EmitLoadParam(
                     mappedParameter.PTXName,
                     mappedParameter.Register,
@@ -1105,6 +1124,16 @@ namespace ILGPU.Backends.PTX
                     // a 4-byte slot -> the scalar arrived as 0 (a generic INumber<T> bf16 kernel's
                     // scale/bias). Mirrors how Float16 declares .b16.
                     targetBuilder.Append("b16 ");
+                    targetBuilder.Append(paramName);
+                    break;
+                case PrimitiveType primFp8
+                    when primFp8.BasicValueType == BasicValueType.Float8E4M3
+                        || primFp8.BasicValueType == BasicValueType.Float8E5M2:
+                    // FP8 computes in an f32 register but its STORAGE (host-packed scalar arg / buffer
+                    // element) is the 1-byte FP8 pattern. Declare the param at 1-byte .b8 storage so the
+                    // host's 1-byte pack lines up; BindParameters loads it (.b8) and widens to f32 via
+                    // EmitFP8BitsToF32. Same fix as bf16's .b16 (declaring .f32 made the 1 byte arrive 0).
+                    targetBuilder.Append("b8 ");
                     targetBuilder.Append(paramName);
                     break;
                 case PrimitiveType _:

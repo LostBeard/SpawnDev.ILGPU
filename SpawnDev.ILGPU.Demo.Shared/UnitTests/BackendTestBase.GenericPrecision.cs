@@ -79,16 +79,10 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 
         private async Task RunFP8RoundTrip<T>(Func<float, T> toT, Func<T, float> toF)
             where T : unmanaged, INumber<T>
+            // FP8 (Float8E4M3 + Float8E5M2) codegen is wired on ALL 6 backends
+            // (CPU, OpenCL, WebGPU, WebGL, Wasm, CUDA) - no skip needed.
             => await RunTest(async accelerator =>
-        {
-            // FP8 codegen wired on CPU/OpenCL/WebGPU/WebGL/Wasm so far; skip PTX (CUDA) until done.
-            var at = accelerator.AcceleratorType;
-            if (at != AcceleratorType.CPU && at != AcceleratorType.OpenCL &&
-                at != AcceleratorType.WebGPU && at != AcceleratorType.WebGL &&
-                at != AcceleratorType.Wasm)
-                return;
-            await RunPrecisionRoundTripCore<T>(accelerator, toT, toF);
-        });
+                await RunPrecisionRoundTripCore<T>(accelerator, toT, toF));
 
         private async Task RunPrecisionRoundTrip<T>(Func<float, T> toT, Func<T, float> toF)
             where T : unmanaged, INumber<T>

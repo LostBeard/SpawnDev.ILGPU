@@ -241,6 +241,25 @@ namespace ILGPU.Backends.PTX
                 }
             }
 
+            // FP8 uses the SAME f32-register model: the FP8 value lives as f32 in-register and is
+            // rounded to the 1-byte FP8 grid only at the store boundary (EmitF32ToFP8Bits). So an
+            // FP8<->f32 (or FP8<->FP8) ConvertValue is a register no-op here - this is what makes
+            // PrecisionConvert.ConvertToSingle/ConvertFromSingle<FP8> lower to nothing on PTX.
+            bool srcFp8 = sourceType == ArithmeticBasicValueType.Float8E4M3
+                || sourceType == ArithmeticBasicValueType.Float8E5M2;
+            bool dstFp8 = targetType == ArithmeticBasicValueType.Float8E4M3
+                || targetType == ArithmeticBasicValueType.Float8E5M2;
+            if (srcFp8 || dstFp8)
+            {
+                if (srcFp8) sourceType = ArithmeticBasicValueType.Float32;
+                if (dstFp8) targetType = ArithmeticBasicValueType.Float32;
+                if (sourceType == targetType)
+                {
+                    Alias(value, value.Value);
+                    return;
+                }
+            }
+
             var sourceValue = LoadPrimitive(value.Value);
 
             var convertOperation = PTXInstructions.GetConvertOperation(
@@ -938,6 +957,27 @@ namespace ILGPU.Backends.PTX
                 return;
             }
 
+            if (load.Type.BasicValueType == BasicValueType.Float8E4M3 ||
+                load.Type.BasicValueType == BasicValueType.Float8E5M2)
+            {
+                // FP8 storage is a packed 1-byte value; load it into a temp .b16 register, then
+                // widen to the f32 value register via portable bit-manip (every CUDA arch - FP8
+                // has no native PTX cvt on the cards we target). f32-register model like bf16.
+                bool isE4M3 = load.Type.BasicValueType == BasicValueType.Float8E4M3;
+                var fp8Target = AllocateHardware(load);
+                var rawReg = AllocateRegister(BasicValueType.Int16, PTXRegisterKind.Int16);
+                using (var cmd = BeginCommand(PTXInstructions.LoadOperation))
+                {
+                    cmd.AppendAddressSpace(sourceType.AddressSpace);
+                    cmd.AppendSuffix("u8");
+                    cmd.AppendArgument(rawReg);
+                    cmd.AppendArgumentValue(address, 0);
+                }
+                EmitFP8BitsToF32(rawReg, fp8Target, isE4M3);
+                FreeRegister(rawReg);
+                return;
+            }
+
             var targetRegister = Allocate(load);
 
             EmitVectorizedCommand(
@@ -1065,6 +1105,27 @@ namespace ILGPU.Backends.PTX
                 {
                     cmd.AppendAddressSpace(targetType.AddressSpace);
                     cmd.AppendSuffix("b16");
+                    cmd.AppendArgumentValue(address, 0);
+                    cmd.AppendArgument(rawReg);
+                }
+                FreeRegister(rawReg);
+                return;
+            }
+
+            if (targetType.ElementType.BasicValueType == BasicValueType.Float8E4M3 ||
+                targetType.ElementType.BasicValueType == BasicValueType.Float8E5M2)
+            {
+                // FP8 store: round the f32 value register to the 1-byte FP8 pattern via portable
+                // bit-manip (EmitF32ToFP8Bits - every CUDA arch) into a temp .b16 register, then
+                // write the low byte. Keyed off the TARGET BUFFER element type (same reason as bf16).
+                bool isE4M3 = targetType.ElementType.BasicValueType == BasicValueType.Float8E4M3;
+                var valueReg = EnsureHardwareRegister(value.AsNotNullCast<PrimitiveRegister>());
+                var rawReg = AllocateRegister(BasicValueType.Int16, PTXRegisterKind.Int16);
+                EmitF32ToFP8Bits(valueReg, rawReg, isE4M3);
+                using (var cmd = BeginCommand(PTXInstructions.StoreOperation))
+                {
+                    cmd.AppendAddressSpace(targetType.AddressSpace);
+                    cmd.AppendSuffix("u8");
                     cmd.AppendArgumentValue(address, 0);
                     cmd.AppendArgument(rawReg);
                 }
