@@ -50,6 +50,42 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 
         // ----- Kernels (static so they bind as ILGPU entry points) -----
 
+        // All-constant bf16 arithmetic -> the IR constant-folds it at compile (both operands are
+        // PrimitiveValues). Before the bf16 fold cases existed this THREW at IR construction.
+        static void BFloat16ConstFoldKernel(Index1D i, ArrayView<BFloat16> result)
+        {
+            BFloat16 a = (BFloat16)6.0f;
+            BFloat16 b = (BFloat16)2.0f;
+            BFloat16 sum = a + b;    // 8
+            BFloat16 dif = a - b;    // 4
+            BFloat16 prod = a * b;   // 12
+            BFloat16 quot = a / b;   // 3
+            BFloat16 neg = -a;       // -6
+            result[i.X] = sum + dif + prod + quot + neg; // 8+4+12+3-6 = 21
+        }
+
+        /// <summary>
+        /// Verifies the IR constant-folds bf16 literal arithmetic (Neg/Add/Sub/Mul/Div). The kernel
+        /// is entirely constant, so every op folds during IR construction - which THREW
+        /// (NotSupportedException) before the BFloat16 fold cases were added. Compiling + running it
+        /// to the correct result proves the fold path works rather than throwing.
+        /// </summary>
+        [TestMethod]
+        public async Task BFloat16_ConstFold_Arithmetic() => await RunTest(async accelerator =>
+        {
+            RequireBFloat16SupportedBackend(accelerator);
+            int n = 4;
+            using var resultBuf = accelerator.Allocate1D<BFloat16>(n);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<BFloat16>>(BFloat16ConstFoldKernel);
+            kernel(n, resultBuf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await resultBuf.CopyToHostAsync<BFloat16>();
+            for (int i = 0; i < n; i++)
+                if (MathF.Abs((float)result[i] - 21f) > 0.01f)
+                    throw new Exception($"bf16 const-fold arithmetic wrong at [{i}]: got {(float)result[i]} expected 21");
+        });
+
         // bf16 less-than: writes 1 if a[i] < b[i] (as a bf16/float comparison), else 0.
         static void BFloat16LessThanKernel(
             Index1D i, ArrayView<BFloat16> a, ArrayView<BFloat16> b, ArrayView<int> lt)

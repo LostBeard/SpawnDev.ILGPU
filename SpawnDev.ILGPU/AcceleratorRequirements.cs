@@ -71,6 +71,15 @@ public sealed class AcceleratorRequirements
     public bool RequiresFloat16Native { get; init; }
 
     /// <summary>
+    /// Kernel uses BFloat16 (<c>ILGPU.BFloat16</c>, "brain float"). Every backend supports it -
+    /// always emulated (top-16-bits-of-fp32 + round-to-nearest-even), with native <c>cvt.*.bf16</c>
+    /// on CUDA sm_80+ used only at the load/store boundary. There is no native-vs-emulated split
+    /// (no hardware has native bf16 arithmetic), so this is a no-op documentation filter like
+    /// <see cref="RequiresFloat16"/> - it never rules out a backend.
+    /// </summary>
+    public bool RequiresBFloat16 { get; init; }
+
+    /// <summary>
     /// Kernel uses Float64 (<c>double</c>). True is compatible with every backend - WebGPU
     /// and WebGL run Float64 through Dekker emulation (see <c>CLAUDE.md</c>). Use
     /// <see cref="RequiresFloat64Native"/> to rule out emulated paths when the performance
@@ -223,6 +232,7 @@ public static class AcceleratorRequirementsExtensions
         if (requirements.RequiresBarriers && !HasBarriers(backend)) return false;
         if (requirements.RequiresFloat16 && !HasFloat16(device)) return false;
         if (requirements.RequiresFloat16Native && !HasFloat16Native(device)) return false;
+        if (requirements.RequiresBFloat16 && !HasBFloat16(device)) return false;
         if (requirements.RequiresFloat64 && !HasFloat64(device)) return false;
         if (requirements.RequiresFloat64Native && !HasFloat64Native(device)) return false;
         if (requirements.RequiresFloat64Strict && !HasFloat64Strict(device)) return false;
@@ -269,6 +279,10 @@ public static class AcceleratorRequirementsExtensions
 
     private static bool HasFloat16(Device device)
         => device.Capabilities?.Float16 ?? true; // every shipped backend supports Float16 via emulation
+
+    // Every backend supports BFloat16 (always emulated; native cvt only at the load/store
+    // boundary on CUDA). No native-vs-emulated split, so this is always true.
+    private static bool HasBFloat16(Device device) => true;
 
     private static bool HasFloat16Native(Device device)
     {
@@ -348,6 +362,7 @@ public static class AcceleratorRequirementsExtensions
         if (r.RequiresBarriers) flags.Add("Barriers");
         if (r.RequiresFloat16) flags.Add("Float16");
         if (r.RequiresFloat16Native) flags.Add("Float16Native");
+        if (r.RequiresBFloat16) flags.Add("BFloat16");
         if (r.RequiresFloat64) flags.Add("Float64");
         if (r.RequiresFloat64Native) flags.Add("Float64Native");
         if (r.RequiresFloat64Strict) flags.Add("Float64Strict");

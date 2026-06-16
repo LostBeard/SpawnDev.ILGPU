@@ -89,6 +89,16 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         <#= op.GetOpOrCall(false, "value.Float16Value") #>);
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+<#              if (op.HasOp) { #>
+                        <#= op.GetOpOrCall(false, "value.BFloat16Value") #>);
+<#              } else if (op.IsPredicate) { #>
+                        <#= op.GetOpOrCall(false, "(float)value.BFloat16Value") #>);
+<#              } else { #>
+                        (BFloat16)(<#= op.GetOpOrCall(false, "(float)value.BFloat16Value") #>));
+<#              } #>
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -316,6 +326,14 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         <#= op.GetOpOrCall(false, "left.Float16Value", "right.Float16Value") #>);
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+<#              if (op.HasOp) { #>
+                        <#= op.GetOpOrCall(false, "left.BFloat16Value", "right.BFloat16Value") #>);
+<#              } else { #>
+                        (BFloat16)(<#= op.GetOpOrCall(false, "(float)left.BFloat16Value", "(float)right.BFloat16Value") #>));
+<#              } #>
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,

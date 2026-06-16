@@ -113,6 +113,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         -value.Float16Value);
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        -value.BFloat16Value);
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -181,6 +185,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.Abs(value.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.Abs((float)value.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -297,6 +305,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.Rcp(value.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.CPUOnly.Rcp((float)value.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -319,6 +331,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.IsNaN(value.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        IntrinsicMath.CPUOnly.IsNaN((float)value.BFloat16Value));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -341,6 +357,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.IsInfinity(value.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        IntrinsicMath.CPUOnly.IsInfinity((float)value.BFloat16Value));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -363,6 +383,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.IsFinite(value.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        IntrinsicMath.CPUOnly.IsFinite((float)value.BFloat16Value));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -385,6 +409,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.Sqrt(value.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.CPUOnly.Sqrt((float)value.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -407,6 +435,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.Rsqrt(value.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.CPUOnly.Rsqrt((float)value.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -429,6 +461,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.Asin(value.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.CPUOnly.Asin((float)value.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -451,6 +487,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.Sin(value.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.CPUOnly.Sin((float)value.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -473,6 +513,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.Sinh(value.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.CPUOnly.Sinh((float)value.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -495,6 +539,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.Acos(value.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.CPUOnly.Acos((float)value.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -517,6 +565,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.Cos(value.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.CPUOnly.Cos((float)value.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -539,6 +591,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.Cosh(value.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.CPUOnly.Cosh((float)value.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -561,6 +617,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.Tan(value.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.CPUOnly.Tan((float)value.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -583,6 +643,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.Tanh(value.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.CPUOnly.Tanh((float)value.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -605,6 +669,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.Atan(value.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.CPUOnly.Atan((float)value.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -627,6 +695,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.Exp(value.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.CPUOnly.Exp((float)value.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -649,6 +721,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.Exp2(value.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.CPUOnly.Exp2((float)value.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -671,6 +747,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.Floor(value.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.CPUOnly.Floor((float)value.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -693,6 +773,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.Ceiling(value.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.CPUOnly.Ceiling((float)value.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -715,6 +799,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.Log(value.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.CPUOnly.Log((float)value.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -737,6 +825,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.Log2(value.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.CPUOnly.Log2((float)value.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -759,6 +851,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.Log10(value.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.CPUOnly.Log10((float)value.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -1262,6 +1358,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         left.Float16Value + right.Float16Value);
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        left.BFloat16Value + right.BFloat16Value);
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -1340,6 +1440,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         left.Float16Value - right.Float16Value);
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        left.BFloat16Value - right.BFloat16Value);
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -1418,6 +1522,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         left.Float16Value * right.Float16Value);
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        left.BFloat16Value * right.BFloat16Value);
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -1496,6 +1604,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         left.Float16Value / right.Float16Value);
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        left.BFloat16Value / right.BFloat16Value);
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -1574,6 +1686,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         left.Float16Value % right.Float16Value);
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        left.BFloat16Value % right.BFloat16Value);
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -1994,6 +2110,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.Min(left.Float16Value, right.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.Min((float)left.BFloat16Value, (float)right.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -2072,6 +2192,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.Max(left.Float16Value, right.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.Max((float)left.BFloat16Value, (float)right.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -2149,6 +2273,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.Atan2(left.Float16Value, right.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.CPUOnly.Atan2((float)left.BFloat16Value, (float)right.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -2174,6 +2302,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.Pow(left.Float16Value, right.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.CPUOnly.Pow((float)left.BFloat16Value, (float)right.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -2199,6 +2331,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CPUOnly.Log(left.Float16Value, right.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.CPUOnly.Log((float)left.BFloat16Value, (float)right.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -2224,6 +2360,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(
                         location,
                         IntrinsicMath.CopySign(left.Float16Value, right.Float16Value));
+                case BasicValueType.BFloat16:
+                    return CreatePrimitiveValue(
+                        location,
+                        (BFloat16)(IntrinsicMath.CopySign((float)left.BFloat16Value, (float)right.BFloat16Value)));
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
