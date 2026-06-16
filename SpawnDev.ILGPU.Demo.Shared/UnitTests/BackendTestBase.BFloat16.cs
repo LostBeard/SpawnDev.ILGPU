@@ -50,6 +50,47 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 
         // ----- Kernels (static so they bind as ILGPU entry points) -----
 
+        // bf16 less-than: writes 1 if a[i] < b[i] (as a bf16/float comparison), else 0.
+        static void BFloat16LessThanKernel(
+            Index1D i, ArrayView<BFloat16> a, ArrayView<BFloat16> b, ArrayView<int> lt)
+            => lt[i.X] = (a[i.X] < b[i.X]) ? 1 : 0;
+
+        /// <summary>
+        /// Verifies the bf16 `&lt;` operator on the device orders by FLOAT magnitude, not raw int16
+        /// bits. The key case is -1 vs -4: as a float, -1 &gt; -4 so (-1 &lt; -4) is FALSE; but if bf16
+        /// were compared as its raw 16-bit pattern (-1 = 0xBF80 = -16512 &lt; -4 = 0xC080 = -16256),
+        /// the answer flips to TRUE. Cross-checks every sign-spanning pair against the CPU float oracle.
+        /// </summary>
+        [TestMethod]
+        public async Task BFloat16_LessThan_OrdersByFloatNotBits() => await RunTest(async accelerator =>
+        {
+            RequireBFloat16SupportedBackend(accelerator);
+            float[] xs = { -1f, -4f, -1f, 1f, 3f, 2f, -1f, 0f, -4f, 4f };
+            float[] ys = { -4f, -1f, 1f, -1f, 2f, 3f, -1f, -1f, -4f, -4f };
+            int n = xs.Length;
+            var a = new BFloat16[n];
+            var b = new BFloat16[n];
+            for (int i = 0; i < n; i++) { a[i] = (BFloat16)xs[i]; b[i] = (BFloat16)ys[i]; }
+
+            using var aBuf = accelerator.Allocate1D(a);
+            using var bBuf = accelerator.Allocate1D(b);
+            using var ltBuf = accelerator.Allocate1D<int>(n);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<BFloat16>, ArrayView<BFloat16>, ArrayView<int>>(BFloat16LessThanKernel);
+            kernel(n, aBuf.View, bBuf.View, ltBuf.View);
+            await accelerator.SynchronizeAsync();
+            var gpu = await ltBuf.CopyToHostAsync<int>();
+
+            for (int i = 0; i < n; i++)
+            {
+                int expected = (xs[i] < ys[i]) ? 1 : 0; // float-correct oracle
+                if (gpu[i] != expected)
+                    throw new Exception(
+                        $"bf16 '<' wrong at ({xs[i]} < {ys[i]}): GPU={gpu[i]} expected={expected} " +
+                        $"(GPU={(gpu[i] == 1 ? "true" : "false")}; if this sorts by raw int16 bits the sign flips)");
+            }
+        });
+
         static void BFloat16CopyKernel(Index1D i, ArrayView<BFloat16> input, ArrayView<BFloat16> output)
             => output[i] = input[i];
 

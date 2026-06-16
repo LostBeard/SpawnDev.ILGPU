@@ -191,6 +191,23 @@ namespace ILGPU
             value.RawValue;
 
         /// <summary>
+        /// Casts the given bfloat16 to its raw 16-bit pattern via a reinterpret cast.
+        /// </summary>
+        /// <param name="value">The value to cast.</param>
+        /// <returns>The 16-bit bfloat16 pattern.</returns>
+        /// <remarks>
+        /// Enables bfloat16 radix sorting (see <c>AscendingBFloat16</c>). There is
+        /// deliberately no <c>IntAsFloat(ushort) -&gt; BFloat16</c> twin: it would collide
+        /// with <see cref="IntAsFloat(ushort)"/> (returns <see cref="Half"/>) by return
+        /// type, and the radix sort never reconstructs a value from bits (it permutes the
+        /// original value array). Use <c>new BFloat16(bits)</c> if you need it on the host.
+        /// </remarks>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        [InteropIntrinsic(InteropIntrinsicKind.FloatAsInt)]
+        public static ushort FloatAsInt(BFloat16 value) =>
+            value.RawValue;
+
+        /// <summary>
         /// Casts the given float to an int via a reinterpret cast.
         /// </summary>
         /// <param name="value">The value to cast.</param>

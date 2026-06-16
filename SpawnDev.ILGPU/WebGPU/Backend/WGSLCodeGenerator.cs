@@ -2832,6 +2832,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 _kernelReferencesF16Helpers = true;
                 AppendLine($"{target} = i32(_f32_to_f16({source}));");
             }
+            else if (value.Value.Type is global::ILGPU.IR.Types.PrimitiveType bpt &&
+                bpt.BasicValueType == global::ILGPU.BasicValueType.BFloat16)
+            {
+                // bf16 is always emulated (WGSL "f32"); FloatAsInt(bf16) must yield the 16-bit
+                // bf16 pattern (AscendingBFloat16 radix sort, NumBits=16) - recover it via
+                // _f32_to_bf16, not a bitcast of the promoted f32.
+                _kernelReferencesBF16Helpers = true;
+                AppendLine($"{target} = i32(_f32_to_bf16({source}));");
+            }
             else if (source.Type == "emu_f64")
             {
                 // emu_f64 is a Dekker vec2<f32> pair — not the raw IEEE-754 double bits.
@@ -2867,6 +2876,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 _kernelReferencesF16Helpers = true;
                 AppendLine($"{target} = _f16_to_f32(u32({source}) & 0xFFFFu);");
+            }
+            else if (value.Type is global::ILGPU.IR.Types.PrimitiveType bpt &&
+                bpt.BasicValueType == global::ILGPU.BasicValueType.BFloat16)
+            {
+                // Symmetric inverse for bf16 (always emulated): widen the low-16 bf16 pattern
+                // to f32. Defensive - no IntAsFloat->BFloat16 frontend overload today.
+                _kernelReferencesBF16Helpers = true;
+                AppendLine($"{target} = _bf16_to_f32(u32({source}) & 0xFFFFu);");
             }
             else if (target.Type == "emu_f64")
             {

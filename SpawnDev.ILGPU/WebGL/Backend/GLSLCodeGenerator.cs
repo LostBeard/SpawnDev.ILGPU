@@ -2149,6 +2149,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // FloatAsInt). Compress back to the 16-bit f16 pattern via the emulation helper. Parallel
                 // to the Float64 case above.
                 AppendLine($"{target} = int(_f32_to_f16({source}));");
+            else if (value.Value.BasicValueType == BasicValueType.BFloat16)
+                // Emulated bf16 is a GLSL `float`; FloatAsInt(bf16) must yield the 16-bit bf16
+                // pattern (AscendingBFloat16 radix sort, NumBits=16), not floatBitsToInt of the
+                // widened f32. Compress via _f32_to_bf16, parallel to the Half case above.
+                AppendLine($"{target} = int(_f32_to_bf16({source}));");
             else
                 AppendLine($"{target} = floatBitsToInt({source});");
         }
@@ -2165,6 +2170,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // into the emulated Half = GLSL `float`. intBitsToFloat would interpret the pattern as
                 // 32-bit f32 bits, which is wrong. Parallel to the Float64 case above.
                 AppendLine($"{target} = _f16_to_f32(uint({source}));");
+            else if (value.BasicValueType == BasicValueType.BFloat16)
+                // Reverse for bf16: expand the low-16 bf16 pattern to the emulated GLSL `float`.
+                // Defensive - no IntAsFloat->BFloat16 frontend overload today.
+                AppendLine($"{target} = _bf16_to_f32(uint({source}));");
             else
                 AppendLine($"{target} = intBitsToFloat({source});");
         }

@@ -262,6 +262,20 @@ namespace ILGPU.Backends.OpenCL
                 return;
             }
 
+            // bf16 is ALWAYS emulated as float on OpenCL (no native bf16 type). FloatAsInt(bf16)
+            // must yield the 16-bit bf16 pattern, not the promoted-f32 bits - use the
+            // _f32_to_bf16_bits helper emitted in the kernel prologue (same one the store path
+            // uses). Drives AscendingBFloat16 radix sort (NumBits=16).
+            if (value.Value.BasicValueType == BasicValueType.BFloat16)
+            {
+                using var statement = BeginStatement(target);
+                statement.AppendCommand("_f32_to_bf16_bits");
+                statement.BeginArguments();
+                statement.AppendArgument(source);
+                statement.EndArguments();
+                return;
+            }
+
             using var statement2 = BeginStatement(target);
             statement2.AppendCommand(
                 value.BasicValueType == BasicValueType.Int64 ?
@@ -288,6 +302,18 @@ namespace ILGPU.Backends.OpenCL
             {
                 using var statement = BeginStatement(target);
                 statement.AppendCommand("_half_bits_to_f32");
+                statement.BeginArguments();
+                statement.AppendArgument(source);
+                statement.EndArguments();
+                return;
+            }
+
+            // Symmetric inverse for bf16 (always emulated): widen the 16-bit pattern to f32.
+            // Defensive - the frontend has no IntAsFloat->BFloat16 overload today.
+            if (value.BasicValueType == BasicValueType.BFloat16)
+            {
+                using var statement = BeginStatement(target);
+                statement.AppendCommand("_bf16_bits_to_f32");
                 statement.BeginArguments();
                 statement.AppendArgument(source);
                 statement.EndArguments();

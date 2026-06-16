@@ -303,7 +303,7 @@ namespace ILGPU.Algorithms
     /// <summary>
     /// Contains extension methods for radix-sort operations.
     /// </summary>
-    public static class RadixSortExtensions
+    public static partial class RadixSortExtensions
     {
         /// <summary>
         /// DIAGNOSTIC: Per-pass hook. Called after each radix sort pass with (bitIdx, counterView).
@@ -1126,6 +1126,25 @@ namespace ILGPU.Algorithms
             where TValueStride : struct, IStride1D
             where TRadixSortOperation : struct, IRadixSortOperation<TKey>
         {
+            // WebGPU: naga/Dawn mis-compiles the bf16 descending transform in the specialized pairs
+            // radix kernel (sorts keys as raw int16). bf16 codegen is proven correct (bucket-compare
+            // matches CPU), so route a bf16 KEY through an f32 working representation (lossless,
+            // order-preserving) + the correct f32 pairs radix sort, then narrow back. bf16 VALUE
+            // (rare, untested) falls through to the generic path. See RadixSortExtensions.BFloat16.cs.
+            if (accelerator.AcceleratorType == AcceleratorType.WebGPU &&
+                typeof(TKey) == typeof(BFloat16) &&
+                typeof(TValue) != typeof(BFloat16))
+            {
+                var handler = typeof(RadixSortExtensions)
+                    .GetMethod(nameof(CreateWebGPUWidenRadixSortPairsBFloat16Key),
+                        BindingFlags.NonPublic | BindingFlags.Static)!
+                    .MakeGenericMethod(
+                        typeof(TKeyStride), typeof(TValue), typeof(TValueStride),
+                        typeof(TRadixSortOperation))
+                    .Invoke(null, new object[] { accelerator })!;
+                return (RadixSortPairs<TKey, TKeyStride, TValue, TValueStride>)handler;
+            }
+
             // WebGL: gather-only transform feedback. Sort the pairs by SCATTER (the struct-packed
             // gather/scatter pairs path needs a multi-field scatter). Compute each element's stable
             // 1-bit-split destination from the keys, then scatter BOTH keys and values by that dest.
@@ -1151,6 +1170,23 @@ namespace ILGPU.Algorithms
                         typeof(TKeyStride), typeof(TValue), typeof(TValueStride),
                         typeof(TRadixSortOperation))
                     .Invoke(null, new object[] { accelerator, scatterProviderHalfKey })!;
+                return (RadixSortPairs<TKey, TKeyStride, TValue, TValueStride>)handler;
+            }
+
+            // bf16 KEY (+ any 4/8-byte non-bf16 value): same sub-word unpacked-f32 path as Half.
+            if (accelerator.AcceleratorType == AcceleratorType.WebGL &&
+                accelerator is IScatterProvider scatterProviderBF16Key &&
+                typeof(TKey) == typeof(BFloat16) &&
+                (Interop.SizeOf<TValue>() == 4 || Interop.SizeOf<TValue>() == 8) &&
+                typeof(TValue) != typeof(BFloat16))
+            {
+                var handler = typeof(RadixSortExtensions)
+                    .GetMethod(nameof(CreateWebGLScatterRadixSortPairsBFloat16Key),
+                        BindingFlags.NonPublic | BindingFlags.Static)!
+                    .MakeGenericMethod(
+                        typeof(TKeyStride), typeof(TValue), typeof(TValueStride),
+                        typeof(TRadixSortOperation))
+                    .Invoke(null, new object[] { accelerator, scatterProviderBF16Key })!;
                 return (RadixSortPairs<TKey, TKeyStride, TValue, TValueStride>)handler;
             }
 
@@ -1216,6 +1252,24 @@ namespace ILGPU.Algorithms
             {
                 throw new NotSupportedException(
                     ErrorMessages.NotSupportedNumberOfRadixSortBits);
+            }
+
+            // WebGPU: the WebGPU shader compiler (naga/Dawn) MIS-COMPILES the bf16 DESCENDING
+            // transform inside the specialized radix kernel - it drops the float ordering and
+            // sorts the keys as raw signed int16. ILGPU's bf16 codegen is proven correct (the
+            // standalone ExtractRadixBits bucket-compare matches the CPU oracle on WebGPU for
+            // every key + pass), so this is a shader-compiler bug, not an ILGPU gap. bf16 widens
+            // to f32 LOSSLESSLY + order-preservingly, so route bf16 keys through an f32 working
+            // representation and the (correct) f32 radix sort, then narrow back - the same
+            // sub-word-key strategy WebGL uses. See RadixSortExtensions.BFloat16.cs.
+            if (accelerator.AcceleratorType == AcceleratorType.WebGPU && typeof(T) == typeof(BFloat16))
+            {
+                var handler = typeof(RadixSortExtensions)
+                    .GetMethod(nameof(CreateWebGPUWidenRadixSortBFloat16),
+                        BindingFlags.NonPublic | BindingFlags.Static)!
+                    .MakeGenericMethod(typeof(TStride), typeof(TRadixSortOperation))
+                    .Invoke(null, new object[] { accelerator })!;
+                return (RadixSort<T, TStride>)handler;
             }
 
             // WebGL: transform feedback is gather-only — no in-kernel scatter and limited loop
@@ -1464,6 +1518,17 @@ namespace ILGPU.Algorithms
             {
                 var handler = typeof(RadixSortExtensions)
                     .GetMethod(nameof(CreateWebGLScatterRadixSortHalf),
+                        BindingFlags.NonPublic | BindingFlags.Static)!
+                    .MakeGenericMethod(typeof(TStride), typeof(TRadixSortOperation))
+                    .Invoke(null, new object[] { accelerator, scatterProvider })!;
+                return (RadixSort<T, TStride>)handler;
+            }
+            // bf16 is also a 2-byte sub-word key — same unpacked-f32 working representation as Half
+            // (bf16 is a strict subset of f32, so the widen/narrow round-trip is lossless).
+            if (typeof(T) == typeof(BFloat16))
+            {
+                var handler = typeof(RadixSortExtensions)
+                    .GetMethod(nameof(CreateWebGLScatterRadixSortBFloat16),
                         BindingFlags.NonPublic | BindingFlags.Static)!
                     .MakeGenericMethod(typeof(TStride), typeof(TRadixSortOperation))
                     .Invoke(null, new object[] { accelerator, scatterProvider })!;

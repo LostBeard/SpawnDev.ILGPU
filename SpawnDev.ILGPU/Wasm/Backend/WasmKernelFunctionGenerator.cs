@@ -2452,6 +2452,19 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 WasmModuleBuilder.EmitLocalSet(Code, target);
                 return;
             }
+            // bf16 also lives in an F32 local (promoted). EmitF32ToBF16 rounds it to its
+            // 16-bit bf16 bit pattern as an I32 - what Interop.FloatAsInt(BFloat16) returns
+            // (drives AscendingBFloat16 radix sort, NumBits=16).
+            bool isSrcBFloat16 = srcIRType is PrimitiveType ptSrcB
+                && ptSrcB.BasicValueType == BasicValueType.BFloat16;
+            if (isSrcBFloat16)
+            {
+                var target = AllocateLocal(value, WasmOpCodes.I32);
+                EmitGetLocal(value.Value.Resolve());
+                EmitF32ToBF16();
+                WasmModuleBuilder.EmitLocalSet(Code, target);
+                return;
+            }
             base.GenerateCode(value);
         }
 
@@ -2468,6 +2481,18 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 var target = AllocateLocal(value, WasmOpCodes.F32);
                 EmitGetLocal(value.Value.Resolve());
                 EmitF16ToF32();
+                WasmModuleBuilder.EmitLocalSet(Code, target);
+                return;
+            }
+            // Reverse for bf16: expand the low-16 bf16 pattern to the promoted F32 local.
+            // Defensive - no IntAsFloat->BFloat16 frontend overload today.
+            bool isDstBFloat16 = dstIRType is PrimitiveType ptDstB
+                && ptDstB.BasicValueType == BasicValueType.BFloat16;
+            if (isDstBFloat16)
+            {
+                var target = AllocateLocal(value, WasmOpCodes.F32);
+                EmitGetLocal(value.Value.Resolve());
+                EmitBF16ToF32();
                 WasmModuleBuilder.EmitLocalSet(Code, target);
                 return;
             }

@@ -265,6 +265,19 @@ namespace ILGPU.Backends.PTX
         /// <summary cref="IBackendCodeGenerator.GenerateCode(FloatAsIntCast)"/>
         public void GenerateCode(FloatAsIntCast value)
         {
+            if (value.Value.BasicValueType == BasicValueType.BFloat16)
+            {
+                // FloatAsInt(bf16): the value lives in an f32 register (f32-register model).
+                // Round it to its 16-bit bf16 pattern via cvt.rn.bf16.f32 into the Int16
+                // target register (= the raw bf16 bits, exactly the store-side conversion).
+                var bf16Source = LoadHardware(value.Value);
+                var bf16Target = AllocateHardware(value);
+                using var cmd = BeginCommand("cvt.rn.bf16.f32");
+                cmd.AppendArgument(bf16Target);
+                cmd.AppendArgument(bf16Source);
+                return;
+            }
+
             var source = LoadHardware(value.Value);
             if (source.Kind == PTXRegisterKind.Int16)
             {
@@ -289,6 +302,19 @@ namespace ILGPU.Backends.PTX
         /// <summary cref="IBackendCodeGenerator.GenerateCode(IntAsFloatCast)"/>
         public void GenerateCode(IntAsFloatCast value)
         {
+            if (value.BasicValueType == BasicValueType.BFloat16)
+            {
+                // IntAsFloat(bf16 bits): widen the 16-bit pattern (Int16 reg) to the f32
+                // value register via cvt.f32.bf16 (the load-side conversion). Defensive
+                // symmetry - the frontend has no IntAsFloat->BFloat16 overload today.
+                var src = LoadHardware(value.Value);
+                var tgt = AllocateHardware(value);
+                using var cmd = BeginCommand("cvt.f32.bf16");
+                cmd.AppendArgument(tgt);
+                cmd.AppendArgument(src);
+                return;
+            }
+
             var source = LoadHardware(value.Value);
             if (source.Kind == PTXRegisterKind.Int16)
             {

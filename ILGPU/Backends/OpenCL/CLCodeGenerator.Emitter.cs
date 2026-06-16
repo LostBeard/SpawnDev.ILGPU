@@ -372,6 +372,10 @@ namespace ILGPU.Backends.OpenCL
                     case BasicValueType.Float16:
                         AppendConstant(value.Float16Value);
                         break;
+                    case BasicValueType.BFloat16:
+                        // bf16 computes as float on OpenCL; emit the f32 magnitude.
+                        AppendConstant((float)value.BFloat16Value);
+                        break;
                     case BasicValueType.Float32:
                         AppendConstant(value.Float32Value);
                         break;

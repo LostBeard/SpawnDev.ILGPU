@@ -32,6 +32,10 @@ try
     if (args.Length > 0 && args[0] == "shader-gen")
         return await ShaderGenDump.Run();
 
+    // Offline bf16 ExtractRadixBits WGSL dump (emulated-f16 profile = the failing bf16 radix path).
+    if (args.Length > 0 && args[0] == "bf16-radix-emit")
+        return await BF16RadixWgslProbe.Run();
+
     // Offline subgroup/warp reduce probe (work-order #1). Confirms the high-level reduce API
     // lowers to native subgroupAdd with subgroups, shared-mem fallback without. No device/browser.
     if (args.Length > 0 && args[0] == "subgroup-reduce")

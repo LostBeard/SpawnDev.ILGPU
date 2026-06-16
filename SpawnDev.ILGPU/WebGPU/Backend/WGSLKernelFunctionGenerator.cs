@@ -1807,6 +1807,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                     bsElemSize = 2;
                                 else if (bsPt.BasicValueType == BasicValueType.Float16 && !Backend.HasShaderF16)
                                     bsElemSize = 2;
+                                else if (bsPt.BasicValueType == BasicValueType.BFloat16)
+                                    bsElemSize = 2; // bf16 is always emulated (2-byte packed)
                                 if (bsElemSize > 0)
                                 {
                                     // Use syntheticViewParamIdx as key since body struct fields
@@ -1815,6 +1817,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                     _subWordParams[synthIdx] = bsElemSize;
                                     if (bsPt.BasicValueType == BasicValueType.Float16 && !Backend.HasShaderF16)
                                         _subWordFloat16Params.Add(synthIdx);
+                                    else if (bsPt.BasicValueType == BasicValueType.BFloat16)
+                                        // bf16 body-struct view field: classify as sub-word so the
+                                        // buffer is declared array<atomic<u32>> (packed), matching the
+                                        // packed atomicLoad the bf16 load path emits. Without this the
+                                        // declaration was array<f32> -> atomicLoad-on-f32 WGSL error.
+                                        _subWordBFloat16Params.Add(synthIdx);
                                     isSubWordField = true;
                                 }
                             }
