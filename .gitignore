@@ -378,4 +378,5 @@ _subgroup_reduce_probe/
 _wasm_inf_probe/
 _wasm_simd_probe/
 _wasm_simd_bench/
+_wasm_simd_emit_gate/
 _threadB_wip_backup/

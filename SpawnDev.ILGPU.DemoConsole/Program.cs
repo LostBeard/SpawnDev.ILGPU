@@ -32,6 +32,11 @@ try
     if (args.Length > 0 && args[0] == "simd-analyze")
         return await WasmSimdAnalyzeProbe.Run();
 
+    // Wasm SIMD128 Phase 3 Stage-3a STRUCTURAL gate: ForceSimd-compile real elementwise kernels,
+    // assert a kernel_simd export is emitted + write each module for wasm-validate. No browser.
+    if (args.Length > 0 && args[0] == "wasm-simd-emit-gate")
+        return await WasmSimdEmitGateProbe.Run(args);
+
     // Offline WGSL generation probe (precompiled-shaders Layer 1). No device/browser.
     if (args.Length > 0 && args[0] == "shader-gen")
         return await ShaderGenDump.Run();

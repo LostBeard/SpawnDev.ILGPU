@@ -719,6 +719,24 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 definedFuncIndex++;
             }
 
+            // Wasm SIMD128 Stage-3a (ADDITIVE): when SIMD is effective AND the kernel is in the
+            // f32 unit-stride elementwise class, emit an ADDITIONAL `kernel_simd` that processes
+            // 4 lanes/call. Appended LAST (after any helpers + dispatcher) so their defined-function
+            // indices never shift, and the scalar `kernel` body stays BYTE-IDENTICAL
+            // (TryGenerateSimdKernel saves/clears/restores the scalar local+Code context). The SIMD
+            // class excludes barriers, so when kernel_simd is emitted there is no dispatcher and
+            // definedFuncIndex is just past the kernel (+ any helpers). The dispatch path runs it
+            // by-4 with a scalar tail only when present; absent ⇒ pure scalar path (no regression).
+            // Reuses the kernel's func-type (typeIdx) — kernel_simd has the same ABI signature.
+            if (EffectiveWasmSimd && kernelGen.TryGenerateSimdKernel() && kernelGen.HasSimdKernel)
+            {
+                int simdFuncIdx = moduleBuilder.AddFunction(typeIdx);
+                moduleBuilder.ExportFunction("kernel_simd", simdFuncIdx);
+                moduleBuilder.SetFunctionBody(definedFuncIndex, kernelGen.SimdKernelLocals!, kernelGen.SimdKernelCode!);
+                definedFuncIndex++;
+                if (VerboseLogging) Log($"[Wasm-SIMD] kernel_simd emitted: funcIdx={simdFuncIdx}, definedIdx={definedFuncIndex - 1}, locals={kernelGen.SimdKernelLocals!.Count}, code={kernelGen.SimdKernelCode!.Length}b");
+            }
+
             // Emit binary
             var wasmBinary = moduleBuilder.Emit();
 
