@@ -1,6 +1,24 @@
 # Wasm SIMD128 — Phase 2 design (decision gate), leaning FusedDequantMatMul
 
-**Date:** 2026-06-14 · **Owner:** Geordi · **Status: DESIGN (Phase 1 foundation shipped, master `a3b8dc3`).**
+> **✅ PHASE 2 RESULT (2026-06-16, Geordi) — GATE NUMBER MEASURED, GO recommendation.**
+> Ran the `simd-bench-emit` A/B (scalar.wasm vs simd.wasm FMA-fold + `run-bench.mjs`, Node v24/V8,
+> N=1M, single-thread = pure ALU win, no dispatch floor):
+> | R | scalar | f32x4 | speedup |
+> |---|---|---|---|
+> | 1 | 0.74ms | 0.21ms | 3.49x |
+> | 4 | 1.34ms | 0.58ms | 2.29x |
+> | 16 | 5.22ms | 3.01ms | 1.73x (mem-bound knee) |
+> | 64 | 51.6ms | 14.5ms | **3.57x** |
+> | 256 | 310ms | 102ms | **3.03x** |
+> **Correctness exact:** SIMD == scalar output (cross-mode determinism, no one-mode FMA), both within
+> f32 ULP of the JS CPU reference (8e-8…7e-6). The ALU-dense win (**3x+** at R≥64) BEATS the Phase-0
+> 1.5–2× prediction, so the pure-ALU path is decisively worth vectorizing. **Recommendation: GO on
+> Phase 3** (generic Velocity lane port → makes FusedDequantMatMul + all kernels vectorizable), gated
+> on Captain's call since Phase 3 is the expensive build. The real-dispatch (~35ms worker-pool floor)
+> number is a Phase-3 sizing concern, not the gate — the gate is this pure-ALU ratio and it's a clear win.
+> Design doc `wasm-simd128-phase3-velocity-port-design-2026-06-14.md` is the Phase 3 plan.
+
+**Date:** 2026-06-14 · **Owner:** Geordi · **Status: PHASE 2 COMPLETE — gate measured (3x+ ALU-dense), GO recommended; Phase 1 foundation shipped, master `a3b8dc3`.**
 Parent plan: `wasm-simd128-velocity-port-plan-2026-06-12.md`. Phase-0 measurement + the foundation
 (`WasmOpCodes` v128 ops, `WasmModuleBuilder` emit helpers, `RuntimeSupportsWasmSimd` detection,
 `ForceScalar`/`ForceSimd`/`EffectiveWasmSimd`, offline `wasm-simd-probe`) are done and verified.
