@@ -904,6 +904,18 @@ namespace ILGPU.Backends.PTX
                 return;
             }
 
+            // FP8 field/value: 1-byte storage, f32 register. Load the byte, widen via portable
+            // bit-manip (every CUDA arch). Same model as bf16.
+            if (register.BasicValueType == BasicValueType.Float8E4M3 ||
+                register.BasicValueType == BasicValueType.Float8E5M2)
+            {
+                var rawReg = AllocateRegister(BasicValueType.Int16, PTXRegisterKind.Int16);
+                emitter.Emit(this, command, rawReg, userState);
+                EmitFP8BitsToF32(rawReg, register, register.BasicValueType == BasicValueType.Float8E4M3);
+                FreeRegister(rawReg);
+                return;
+            }
+
             HardwareRegister? originalRegister = null;
             // We need a temporary 32bit register for predicate conversion at this point:
             // 1) load value into temporary register
@@ -957,6 +969,18 @@ namespace ILGPU.Backends.PTX
                     BasicValueType.Int16,
                     PTXRegisterKind.Int16);
                 EmitF32ToBF16Bits(f32Register, rawReg);
+                emitter.Emit(this, command, rawReg, userState);
+                FreeRegister(rawReg);
+                return;
+            }
+
+            // FP8 field/value store: round the f32 value to its 1-byte pattern via portable bit-manip.
+            if (register.BasicValueType == BasicValueType.Float8E4M3 ||
+                register.BasicValueType == BasicValueType.Float8E5M2)
+            {
+                var f32Register = EnsureHardwareRegister(register);
+                var rawReg = AllocateRegister(BasicValueType.Int16, PTXRegisterKind.Int16);
+                EmitF32ToFP8Bits(f32Register, rawReg, register.BasicValueType == BasicValueType.Float8E4M3);
                 emitter.Emit(this, command, rawReg, userState);
                 FreeRegister(rawReg);
                 return;
