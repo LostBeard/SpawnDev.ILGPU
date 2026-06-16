@@ -65,6 +65,26 @@ namespace ILGPU.Backends.OpenCL
                 return;
             }
 
+            // FP8 emulation: E4M3/E5M2 have no native OpenCL type, so views are uchar* and
+            // load/store convert via the _e*m* helpers. Track (basePtr, index, isE4M3).
+            if (value.Type is PointerType ptrTypeFp8
+                && ptrTypeFp8.ElementType is PrimitiveType ptElemFp8
+                && (ptElemFp8.BasicValueType == BasicValueType.Float8E4M3
+                    || ptElemFp8.BasicValueType == BasicValueType.Float8E5M2))
+            {
+                var targetFp8 = AllocatePointerType(ptrTypeFp8);
+                using (var statement = BeginStatement(targetFp8))
+                {
+                    statement.AppendCommand(CLInstructions.AddressOfOperation);
+                    statement.Append(source);
+                    statement.AppendIndexer(elementIndex);
+                }
+                Bind(value, targetFp8);
+                _fp8EmulatedLEAs[targetFp8.ToString()] =
+                    (source, elementIndex, ptElemFp8.BasicValueType == BasicValueType.Float8E4M3);
+                return;
+            }
+
             var target2 = AllocatePointerType(value.Type.AsNotNullCast<PointerType>());
 
             using (var statement = BeginStatement(target2))

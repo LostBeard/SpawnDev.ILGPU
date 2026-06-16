@@ -120,15 +120,19 @@ internal static class Float8Repro
         // through a real ILGPU kernel on the CPU backend (FP8 buffer load/store + in-kernel
         // arithmetic + FP8 const + FP8<->f32 convert). The reference replays the identical managed
         // FP8 ops, so a correct kernel matches BIT-EXACT (any divergence = a codegen bug).
-        Console.WriteLine("--- CPU kernel (generic INumber<T>, exact-match vs managed FP8 ops) ---");
+        Console.WriteLine("--- Desktop kernels (generic INumber<T>, exact-match vs managed FP8 ops) ---");
         int kFails = 0;
-        using (var context = Context.Create(b => b.Default()))
+        using (var context = Context.Create(b => b.Default().EnableAlgorithms()))
         {
             foreach (var dev in context)
             {
-                if (dev.AcceleratorType != AcceleratorType.CPU)
+                // Desktop backends only (CPU/CUDA/OpenCL). Browser = Phase 1-2 (PMT).
+                if (dev.AcceleratorType != AcceleratorType.CPU &&
+                    dev.AcceleratorType != AcceleratorType.Cuda &&
+                    dev.AcceleratorType != AcceleratorType.OpenCL)
                     continue;
                 using var acc = dev.CreateAccelerator(context);
+                Console.WriteLine($"  [{acc.AcceleratorType} {acc.Name}]");
                 kFails += RunKernel<Float8E4M3>(acc, "E4M3", f => (Float8E4M3)f, v => (float)v);
                 kFails += RunKernel<Float8E5M2>(acc, "E5M2", f => (Float8E5M2)f, v => (float)v);
             }
@@ -203,12 +207,17 @@ internal static class Float8Repro
         catch (Exception ex)
         {
             Console.WriteLine($"  {label}: {ex.GetType().Name}: {ex.Message}");
-            var inner = ex.InnerException; int depth = 0;
-            while (inner != null && depth < 3)
+            var inner = ex.InnerException; int depth = 0; Exception deepest = ex;
+            while (inner != null && depth < 5)
             {
                 Console.WriteLine($"     INNER[{depth}] {inner.GetType().Name}: {inner.Message}");
+                deepest = inner;
                 inner = inner.InnerException; depth++;
             }
+            // Dump the deepest stack to pinpoint the throwing codegen site.
+            var stk = (deepest.StackTrace ?? "").Split('\n');
+            for (int i = 0; i < stk.Length && i < 6; i++)
+                Console.WriteLine($"        @ {stk[i].Trim()}");
             return 1;
         }
     }

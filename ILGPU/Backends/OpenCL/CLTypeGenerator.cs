@@ -344,9 +344,15 @@ namespace ILGPU.Backends.OpenCL
                         // bf16 is stored as raw 2-byte ushort (values compute as float, but the
                         // STORAGE pointer must be ushort* for correct 2-byte stride). The bf16
                         // load/store handlers convert via _bf16_bits_to_f32 / _f32_to_bf16_bits.
+                        // FP8 (E4M3/E5M2) is the same idea with 1-byte uchar storage (helpers
+                        // _e*m*_bits_to_f32 / _f32_to_e*m*_bits).
                         if (pointerType.ElementType is PrimitiveType bf16Elem
                             && bf16Elem.BasicValueType == BasicValueType.BFloat16)
                             builder.Append("ushort");
+                        else if (pointerType.ElementType is PrimitiveType fp8Elem
+                            && (fp8Elem.BasicValueType == BasicValueType.Float8E4M3
+                                || fp8Elem.BasicValueType == BasicValueType.Float8E5M2))
+                            builder.Append("uchar");
                         else
                             builder.Append(mapping[pointerType.ElementType]);
                         builder.Append(CLInstructions.DereferenceOperation);

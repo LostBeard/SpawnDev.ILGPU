@@ -180,6 +180,14 @@ namespace ILGPU.Backends.PTX
                         // f32 magnitude as the immediate.
                         AppendConstant((float)value.BFloat16Value);
                         break;
+                    case BasicValueType.Float8E4M3:
+                        // FP8 is held in an f32 register on PTX (same f32-register model as
+                        // bf16); emit the f32 magnitude as the immediate.
+                        AppendConstant((float)value.Float8E4M3Value);
+                        break;
+                    case BasicValueType.Float8E5M2:
+                        AppendConstant((float)value.Float8E5M2Value);
+                        break;
                     case BasicValueType.Float32:
                         AppendConstant(value.Float32Value);
                         break;

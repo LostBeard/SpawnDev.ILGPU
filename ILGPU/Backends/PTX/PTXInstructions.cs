@@ -41,7 +41,9 @@ namespace ILGPU.Backends.PTX
             // kernel whose body selects a bf16 (e.g. `v > T.Zero ? v : T.Zero`) threw
             // KeyNotFoundException 'BFloat16' at PTX codegen (concrete-typed bf16 kernels that don't
             // select were unaffected, so the bf16 parity work missed it).
-            if (type == BasicValueType.BFloat16)
+            if (type == BasicValueType.BFloat16 ||
+                type == BasicValueType.Float8E4M3 ||
+                type == BasicValueType.Float8E5M2)
                 type = BasicValueType.Float32;
             return SelectValueOperations[type];
         }
@@ -58,9 +60,11 @@ namespace ILGPU.Backends.PTX
             CompareFlags flags,
             ArithmeticBasicValueType type)
         {
-            // bf16 has no native PTX arithmetic/compare; it computes as f32 (values held in
-            // f32 registers, converted at load/store). Route bf16 ops through the f32 tables.
-            if (type == ArithmeticBasicValueType.BFloat16)
+            // bf16/FP8 have no native PTX arithmetic/compare; they compute as f32 (values held in
+            // f32 registers, converted at load/store). Route those ops through the f32 tables.
+            if (type == ArithmeticBasicValueType.BFloat16 ||
+                type == ArithmeticBasicValueType.Float8E4M3 ||
+                type == ArithmeticBasicValueType.Float8E5M2)
                 type = ArithmeticBasicValueType.Float32;
             var unorderedFloatComparison = type.IsFloat()
                 && flags.HasFlag(CompareFlags.UnsignedOrUnordered);
@@ -108,8 +112,10 @@ namespace ILGPU.Backends.PTX
             CudaCapabilityContext capabilities,
             bool fastMath)
         {
-            if (type == ArithmeticBasicValueType.BFloat16)
-                type = ArithmeticBasicValueType.Float32; // bf16 computes as f32 on PTX
+            if (type == ArithmeticBasicValueType.BFloat16 ||
+                type == ArithmeticBasicValueType.Float8E4M3 ||
+                type == ArithmeticBasicValueType.Float8E5M2)
+                type = ArithmeticBasicValueType.Float32; // bf16/FP8 compute as f32 on PTX
             if (kind == UnaryArithmeticKind.TanhF &&
                 type == ArithmeticBasicValueType.Float32 &&
                 !capabilities.Float32_TanH)
@@ -147,8 +153,10 @@ namespace ILGPU.Backends.PTX
             CudaCapabilityContext capabilities,
             bool fastMath)
         {
-            if (type == ArithmeticBasicValueType.BFloat16)
-                type = ArithmeticBasicValueType.Float32; // bf16 computes as f32 on PTX
+            if (type == ArithmeticBasicValueType.BFloat16 ||
+                type == ArithmeticBasicValueType.Float8E4M3 ||
+                type == ArithmeticBasicValueType.Float8E5M2)
+                type = ArithmeticBasicValueType.Float32; // bf16/FP8 compute as f32 on PTX
             if (kind == BinaryArithmeticKind.Min &&
                type == ArithmeticBasicValueType.Float16 &&
                !capabilities.Float16_Min)
@@ -182,8 +190,10 @@ namespace ILGPU.Backends.PTX
             TernaryArithmeticKind kind,
             ArithmeticBasicValueType type)
         {
-            if (type == ArithmeticBasicValueType.BFloat16)
-                type = ArithmeticBasicValueType.Float32; // bf16 computes as f32 on PTX
+            if (type == ArithmeticBasicValueType.BFloat16 ||
+                type == ArithmeticBasicValueType.Float8E4M3 ||
+                type == ArithmeticBasicValueType.Float8E5M2)
+                type = ArithmeticBasicValueType.Float32; // bf16/FP8 compute as f32 on PTX
             return TernaryArithmeticOperations.TryGetValue((kind, type), out string? operation)
                 ? operation
                 : throw new NotSupportedIntrinsicException(kind.ToString());

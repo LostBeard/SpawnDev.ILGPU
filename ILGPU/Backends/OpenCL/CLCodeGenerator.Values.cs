@@ -499,6 +499,26 @@ namespace ILGPU.Backends.OpenCL
                 return;
             }
 
+            // FP8 emulation: read the raw uchar and convert to f32 via the format's helper.
+            if (_fp8EmulatedLEAs.TryGetValue(address.ToString(), out var fp8Lea))
+            {
+                using var statement = BeginStatement(target);
+                statement.AppendCommand(fp8Lea.IsE4M3 ? "_e4m3_bits_to_f32(" : "_e5m2_bits_to_f32(");
+                statement.AppendArgument(fp8Lea.BasePtr);
+                statement.AppendIndexer(fp8Lea.Index);
+                statement.AppendCommand(")");
+                return;
+            }
+            if (IsFloat8PointerEmulated(load.Source.Type, out bool loadIsE4M3))
+            {
+                using var statement = BeginStatement(target);
+                statement.AppendCommand(loadIsE4M3 ? "_e4m3_bits_to_f32(" : "_e5m2_bits_to_f32(");
+                statement.AppendCommand(CLInstructions.DereferenceOperation);
+                statement.AppendArgument(address);
+                statement.AppendCommand(")");
+                return;
+            }
+
             using var statement2 = BeginStatement(target);
             statement2.AppendCommand(CLInstructions.DereferenceOperation);
             statement2.AppendArgument(address);
@@ -557,6 +577,26 @@ namespace ILGPU.Backends.OpenCL
                 return;
             }
 
+            // FP8 emulation: convert f32 -> fp8 bits (RNE) and store as raw uchar.
+            if (_fp8EmulatedLEAs.TryGetValue(address.ToString(), out var fp8StoreLea))
+            {
+                using var statement = BeginStatement(fp8StoreLea.BasePtr, fp8StoreLea.Index);
+                statement.AppendCommand(fp8StoreLea.IsE4M3 ? "_f32_to_e4m3_bits(" : "_f32_to_e5m2_bits(");
+                statement.AppendArgument(value);
+                statement.AppendCommand(")");
+                return;
+            }
+            if (IsFloat8PointerEmulated(store.Target.Type, out bool storeIsE4M3))
+            {
+                using var statement = BeginStatement(CLInstructions.DereferenceOperation);
+                statement.AppendArgument(address);
+                statement.AppendCommand(CLInstructions.AssignmentOperation);
+                statement.AppendCommand(storeIsE4M3 ? "_f32_to_e4m3_bits(" : "_f32_to_e5m2_bits(");
+                statement.AppendArgument(value);
+                statement.AppendCommand(")");
+                return;
+            }
+
             using var statement2 = BeginStatement(CLInstructions.DereferenceOperation);
             statement2.AppendArgument(address);
             statement2.AppendCommand(CLInstructions.AssignmentOperation);
@@ -573,6 +613,20 @@ namespace ILGPU.Backends.OpenCL
             type is PointerType ptr
             && ptr.ElementType is PrimitiveType pe
             && pe.BasicValueType == BasicValueType.BFloat16;
+
+        private static bool IsFloat8PointerEmulated(TypeNode type, out bool isE4M3)
+        {
+            isE4M3 = false;
+            if (type is PointerType ptr
+                && ptr.ElementType is PrimitiveType pe
+                && (pe.BasicValueType == BasicValueType.Float8E4M3
+                    || pe.BasicValueType == BasicValueType.Float8E5M2))
+            {
+                isE4M3 = pe.BasicValueType == BasicValueType.Float8E4M3;
+                return true;
+            }
+            return false;
+        }
 
         /// <summary cref="IBackendCodeGenerator.GenerateCode(LoadFieldAddress)"/>
         public void GenerateCode(LoadFieldAddress value)

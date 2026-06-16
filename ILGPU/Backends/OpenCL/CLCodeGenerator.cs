@@ -208,6 +208,10 @@ namespace ILGPU.Backends.OpenCL
         // ushort* buffers. Load/Store convert via _bf16_bits_to_f32 / _f32_to_bf16_bits helpers.
         internal readonly Dictionary<string, (Variable BasePtr, Variable Index)> _bf16EmulatedLEAs = new();
 
+        // FP8 emulation (always emulated - no native OpenCL fp8 type): tracks LEAs into uchar*
+        // buffers. Load/Store convert via _e4m3/_e5m2 helpers; IsE4M3 selects the format.
+        internal readonly Dictionary<string, (Variable BasePtr, Variable Index, bool IsE4M3)> _fp8EmulatedLEAs = new();
+
         private StringBuilder prefixBuilder = new StringBuilder();
         private StringBuilder suffixBuilder = new StringBuilder();
 
@@ -339,11 +343,14 @@ namespace ILGPU.Backends.OpenCL
         private readonly List<(string Name, BasicValueType Type)> _subWordScalarParams = new();
 
         /// <summary>True if <paramref name="param"/> is a by-value scalar of an EMULATED sub-word type
-        /// (bf16 always; Half when cl_khr_fp16 is absent) - the case whose storage (2 bytes) differs from
-        /// its OpenCL compute type (`float`, 4 bytes). Native-half scalars and full-width types are fine.</summary>
+        /// (bf16 + FP8 always; Half when cl_khr_fp16 is absent) - the case whose storage (1-2 bytes)
+        /// differs from its OpenCL compute type (`float`, 4 bytes). Native-half scalars and full-width
+        /// types are fine.</summary>
         private bool IsEmulatedSubWordScalarParam(Parameter param) =>
             param.ParameterType is ILGPU.IR.Types.PrimitiveType prim &&
             (prim.BasicValueType == BasicValueType.BFloat16 ||
+             prim.BasicValueType == BasicValueType.Float8E4M3 ||
+             prim.BasicValueType == BasicValueType.Float8E5M2 ||
              (prim.BasicValueType == BasicValueType.Float16 &&
               !TypeGenerator.Capabilities.Float16Native));
 
@@ -383,10 +390,13 @@ namespace ILGPU.Backends.OpenCL
                     // Conversions). Matches how bf16/Half buffer ELEMENTS are 2-byte storage + converted.
                     var bvt = ((ILGPU.IR.Types.PrimitiveType)param.ParameterType)
                         .BasicValueType;
-                    // Raw 16-bit storage as `ushort` for BOTH (the managed bf16/Half raw bits).
-                    // NVIDIA OpenCL rejects a `half` SCALAR arg without cl_khr_fp16, so use ushort +
-                    // the bit-conversion helpers (mirrors how the host packs 2 raw bytes for either).
-                    targetBuilder.Append("ushort");
+                    // Raw STORAGE under a raw name: `ushort` (2 bytes) for bf16/Half, `uchar` (1 byte)
+                    // for FP8 - matching the managed raw bits the host packs. NVIDIA OpenCL rejects a
+                    // `half` SCALAR arg without cl_khr_fp16, so all emulated sub-word scalars use an
+                    // integer storage type + the bit-conversion helpers.
+                    bool isFp8Scalar = bvt == BasicValueType.Float8E4M3
+                        || bvt == BasicValueType.Float8E5M2;
+                    targetBuilder.Append(isFp8Scalar ? "uchar" : "ushort");
                     targetBuilder.Append(' ');
                     targetBuilder.Append(variable.VariableName);
                     targetBuilder.Append(SubWordScalarRawSuffix);
@@ -420,6 +430,20 @@ namespace ILGPU.Backends.OpenCL
                 if (type == BasicValueType.BFloat16)
                 {
                     Builder.Append("_bf16_bits_to_f32(");
+                    Builder.Append(name);
+                    Builder.Append(SubWordScalarRawSuffix);
+                    Builder.Append(')');
+                }
+                else if (type == BasicValueType.Float8E4M3)
+                {
+                    Builder.Append("_e4m3_bits_to_f32(");
+                    Builder.Append(name);
+                    Builder.Append(SubWordScalarRawSuffix);
+                    Builder.Append(')');
+                }
+                else if (type == BasicValueType.Float8E5M2)
+                {
+                    Builder.Append("_e5m2_bits_to_f32(");
                     Builder.Append(name);
                     Builder.Append(SubWordScalarRawSuffix);
                     Builder.Append(')');
