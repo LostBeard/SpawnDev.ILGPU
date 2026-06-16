@@ -99,6 +99,26 @@ namespace ILGPU.IR.Construction
 <#              } else { #>
                         (BFloat16)(<#= op.GetOpOrCall(false, "(float)value.BFloat16Value") #>));
 <#              } #>
+                case BasicValueType.Float8E4M3:
+                    return CreatePrimitiveValue(
+                        location,
+<#              if (op.HasOp) { #>
+                        <#= op.GetOpOrCall(false, "value.Float8E4M3Value") #>);
+<#              } else if (op.IsPredicate) { #>
+                        <#= op.GetOpOrCall(false, "(float)value.Float8E4M3Value") #>);
+<#              } else { #>
+                        (Float8E4M3)(<#= op.GetOpOrCall(false, "(float)value.Float8E4M3Value") #>));
+<#              } #>
+                case BasicValueType.Float8E5M2:
+                    return CreatePrimitiveValue(
+                        location,
+<#              if (op.HasOp) { #>
+                        <#= op.GetOpOrCall(false, "value.Float8E5M2Value") #>);
+<#              } else if (op.IsPredicate) { #>
+                        <#= op.GetOpOrCall(false, "(float)value.Float8E5M2Value") #>);
+<#              } else { #>
+                        (Float8E5M2)(<#= op.GetOpOrCall(false, "(float)value.Float8E5M2Value") #>));
+<#              } #>
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -333,6 +353,22 @@ namespace ILGPU.IR.Construction
                         <#= op.GetOpOrCall(false, "left.BFloat16Value", "right.BFloat16Value") #>);
 <#              } else { #>
                         (BFloat16)(<#= op.GetOpOrCall(false, "(float)left.BFloat16Value", "(float)right.BFloat16Value") #>));
+<#              } #>
+                case BasicValueType.Float8E4M3:
+                    return CreatePrimitiveValue(
+                        location,
+<#              if (op.HasOp) { #>
+                        <#= op.GetOpOrCall(false, "left.Float8E4M3Value", "right.Float8E4M3Value") #>);
+<#              } else { #>
+                        (Float8E4M3)(<#= op.GetOpOrCall(false, "(float)left.Float8E4M3Value", "(float)right.Float8E4M3Value") #>));
+<#              } #>
+                case BasicValueType.Float8E5M2:
+                    return CreatePrimitiveValue(
+                        location,
+<#              if (op.HasOp) { #>
+                        <#= op.GetOpOrCall(false, "left.Float8E5M2Value", "right.Float8E5M2Value") #>);
+<#              } else { #>
+                        (Float8E5M2)(<#= op.GetOpOrCall(false, "(float)left.Float8E5M2Value", "(float)right.Float8E5M2Value") #>));
 <#              } #>
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(

@@ -35,7 +35,9 @@ namespace ILGPU.IR.Types
                 2,
                 4,
                 8,
-                2); // BFloat16 (appended at the end; 2-byte storage like Float16)
+                2, // BFloat16 (appended at the end; 2-byte storage like Float16)
+                1, // Float8E4M3 (appended; 1-byte storage)
+                1); // Float8E5M2 (appended; 1-byte storage)
 
         /// <summary>
         /// Maps integer-based type size values to <see cref="BasicValueType"/> entries.

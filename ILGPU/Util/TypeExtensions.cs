@@ -274,6 +274,8 @@ namespace ILGPU.Util
                 BasicValueType.Float32 => typeof(float),
                 BasicValueType.Float64 => typeof(double),
                 BasicValueType.BFloat16 => typeof(BFloat16),
+                BasicValueType.Float8E4M3 => typeof(Float8E4M3),
+                BasicValueType.Float8E5M2 => typeof(Float8E5M2),
                 _ => null,
             };
 
@@ -298,6 +300,8 @@ namespace ILGPU.Util
                 ArithmeticBasicValueType.UInt32 => typeof(int),
                 ArithmeticBasicValueType.UInt64 => typeof(long),
                 ArithmeticBasicValueType.BFloat16 => typeof(BFloat16),
+                ArithmeticBasicValueType.Float8E4M3 => typeof(Float8E4M3),
+                ArithmeticBasicValueType.Float8E5M2 => typeof(Float8E5M2),
                 _ => throw new ArgumentOutOfRangeException(nameof(type)),
             };
 
@@ -333,6 +337,10 @@ namespace ILGPU.Util
                         return BasicValueType.Float16;
                     if (type == typeof(BFloat16))
                         return BasicValueType.BFloat16;
+                    if (type == typeof(Float8E4M3))
+                        return BasicValueType.Float8E4M3;
+                    if (type == typeof(Float8E5M2))
+                        return BasicValueType.Float8E5M2;
                     return BasicValueType.None;
             }
         }
@@ -359,6 +367,8 @@ namespace ILGPU.Util
                 TypeCode.Double => ArithmeticBasicValueType.Float64,
                 _ => type == typeof(Half) ? ArithmeticBasicValueType.Float16
                     : type == typeof(BFloat16) ? ArithmeticBasicValueType.BFloat16
+                    : type == typeof(Float8E4M3) ? ArithmeticBasicValueType.Float8E4M3
+                    : type == typeof(Float8E5M2) ? ArithmeticBasicValueType.Float8E5M2
                     : ArithmeticBasicValueType.None
             };
 
@@ -394,6 +404,10 @@ namespace ILGPU.Util
                     return BasicValueType.Float64;
                 case ArithmeticBasicValueType.BFloat16:
                     return BasicValueType.BFloat16;
+                case ArithmeticBasicValueType.Float8E4M3:
+                    return BasicValueType.Float8E4M3;
+                case ArithmeticBasicValueType.Float8E5M2:
+                    return BasicValueType.Float8E5M2;
                 default:
                     return BasicValueType.None;
             }
@@ -429,6 +443,8 @@ namespace ILGPU.Util
                 BasicValueType.Float32 => ArithmeticBasicValueType.Float32,
                 BasicValueType.Float64 => ArithmeticBasicValueType.Float64,
                 BasicValueType.BFloat16 => ArithmeticBasicValueType.BFloat16,
+                BasicValueType.Float8E4M3 => ArithmeticBasicValueType.Float8E4M3,
+                BasicValueType.Float8E5M2 => ArithmeticBasicValueType.Float8E5M2,
                 _ => ArithmeticBasicValueType.None,
             };
 
@@ -456,6 +472,8 @@ namespace ILGPU.Util
                 ArithmeticBasicValueType.Float32 => ArithmeticBasicValueType.Float32,
                 ArithmeticBasicValueType.Float64 => ArithmeticBasicValueType.Float32,
                 ArithmeticBasicValueType.BFloat16 => ArithmeticBasicValueType.Float32,
+                ArithmeticBasicValueType.Float8E4M3 => ArithmeticBasicValueType.Float32,
+                ArithmeticBasicValueType.Float8E5M2 => ArithmeticBasicValueType.Float32,
                 _ => ArithmeticBasicValueType.None,
             };
 
@@ -501,6 +519,8 @@ namespace ILGPU.Util
                     return ArithmeticBasicValueType.UInt64;
                 case ArithmeticBasicValueType.Float16:
                 case ArithmeticBasicValueType.BFloat16:
+                case ArithmeticBasicValueType.Float8E4M3:
+                case ArithmeticBasicValueType.Float8E5M2:
                 case ArithmeticBasicValueType.Float32:
                     return ArithmeticBasicValueType.Float64;
                 default:
@@ -555,6 +575,8 @@ namespace ILGPU.Util
             {
                 case BasicValueType.Float16:
                 case BasicValueType.BFloat16:
+                case BasicValueType.Float8E4M3:
+                case BasicValueType.Float8E5M2:
                 case BasicValueType.Float32:
                 case BasicValueType.Float64:
                     return true;
@@ -576,6 +598,8 @@ namespace ILGPU.Util
             {
                 case ArithmeticBasicValueType.Float16:
                 case ArithmeticBasicValueType.BFloat16:
+                case ArithmeticBasicValueType.Float8E4M3:
+                case ArithmeticBasicValueType.Float8E5M2:
                 case ArithmeticBasicValueType.Float32:
                 case ArithmeticBasicValueType.Float64:
                     return true;

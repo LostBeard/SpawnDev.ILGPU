@@ -73,6 +73,34 @@ namespace ILGPU
 
         #endregion
 
+        #region Constants
+
+        /// <summary>Represents a positive zero value (0x00).</summary>
+        public static readonly Float8E5M2 Zero = new Float8E5M2(0x00);
+
+        /// <summary>Represents the value one (1.0). exp=15 (bias), mant=0 -&gt; 0x3C.</summary>
+        public static readonly Float8E5M2 One = new Float8E5M2(0x3C);
+
+        /// <summary>The smallest positive subnormal (2^-16, 0x01).</summary>
+        public static readonly Float8E5M2 Epsilon = new Float8E5M2(0x01);
+
+        /// <summary>The largest finite value (57344 = 1.75 * 2^15, exp=30 mant=3 -&gt; 0x7B).</summary>
+        public static readonly Float8E5M2 MaxValue = new Float8E5M2(0x7B);
+
+        /// <summary>The smallest finite value (-57344, 0xFB).</summary>
+        public static readonly Float8E5M2 MinValue = new Float8E5M2(0xFB);
+
+        /// <summary>Quiet NaN (exp all ones, top mantissa bit set -&gt; 0x7E).</summary>
+        public static readonly Float8E5M2 NaN = new Float8E5M2(0x7E);
+
+        /// <summary>Positive infinity (exp all ones, mant=0 -&gt; 0x7C).</summary>
+        public static readonly Float8E5M2 PositiveInfinity = new Float8E5M2(0x7C);
+
+        /// <summary>Negative infinity (0xFC).</summary>
+        public static readonly Float8E5M2 NegativeInfinity = new Float8E5M2(0xFC);
+
+        #endregion
+
         #region Instance
 
         /// <summary>Constructs a new E5M2 value from its raw 8-bit pattern.</summary>

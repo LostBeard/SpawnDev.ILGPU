@@ -63,6 +63,28 @@ namespace ILGPU
 
         #endregion
 
+        #region Constants
+
+        /// <summary>Represents a positive zero value (0x00).</summary>
+        public static readonly Float8E4M3 Zero = new Float8E4M3(0x00);
+
+        /// <summary>Represents the value one (1.0). exp=7 (bias), mant=0 -&gt; 0x38.</summary>
+        public static readonly Float8E4M3 One = new Float8E4M3(0x38);
+
+        /// <summary>The smallest positive subnormal (2^-9, 0x01).</summary>
+        public static readonly Float8E4M3 Epsilon = new Float8E4M3(0x01);
+
+        /// <summary>The largest finite value (448 = 1.75 * 2^8, exp=15 mant=6 -&gt; 0x7E). E4M3 has no Inf.</summary>
+        public static readonly Float8E4M3 MaxValue = new Float8E4M3(0x7E);
+
+        /// <summary>The smallest finite value (-448, 0xFE).</summary>
+        public static readonly Float8E4M3 MinValue = new Float8E4M3(0xFE);
+
+        /// <summary>The single NaN (exp all ones, mant all ones -&gt; 0x7F). E4M3 has no Inf.</summary>
+        public static readonly Float8E4M3 NaN = new Float8E4M3(0x7F);
+
+        #endregion
+
         #region Instance
 
         /// <summary>Constructs a new E4M3 value from its raw 8-bit pattern.</summary>

@@ -1,7 +1,9 @@
 using System;
+using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Threading.Tasks;
 using ILGPU;
+using ILGPU.Runtime;
 
 /// <summary>
 /// CPU verification of the FP8 conversion math (no kernel, pure managed) BEFORE wiring the IR
@@ -113,11 +115,102 @@ internal static class Float8Repro
         e4Fails += Check("E4M3 arith 1.5*2-0.5=2.5", (float)((Float8E4M3)1.5f * (Float8E4M3)2f - (Float8E4M3)0.5f) == 2.5f);
         Console.WriteLine(e4Fails == 0 ? "  E4M3 PASS" : $"  E4M3 FAIL: {e4Fails} problems");
 
-        int total = fails + e4Fails;
+        // ===================== CPU KERNEL (real IR + IL codegen path) =====================
+        // The managed conversion above is independently verified; now prove the SAME math runs
+        // through a real ILGPU kernel on the CPU backend (FP8 buffer load/store + in-kernel
+        // arithmetic + FP8 const + FP8<->f32 convert). The reference replays the identical managed
+        // FP8 ops, so a correct kernel matches BIT-EXACT (any divergence = a codegen bug).
+        Console.WriteLine("--- CPU kernel (generic INumber<T>, exact-match vs managed FP8 ops) ---");
+        int kFails = 0;
+        using (var context = Context.Create(b => b.Default()))
+        {
+            foreach (var dev in context)
+            {
+                if (dev.AcceleratorType != AcceleratorType.CPU)
+                    continue;
+                using var acc = dev.CreateAccelerator(context);
+                kFails += RunKernel<Float8E4M3>(acc, "E4M3", f => (Float8E4M3)f, v => (float)v);
+                kFails += RunKernel<Float8E5M2>(acc, "E5M2", f => (Float8E5M2)f, v => (float)v);
+            }
+        }
+
+        int total = fails + e4Fails + kFails;
         Console.WriteLine(total == 0
-            ? "=== FP8 PASS (E5M2 + E4M3 conversion verified) ==="
+            ? "=== FP8 PASS (E5M2 + E4M3 conversion + CPU kernel verified) ==="
             : $"=== FP8 FAIL: {total} problems ===");
         return Task.FromResult(total == 0 ? 0 : 1);
+    }
+
+    // y[i] = relu(x[i]*scale + bias), all in T's precision - exercises FP8 load/store, arithmetic,
+    // const emission, compare + select, and FP8<->f32 conversion inside the kernel.
+    private static void FusedReluGeneric<T>(Index1D i,
+        ArrayView1D<T, Stride1D.Dense> x, ArrayView1D<T, Stride1D.Dense> y, T scale, T bias)
+        where T : unmanaged, INumber<T>
+    {
+        T v = x[i] * scale + bias;
+        y[i] = v > T.Zero ? v : T.Zero;
+    }
+
+    private static int RunKernel<T>(Accelerator acc, string label, Func<float, T> toT, Func<T, float> toF)
+        where T : unmanaged, INumber<T>
+    {
+        const int n = 257;
+        var st = toT(1.5f);
+        var bt = toT(-0.25f);
+        var x = new T[n];
+        var expected = new T[n];
+        var rng = new Random(7);
+        for (int i = 0; i < n; i++)
+        {
+            float xf = (float)(rng.NextDouble() * 4 - 2);
+            T xt = toT(xf);
+            x[i] = xt;
+            // Replay the EXACT managed FP8 ops the kernel will run.
+            T v = xt * st + bt;
+            expected[i] = v > T.Zero ? v : T.Zero;
+        }
+
+        try
+        {
+            using var inBuf = acc.Allocate1D(x);
+            using var outBuf = acc.Allocate1D<T>(n);
+            var k = acc.LoadAutoGroupedStreamKernel<Index1D,
+                ArrayView1D<T, Stride1D.Dense>, ArrayView1D<T, Stride1D.Dense>, T, T>(FusedReluGeneric<T>);
+            k(n, inBuf.View, outBuf.View, st, bt);
+            acc.Synchronize();
+            var got = outBuf.GetAsArray1D();
+
+            int bad = 0, firstBad = -1;
+            for (int i = 0; i < n; i++)
+            {
+                float g = toF(got[i]), e = toF(expected[i]);
+                bool bothNaN = float.IsNaN(g) && float.IsNaN(e);
+                if (!bothNaN && g != e)
+                {
+                    if (bad == 0) firstBad = i;
+                    bad++;
+                }
+            }
+            if (bad == 0)
+            {
+                Console.WriteLine($"  {label}: OK ({n}/{n} bit-exact vs managed FP8 ops)");
+                return 0;
+            }
+            Console.WriteLine($"  {label}: WRONG {bad}/{n}, first@{firstBad} " +
+                $"got={toF(got[firstBad])} want={toF(expected[firstBad])}");
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  {label}: {ex.GetType().Name}: {ex.Message}");
+            var inner = ex.InnerException; int depth = 0;
+            while (inner != null && depth < 3)
+            {
+                Console.WriteLine($"     INNER[{depth}] {inner.GetType().Name}: {inner.Message}");
+                inner = inner.InnerException; depth++;
+            }
+            return 1;
+        }
     }
 
     private static float RefE4M3ToFloat(byte raw)

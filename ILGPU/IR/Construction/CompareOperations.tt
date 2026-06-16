@@ -74,6 +74,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(location, <#= operation.Prefix #>left.Float16Value<#= operation.Operation #>right.Float16Value<#= operation.Suffix #>);
                 case BasicValueType.BFloat16:
                     return CreatePrimitiveValue(location, <#= operation.Prefix #>left.BFloat16Value<#= operation.Operation #>right.BFloat16Value<#= operation.Suffix #>);
+                case BasicValueType.Float8E4M3:
+                    return CreatePrimitiveValue(location, <#= operation.Prefix #>(float)left.Float8E4M3Value<#= operation.Operation #>(float)right.Float8E4M3Value<#= operation.Suffix #>);
+                case BasicValueType.Float8E5M2:
+                    return CreatePrimitiveValue(location, <#= operation.Prefix #>(float)left.Float8E5M2Value<#= operation.Operation #>(float)right.Float8E5M2Value<#= operation.Suffix #>);
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(location, <#= operation.Prefix #>left.Float32Value<#= operation.Operation #>right.Float32Value<#= operation.Suffix #>);
                 case BasicValueType.Float64:

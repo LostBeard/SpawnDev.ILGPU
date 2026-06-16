@@ -202,7 +202,9 @@ namespace ILGPU.Backends.PTX
                 string.Empty, "pred",
                 "b8", "b16", "b32", "b64",
                 "f16", "f32", "f64",
-                "f32"); // BFloat16 (ordinal 9) - bf16 value held in an f32 register (storage uses literal b16)
+                "f32", // BFloat16 (ordinal 9) - bf16 value held in an f32 register (storage uses literal b16)
+                "f32", // Float8E4M3 (ordinal 10) - held in an f32 register (storage uses literal b8)
+                "f32"); // Float8E5M2 (ordinal 11) - held in an f32 register (storage uses literal b8)
 
         /// <summary>
         /// Maps basic types to constant-loading target basic types.
@@ -214,7 +216,9 @@ namespace ILGPU.Backends.PTX
                 BasicValueType.Int16, BasicValueType.Int16,
                 BasicValueType.Int32, BasicValueType.Int64,
                 BasicValueType.Int16, BasicValueType.Float32, BasicValueType.Float64,
-                BasicValueType.Float32); // BFloat16 (ordinal 9) - f32-register model (mov as f32)
+                BasicValueType.Float32, // BFloat16 (ordinal 9) - f32-register model (mov as f32)
+                BasicValueType.Float32, // Float8E4M3 (ordinal 10) - f32-register model
+                BasicValueType.Float32); // Float8E5M2 (ordinal 11) - f32-register model
 
         /// <summary>
         /// Maps basic types to constant-loading target basic types.
@@ -226,7 +230,9 @@ namespace ILGPU.Backends.PTX
                 BasicValueType.Int8, BasicValueType.Int16,
                 BasicValueType.Int32, BasicValueType.Int64,
                 BasicValueType.Int16, BasicValueType.Float32, BasicValueType.Float64,
-                BasicValueType.Int16); // BFloat16 (ordinal 9) - placeholder (Phase 3)
+                BasicValueType.Int16, // BFloat16 (ordinal 9) - placeholder (Phase 3)
+                BasicValueType.Int8, // Float8E4M3 (ordinal 10) - 1-byte storage IO
+                BasicValueType.Int8); // Float8E5M2 (ordinal 11) - 1-byte storage IO
 
         /// <summary>
         /// Resolves the PTX suffix for the given basic value type.

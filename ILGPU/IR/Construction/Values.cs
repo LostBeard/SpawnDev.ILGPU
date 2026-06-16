@@ -95,6 +95,10 @@ namespace ILGPU.IR.Construction
                     CreatePrimitiveValue(location, (Half)value),
                 ArithmeticBasicValueType.BFloat16 =>
                     CreatePrimitiveValue(location, (BFloat16)value),
+                ArithmeticBasicValueType.Float8E4M3 =>
+                    CreatePrimitiveValue(location, (Float8E4M3)value),
+                ArithmeticBasicValueType.Float8E5M2 =>
+                    CreatePrimitiveValue(location, (Float8E5M2)value),
                 ArithmeticBasicValueType.Float32 =>
                     CreatePrimitiveValue(location, (float)value),
                 ArithmeticBasicValueType.Float64 =>
@@ -255,6 +259,30 @@ namespace ILGPU.IR.Construction
                 value.RawValue));
 
         /// <summary>
+        /// Creates a primitive <see cref="Float8E4M3"/> value.
+        /// </summary>
+        /// <param name="location">The current location.</param>
+        /// <param name="value">The value.</param>
+        /// <returns>The created primitive value.</returns>
+        public PrimitiveValue CreatePrimitiveValue(Location location, Float8E4M3 value) =>
+            Append(new PrimitiveValue(
+                GetInitializer(location),
+                BasicValueType.Float8E4M3,
+                value.RawValue));
+
+        /// <summary>
+        /// Creates a primitive <see cref="Float8E5M2"/> value.
+        /// </summary>
+        /// <param name="location">The current location.</param>
+        /// <param name="value">The value.</param>
+        /// <returns>The created primitive value.</returns>
+        public PrimitiveValue CreatePrimitiveValue(Location location, Float8E5M2 value) =>
+            Append(new PrimitiveValue(
+                GetInitializer(location),
+                BasicValueType.Float8E5M2,
+                value.RawValue));
+
+        /// <summary>
         /// Creates a primitive <see cref="float"/> value.
         /// </summary>
         /// <param name="location">The current location.</param>
@@ -342,6 +370,16 @@ namespace ILGPU.IR.Construction
                         value == null
                         ? BFloat16.Zero
                         : (BFloat16)value),
+                ArithmeticBasicValueType.Float8E4M3 =>
+                    CreatePrimitiveValue(location,
+                        value == null
+                        ? Float8E4M3.Zero
+                        : (Float8E4M3)value),
+                ArithmeticBasicValueType.Float8E5M2 =>
+                    CreatePrimitiveValue(location,
+                        value == null
+                        ? Float8E5M2.Zero
+                        : (Float8E5M2)value),
                 ArithmeticBasicValueType.Float32 =>
                     CreatePrimitiveValue(location, Convert.ToSingle(value)),
                 ArithmeticBasicValueType.Float64 =>

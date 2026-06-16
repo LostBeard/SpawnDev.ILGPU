@@ -43,7 +43,9 @@ namespace ILGPU.IR.Types
                 BasicValueType.Float16,
                 BasicValueType.Float32,
                 BasicValueType.Float64,
-                BasicValueType.BFloat16);
+                BasicValueType.BFloat16,
+                BasicValueType.Float8E4M3,
+                BasicValueType.Float8E5M2);
 
         /// <summary>
         /// Returns true if the given basic value type can be used in combination with
@@ -193,6 +195,8 @@ namespace ILGPU.IR.Types
             switch (basicValueType)
             {
                 case BasicValueType.Int8:
+                case BasicValueType.Float8E4M3:
+                case BasicValueType.Float8E5M2:
                     return Padding8Type;
 
                 case BasicValueType.Int16:

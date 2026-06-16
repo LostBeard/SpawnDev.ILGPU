@@ -82,6 +82,34 @@ namespace ILGPU.Backends.IL
                     null)
                 .AsNotNull();
 
+        /// <summary>
+        /// Stores the constructor of the <see cref="Float8E4M3"/> type.
+        /// </summary>
+        private static readonly ConstructorInfo Float8E4M3Constructor =
+            typeof(Float8E4M3).GetConstructor(
+                    BindingFlags.NonPublic | BindingFlags.CreateInstance,
+                    null,
+                    new Type[]
+                    {
+                        typeof(byte)
+                    },
+                    null)
+                .AsNotNull();
+
+        /// <summary>
+        /// Stores the constructor of the <see cref="Float8E5M2"/> type.
+        /// </summary>
+        private static readonly ConstructorInfo Float8E5M2Constructor =
+            typeof(Float8E5M2).GetConstructor(
+                    BindingFlags.NonPublic | BindingFlags.CreateInstance,
+                    null,
+                    new Type[]
+                    {
+                        typeof(byte)
+                    },
+                    null)
+                .AsNotNull();
+
         #endregion
 
         #region Methods
@@ -141,6 +169,22 @@ namespace ILGPU.Backends.IL
                     emitter.EmitConstant(value.BFloat16Value.RawValue);
                     emitter.EmitNewObject(BFloat16Constructor);
                     emitter.Emit(LocalOperation.Load, temporaryBFloat16);
+                    break;
+                case BasicValueType.Float8E4M3:
+                    // Allocate a temporary variable and invoke the E4M3 constructor
+                    var temporaryE4M3 = emitter.DeclareLocal(typeof(Float8E4M3));
+                    emitter.Emit(LocalOperation.LoadAddress, temporaryE4M3);
+                    emitter.EmitConstant(value.Float8E4M3Value.RawValue);
+                    emitter.EmitNewObject(Float8E4M3Constructor);
+                    emitter.Emit(LocalOperation.Load, temporaryE4M3);
+                    break;
+                case BasicValueType.Float8E5M2:
+                    // Allocate a temporary variable and invoke the E5M2 constructor
+                    var temporaryE5M2 = emitter.DeclareLocal(typeof(Float8E5M2));
+                    emitter.Emit(LocalOperation.LoadAddress, temporaryE5M2);
+                    emitter.EmitConstant(value.Float8E5M2Value.RawValue);
+                    emitter.EmitNewObject(Float8E5M2Constructor);
+                    emitter.Emit(LocalOperation.Load, temporaryE5M2);
                     break;
                 case BasicValueType.Float32:
                     emitter.EmitConstant(value.Float32Value);

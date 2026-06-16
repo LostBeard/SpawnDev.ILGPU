@@ -64,6 +64,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(location, left.Float16Value == right.Float16Value);
                 case BasicValueType.BFloat16:
                     return CreatePrimitiveValue(location, left.BFloat16Value == right.BFloat16Value);
+                case BasicValueType.Float8E4M3:
+                    return CreatePrimitiveValue(location, (float)left.Float8E4M3Value == (float)right.Float8E4M3Value);
+                case BasicValueType.Float8E5M2:
+                    return CreatePrimitiveValue(location, (float)left.Float8E5M2Value == (float)right.Float8E5M2Value);
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(location, left.Float32Value == right.Float32Value);
                 case BasicValueType.Float64:
@@ -110,6 +114,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(location, left.Float16Value != right.Float16Value);
                 case BasicValueType.BFloat16:
                     return CreatePrimitiveValue(location, left.BFloat16Value != right.BFloat16Value);
+                case BasicValueType.Float8E4M3:
+                    return CreatePrimitiveValue(location, (float)left.Float8E4M3Value != (float)right.Float8E4M3Value);
+                case BasicValueType.Float8E5M2:
+                    return CreatePrimitiveValue(location, (float)left.Float8E5M2Value != (float)right.Float8E5M2Value);
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(location, left.Float32Value != right.Float32Value);
                 case BasicValueType.Float64:
@@ -156,6 +164,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(location, left.Float16Value < right.Float16Value);
                 case BasicValueType.BFloat16:
                     return CreatePrimitiveValue(location, left.BFloat16Value < right.BFloat16Value);
+                case BasicValueType.Float8E4M3:
+                    return CreatePrimitiveValue(location, (float)left.Float8E4M3Value < (float)right.Float8E4M3Value);
+                case BasicValueType.Float8E5M2:
+                    return CreatePrimitiveValue(location, (float)left.Float8E5M2Value < (float)right.Float8E5M2Value);
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(location, left.Float32Value < right.Float32Value);
                 case BasicValueType.Float64:
@@ -200,6 +212,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(location, left.Float16Value <= right.Float16Value);
                 case BasicValueType.BFloat16:
                     return CreatePrimitiveValue(location, left.BFloat16Value <= right.BFloat16Value);
+                case BasicValueType.Float8E4M3:
+                    return CreatePrimitiveValue(location, (float)left.Float8E4M3Value <= (float)right.Float8E4M3Value);
+                case BasicValueType.Float8E5M2:
+                    return CreatePrimitiveValue(location, (float)left.Float8E5M2Value <= (float)right.Float8E5M2Value);
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(location, left.Float32Value <= right.Float32Value);
                 case BasicValueType.Float64:
@@ -244,6 +260,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(location, left.Float16Value > right.Float16Value);
                 case BasicValueType.BFloat16:
                     return CreatePrimitiveValue(location, left.BFloat16Value > right.BFloat16Value);
+                case BasicValueType.Float8E4M3:
+                    return CreatePrimitiveValue(location, (float)left.Float8E4M3Value > (float)right.Float8E4M3Value);
+                case BasicValueType.Float8E5M2:
+                    return CreatePrimitiveValue(location, (float)left.Float8E5M2Value > (float)right.Float8E5M2Value);
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(location, left.Float32Value > right.Float32Value);
                 case BasicValueType.Float64:
@@ -288,6 +308,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(location, left.Float16Value >= right.Float16Value);
                 case BasicValueType.BFloat16:
                     return CreatePrimitiveValue(location, left.BFloat16Value >= right.BFloat16Value);
+                case BasicValueType.Float8E4M3:
+                    return CreatePrimitiveValue(location, (float)left.Float8E4M3Value >= (float)right.Float8E4M3Value);
+                case BasicValueType.Float8E5M2:
+                    return CreatePrimitiveValue(location, (float)left.Float8E5M2Value >= (float)right.Float8E5M2Value);
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(location, left.Float32Value >= right.Float32Value);
                 case BasicValueType.Float64:

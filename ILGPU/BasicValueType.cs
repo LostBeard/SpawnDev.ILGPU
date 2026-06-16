@@ -66,6 +66,18 @@ namespace ILGPU
         /// ordinals (and the positional type tables indexed by them) are unchanged.
         /// </summary>
         BFloat16,
+
+        /// <summary>
+        /// Represents an 8-bit float in OCP E4M3 (E4M3FN) layout. Appended at the end so
+        /// existing ordinals (and the positional type tables indexed by them) are unchanged.
+        /// </summary>
+        Float8E4M3,
+
+        /// <summary>
+        /// Represents an 8-bit float in OCP E5M2 layout. Appended at the end so existing
+        /// ordinals (and the positional type tables indexed by them) are unchanged.
+        /// </summary>
+        Float8E5M2,
     }
 
     /// <summary>
@@ -143,5 +155,17 @@ namespace ILGPU
         /// ordinals are unchanged.
         /// </summary>
         BFloat16,
+
+        /// <summary>
+        /// Represents an 8-bit float in OCP E4M3 (E4M3FN) layout. Appended at the end so
+        /// existing ordinals are unchanged.
+        /// </summary>
+        Float8E4M3,
+
+        /// <summary>
+        /// Represents an 8-bit float in OCP E5M2 layout. Appended at the end so existing
+        /// ordinals are unchanged.
+        /// </summary>
+        Float8E5M2,
     }
 }
