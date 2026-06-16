@@ -97,6 +97,26 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // (views, scalars) have no variant operand ⇒ stay invariant (uniform across lanes).
             laneVariant.Add(indexParam);
 
+            // ALSO seed the thread-POSITION intrinsics — a kernel can read its per-lane id directly
+            // via Grid.GlobalIndex / Group.Idx / Grid.Idx / LaneIdx instead of the Index1D parameter
+            // (e.g. an explicitly-grouped kernel). These differ across the 4 consecutive lanes of a
+            // by-4 warp, so they are lane-VARIANT and MUST seed the fixpoint. Missing them silently
+            // classified a whole kernel as lane-uniform → the emitter produced an all-scalar
+            // `kernel_simd` that the by-4 dispatch ran once per 4 threads, SKIPPING 3 of every 4
+            // (GridGroupDimension regression, 2026-06-16). Group/Grid index are seeded conservatively
+            // (Grid.Idx is uniform within a group but a 4-lane warp can straddle a group boundary).
+            foreach (var v in allValues)
+            {
+                switch (v.ValueKind)
+                {
+                    case ValueKind.GridIndex:   // Grid.Idx (group index)
+                    case ValueKind.GroupIndex:  // Group.Idx (per-lane thread id within the group)
+                    case ValueKind.LaneIdx:     // per-lane warp lane id
+                        laneVariant.Add(v);
+                        break;
+                }
+            }
+
             bool changed = true;
             while (changed)
             {

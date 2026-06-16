@@ -37,6 +37,10 @@ try
     if (args.Length > 0 && args[0] == "wasm-simd-emit-gate")
         return await WasmSimdEmitGateProbe.Run(args);
 
+    // Offline dump of GridGroupDimensionKernel Wasm (debug the explicit-KernelConfig GlobalIndex bug).
+    if (args.Length > 0 && args[0] == "wasm-gridgroup-dump")
+        return await WasmGridGroupDumpProbe.Run(args);
+
     // Offline WGSL generation probe (precompiled-shaders Layer 1). No device/browser.
     if (args.Length > 0 && args[0] == "shader-gen")
         return await ShaderGenDump.Run();

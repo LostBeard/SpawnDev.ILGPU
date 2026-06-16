@@ -737,6 +737,54 @@ namespace SpawnDev.ILGPU.Wasm
             wasmAccel._pendingWork.Add(task);
         }
 
+        /// <summary>
+        /// Enqueues a device-to-device (Wasm-to-Wasm) buffer copy into the serialized work stream so it
+        /// runs AFTER any producing kernel - the order-preserving path for sync <c>CopyFrom</c> on Wasm
+        /// (the worker pool is not a single ordered queue, so an immediate SharedArrayBuffer copy would
+        /// read stale data). Mirrors the dispatch enqueue (<see cref="RunKernelAsync"/> awaits
+        /// <see cref="_pendingWork"/> before each dispatch): the copy task awaits the CURRENT pending
+        /// work snapshot (the producers), then does the immediate SAB copy; the task is added to
+        /// <see cref="_pendingWork"/> so the next dispatch / <see cref="SynchronizeAsync"/> waits for it.
+        /// Non-blocking: returns immediately. Bounds were validated synchronously by the caller
+        /// (<see cref="WasmMemoryBuffer.CopyFromBufferOrdered"/>).
+        /// </summary>
+        internal void EnqueueOrderedDeviceCopy(
+            WasmMemoryBuffer target,
+            WasmMemoryBuffer source,
+            long sourceOffsetInBytes,
+            long targetOffsetInBytes,
+            long lengthInBytes)
+        {
+            if (_disposed)
+                throw new ObjectDisposedException(nameof(WasmAccelerator));
+
+            // Snapshot the producers this copy must follow, then make copyTask SUBSUME them: it awaits
+            // the snapshot at its first (synchronous) await before we mutate _pendingWork below, exactly
+            // like RunKernelAsync's serialize-and-clear step. Replacing _pendingWork with [copyTask]
+            // bounds the list (a run of pure copies with no intervening dispatch won't accumulate) while
+            // preserving order — a later dispatch / SynchronizeAsync awaits copyTask, which awaits prior.
+            Task[] prior = _pendingWork.Count > 0 ? _pendingWork.ToArray() : System.Array.Empty<Task>();
+            var copyTask = OrderedDeviceCopyAsync(
+                prior, target, source, sourceOffsetInBytes, targetOffsetInBytes, lengthInBytes);
+            _pendingWork.Clear();
+            _pendingWork.Add(copyTask);
+        }
+
+        private static async Task OrderedDeviceCopyAsync(
+            Task[] prior,
+            WasmMemoryBuffer target,
+            WasmMemoryBuffer source,
+            long sourceOffsetInBytes,
+            long targetOffsetInBytes,
+            long lengthInBytes)
+        {
+            if (prior.Length > 0)
+                await Task.WhenAll(prior);
+            // Producer(s) done -> the source SharedArrayBuffer now holds final data. Immediate SAB copy.
+            target.CopyFromBufferCoreImmediate(
+                source, sourceOffsetInBytes, targetOffsetInBytes, lengthInBytes);
+        }
+
         private async Task RunKernelAsync(
             WasmCompiledKernel compiledKernel,
             object dimension,

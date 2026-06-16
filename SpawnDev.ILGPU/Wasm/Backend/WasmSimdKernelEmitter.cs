@@ -48,6 +48,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// <summary>True iff a valid `kernel_simd` was emitted (⇒ dispatch may run it by-4 + scalar tail).</summary>
         internal bool HasSimdKernel;
 
+        /// <summary>Count of lane-variant v128 STORES emitted in the current SIMD pass. MUST be &gt; 0 for a
+        /// valid `kernel_simd`: the by-4 dispatch runs `kernel_simd(i)` once per 4 threads, so if the body
+        /// has NO per-lane v128 store it would process only lane i and SKIP i+1..i+3. A kernel the analysis
+        /// classified as all-lane-uniform produces zero v128 stores → it must bail to the scalar path
+        /// (which runs every thread). Guards against any analysis under-detection of lane variance.</summary>
+        private int _simdV128StoreCount;
+
         /// <summary>
         /// Attempts to emit the additive v128 <c>kernel_simd</c> for the Stage-3a f32 unit-stride
         /// elementwise class. Saves/clears/restores the generator's local+Code context so the
@@ -98,12 +105,22 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 _nextLocalIndex = (uint)_paramCount;
                 _localFirstState.Clear();
                 _localCrossesState.Clear();
+                _simdV128StoreCount = 0;
 
                 foreach (var v in block)
                 {
                     if (!EmitSimdValue(v, laneVariant))
                         return false; // (finally restores; ok stays false)
                 }
+
+                // SAFETY: a valid kernel_simd MUST contain at least one lane-variant v128 store. If the
+                // analysis under-detected variance (e.g. a thread-position intrinsic it failed to seed),
+                // every value would be emitted scalar and kernel_simd would have NO v128 store — then the
+                // by-4 dispatch (kernel_simd(i), i+=4) would process only lane i and silently skip
+                // i+1..i+3. Bail to the always-correct scalar path instead.
+                if (_simdV128StoreCount == 0)
+                    return false; // (finally restores)
+
                 if (block.Terminator != null)
                     GenerateCodeFor(block.Terminator); // ReturnTerminator — lane-uniform
                 WasmModuleBuilder.EmitI32Const(Code, 0); // i32 return (0 = done), matches scalar
@@ -212,6 +229,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     EmitGetLocal(st.Target.Resolve());                 // scalar lane-base byte address
                     if (!PushAsV128(storeVal, laneVariant)) return false;
                     WasmModuleBuilder.EmitSimdMem(Code, WasmOpCodes.V128Store, 2, 0);
+                    _simdV128StoreCount++;                             // real per-lane vector work emitted
                     return true;
                 }
                 default:

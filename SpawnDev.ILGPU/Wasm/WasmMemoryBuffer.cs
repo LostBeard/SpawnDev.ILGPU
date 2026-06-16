@@ -517,9 +517,43 @@ namespace SpawnDev.ILGPU.Wasm
         }
 
         /// <summary>
-        /// Copies data from the source buffer to this buffer.
-        /// Handles Wasm-to-Wasm copies via SharedArrayBuffer directly,
-        /// bypassing Marshal.Copy which requires native pointers.
+        /// ORDER-PRESERVING device-to-device copy entry (overrides <see cref="MemoryBuffer.CopyFromBufferOrdered"/>).
+        /// A genuine Wasm-to-Wasm device copy is ENQUEUED into the accelerator's serialized work stream
+        /// so it runs AFTER any producing kernel - the worker pool is not a single ordered queue, so an
+        /// IMMEDIATE SharedArrayBuffer copy would read stale data (the device-copy ordering race). The
+        /// call returns immediately (non-blocking, like WebGPU's queued CopyBufferToBuffer); the bytes
+        /// are guaranteed after the next dependent dispatch (RunKernelAsync awaits _pendingWork) or
+        /// <see cref="WasmAccelerator.SynchronizeAsync"/>. Bounds are validated SYNCHRONOUSLY here so bad
+        /// args throw at the call site, not inside the deferred task. A host&lt;-&gt;device copy
+        /// (non-Wasm source = a CPU staging buffer) is not a kernel-ordering race, so it copies
+        /// immediately via <see cref="CopyFromBufferCore"/>.
+        /// </summary>
+        protected override void CopyFromBufferOrdered(
+            AcceleratorStream stream,
+            MemoryBuffer sourceBuffer,
+            long sourceOffsetInBytes,
+            long targetOffsetInBytes,
+            long lengthInBytes)
+        {
+            if (sourceBuffer is WasmMemoryBuffer wasmSource && Accelerator is WasmAccelerator wasmAccel)
+            {
+                ValidateBufferCopyBounds(wasmSource, sourceOffsetInBytes, targetOffsetInBytes, lengthInBytes);
+                wasmAccel.EnqueueOrderedDeviceCopy(
+                    this, wasmSource, sourceOffsetInBytes, targetOffsetInBytes, lengthInBytes);
+                return;
+            }
+            // Host<->device (non-Wasm source): no kernel-ordering race - copy immediately.
+            CopyFromBufferCore(
+                stream, sourceBuffer, sourceOffsetInBytes, targetOffsetInBytes, lengthInBytes);
+        }
+
+        /// <summary>
+        /// IMMEDIATE device-to-device copy primitive (Wasm-to-Wasm via SharedArrayBuffer TypedArray,
+        /// bypassing Marshal.Copy which needs native pointers). Reached ONLY when the producer is
+        /// already known complete: the post-drain path (<see cref="MemoryBuffer.CopyFromBufferAfterDrain"/>,
+        /// used by <c>CopyFromAsync</c> / <c>CopyFromUnchecked</c>) and the deferred ordered task in
+        /// <see cref="WasmAccelerator.EnqueueOrderedDeviceCopy"/>. Sync <c>CopyFrom</c> does NOT reach
+        /// here directly - it routes through <see cref="CopyFromBufferOrdered"/> which enqueues instead.
         /// </summary>
         protected override void CopyFromBufferCore(
             AcceleratorStream stream,
@@ -530,13 +564,7 @@ namespace SpawnDev.ILGPU.Wasm
         {
             if (sourceBuffer is WasmMemoryBuffer wasmSource)
             {
-                // Bounds validation
-                if (sourceOffsetInBytes + lengthInBytes > wasmSource.SharedBuffer.ByteLength)
-                    throw new ArgumentOutOfRangeException(nameof(sourceOffsetInBytes),
-                        $"Source copy range [{sourceOffsetInBytes}, {sourceOffsetInBytes + lengthInBytes}) exceeds source buffer size {wasmSource.SharedBuffer.ByteLength}");
-                if (targetOffsetInBytes + lengthInBytes > SharedBuffer.ByteLength)
-                    throw new ArgumentOutOfRangeException(nameof(targetOffsetInBytes),
-                        $"Target copy range [{targetOffsetInBytes}, {targetOffsetInBytes + lengthInBytes}) exceeds target buffer size {SharedBuffer.ByteLength}");
+                ValidateBufferCopyBounds(wasmSource, sourceOffsetInBytes, targetOffsetInBytes, lengthInBytes);
 
                 // Wasm-to-Wasm: copy between SharedArrayBuffers via JS TypedArray
                 using var srcView = new Uint8Array(
@@ -554,6 +582,27 @@ namespace SpawnDev.ILGPU.Wasm
             base.CopyFromBufferCore(
                 stream, sourceBuffer,
                 sourceOffsetInBytes, targetOffsetInBytes, lengthInBytes);
+        }
+
+        /// <summary>Immediate device-to-device copy invoked by the deferred ordered task in
+        /// <see cref="WasmAccelerator.EnqueueOrderedDeviceCopy"/> once the producer has drained.
+        /// Internal so the accelerator can reach the protected <see cref="CopyFromBufferCore"/>.</summary>
+        internal void CopyFromBufferCoreImmediate(
+            MemoryBuffer source, long sourceOffsetInBytes, long targetOffsetInBytes, long lengthInBytes)
+            => CopyFromBufferCore(
+                Accelerator.DefaultStream, source, sourceOffsetInBytes, targetOffsetInBytes, lengthInBytes);
+
+        /// <summary>Validates a Wasm-to-Wasm copy range against both SharedArrayBuffer sizes. Run
+        /// synchronously at the sync call site so out-of-range args throw there, not in a deferred task.</summary>
+        private void ValidateBufferCopyBounds(
+            WasmMemoryBuffer wasmSource, long sourceOffsetInBytes, long targetOffsetInBytes, long lengthInBytes)
+        {
+            if (sourceOffsetInBytes + lengthInBytes > wasmSource.SharedBuffer.ByteLength)
+                throw new ArgumentOutOfRangeException(nameof(sourceOffsetInBytes),
+                    $"Source copy range [{sourceOffsetInBytes}, {sourceOffsetInBytes + lengthInBytes}) exceeds source buffer size {wasmSource.SharedBuffer.ByteLength}");
+            if (targetOffsetInBytes + lengthInBytes > SharedBuffer.ByteLength)
+                throw new ArgumentOutOfRangeException(nameof(targetOffsetInBytes),
+                    $"Target copy range [{targetOffsetInBytes}, {targetOffsetInBytes + lengthInBytes}) exceeds target buffer size {SharedBuffer.ByteLength}");
         }
 
         // ── Resident-count diagnostics (2026-06-14) ──

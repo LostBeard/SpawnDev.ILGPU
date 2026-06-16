@@ -323,13 +323,16 @@ namespace ILGPU.Runtime
         /// <param name="targetOffsetInBytes">Byte offset within this buffer.</param>
         /// <param name="lengthInBytes">Number of bytes to copy.</param>
         /// <summary>
-        /// SYNCHRONOUS device-to-device buffer copy. Guarded entry point: throws on the
-        /// async-only browser backends (<see cref="Accelerator.RequiresAsyncDeviceCopy"/>) where a
-        /// sync device copy cannot be ordered against a producing kernel (it would read stale data -
-        /// e.g. the Wasm worker pool copying a buffer a still-running kernel is mid-write to). Use
-        /// the async <c>CopyFromAsync</c> path on those backends; it drains first and routes through
-        /// <see cref="CopyFromBufferAfterDrain"/>. Desktop (CPU/CUDA/OpenCL) orders sync device
-        /// copies correctly, so this is a direct passthrough there.
+        /// SYNCHRONOUS device-to-device buffer copy. Routes through <see cref="CopyFromBufferOrdered"/>
+        /// so every backend maintains operation order WITHOUT requiring the caller to await:
+        /// desktop (CPU/CUDA/OpenCL) copies immediately (already ordered on the stream); WebGPU/WebGL
+        /// record a queue-ordered <c>CopyBufferToBuffer</c> after any producing dispatch; Wasm ENQUEUES
+        /// the copy into its serialized work stream so it runs AFTER the producing kernel (the worker
+        /// pool is not a single ordered queue, so an immediate copy would read stale data - the bug
+        /// this routing fixes). In every case the copy is ordered; only WAITING for completion is async
+        /// (<c>SynchronizeAsync</c> / a dependent dispatch), exactly like WebGPU. <c>CopyFromAsync</c>
+        /// remains an optional convenience that drains the producer eagerly, but sync <c>CopyFrom</c>
+        /// is now correct on browser too.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         protected internal void CopyFromBuffer(
@@ -339,21 +342,29 @@ namespace ILGPU.Runtime
             long targetOffsetInBytes,
             long lengthInBytes)
         {
-            // Guard only GENUINE device-to-device copies on the async-only browser backends, where
-            // the source buffer may be mid-write by a producing kernel the sync copy cannot be
-            // ordered against (Wasm worker pool). Host<->device transfers (one side is a
-            // CPUMemoryBuffer staging buffer) are NOT a kernel-ordering race and stay allowed.
-            if (Accelerator.RequiresAsyncDeviceCopy &&
-                sourceBuffer.Accelerator.RequiresAsyncDeviceCopy)
-            {
-                throw new NotSupportedException(
-                    "Synchronous device-to-device CopyFrom/CopyTo is desktop-only (CPU/CUDA/OpenCL). " +
-                    "On the browser backends (Wasm/WebGPU/WebGL) it cannot be ordered against a " +
-                    "producing kernel and would silently read stale data - use `await CopyFromAsync(...)`; " +
-                    "the async form drains the producer first. Library code that orders the copy by " +
-                    "other means (queue order / an explicit drain) may use CopyFromBufferAfterDrain. " +
-                    "Browser backends are async-only at the GPU boundary (same reason Synchronize() throws).");
-            }
+            CopyFromBufferOrdered(
+                stream, sourceBuffer, sourceOffsetInBytes, targetOffsetInBytes, lengthInBytes);
+        }
+
+        /// <summary>
+        /// ORDER-PRESERVING device-to-device copy entry. The default performs the copy immediately via
+        /// <see cref="CopyFromBufferCore"/> - correct for desktop (stream-ordered) and WebGPU/WebGL
+        /// (their Core records a queue-ordered <c>CopyBufferToBuffer</c>). The Wasm backend overrides
+        /// this to ENQUEUE the copy into its serialized work stream (so it runs after the producing
+        /// kernel) instead of copying the SharedArrayBuffer immediately - the fix for the Wasm
+        /// device-copy ordering race. Non-blocking on every backend: it never waits for completion (the
+        /// single Blazor thread can't block); completion is observed at the next dependent dispatch or
+        /// <c>SynchronizeAsync</c>. Host&lt;-&gt;device transfers (a CPU staging buffer on one side) are
+        /// not a kernel-ordering race and copy immediately on every backend.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        protected internal virtual void CopyFromBufferOrdered(
+            AcceleratorStream stream,
+            MemoryBuffer sourceBuffer,
+            long sourceOffsetInBytes,
+            long targetOffsetInBytes,
+            long lengthInBytes)
+        {
             CopyFromBufferCore(
                 stream, sourceBuffer, sourceOffsetInBytes, targetOffsetInBytes, lengthInBytes);
         }

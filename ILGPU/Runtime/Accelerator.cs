@@ -306,15 +306,17 @@ namespace ILGPU.Runtime
         }
 
         /// <summary>
-        /// True if this accelerator is async-only at the GPU boundary, so a SYNCHRONOUS
-        /// device-to-device buffer copy (sync <c>CopyFrom</c>/<c>CopyTo</c> between two device
-        /// buffers) cannot be ordered against a producing kernel and must instead go through the
-        /// async <c>CopyFromAsync</c>/<c>CopyToHostAsync</c> path (which drains first). False on the
-        /// desktop backends (CPU/CUDA/OpenCL), where a sync device copy is correctly ordered.
-        /// True on the browser backends (Wasm/WebGPU/WebGL) - mirrors the same reason
-        /// <see cref="Synchronize"/> throws there. The sync device-copy entry point throws when this
-        /// is true so the misuse is loud instead of a silent stale read (e.g. the Wasm worker pool
-        /// returning a buffer a still-running kernel is mid-write to).
+        /// Informational capability flag: true if this accelerator's device-to-device buffer copies
+        /// are DEFERRED (queue-ordered / enqueued) rather than completed immediately when sync
+        /// <c>CopyFrom</c>/<c>CopyTo</c> returns. On the browser backends (Wasm/WebGPU/WebGL) a device
+        /// copy is ordered after any producing kernel but does not finish synchronously - the bytes are
+        /// guaranteed only after the next dependent dispatch or <c>SynchronizeAsync</c> (the single
+        /// Blazor thread cannot block to wait). False on the desktop backends (CPU/CUDA/OpenCL), where
+        /// a sync device copy completes immediately. Sync <c>CopyFrom</c> is ORDERED and correct on
+        /// every backend (see <see cref="MemoryBuffer.CopyFromBufferOrdered"/>); this flag only tells a
+        /// caller whether the bytes are guaranteed to have landed the instant the call returns (desktop)
+        /// or at the next drain (browser). A caller that needs the copy completed before reading the
+        /// destination on the host should use the async readback (<c>CopyToHostAsync</c>), which drains.
         /// </summary>
         public virtual bool RequiresAsyncDeviceCopy => false;
 

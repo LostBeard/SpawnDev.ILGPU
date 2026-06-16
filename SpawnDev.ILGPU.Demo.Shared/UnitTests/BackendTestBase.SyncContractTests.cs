@@ -135,52 +135,48 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         });
 
         /// <summary>
-        /// Device-to-device copy contract: a SYNC <c>CopyFrom</c> of a buffer a kernel just wrote
-        /// THROWS NotSupportedException on the browser backends (it cannot be ordered against the
-        /// producing kernel on the worker pool / async queue boundary — the silent-stale-read class).
-        /// <c>CopyFromAsync</c> (drains the producer first) is the portable path and yields the
-        /// correct output on EVERY backend. Desktop sync <c>CopyFrom</c> stays valid (ordered).
-        /// Mirrors <see cref="SyncSynchronizeContractTest"/> for the device-copy half of the contract.
+        /// Device-to-device copy ORDERING contract: a SYNC <c>CopyFrom</c> of a buffer a kernel just
+        /// wrote must be ORDERED AFTER the producing kernel on EVERY backend (desktop: stream-ordered;
+        /// WebGPU/WebGL: queue-ordered <c>CopyBufferToBuffer</c>; Wasm: enqueued after the producer in
+        /// the serialized work stream — the fix for the Wasm device-copy race). The copy is
+        /// NON-BLOCKING on browser (it completes at the next drain), so the result is read via
+        /// <c>SynchronizeAsync</c> + async readback, NOT a sync read. If the copy were unordered (the
+        /// old Wasm immediate-SAB-copy bug) it would read <c>src</c> mid-kernel and produce stale data,
+        /// which this test catches. <c>CopyFromAsync</c> (explicit eager drain) stays a valid
+        /// convenience and must also be correct. Replaces the prior "sync device copy THROWS on browser"
+        /// contract: the throw was a workaround for the Wasm ordering gap, now fixed at the source.
         /// </summary>
         [TestMethod]
         public async Task SyncDeviceCopyContractTest() => await RunTest(async accelerator =>
         {
-            bool browser = IsBrowserBackend(accelerator.AcceleratorType);
             const int count = 64;
 
             var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(
                 SyncContract_FillKernel);
             using var src = accelerator.Allocate1D<int>(count);
             using var dst = accelerator.Allocate1D<int>(count);
-            kernel((Index1D)count, src.View); // src now has pending kernel output (src[i] = i*2)
+            kernel((Index1D)count, src.View); // src now has PENDING kernel output (src[i] = i*2)
 
-            if (browser)
-            {
-                // Sync device->device copy of a kernel output is unordered at the browser GPU
-                // boundary -> throws (loud, not a silent stale read). The async form is the path.
-                AssertThrowsNotSupported(
-                    () => dst.View.CopyFrom(accelerator.DefaultStream, src.View),
-                    "dst.View.CopyFrom(src.View)");
-            }
-            else
-            {
-                // Desktop: sync device copy is correctly ordered, so it works.
-                accelerator.Synchronize();
-                dst.View.CopyFrom(accelerator.DefaultStream, src.View);
-                accelerator.Synchronize();
-                var dr = await dst.CopyToHostAsync<int>();
-                for (int i = 0; i < count; i++)
-                {
-                    if (dr[i] != i * 2)
-                        throw new Exception(
-                            $"Desktop sync CopyFrom produced wrong data at {i}: expected {i * 2}, got {dr[i]}");
-                }
-            }
-
-            // CopyFromAsync (drain the producer, then copy) is portable on EVERY backend and correct.
-            await dst.View.CopyFromAsync(src.View);
+            // SYNC CopyFrom of a still-producing buffer — must order after the kernel on every backend.
+            // This is exactly the race scenario; an unordered copy would capture stale src.
+            dst.View.CopyFrom(accelerator.DefaultStream, src.View);
             await accelerator.SynchronizeAsync();
-            var result = await dst.CopyToHostAsync<int>();
+            var dr = await dst.CopyToHostAsync<int>();
+            for (int i = 0; i < count; i++)
+            {
+                if (dr[i] != i * 2)
+                    throw new Exception(
+                        $"Sync CopyFrom of a kernel output was NOT ordered after the producer at {i}: " +
+                        $"expected {i * 2}, got {dr[i]} (the copy must run AFTER the producing kernel on " +
+                        "EVERY backend — Wasm enqueues it into the serialized work stream).");
+            }
+
+            // CopyFromAsync (explicit eager drain, then copy) stays portable + correct on EVERY backend.
+            using var dst2 = accelerator.Allocate1D<int>(count);
+            kernel((Index1D)count, src.View); // re-dispatch so there is pending work to drain again
+            await dst2.View.CopyFromAsync(src.View);
+            await accelerator.SynchronizeAsync();
+            var result = await dst2.CopyToHostAsync<int>();
             for (int i = 0; i < count; i++)
             {
                 if (result[i] != i * 2)
