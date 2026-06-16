@@ -21,6 +21,42 @@ First phase of `ILGPU.BFloat16` ("brain float") support, mirroring the `ILGPU.Ha
   - **IR const-fold** of bf16 literal arithmetic/compare/convert (the `.tt`-generated `ArithmeticOperations`/`CompareOperations` + `Convert.cs` got bf16 cases; was throwing `NotSupportedException`). **`AcceleratorRequirements.RequiresBFloat16`** (no-op documentation filter; bf16 is always available, no native-vs-emulated split).
   - PMT (`PMT_FILTER=BFloat16`): radix (keys-only asc/desc + pairs), GPU-vs-CPU bucket-compare, less-than ordering, const-fold, range/specials - **all green on all 6 backends**. No Half regression.
 
+### 4.13.0-local.8 - Generic `INumber<T>` mixed-precision kernels (float/Half/bf16) on all 6 backends
+
+A single generic `where T : INumber<T>` compute kernel instantiated for `float` / `ILGPU.Half` /
+`ILGPU.BFloat16` now transpiles AND runs correctly on every backend - one kernel instead of N
+hand-written per-type variants, the foundation for adding further low-precision types. This closes the
+codegen gaps the concrete-typed bf16/Half parity work didn't cover (the generic-specialization compile
+path AND by-value SUB-WORD SCALAR params - distinct from sub-word BUFFER elements, which already worked).
+Forks bump to 2.0.24 (PTX + OpenCL are in the `ILGPU/` fork). Gate: new
+`BackendTestBase.GenericPrecision` (float/Half/bf16) **23/0 across all 6 backends**; no regression
+(`PMT_FILTER=BFloat16` 100/0, `PMT_FILTER=Half` 190/0/8).
+
+- **PTX bf16 select.** `GetSelectValueOperation` indexed the op table directly with no bf16->f32 remap
+  (unlike `GetCompareOperation`/`GetArithmeticOperation`), so a generic kernel selecting a bf16 (the
+  `v > T.Zero ? v : T.Zero` ternary -> `selp`) threw `KeyNotFoundException 'BFloat16'` at compile. bf16
+  computes in an f32 register, so the select uses the f32 `selp` - now remapped like the others.
+- **By-value sub-word SCALAR params.** A Half/bf16 passed BY VALUE (e.g. a kernel's `scale`/`bias`) is
+  2-byte storage but computes as f32; every backend mishandled the boundary. The uniform fix: declare/pass
+  the 2-byte STORAGE and convert to f32 at the kernel boundary using the SAME conversion a buffer-element
+  load uses (the host packs storage bytes, unchanged), keyed on the type so non-sub-word params are
+  byte-identical.
+  - **PTX:** declared the bf16 param `.f32` (4B) while the host packs 2B -> garbage (bias=0). Now declares
+    `.b16` + `cvt.f32.bf16` at `BindParameters` (mirrors the bf16 buffer-element load). Half is native f16
+    (2B register) and was already fine.
+  - **OpenCL:** emulated sub-word scalars (bf16 always; Half without `cl_khr_fp16`) were declared 4-byte
+    `float` -> `CL_INVALID_ARG_SIZE`. Now declared `ushort` storage + converted via `_bf16_bits_to_f32` /
+    `_half_bits_to_f32` at body entry.
+  - **WebGPU (WGSL):** read the packed scalar as `bitcast<f32>(slot)` but the 2-byte bits sit in the
+    slot's low 16 -> near-zero denormal. Now widens via `_bf16_to_f32` / `_f16_to_f32` (both the
+    direct-param and struct-field read sites).
+  - **WebGL:** the dispatch derived the scalar type from the C# arg with no Half/bf16 case -> the uniform
+    was never sent (arrived as 0). Added Half/bf16 -> `float` (widen via the explicit operator; they don't
+    implement `IConvertible`, so `Convert.ToSingle` had returned 0).
+  - **Wasm:** a Half/bf16 scalar (a CLR struct) fell into the struct-serialize-to-scratch path and the
+    kernel read its raw 16 bits (got 38656). They compute as f32 (`GetWasmTypeFromIR` -> F32), so the host
+    now passes the widened f32 value, like a float scalar.
+
 ### 4.13.0-local.7 - Wasm device-copy ORDERING fix (sync `CopyFrom` works again on browser) + Wasm SIMD128 Stage-3a elementwise vectorization
 
 Two Wasm-backend changes. Forks bump to 2.0.23 (the device-copy fix touches the `ILGPU/` fork: `MemoryBuffer.CopyFromBufferOrdered` + `Accelerator.RequiresAsyncDeviceCopy`). Full Wasm PMT lane **537/0/17**.
