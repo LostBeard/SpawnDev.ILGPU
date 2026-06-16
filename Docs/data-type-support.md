@@ -1,7 +1,7 @@
 # Data Type Support by Backend
 
 Tracks verified support for all data types across all 7 backends.
-Updated: 2026-06-15
+Updated: 2026-06-16
 
 **Legend:**
 - [x] PASS - verified with unit tests (real data, real kernels, real verification)
@@ -26,6 +26,8 @@ Updated: 2026-06-15
 | UInt64 | ulong | 8B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float16 | Half | 2B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | BFloat16 | BFloat16 | 2B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| Float8E4M3 | Float8E4M3 | 1B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| Float8E5M2 | Float8E5M2 | 1B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float32 | float | 4B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float64 | double | 8B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 
@@ -43,6 +45,8 @@ Updated: 2026-06-15
 | UInt64 | ulong | 8B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float16 | Half | 2B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | BFloat16 | BFloat16 | 2B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| Float8E4M3 | Float8E4M3 | 1B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| Float8E5M2 | Float8E5M2 | 1B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float32 | float | 4B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float64 | double | 8B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 
@@ -60,6 +64,8 @@ Updated: 2026-06-15
 | UInt64 | ulong | 8B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float16 | Half | 2B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | BFloat16 | BFloat16 | 2B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| Float8E4M3 | Float8E4M3 | 1B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| Float8E5M2 | Float8E5M2 | 1B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float32 | float | 4B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float64 | double | 8B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 
@@ -148,8 +154,42 @@ NaN-preservation guard. Values compute as f32 everywhere; only the storage is 2-
 | **Wasm** | `EmitBF16ToF32` / `EmitF32ToBF16` emit the conversion as inline WebAssembly bytecode; 2-byte `i32.load16_u` / `i32.store16` (atomic in barrier kernels). |
 | **WebGL** | Packed-u16 in an R32I texel; `texelFetch` + shift/mask load, Transform-Feedback varying store; `_bf16_to_f32` / `_f32_to_bf16` GLSL helpers. |
 | **OpenCL** | Emulated (no common native bf16 extension; `cl_khr_fp16` is fp16, not bf16). View params are `ushort*` (2-byte storage stride - a `float*` typedef silently corrupts), `_bf16_bits_to_f32` / `_f32_to_bf16_bits` OpenCL-C helpers + tracked LEA base pointer. |
-| **CUDA** | **f32-register-compute model** (PTX has no native bf16 *arithmetic*, only `cvt.*.bf16`): the value lives in an `.f32` register and computes as f32; arithmetic/compare route through the f32 tables; `ConvertValue` bf16<->f32 is a register no-op. Load = `ld.global.b16` + `cvt.f32.bf16`; store = `cvt.rn.bf16.f32` (RNE) + `st.global.b16`. `cvt.*.bf16` is native on sm_80+ (Ampere/Ada/Hopper). |
+| **CUDA** | **f32-register-compute model** (PTX has no native bf16 *arithmetic*): the value lives in an `.f32` register and computes as f32; arithmetic/compare route through the f32 tables; `ConvertValue` bf16<->f32 is a register no-op. **The bf16<->f32 conversion at the load/store boundary uses PORTABLE bit-manipulation (basic integer ops on EVERY CUDA arch), NOT the native `cvt.*.bf16`** - those `cvt` instructions are sm_80+ (Ampere) only, so the earlier native-cvt path failed to compile on pre-Ampere cards (Pascal sm_61 / Volta sm_70 / Turing sm_75). Load = `ld.global.u8`... no: `ld.global.b16` + zero-extend + `shl 16` + reinterpret (exact, bf16 = top 16 bits of fp32); store = RNE round + NaN-guard + `st.global.b16`. Byte-identical to every other backend. (4.13.0+; pre-4.13.0 used the sm_80 native cvt and broke on older cards.) |
 | **CPU** | Native - the managed `BFloat16` struct runs directly (`DefaultILBackend`). |
+
+### FP8 (`Float8E4M3` + `Float8E5M2`) buffer access
+
+`ILGPU.Float8E4M3` and `ILGPU.Float8E5M2` add the two OCP 8-bit floating-point formats, each with the
+`BasicValueType.Float8E4M3` / `Float8E5M2` IR primitive. **Complete Read/Write/EndToEnd support on ALL
+6 backends.**
+
+- **`Float8E4M3`** - 1 sign / 4 exponent / 3 mantissa, bias 7. The "E4M3FN" finite variant: **no
+  infinities** (the only non-finite value is NaN at `0x7F`/`0xFF`), max finite magnitude **448**, finite
+  overflow **saturates** to ±448. The FP8 **forward / inference** format (one extra mantissa bit vs E5M2,
+  at the cost of range).
+- **`Float8E5M2`** - 1 sign / 5 exponent / 2 mantissa, bias 15. IEEE-754-style: **has infinities and
+  NaNs** (like fp16 but with 8 fewer mantissa bits). The FP8 **backward / gradient** format (fp16-class
+  dynamic range, which gradients need).
+
+Like `Half`/`BFloat16`, FP8 uses the **f32-register model**: values compute as f32 in-register and are
+converted to the 1-byte FP8 grid only at the load/store boundary, so accumulation stays full-precision
+(matching how real FP8 tensor-core hardware accumulates). Unlike bf16 (a trivial top-16-bits shift), the
+FP8 conversion needs exponent rebias (127 -> 7/15), round-to-nearest-even from 23 to 2/3 mantissa bits,
+subnormal normalization, and the per-format specials. The conversion is **byte-identical across every
+backend** (CPU-verified idempotence 0/256 for all representable values).
+
+| Backend | Mechanism |
+|---------|-----------|
+| **WebGPU** | Always emulated. Packed **4 FP8 per `array<atomic<u32>>` word** (1-byte sub-word storage); `_e4m3_to_f32`/`_e5m2_to_f32` + inverse WGSL helpers at the load/store boundary. |
+| **Wasm** | Conversion emitted as **inline WebAssembly bytecode** (`EmitFP8ToF32`/`EmitF32ToFP8`, the subnormal-normalize loop unrolled for bit-exactness); 1-byte `i32.load8_u` / `i32.store8` (verified-atomic in barrier kernels). |
+| **WebGL** | Packed 4 FP8 per R32I texel; `texelFetch` + shift/mask load, Transform-Feedback varying store; `_e4m3/_e5m2` GLSL helpers. |
+| **OpenCL** | Emulated as `uchar*` storage (1-byte stride); `_e4m3_bits_to_f32` / `_f32_to_e4m3_bits` (+ E5M2) OpenCL-C helpers + tracked LEA base pointer. |
+| **CUDA** | f32-register model. The FP8<->f32 conversion is **inline PTX bit-manipulation** (branchless `setp`/`selp`, unrolled normalize) using only basic integer ops - FP8 has no portable native PTX cvt (`cvt.*.e4m3` is sm_89/Hopper only), so this works on every CUDA arch. Load = `ld.global.u8` + convert; store = convert + `st.global.u8`. |
+| **CPU** | Native - the managed `Float8E4M3`/`Float8E5M2` structs run directly. |
+
+> **Convention note (E4M3 overflow):** out-of-range *inputs* to `Float8E4M3` saturate finite overflow to
+> ±448 and map ±Inf -> NaN (the OCP / NVIDIA Transformer Engine saturating-forward convention). Only the
+> out-of-range input behavior is convention-dependent; every *representable* value round-trips exactly.
 
 ### Sub-Word Usage Notes
 
