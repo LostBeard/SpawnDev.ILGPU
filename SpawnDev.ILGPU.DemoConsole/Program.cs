@@ -45,6 +45,10 @@ try
     if (args.Length > 0 && args[0] == "generic-precision-repro")
         return await GenericPrecisionRepro.Run();
 
+    // FP8 conversion verification (CPU/managed) — E5M2 idempotence + decode reference + specials.
+    if (args.Length > 0 && args[0] == "fp8-verify")
+        return await Float8Repro.Run();
+
     // Offline WGSL generation probe (precompiled-shaders Layer 1). No device/browser.
     if (args.Length > 0 && args[0] == "shader-gen")
         return await ShaderGenDump.Run();
