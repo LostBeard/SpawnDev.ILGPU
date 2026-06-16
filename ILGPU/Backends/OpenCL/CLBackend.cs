@@ -144,6 +144,105 @@ namespace ILGPU.Backends.OpenCL
             extensionBuilder.AppendLine("}");
             extensionBuilder.AppendLine();
 
+            // FP8 bit-conversion helpers - both FP8 formats are ALWAYS emulated (no native OpenCL fp8
+            // type; even Hopper-class cvt is unavailable through OpenCL C). Direct ports of the managed
+            // ConvertFloat8E*M*ToFloat / ConvertFloatToFloat8E*M* (CPU-verified idempotence 0/256), so
+            // every representable value round-trips bit-identically. E5M2 (1/5/2 bias 15) is IEEE-style
+            // (Inf+NaN); E4M3 (1/4/3 bias 7, "E4M3FN") has NO Inf, single NaN 0x7F, saturates to +-448.
+            // static inline -> the OpenCL compiler strips these when the kernel uses no fp8.
+            extensionBuilder.AppendLine("// FP8 E5M2 bit-conversion helpers (always emulated as float).");
+            extensionBuilder.AppendLine("static inline float _e5m2_bits_to_f32(uchar raw) {");
+            extensionBuilder.AppendLine("    uint bits = raw;");
+            extensionBuilder.AppendLine("    uint sign = (bits & 0x80u) << 24;");
+            extensionBuilder.AppendLine("    uint expo = (bits >> 2) & 0x1Fu;");
+            extensionBuilder.AppendLine("    uint mant = bits & 0x03u;");
+            extensionBuilder.AppendLine("    if (expo == 0u) {");
+            extensionBuilder.AppendLine("        if (mant == 0u) return as_float(sign);");
+            extensionBuilder.AppendLine("        uint e = 127u - 15u + 1u; uint m = mant;");
+            extensionBuilder.AppendLine("        while ((m & 0x04u) == 0u) { m <<= 1; e -= 1u; }");
+            extensionBuilder.AppendLine("        m &= 0x03u; return as_float(sign | (e << 23) | (m << 21));");
+            extensionBuilder.AppendLine("    }");
+            extensionBuilder.AppendLine("    if (expo == 0x1Fu) return as_float(sign | (0xFFu << 23) | (mant << 21));");
+            extensionBuilder.AppendLine("    uint f32Exp = expo - 15u + 127u;");
+            extensionBuilder.AppendLine("    return as_float(sign | (f32Exp << 23) | (mant << 21));");
+            extensionBuilder.AppendLine("}");
+            extensionBuilder.AppendLine("static inline uchar _f32_to_e5m2_bits(float f) {");
+            extensionBuilder.AppendLine("    uint bits = as_uint(f);");
+            extensionBuilder.AppendLine("    uint sign = (bits >> 24) & 0x80u;");
+            extensionBuilder.AppendLine("    uint rest = bits & 0x7FFFFFFFu;");
+            extensionBuilder.AppendLine("    if (rest > 0x7F800000u) return (uchar)(sign | 0x7Fu);");
+            extensionBuilder.AppendLine("    if (rest == 0x7F800000u) return (uchar)(sign | 0x7Cu);");
+            extensionBuilder.AppendLine("    int f32Exp = (int)((rest >> 23) & 0xFFu);");
+            extensionBuilder.AppendLine("    uint f32Mant = rest & 0x7FFFFFu;");
+            extensionBuilder.AppendLine("    int e = f32Exp - 127;");
+            extensionBuilder.AppendLine("    if (e > 15) return (uchar)(sign | 0x7Cu);");
+            extensionBuilder.AppendLine("    if (e < -14) {");
+            extensionBuilder.AppendLine("        if (f32Exp == 0) return (uchar)sign;");
+            extensionBuilder.AppendLine("        uint signif = f32Mant | 0x800000u;");
+            extensionBuilder.AppendLine("        int shift = (-14 - e) + 21;");
+            extensionBuilder.AppendLine("        if (shift > 31) return (uchar)sign;");
+            extensionBuilder.AppendLine("        uint m = signif >> shift;");
+            extensionBuilder.AppendLine("        uint roundBit = (signif >> (shift - 1)) & 1u;");
+            extensionBuilder.AppendLine("        uint sticky = (signif & ((1u << (shift - 1)) - 1u)) != 0u ? 1u : 0u;");
+            extensionBuilder.AppendLine("        if (roundBit == 1u && (sticky == 1u || (m & 1u) == 1u)) m += 1u;");
+            extensionBuilder.AppendLine("        return (uchar)(sign | (m & 0x03u) | ((m >> 2) << 2));");
+            extensionBuilder.AppendLine("    }");
+            extensionBuilder.AppendLine("    uint mant2 = f32Mant >> 21;");
+            extensionBuilder.AppendLine("    uint round = (f32Mant >> 20) & 1u;");
+            extensionBuilder.AppendLine("    uint stick = (f32Mant & 0xFFFFFu) != 0u ? 1u : 0u;");
+            extensionBuilder.AppendLine("    uint eField = (uint)(e + 15);");
+            extensionBuilder.AppendLine("    uint outBits = (eField << 2) | mant2;");
+            extensionBuilder.AppendLine("    if (round == 1u && (stick == 1u || (mant2 & 1u) == 1u)) outBits += 1u;");
+            extensionBuilder.AppendLine("    return (uchar)(sign | (outBits & 0x7Fu));");
+            extensionBuilder.AppendLine("}");
+            extensionBuilder.AppendLine();
+            extensionBuilder.AppendLine("// FP8 E4M3 (E4M3FN) bit-conversion helpers (always emulated as float; no Inf, saturate to 448).");
+            extensionBuilder.AppendLine("static inline float _e4m3_bits_to_f32(uchar raw) {");
+            extensionBuilder.AppendLine("    uint bits = raw;");
+            extensionBuilder.AppendLine("    uint sign = (bits & 0x80u) << 24;");
+            extensionBuilder.AppendLine("    uint expo = (bits >> 3) & 0x0Fu;");
+            extensionBuilder.AppendLine("    uint mant = bits & 0x07u;");
+            extensionBuilder.AppendLine("    if ((bits & 0x7Fu) == 0x7Fu) return as_float(sign | 0x7FC00000u);");
+            extensionBuilder.AppendLine("    if (expo == 0u) {");
+            extensionBuilder.AppendLine("        if (mant == 0u) return as_float(sign);");
+            extensionBuilder.AppendLine("        uint e = 127u - 7u + 1u; uint m = mant;");
+            extensionBuilder.AppendLine("        while ((m & 0x08u) == 0u) { m <<= 1; e -= 1u; }");
+            extensionBuilder.AppendLine("        m &= 0x07u; return as_float(sign | (e << 23) | (m << 20));");
+            extensionBuilder.AppendLine("    }");
+            extensionBuilder.AppendLine("    uint f32Exp = expo - 7u + 127u;");
+            extensionBuilder.AppendLine("    return as_float(sign | (f32Exp << 23) | (mant << 20));");
+            extensionBuilder.AppendLine("}");
+            extensionBuilder.AppendLine("static inline uchar _f32_to_e4m3_bits(float f) {");
+            extensionBuilder.AppendLine("    uint bits = as_uint(f);");
+            extensionBuilder.AppendLine("    uint sign = (bits >> 24) & 0x80u;");
+            extensionBuilder.AppendLine("    uint rest = bits & 0x7FFFFFFFu;");
+            extensionBuilder.AppendLine("    if (rest >= 0x7F800000u) return (uchar)(sign | 0x7Fu);");
+            extensionBuilder.AppendLine("    int f32Exp = (int)((rest >> 23) & 0xFFu);");
+            extensionBuilder.AppendLine("    uint f32Mant = rest & 0x7FFFFFu;");
+            extensionBuilder.AppendLine("    int e = f32Exp - 127;");
+            extensionBuilder.AppendLine("    if (e > 8 || (e == 8 && f32Mant > 0x600000u)) return (uchar)(sign | 0x7Eu);");
+            extensionBuilder.AppendLine("    if (e < -6) {");
+            extensionBuilder.AppendLine("        if (f32Exp == 0) return (uchar)sign;");
+            extensionBuilder.AppendLine("        uint signif = f32Mant | 0x800000u;");
+            extensionBuilder.AppendLine("        int shift = (-6 - e) + 20;");
+            extensionBuilder.AppendLine("        if (shift > 31) return (uchar)sign;");
+            extensionBuilder.AppendLine("        uint m = signif >> shift;");
+            extensionBuilder.AppendLine("        uint roundBit = (signif >> (shift - 1)) & 1u;");
+            extensionBuilder.AppendLine("        uint sticky = (signif & ((1u << (shift - 1)) - 1u)) != 0u ? 1u : 0u;");
+            extensionBuilder.AppendLine("        if (roundBit == 1u && (sticky == 1u || (m & 1u) == 1u)) m += 1u;");
+            extensionBuilder.AppendLine("        return (uchar)(sign | (m & 0x7Fu));");
+            extensionBuilder.AppendLine("    }");
+            extensionBuilder.AppendLine("    uint mant3 = f32Mant >> 20;");
+            extensionBuilder.AppendLine("    uint round = (f32Mant >> 19) & 1u;");
+            extensionBuilder.AppendLine("    uint stick = (f32Mant & 0x7FFFFu) != 0u ? 1u : 0u;");
+            extensionBuilder.AppendLine("    uint eField = (uint)(e + 7);");
+            extensionBuilder.AppendLine("    uint outBits = (eField << 3) | mant3;");
+            extensionBuilder.AppendLine("    if (round == 1u && (stick == 1u || (mant3 & 1u) == 1u)) outBits += 1u;");
+            extensionBuilder.AppendLine("    if ((outBits & 0x7Fu) >= 0x7Fu) outBits = 0x7Eu;");
+            extensionBuilder.AppendLine("    return (uchar)(sign | (outBits & 0x7Fu));");
+            extensionBuilder.AppendLine("}");
+            extensionBuilder.AppendLine();
+
             extensions = extensionBuilder.ToString();
         }
 
