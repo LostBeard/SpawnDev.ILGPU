@@ -39,6 +39,63 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             await RunGenericPrecision<global::ILGPU.BFloat16>(
                 v => (global::ILGPU.BFloat16)v, v => (float)v, 3e-2f);
 
+        // PrecisionConvert: transpilable generic float<->T conversion inside a generic kernel
+        // (Geordi 2026-06-16, from Tuvok's generic-in-kernel-float-T-conversion-gap). The point is
+        // that float.CreateChecked(t)/T.CreateChecked(f) touch System.Type and the transpiler rejects
+        // them on every GPU backend; PrecisionConvert.ConvertToSingle/ConvertFromSingle lower to the
+        // native convert instead. A pure round-trip ConvertFromSingle(ConvertToSingle(x)) must be
+        // BIT-EXACT vs the concrete (T)(float)x cast on all 6 backends (no accumulation, no tolerance).
+        private static void PrecisionRoundTripGeneric<T>(Index1D i,
+            ArrayView1D<T, Stride1D.Dense> x, ArrayView1D<T, Stride1D.Dense> y)
+            where T : unmanaged, INumber<T> =>
+            y[i] = PrecisionConvert.ConvertFromSingle<T>(PrecisionConvert.ConvertToSingle(x[i]));
+
+        [TestMethod]
+        public async Task PrecisionConvert_Float_RoundTripBitExact() =>
+            await RunPrecisionRoundTrip<float>(v => v, v => v);
+
+        [TestMethod]
+        public async Task PrecisionConvert_Half_RoundTripBitExact() =>
+            await RunPrecisionRoundTrip<global::ILGPU.Half>(
+                v => (global::ILGPU.Half)v, v => (float)v);
+
+        [TestMethod]
+        public async Task PrecisionConvert_BFloat16_RoundTripBitExact() =>
+            await RunPrecisionRoundTrip<global::ILGPU.BFloat16>(
+                v => (global::ILGPU.BFloat16)v, v => (float)v);
+
+        private async Task RunPrecisionRoundTrip<T>(Func<float, T> toT, Func<T, float> toF)
+            where T : unmanaged, INumber<T>
+            => await RunTest(async accelerator =>
+        {
+            const int n = 251;
+            var rng = new Random(13);
+            var x = new T[n];
+            for (int i = 0; i < n; i++)
+                x[i] = toT((float)(rng.NextDouble() * 4 - 2));
+
+            using var inBuf = accelerator.Allocate1D(x);
+            using var outBuf = accelerator.Allocate1D<T>(n);
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D,
+                ArrayView1D<T, Stride1D.Dense>, ArrayView1D<T, Stride1D.Dense>>(
+                PrecisionRoundTripGeneric<T>);
+            k(n, inBuf.View, outBuf.View);
+            await accelerator.SynchronizeAsync();
+            var got = await outBuf.CopyToHostAsync<T>();
+
+            for (int i = 0; i < n; i++)
+            {
+                // Reference = concrete (T)(float)x cast - exactly what the intrinsic lowers to.
+                float g = toF(got[i]);
+                float e = toF(toT(toF(x[i])));
+                bool bothNaN = float.IsNaN(g) && float.IsNaN(e);
+                if (!bothNaN && g != e)
+                    throw new Exception(
+                        $"PrecisionConvert {typeof(T).Name} round-trip @{i} ({BackendName}): got {g}, " +
+                        $"want {e} - generic float<->T convert must lower to the native cast (bit-exact).");
+            }
+        });
+
         private async Task RunGenericPrecision<T>(Func<float, T> toT, Func<T, float> toF, float relTol)
             where T : unmanaged, INumber<T>
             => await RunTest(async accelerator =>
