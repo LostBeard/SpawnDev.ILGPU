@@ -32,14 +32,17 @@ Transpiles ILGPU IR → WGSL shaders. Dispatches via `WebGPUAccelerator`.
 
 | Operation | Method | WebGPU Implementation | Status |
 |-----------|--------|----------------------|--------|
-| GPU→GPU | `CopyFrom` / `ArrayView.CopyTo(ArrayView)` | `CopyBufferToBuffer` | **WORKS** |
+| GPU→GPU (sync) | `CopyFrom` / `ArrayView.CopyTo(ArrayView)` | N/A | **THROWS NotSupportedException** (4.13.0-local.6+) |
+| GPU→GPU (async) | `CopyFromAsync` | `CopyBufferToBuffer` (ordered after producer) | **WORKS** |
 | CPU→GPU | `CopyFromCPU` | `queue.WriteBuffer` | **WORKS** |
 | GPU→CPU (sync) | `CopyTo` / `CopyToCPU` / `GetAsArray1D` | N/A | **THROWS NotSupportedException** |
 | GPU→CPU (async) | `CopyToHostAsync` | `mapAsync(Read)` | **WORKS** |
 
-**NEVER replace `CopyFrom` with `Scale(×1)` kernel dispatch.** `CopyFrom` is a native GPU command (`CopyBufferToBuffer`) — no shader compilation, no dispatch overhead. `Scale(×1)` requires kernel loading and dispatch, which causes "obj null or undefined" errors during early session initialization when accelerator state isn't fully wired. This was proven in ML commit 45b7cba (13+ WebGPU failures, reverted).
+**Sync device-to-device `CopyFrom` THROWS on WebGPU (4.13.0-local.6+) — use `await CopyFromAsync(...)`.** Completing the sync/async contract: a sync `CopyFrom` of a buffer a kernel just wrote cannot be ordered against the producer at the browser GPU boundary (it silently read stale data on the Wasm worker pool — a real argmax flip in gemma4 KV; WebGPU/WebGL happened to be queue-ordered, but the contract is uniform so the misuse is loud everywhere, not silent-wrong on one backend). `CopyFromAsync` drains the producer first, then does the `CopyBufferToBuffer`. Library code that orders the copy by other means (queue order, an explicit drain/flush) may use the unguarded `CopyFromUnchecked` / `MemoryBuffer.CopyFromBufferAfterDrain`. Host↔device transfers (`CopyFromCPU`, `CopyToHostAsync`) are unaffected.
 
-**The confusion:** `CopyTo` (GPU→**CPU**) throws on WebGPU. `CopyFrom` (GPU→**GPU**) works perfectly. They are different operations going different directions. When you need GPU→CPU, use `CopyToHostAsync`. When you need GPU→GPU, use `CopyFrom`.
+**NEVER replace `CopyFromAsync` with `Scale(×1)` kernel dispatch.** The device copy is a native GPU command (`CopyBufferToBuffer`) — no shader compilation, no dispatch overhead. `Scale(×1)` requires kernel loading and dispatch, which causes "obj null or undefined" errors during early session initialization when accelerator state isn't fully wired. This was proven in ML commit 45b7cba (13+ WebGPU failures, reverted).
+
+**The directions:** GPU→CPU readback and GPU→GPU device copy are BOTH async-only on WebGPU now (`CopyToHostAsync` / `CopyFromAsync`). The sync forms (`CopyTo`/`CopyToCPU`, sync `CopyFrom`) throw. Only host→GPU upload (`CopyFromCPU`) is synchronous.
 
 ## Command Batching & Synchronization
 

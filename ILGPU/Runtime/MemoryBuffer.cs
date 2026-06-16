@@ -322,8 +322,73 @@ namespace ILGPU.Runtime
         /// <param name="sourceOffsetInBytes">Byte offset within the source.</param>
         /// <param name="targetOffsetInBytes">Byte offset within this buffer.</param>
         /// <param name="lengthInBytes">Number of bytes to copy.</param>
+        /// <summary>
+        /// SYNCHRONOUS device-to-device buffer copy. Guarded entry point: throws on the
+        /// async-only browser backends (<see cref="Accelerator.RequiresAsyncDeviceCopy"/>) where a
+        /// sync device copy cannot be ordered against a producing kernel (it would read stale data -
+        /// e.g. the Wasm worker pool copying a buffer a still-running kernel is mid-write to). Use
+        /// the async <c>CopyFromAsync</c> path on those backends; it drains first and routes through
+        /// <see cref="CopyFromBufferAfterDrain"/>. Desktop (CPU/CUDA/OpenCL) orders sync device
+        /// copies correctly, so this is a direct passthrough there.
+        /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        protected internal virtual void CopyFromBuffer(
+        protected internal void CopyFromBuffer(
+            AcceleratorStream stream,
+            MemoryBuffer sourceBuffer,
+            long sourceOffsetInBytes,
+            long targetOffsetInBytes,
+            long lengthInBytes)
+        {
+            // Guard only GENUINE device-to-device copies on the async-only browser backends, where
+            // the source buffer may be mid-write by a producing kernel the sync copy cannot be
+            // ordered against (Wasm worker pool). Host<->device transfers (one side is a
+            // CPUMemoryBuffer staging buffer) are NOT a kernel-ordering race and stay allowed.
+            if (Accelerator.RequiresAsyncDeviceCopy &&
+                sourceBuffer.Accelerator.RequiresAsyncDeviceCopy)
+            {
+                throw new NotSupportedException(
+                    "Synchronous device-to-device CopyFrom/CopyTo is desktop-only (CPU/CUDA/OpenCL). " +
+                    "On the browser backends (Wasm/WebGPU/WebGL) it cannot be ordered against a " +
+                    "producing kernel and would silently read stale data - use `await CopyFromAsync(...)`; " +
+                    "the async form drains the producer first. Library code that orders the copy by " +
+                    "other means (queue order / an explicit drain) may use CopyFromBufferAfterDrain. " +
+                    "Browser backends are async-only at the GPU boundary (same reason Synchronize() throws).");
+            }
+            CopyFromBufferCore(
+                stream, sourceBuffer, sourceOffsetInBytes, targetOffsetInBytes, lengthInBytes);
+        }
+
+        /// <summary>
+        /// Unguarded device-to-device buffer copy for use by the async copy path AFTER it has
+        /// drained the producing kernel (browser backends) - bypasses the
+        /// <see cref="RequiresAsyncDeviceCopy"/> guard on <see cref="CopyFromBuffer"/>. Public so the
+        /// <c>CopyFromAsync</c> extension (a different assembly) can reach it post-drain; NEVER call
+        /// it directly from synchronous consumer code - that re-introduces the unordered race the
+        /// guard exists to stop. Use <c>CopyFromAsync</c>/<c>CopyToHostAsync</c> instead.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void CopyFromBufferAfterDrain(
+            AcceleratorStream stream,
+            MemoryBuffer sourceBuffer,
+            long sourceOffsetInBytes,
+            long targetOffsetInBytes,
+            long lengthInBytes) =>
+            CopyFromBufferCore(
+                stream, sourceBuffer, sourceOffsetInBytes, targetOffsetInBytes, lengthInBytes);
+
+        /// <summary>
+        /// The actual device-to-device copy. Override in derived classes (e.g., Wasm) to handle
+        /// device-to-device copies where both buffers use non-native memory (SharedArrayBuffer).
+        /// Reached only via the guarded <see cref="CopyFromBuffer"/> (desktop) or the post-drain
+        /// <see cref="CopyFromBufferAfterDrain"/> (browser async path).
+        /// </summary>
+        /// <param name="stream">The used accelerator stream.</param>
+        /// <param name="sourceBuffer">The source memory buffer.</param>
+        /// <param name="sourceOffsetInBytes">Byte offset within the source.</param>
+        /// <param name="targetOffsetInBytes">Byte offset within this buffer.</param>
+        /// <param name="lengthInBytes">Number of bytes to copy.</param>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        protected internal virtual void CopyFromBufferCore(
             AcceleratorStream stream,
             MemoryBuffer sourceBuffer,
             long sourceOffsetInBytes,

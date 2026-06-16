@@ -932,7 +932,11 @@ namespace ILGPU.Algorithms
                     // storage-buffer barrier. The copy+sync forces a pipeline flush.
                     {
                         using var resultBuffer = accelerator.Allocate1D<T>(tempView.Length);
-                        resultBuffer.View.CopyFrom(stream, tempView);
+                        // Unchecked: this device-to-device copy is the inter-pass fence and is
+                        // ordered by the queue (WebGPU/WebGL) / not reached on Wasm (single-group
+                        // scan), so it bypasses the browser sync-copy guard the public CopyFrom now
+                        // raises. stream.Flush() below completes the pipeline flush.
+                        resultBuffer.View.BaseView.CopyFromUnchecked(stream, tempView);
                         stream.Flush();
                     }
                 }
@@ -1205,7 +1209,11 @@ namespace ILGPU.Algorithms
                     if (accelerator.AcceleratorType != AcceleratorType.Wasm)
                     {
                         using var resultBuffer = accelerator.Allocate1D<T>(tempView.Length);
-                        resultBuffer.View.CopyFrom(stream, tempView);
+                        // Unchecked: this device-to-device copy is the inter-pass fence and is
+                        // ordered by the queue (WebGPU/WebGL) / not reached on Wasm (single-group
+                        // scan), so it bypasses the browser sync-copy guard the public CopyFrom now
+                        // raises. stream.Flush() below completes the pipeline flush.
+                        resultBuffer.View.BaseView.CopyFromUnchecked(stream, tempView);
                         stream.Flush();
                     }
                 }

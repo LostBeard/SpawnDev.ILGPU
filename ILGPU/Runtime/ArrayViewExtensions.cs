@@ -727,6 +727,30 @@ namespace ILGPU.Runtime
                 target.IndexInBytes,
                 source.AsRawArrayView().LengthInBytes);
 
+        /// <summary>
+        /// UNGUARDED device-to-device copy that bypasses the browser sync-copy guard on
+        /// <see cref="MemoryBuffer.CopyFromBuffer"/>. For LIBRARY/internal code that already orders
+        /// the copy by other means on the browser backends (queue order, or an explicit
+        /// drain/flush), where the public
+        /// <see cref="CopyFrom{TView}(TView, AcceleratorStream, in TView)"/> throws so consumer
+        /// misuse is loud. Calling this from synchronous consumer code without such ordering
+        /// re-introduces the unordered race the guard exists to stop - use the async
+        /// <c>CopyFromAsync</c> path there instead.
+        /// </summary>
+        [NotInsideKernel]
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static void CopyFromUnchecked<TView>(
+            this TView target,
+            AcceleratorStream stream,
+            in TView source)
+            where TView : IContiguousArrayView =>
+            target.Buffer.CopyFromBufferAfterDrain(
+                stream,
+                source.Buffer,
+                source.IndexInBytes,
+                target.IndexInBytes,
+                source.AsRawArrayView().LengthInBytes);
+
         #endregion
 
         #region Copy elements to/from CPU async

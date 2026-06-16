@@ -521,7 +521,7 @@ namespace SpawnDev.ILGPU.Wasm
         /// Handles Wasm-to-Wasm copies via SharedArrayBuffer directly,
         /// bypassing Marshal.Copy which requires native pointers.
         /// </summary>
-        protected override void CopyFromBuffer(
+        protected override void CopyFromBufferCore(
             AcceleratorStream stream,
             MemoryBuffer sourceBuffer,
             long sourceOffsetInBytes,
@@ -551,7 +551,7 @@ namespace SpawnDev.ILGPU.Wasm
                 return;
             }
             // Non-Wasm source: fall back to default (via native pointer)
-            base.CopyFromBuffer(
+            base.CopyFromBufferCore(
                 stream, sourceBuffer,
                 sourceOffsetInBytes, targetOffsetInBytes, lengthInBytes);
         }

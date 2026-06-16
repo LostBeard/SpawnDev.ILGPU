@@ -133,5 +133,60 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                         $"Flush + SynchronizeAsync produced wrong data at {i}: expected {i * 2}, got {result[i]}");
             }
         });
+
+        /// <summary>
+        /// Device-to-device copy contract: a SYNC <c>CopyFrom</c> of a buffer a kernel just wrote
+        /// THROWS NotSupportedException on the browser backends (it cannot be ordered against the
+        /// producing kernel on the worker pool / async queue boundary — the silent-stale-read class).
+        /// <c>CopyFromAsync</c> (drains the producer first) is the portable path and yields the
+        /// correct output on EVERY backend. Desktop sync <c>CopyFrom</c> stays valid (ordered).
+        /// Mirrors <see cref="SyncSynchronizeContractTest"/> for the device-copy half of the contract.
+        /// </summary>
+        [TestMethod]
+        public async Task SyncDeviceCopyContractTest() => await RunTest(async accelerator =>
+        {
+            bool browser = IsBrowserBackend(accelerator.AcceleratorType);
+            const int count = 64;
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(
+                SyncContract_FillKernel);
+            using var src = accelerator.Allocate1D<int>(count);
+            using var dst = accelerator.Allocate1D<int>(count);
+            kernel((Index1D)count, src.View); // src now has pending kernel output (src[i] = i*2)
+
+            if (browser)
+            {
+                // Sync device->device copy of a kernel output is unordered at the browser GPU
+                // boundary -> throws (loud, not a silent stale read). The async form is the path.
+                AssertThrowsNotSupported(
+                    () => dst.View.CopyFrom(accelerator.DefaultStream, src.View),
+                    "dst.View.CopyFrom(src.View)");
+            }
+            else
+            {
+                // Desktop: sync device copy is correctly ordered, so it works.
+                accelerator.Synchronize();
+                dst.View.CopyFrom(accelerator.DefaultStream, src.View);
+                accelerator.Synchronize();
+                var dr = await dst.CopyToHostAsync<int>();
+                for (int i = 0; i < count; i++)
+                {
+                    if (dr[i] != i * 2)
+                        throw new Exception(
+                            $"Desktop sync CopyFrom produced wrong data at {i}: expected {i * 2}, got {dr[i]}");
+                }
+            }
+
+            // CopyFromAsync (drain the producer, then copy) is portable on EVERY backend and correct.
+            await dst.View.CopyFromAsync(src.View);
+            await accelerator.SynchronizeAsync();
+            var result = await dst.CopyToHostAsync<int>();
+            for (int i = 0; i < count; i++)
+            {
+                if (result[i] != i * 2)
+                    throw new Exception(
+                        $"CopyFromAsync produced wrong data at {i}: expected {i * 2}, got {result[i]}");
+            }
+        });
     }
 }

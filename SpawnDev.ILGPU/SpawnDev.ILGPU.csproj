@@ -4,9 +4,9 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.13.0-local.5</Version>
+		<Version>4.13.0-local.6</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>4.13.0-local.5: CPU backend - cooperative multi-multiprocessor execution. The CPU accelerator simulated a GPU group of 64 threads as 64 OS threads in ONE multiprocessor; on a machine with fewer cores every in-kernel Group.Barrier oversubscribed and thrashed (~1.4s/launch with multi-second tails on barrier/reduction kernels - e.g. GGUF KV-cache decode timed out). Two fixes: (1) the default CPU device now uses NumMultiprocessors = logical-core-count (was hardcoded 1) so thread-groups run one-per-core in parallel; (2) Auto mode now selects cooperative (sequential-within-group) scheduling - one active thread per multiprocessor, cheap O(1) targeted-pulse barrier handoff (was an O(N^2) Monitor.PulseAll storm) - eliminating oversubscription while keeping cross-core parallelism. Measured: a 256-group x64 shared-memory reduction went 1381ms -> 146ms/launch with zero timing variance, results bit-identical. Explicit Parallel mode still available for barrier-free kernels. Forks bump to 2.0.21. Earlier in 4.13.0: BFloat16 full type parity on all 6 backends (see CHANGELOG). Full per-version history: CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
+		<PackageReleaseNotes>4.13.0-local.6: Completes the sync/async contract for device-to-device copies. A SYNCHRONOUS CopyFrom/CopyTo between two device buffers now THROWS NotSupportedException on the browser backends (Wasm/WebGPU/WebGL) - it cannot be ordered against a producing kernel at the async GPU boundary and silently read stale data (a real gemma4 KV argmax flip on Wasm). Use `await CopyFromAsync(...)` (drains the producer, then copies); host&lt;-&gt;device transfers are unaffected. New Accelerator.RequiresAsyncDeviceCopy flag (true on the 3 browser backends), the guard in MemoryBuffer.CopyFromBuffer, public CopyFromBufferAfterDrain + CopyFromUnchecked for library code that orders the copy by other means (the 2 internal scan-fence sites migrated). Locked by BackendTestBase.SyncDeviceCopyContractTest (23/0 all lanes). Forks bump to 2.0.22. --- 4.13.0-local.5: CPU backend - cooperative multi-multiprocessor execution. The CPU accelerator simulated a GPU group of 64 threads as 64 OS threads in ONE multiprocessor; on a machine with fewer cores every in-kernel Group.Barrier oversubscribed and thrashed (~1.4s/launch with multi-second tails on barrier/reduction kernels - e.g. GGUF KV-cache decode timed out). Two fixes: (1) the default CPU device now uses NumMultiprocessors = logical-core-count (was hardcoded 1) so thread-groups run one-per-core in parallel; (2) Auto mode now selects cooperative (sequential-within-group) scheduling - one active thread per multiprocessor, cheap O(1) targeted-pulse barrier handoff (was an O(N^2) Monitor.PulseAll storm) - eliminating oversubscription while keeping cross-core parallelism. Measured: a 256-group x64 shared-memory reduction went 1381ms -> 146ms/launch with zero timing variance, results bit-identical. Explicit Parallel mode still available for barrier-free kernels. Forks bump to 2.0.21. Earlier in 4.13.0: BFloat16 full type parity on all 6 backends (see CHANGELOG). Full per-version history: CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -65,8 +65,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.21" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.21" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.22" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.22" />
 	</ItemGroup>
 
 	<ItemGroup>

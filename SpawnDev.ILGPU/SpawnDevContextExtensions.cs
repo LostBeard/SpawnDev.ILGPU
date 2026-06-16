@@ -514,7 +514,9 @@ namespace SpawnDev.ILGPU
             var srcAcc = srcContig.Buffer?.Accelerator;
             var dstAcc = dstContig.Buffer?.Accelerator;
 
-            // Only Wasm needs the explicit drain - see XML doc above for why.
+            // Only Wasm needs the explicit drain - see XML doc above for why (the worker pool is
+            // not a single ordered queue; WebGPU/WebGL CopyBufferToBuffer is queue-ordered after the
+            // producer, desktop is synchronous).
             if (srcAcc is WasmAccelerator srcWasm)
                 await srcWasm.SynchronizeAsync();
             if (dstAcc is WasmAccelerator dstWasm
@@ -523,7 +525,16 @@ namespace SpawnDev.ILGPU
                 await dstWasm.SynchronizeAsync();
             }
 
-            target.CopyFrom(source);
+            // The sync device-copy entry (target.CopyFrom) now THROWS on the browser backends
+            // (Accelerator.RequiresAsyncDeviceCopy) so the unordered misuse is loud. This IS the
+            // ordered async path (the producer was drained above on Wasm), so route the post-drain
+            // copy through the unguarded core instead of the guarded sync entry.
+            dstContig.Buffer.CopyFromBufferAfterDrain(
+                dstContig.Buffer.Accelerator.DefaultStream,
+                srcContig.Buffer,
+                srcContig.IndexInBytes,
+                dstContig.IndexInBytes,
+                srcContig.AsRawArrayView().LengthInBytes);
         }
 
         /// <summary>

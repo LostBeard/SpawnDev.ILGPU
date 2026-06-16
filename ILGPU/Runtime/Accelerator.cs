@@ -306,6 +306,19 @@ namespace ILGPU.Runtime
         }
 
         /// <summary>
+        /// True if this accelerator is async-only at the GPU boundary, so a SYNCHRONOUS
+        /// device-to-device buffer copy (sync <c>CopyFrom</c>/<c>CopyTo</c> between two device
+        /// buffers) cannot be ordered against a producing kernel and must instead go through the
+        /// async <c>CopyFromAsync</c>/<c>CopyToHostAsync</c> path (which drains first). False on the
+        /// desktop backends (CPU/CUDA/OpenCL), where a sync device copy is correctly ordered.
+        /// True on the browser backends (Wasm/WebGPU/WebGL) - mirrors the same reason
+        /// <see cref="Synchronize"/> throws there. The sync device-copy entry point throws when this
+        /// is true so the misuse is loud instead of a silent stale read (e.g. the Wasm worker pool
+        /// returning a buffer a still-running kernel is mid-write to).
+        /// </summary>
+        public virtual bool RequiresAsyncDeviceCopy => false;
+
+        /// <summary>
         /// Submits all pending work to the device WITHOUT waiting for it to finish.
         /// </summary>
         /// <remarks>
