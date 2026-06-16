@@ -2,7 +2,9 @@
 
 **Author:** Geordi (from Captain's idea, 2026-06-15)
 **Date:** 2026-06-15
-**Status:** **APPROVED (Captain, 2026-06-15). COMPLETE on ALL 6 BACKENDS + verified (Geordi) — Phases 0-2b (CPU + WebGPU + WebGL + Wasm) + 3a (OpenCL) + 3b (native CUDA/PTX). Shipped `SpawnDev.ILGPU 4.13.0-local.2` (forks 2.0.18), master `1382a04`. Gates: `PMT_FILTER=BFloat16` all 6 lanes 28/0/0; `PMT_FILTER=Half` 181/0/8 (no f16 regression).**
+**Status:** **APPROVED (Captain, 2026-06-15). FULL TYPE PARITY with Half on ALL 6 BACKENDS + verified (Geordi). Shipped `SpawnDev.ILGPU 4.13.0-local.3` (forks 2.0.19), master `ea370d0`. Gates: `PMT_FILTER=BFloat16` 77/0 all 6 backends; `PMT_FILTER=Half` 181/0/8 (no regression).**
+- **Phases 0-3b (load/store/arithmetic):** CPU + WebGPU + WebGL + Wasm + OpenCL + native CUDA/PTX (f32-register model). Shipped local.2 (master `1382a04`).
+- **Full parity (local.3):** radix-sort keys (`Interop.FloatAsInt(BFloat16)` + `Ascending/DescendingBFloat16`; per-backend `FloatAsIntCast`), struct fields (CUDA `EmitIOLoad`/`EmitIOStore` + WGSL body-struct classification; validated via `RadixSortPair<bf16,int>`), IR const-fold (`ArithmeticOperations`/`CompareOperations` `.tt` + `Convert.cs`), `AcceleratorRequirements.RequiresBFloat16`. WebGL = unpacked-f32 scatter; **WebGPU = lossless f32-widen** (naga/Dawn mis-compiles the specialized descending kernel - ILGPU codegen proven correct via bucket-compare; tracked `_DevComms/global/geordi-WEBGPU-naga-miscompiles-bf16-descending-radix`). *Remaining (deferred, separate issue): the all-constant compare-ternary `Int1` predicate-fold gap is pre-existing + not bf16-specific.*
 - **Phase 3b (CUDA/PTX):** f32-register-compute model (PTX has no native bf16 arithmetic, only `cvt.*.bf16`):
   bf16 value→`.f32` register (RegisterTypeMapping/ParameterTypeRemapping/movement-remap); arithmetic+compare
   remap bf16→f32 at the `PTXInstructions` chokepoint; `ConvertValue` bf16↔f32 = register no-op; custom Load
