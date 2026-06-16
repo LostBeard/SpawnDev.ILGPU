@@ -282,6 +282,9 @@ namespace ILGPU.Backends.OpenCL
 
             // Emit code that moves view arguments into their appropriate targets
             BeginFunctionBody();
+            // Convert emulated sub-word (bf16 / emulated Half) scalar params from their 2-byte storage
+            // signature param to the float value variable BEFORE any body code reads them.
+            EmitSubWordScalarParamConversions();
             GenerateArgumentMapping();
 
             // Emit index computation

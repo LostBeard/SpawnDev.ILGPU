@@ -323,6 +323,30 @@ namespace ILGPU.Backends.OpenCL
         /// <param name="logic">The type generator to use.</param>
         /// <param name="targetBuilder">The target builder to use.</param>
         /// <param name="paramOffset">The intrinsic parameter offset.</param>
+        /// <summary>
+        /// Suffix for the raw-storage signature name of an emulated sub-word (bf16 / emulated Half)
+        /// scalar kernel param. The signature declares the param at its 2-byte STORAGE type under this
+        /// raw name (so the host's 2-byte clSetKernelArg lines up - declaring it as the 4-byte compute
+        /// `float` threw CL_INVALID_ARG_SIZE); the body then converts it to the float value variable.
+        /// </summary>
+        private const string SubWordScalarRawSuffix = "_swraw";
+
+        /// <summary>
+        /// Emulated sub-word scalar kernel params collected during <see cref="SetupParameters"/>:
+        /// (value variable name, basic value type). The kernel generator emits a storage->float
+        /// conversion for each at the top of the body via <see cref="EmitSubWordScalarParamConversions"/>.
+        /// </summary>
+        private readonly List<(string Name, BasicValueType Type)> _subWordScalarParams = new();
+
+        /// <summary>True if <paramref name="param"/> is a by-value scalar of an EMULATED sub-word type
+        /// (bf16 always; Half when cl_khr_fp16 is absent) - the case whose storage (2 bytes) differs from
+        /// its OpenCL compute type (`float`, 4 bytes). Native-half scalars and full-width types are fine.</summary>
+        private bool IsEmulatedSubWordScalarParam(Parameter param) =>
+            param.ParameterType is ILGPU.IR.Types.PrimitiveType prim &&
+            (prim.BasicValueType == BasicValueType.BFloat16 ||
+             (prim.BasicValueType == BasicValueType.Float16 &&
+              !TypeGenerator.Capabilities.Float16Native));
+
         protected void SetupParameters<TSetupLogic>(
             StringBuilder targetBuilder,
             ref TSetupLogic logic,
@@ -352,11 +376,64 @@ namespace ILGPU.Backends.OpenCL
                     targetBuilder.AppendLine(",");
 
                 targetBuilder.Append('\t');
-                targetBuilder.Append(logic.GetParameterType(param));
-                targetBuilder.Append(' ');
-                targetBuilder.Append(variable.VariableName);
+                if (IsEmulatedSubWordScalarParam(param))
+                {
+                    // Declare at 2-byte STORAGE (ushort for bf16, half for emulated Half) under a raw
+                    // name; the body converts it to the float value variable (EmitSubWordScalarParam-
+                    // Conversions). Matches how bf16/Half buffer ELEMENTS are 2-byte storage + converted.
+                    var bvt = ((ILGPU.IR.Types.PrimitiveType)param.ParameterType)
+                        .BasicValueType;
+                    // Raw 16-bit storage as `ushort` for BOTH (the managed bf16/Half raw bits).
+                    // NVIDIA OpenCL rejects a `half` SCALAR arg without cl_khr_fp16, so use ushort +
+                    // the bit-conversion helpers (mirrors how the host packs 2 raw bytes for either).
+                    targetBuilder.Append("ushort");
+                    targetBuilder.Append(' ');
+                    targetBuilder.Append(variable.VariableName);
+                    targetBuilder.Append(SubWordScalarRawSuffix);
+                    _subWordScalarParams.Add((variable.VariableName, bvt));
+                }
+                else
+                {
+                    targetBuilder.Append(logic.GetParameterType(param));
+                    targetBuilder.Append(' ');
+                    targetBuilder.Append(variable.VariableName);
+                }
 
                 attachComma = true;
+            }
+        }
+
+        /// <summary>
+        /// Emits the storage->float conversion for each emulated sub-word scalar param collected in
+        /// <see cref="SetupParameters"/>: <c>float val = _bf16_bits_to_f32(val_swraw);</c> (bf16) or
+        /// <c>float val = vload_half(0, &amp;val_swraw);</c> (emulated Half). Call at the top of the
+        /// kernel body, before the param value variable is used. The value variable is already bound to
+        /// the IR param, so the rest of the body reads the converted float unchanged.
+        /// </summary>
+        protected void EmitSubWordScalarParamConversions()
+        {
+            foreach (var (name, type) in _subWordScalarParams)
+            {
+                Builder.Append("\tfloat ");
+                Builder.Append(name);
+                Builder.Append(" = ");
+                if (type == BasicValueType.BFloat16)
+                {
+                    Builder.Append("_bf16_bits_to_f32(");
+                    Builder.Append(name);
+                    Builder.Append(SubWordScalarRawSuffix);
+                    Builder.Append(')');
+                }
+                else
+                {
+                    // Emulated Half: widen the raw 16 bits to f32 via the same bit helper the buffer
+                    // path uses (_half_bits_to_f32(short); takes signed short - the cast is bit-preserving).
+                    Builder.Append("_half_bits_to_f32((short)");
+                    Builder.Append(name);
+                    Builder.Append(SubWordScalarRawSuffix);
+                    Builder.Append(')');
+                }
+                Builder.AppendLine(";");
             }
         }
 
