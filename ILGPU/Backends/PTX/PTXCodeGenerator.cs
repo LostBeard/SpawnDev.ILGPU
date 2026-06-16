@@ -983,6 +983,34 @@ namespace ILGPU.Backends.PTX
 
             foreach (var mappedParameter in parameters)
             {
+                // bf16 scalar param: declared at 2-byte .b16 storage (AppendParamDeclaration) so the
+                // host's 2-byte pack lines up. Load the raw 16 bits into a temp .b16 register, then
+                // widen to the f32 VALUE register via cvt.f32.bf16 - the SAME storage->compute
+                // conversion a bf16 buffer-element load uses (GenerateCode(Load)). Without this the
+                // f32-register model's ld.param.f32 read 4 bytes where the host packed only 2, so the
+                // bf16 scalar arrived as 0 (a generic INumber<T> bf16 kernel's scale/bias). Half is
+                // native f16 (2-byte register, no widen) and takes the normal path below.
+                if (mappedParameter.Parameter.Type.BasicValueType == BasicValueType.BFloat16 &&
+                    mappedParameter.Register is HardwareRegister bf16ValueRegister)
+                {
+                    var rawReg = AllocateRegister(
+                        BasicValueType.Int16,
+                        PTXRegisterKind.Int16);
+                    using (var cmd = BeginCommand(PTXInstructions.LoadParamOperation))
+                    {
+                        cmd.AppendSuffix("b16");
+                        cmd.AppendArgument(rawReg);
+                        cmd.AppendRawValue(mappedParameter.PTXName, 0);
+                    }
+                    using (var cmd = BeginCommand("cvt.f32.bf16"))
+                    {
+                        cmd.AppendArgument(bf16ValueRegister);
+                        cmd.AppendArgument(rawReg);
+                    }
+                    FreeRegister(rawReg);
+                    continue;
+                }
+
                 EmitLoadParam(
                     mappedParameter.PTXName,
                     mappedParameter.Register,
@@ -1063,6 +1091,19 @@ namespace ILGPU.Backends.PTX
             targetBuilder.Append(".param .");
             switch (paramType)
             {
+                case PrimitiveType primBf16
+                    when primBf16.BasicValueType == BasicValueType.BFloat16:
+                    // bf16 has no native PTX type; it computes in an f32 register but its STORAGE
+                    // (the host-packed scalar arg, and a buffer element) is the 2-byte top-half-of-fp32
+                    // pattern. Declare the param at 2-byte .b16 storage so the host's 2-byte pack lines
+                    // up; BindParameters loads it (.b16) and widens to the f32 value register via
+                    // cvt.f32.bf16 (the same storage->compute conversion as a bf16 buffer-element load).
+                    // Declaring it .f32 (the register/compute type) made the host's 2 bytes misalign in
+                    // a 4-byte slot -> the scalar arrived as 0 (a generic INumber<T> bf16 kernel's
+                    // scale/bias). Mirrors how Float16 declares .b16.
+                    targetBuilder.Append("b16 ");
+                    targetBuilder.Append(paramName);
+                    break;
                 case PrimitiveType _:
                 case StringType _:
                 case PointerType _:
