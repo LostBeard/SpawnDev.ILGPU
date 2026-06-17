@@ -356,6 +356,11 @@ namespace ILGPU.Backends.OpenCL
                             && (fp8Elem.BasicValueType == BasicValueType.Float8E4M3
                                 || fp8Elem.BasicValueType == BasicValueType.Float8E5M2))
                             builder.Append("uchar");
+                        // FP4 (E2M1) is the same idea: 1-byte uchar storage (4-bit value in the
+                        // low nibble), helpers _e2m1_bits_to_f32 / _f32_to_e2m1_bits.
+                        else if (pointerType.ElementType is PrimitiveType fp4Elem
+                            && fp4Elem.BasicValueType == BasicValueType.Float4E2M1)
+                            builder.Append("uchar");
                         else
                             builder.Append(mapping[pointerType.ElementType]);
                         builder.Append(CLInstructions.DereferenceOperation);

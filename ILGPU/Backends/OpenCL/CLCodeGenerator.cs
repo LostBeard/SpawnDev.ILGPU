@@ -212,6 +212,10 @@ namespace ILGPU.Backends.OpenCL
         // buffers. Load/Store convert via _e4m3/_e5m2 helpers; IsE4M3 selects the format.
         internal readonly Dictionary<string, (Variable BasePtr, Variable Index, bool IsE4M3)> _fp8EmulatedLEAs = new();
 
+        // FP4 emulation (always emulated - no native OpenCL fp4 type): tracks LEAs into uchar*
+        // buffers (4-bit E2M1 value in the low nibble). Load/Store convert via _e2m1 helpers.
+        internal readonly Dictionary<string, (Variable BasePtr, Variable Index)> _fp4EmulatedLEAs = new();
+
         private StringBuilder prefixBuilder = new StringBuilder();
         private StringBuilder suffixBuilder = new StringBuilder();
 
@@ -351,6 +355,7 @@ namespace ILGPU.Backends.OpenCL
             (prim.BasicValueType == BasicValueType.BFloat16 ||
              prim.BasicValueType == BasicValueType.Float8E4M3 ||
              prim.BasicValueType == BasicValueType.Float8E5M2 ||
+             prim.BasicValueType == BasicValueType.Float4E2M1 ||
              (prim.BasicValueType == BasicValueType.Float16 &&
               !TypeGenerator.Capabilities.Float16Native));
 
@@ -394,9 +399,11 @@ namespace ILGPU.Backends.OpenCL
                     // for FP8 - matching the managed raw bits the host packs. NVIDIA OpenCL rejects a
                     // `half` SCALAR arg without cl_khr_fp16, so all emulated sub-word scalars use an
                     // integer storage type + the bit-conversion helpers.
-                    bool isFp8Scalar = bvt == BasicValueType.Float8E4M3
-                        || bvt == BasicValueType.Float8E5M2;
-                    targetBuilder.Append(isFp8Scalar ? "uchar" : "ushort");
+                    // FP8 (1 byte) and FP4 (1 byte, low nibble) both use uchar storage; bf16/Half ushort.
+                    bool isByteScalar = bvt == BasicValueType.Float8E4M3
+                        || bvt == BasicValueType.Float8E5M2
+                        || bvt == BasicValueType.Float4E2M1;
+                    targetBuilder.Append(isByteScalar ? "uchar" : "ushort");
                     targetBuilder.Append(' ');
                     targetBuilder.Append(variable.VariableName);
                     targetBuilder.Append(SubWordScalarRawSuffix);
@@ -444,6 +451,13 @@ namespace ILGPU.Backends.OpenCL
                 else if (type == BasicValueType.Float8E5M2)
                 {
                     Builder.Append("_e5m2_bits_to_f32(");
+                    Builder.Append(name);
+                    Builder.Append(SubWordScalarRawSuffix);
+                    Builder.Append(')');
+                }
+                else if (type == BasicValueType.Float4E2M1)
+                {
+                    Builder.Append("_e2m1_bits_to_f32(");
                     Builder.Append(name);
                     Builder.Append(SubWordScalarRawSuffix);
                     Builder.Append(')');

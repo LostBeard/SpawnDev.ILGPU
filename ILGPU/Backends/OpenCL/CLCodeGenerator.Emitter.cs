@@ -383,6 +383,10 @@ namespace ILGPU.Backends.OpenCL
                     case BasicValueType.Float8E5M2:
                         AppendConstant((float)value.Float8E5M2Value);
                         break;
+                    case BasicValueType.Float4E2M1:
+                        // FP4 computes as float on OpenCL; emit the f32 magnitude.
+                        AppendConstant((float)value.Float4E2M1Value);
+                        break;
                     case BasicValueType.Float32:
                         AppendConstant(value.Float32Value);
                         break;

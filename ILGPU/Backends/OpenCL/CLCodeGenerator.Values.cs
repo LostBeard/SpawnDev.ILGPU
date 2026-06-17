@@ -293,6 +293,19 @@ namespace ILGPU.Backends.OpenCL
                 return;
             }
 
+            // FP4 is ALWAYS emulated as float on OpenCL. FloatAsInt(fp4) must yield the 4-bit
+            // E2M1 pattern (low nibble) via _f32_to_e2m1_bits. Drives the AscendingFloat4E2M1
+            // radix sort (NumBits=4).
+            if (value.Value.BasicValueType == BasicValueType.Float4E2M1)
+            {
+                using var statement = BeginStatement(target);
+                statement.AppendCommand("_f32_to_e2m1_bits");
+                statement.BeginArguments();
+                statement.AppendArgument(source);
+                statement.EndArguments();
+                return;
+            }
+
             using var statement2 = BeginStatement(target);
             statement2.AppendCommand(
                 value.BasicValueType == BasicValueType.Int64 ?
@@ -346,6 +359,18 @@ namespace ILGPU.Backends.OpenCL
                 statement.AppendCommand(
                     value.BasicValueType == BasicValueType.Float8E4M3 ?
                     "_e4m3_bits_to_f32" : "_e5m2_bits_to_f32");
+                statement.BeginArguments();
+                statement.AppendArgument(source);
+                statement.EndArguments();
+                return;
+            }
+
+            // Symmetric inverse for FP4 (always emulated): widen the 4-bit pattern to f32.
+            // Defensive - the frontend has no IntAsFloat->Float4E2M1 overload today.
+            if (value.BasicValueType == BasicValueType.Float4E2M1)
+            {
+                using var statement = BeginStatement(target);
+                statement.AppendCommand("_e2m1_bits_to_f32");
                 statement.BeginArguments();
                 statement.AppendArgument(source);
                 statement.EndArguments();
@@ -551,6 +576,26 @@ namespace ILGPU.Backends.OpenCL
                 return;
             }
 
+            // FP4 emulation: read the raw uchar (low nibble) and convert to f32 via the E2M1 helper.
+            if (_fp4EmulatedLEAs.TryGetValue(address.ToString(), out var fp4Lea))
+            {
+                using var statement = BeginStatement(target);
+                statement.AppendCommand("_e2m1_bits_to_f32(");
+                statement.AppendArgument(fp4Lea.BasePtr);
+                statement.AppendIndexer(fp4Lea.Index);
+                statement.AppendCommand(")");
+                return;
+            }
+            if (IsFloat4PointerEmulated(load.Source.Type))
+            {
+                using var statement = BeginStatement(target);
+                statement.AppendCommand("_e2m1_bits_to_f32(");
+                statement.AppendCommand(CLInstructions.DereferenceOperation);
+                statement.AppendArgument(address);
+                statement.AppendCommand(")");
+                return;
+            }
+
             using var statement2 = BeginStatement(target);
             statement2.AppendCommand(CLInstructions.DereferenceOperation);
             statement2.AppendArgument(address);
@@ -629,6 +674,26 @@ namespace ILGPU.Backends.OpenCL
                 return;
             }
 
+            // FP4 emulation: convert f32 -> e2m1 bits (RNE) and store as raw uchar (low nibble).
+            if (_fp4EmulatedLEAs.TryGetValue(address.ToString(), out var fp4StoreLea))
+            {
+                using var statement = BeginStatement(fp4StoreLea.BasePtr, fp4StoreLea.Index);
+                statement.AppendCommand("_f32_to_e2m1_bits(");
+                statement.AppendArgument(value);
+                statement.AppendCommand(")");
+                return;
+            }
+            if (IsFloat4PointerEmulated(store.Target.Type))
+            {
+                using var statement = BeginStatement(CLInstructions.DereferenceOperation);
+                statement.AppendArgument(address);
+                statement.AppendCommand(CLInstructions.AssignmentOperation);
+                statement.AppendCommand("_f32_to_e2m1_bits(");
+                statement.AppendArgument(value);
+                statement.AppendCommand(")");
+                return;
+            }
+
             using var statement2 = BeginStatement(CLInstructions.DereferenceOperation);
             statement2.AppendArgument(address);
             statement2.AppendCommand(CLInstructions.AssignmentOperation);
@@ -659,6 +724,11 @@ namespace ILGPU.Backends.OpenCL
             }
             return false;
         }
+
+        private static bool IsFloat4PointerEmulated(TypeNode type) =>
+            type is PointerType ptr
+            && ptr.ElementType is PrimitiveType pe
+            && pe.BasicValueType == BasicValueType.Float4E2M1;
 
         /// <summary cref="IBackendCodeGenerator.GenerateCode(LoadFieldAddress)"/>
         public void GenerateCode(LoadFieldAddress value)

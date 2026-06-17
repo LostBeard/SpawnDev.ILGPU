@@ -85,6 +85,24 @@ namespace ILGPU.Backends.OpenCL
                 return;
             }
 
+            // FP4 emulation: E2M1 has no native OpenCL type, so views are uchar* (4-bit value in
+            // the low nibble) and load/store convert via the _e2m1 helpers. Track (basePtr, index).
+            if (value.Type is PointerType ptrTypeFp4
+                && ptrTypeFp4.ElementType is PrimitiveType ptElemFp4
+                && ptElemFp4.BasicValueType == BasicValueType.Float4E2M1)
+            {
+                var targetFp4 = AllocatePointerType(ptrTypeFp4);
+                using (var statement = BeginStatement(targetFp4))
+                {
+                    statement.AppendCommand(CLInstructions.AddressOfOperation);
+                    statement.Append(source);
+                    statement.AppendIndexer(elementIndex);
+                }
+                Bind(value, targetFp4);
+                _fp4EmulatedLEAs[targetFp4.ToString()] = (source, elementIndex);
+                return;
+            }
+
             var target2 = AllocatePointerType(value.Type.AsNotNullCast<PointerType>());
 
             using (var statement = BeginStatement(target2))
