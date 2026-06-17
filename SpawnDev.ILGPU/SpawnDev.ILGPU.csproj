@@ -4,7 +4,7 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.13.1-local.1</Version>
+		<Version>4.13.1</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
 		<PackageReleaseNotes>4.13.0 brings full low-precision floating-point support across ALL 6 backends (CPU, OpenCL, WebGPU, WebGL, Wasm, CUDA): Half, BFloat16, and now FP8 (Float8E4M3 + Float8E5M2), plus generic INumber&lt;T&gt; mixed-precision kernels and PrecisionConvert for transpilable generic float&lt;-&gt;T conversion inside a kernel. This release also fixes bf16 on PRE-AMPERE CUDA cards (GTX 1080 / RTX 2060 etc.): the PTX bf16 path used sm_80+ cvt instructions and failed to compile on older cards; it now uses portable bit-manipulation that works on every CUDA architecture (FP8 likewise). Full per-version history with code samples: CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>

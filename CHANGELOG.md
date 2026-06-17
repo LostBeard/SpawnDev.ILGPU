@@ -2,9 +2,9 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
-## 4.13.1 (unreleased) - FP8 radix-sort keys on all 6 backends
+## 4.13.1 (2026-06-16) - FP8 radix-sort keys on all 6 backends
 
-### local.1 - FP8 (Float8E4M3 / Float8E5M2) radix-sort keys
+### FP8 (Float8E4M3 / Float8E5M2) radix-sort keys
 
 - **FP8 arrays can now be radix-sorted on all 6 backends** (keys-only + key/value pairs, ascending + descending) - closing the tracked 4.13.0 follow-up. Added: `Interop.FloatAsInt(Float8E4M3)` / `(Float8E5M2)` (the raw 8-bit pattern, like the `Half`/`BFloat16` twins); the IR `FloatAsIntCast` lowering for FP8 across all backends (constant-fold + `Int8` result sizing in `IR/Construction/Cast.cs`; per-backend codegen on PTX `EmitF32ToFP8Bits`, OpenCL `_f32_to_e4m3_bits`, WGSL/GLSL `_f32_to_e4m3`, Wasm `EmitF32ToFP8`); and `Ascending`/`DescendingFloat8E4M3`/`E5M2` radix operations (the sign-flip + ones-complement float key transform at 8-bit width - both E4M3 and E5M2 are magnitude-monotonic, exponent above mantissa). On WebGL FP8 keys sort via the unpacked-f32 working representation (same as Half/bf16, since the whole-texel scatter can't move a sub-word value); on the other 5 backends as native 1-byte keys.
 - **WebGPU packed-sub-word fix (the hard part).** `Float8E4M3`/`Float8E5M2` are their OWN `BasicValueType` (NOT `Int8`), so they were silently skipped by every `case Int8/Int16/BFloat16` switch in the WGSL codegen and fell to a default that maps FP8 -> `f32`. For a packed FP8 key buffer this meant: the binding was declared `array<f32>` instead of `array<atomic<u32>>`, and the kernel read each key via a raw whole-word deref instead of a 4-per-word byte extract + `_e4m3_to_f32` - so the radix sort read garbage and corrupted the result (WebGPU only; the 5 other backends were correct). Fixed by adding FP8 to all four WGSL sub-word classification switches (body-struct binding-type, body-struct LEA, direct-param LEA, direct-param coalesce) so FP8 is declared packed `array<atomic<u32>>` and extracted+converted at load/store - exactly the path bf16 (2-per-word) already used. Localized with the Dawn `dump_shaders` Tint-output dump (`PMT_DAWN_DUMP=1`), not by staring at the WGSL.
