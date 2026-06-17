@@ -4,9 +4,9 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.13.1</Version>
+		<Version>4.13.2</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>4.13.0 brings full low-precision floating-point support across ALL 6 backends (CPU, OpenCL, WebGPU, WebGL, Wasm, CUDA): Half, BFloat16, and now FP8 (Float8E4M3 + Float8E5M2), plus generic INumber&lt;T&gt; mixed-precision kernels and PrecisionConvert for transpilable generic float&lt;-&gt;T conversion inside a kernel. This release also fixes bf16 on PRE-AMPERE CUDA cards (GTX 1080 / RTX 2060 etc.): the PTX bf16 path used sm_80+ cvt instructions and failed to compile on older cards; it now uses portable bit-manipulation that works on every CUDA architecture (FP8 likewise). Full per-version history with code samples: CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
+		<PackageReleaseNotes>4.13.2 is a packaging fix over 4.13.1: removes stray Wasm/repro JSON files that the Razor SDK swept into the package, and bundles the precompiled-shaders precompiler tool (tools/) that 4.13.0/4.13.1 were missing. The 4.13.x line brings full low-precision floating-point support across ALL 6 backends (CPU, OpenCL, WebGPU, WebGL, Wasm, CUDA): Half, BFloat16, and FP8 (Float8E4M3 + Float8E5M2) - including FP8 radix-sort keys (4.13.1) - plus generic INumber&lt;T&gt; mixed-precision kernels, PrecisionConvert, and bf16/FP8 portability to pre-Ampere CUDA cards (GTX 1080 / RTX 2060). Full per-version history with code samples: CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -101,6 +101,12 @@
 
 	<ItemGroup>
 		<Content Remove="wwwroot\icon-128.png" />
+		<!-- Wasm/repro/ is tracked debugging-repro scratch (V8 barrier bug repros, .wasm/.wat/.json
+		     fixtures). The Razor SDK auto-sweeps its *.json (manifest/stats/sitemap) into the package
+		     as content/ + contentFiles/ - junk that has no business in the shipped library. Exclude
+		     the whole repro tree from packing (it is not a build input). -->
+		<Content Remove="Wasm\repro\**" />
+		<None Remove="Wasm\repro\**" />
 	</ItemGroup>
 
 	<ItemGroup>

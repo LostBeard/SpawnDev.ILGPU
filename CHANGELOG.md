@@ -2,6 +2,14 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.13.2 (2026-06-16) - Packaging fix (no code changes)
+
+Wrapper-package-only fix over 4.13.1 (forks unchanged at `2.0.27`). No library/runtime behavior changed.
+
+- **Removed stray content from the package.** The Razor SDK was auto-sweeping `*.json` files from the tracked `Wasm/repro/` debugging-repro tree (V8 barrier-bug repros) into the nupkg as `content/` + `contentFiles/` - 18 junk `manifest.json`/`stats.json`/`sitemap.json` files with no business in the shipped library. Excluded `Wasm\repro\**` from packing.
+- **Bundled the precompiled-shaders precompiler tool (`tools/`).** Layer 2 of the precompiled-shaders feature - the precompiler worker + its dependency closure - is gated behind `-p:PackPrecompilerTool=true`, which the publish bat never passed, so 4.13.0 and 4.13.1 shipped without it (the opt-in feature errored for consumers, pointing at the absent tool). `_publish-nuget.bat` now re-packs with that flag before pushing, and the tool is present from 4.13.2 on.
+- 4.13.0 / 4.13.1 remain on nuget.org (immutable); 4.13.2 supersedes them. Use 4.13.2.
+
 ## 4.13.1 (2026-06-16) - FP8 radix-sort keys on all 6 backends
 
 ### FP8 (Float8E4M3 / Float8E5M2) radix-sort keys
