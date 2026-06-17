@@ -1036,6 +1036,24 @@ namespace ILGPU.Backends.PTX
                     continue;
                 }
 
+                // FP4 scalar param: declared at 1-byte .b8 storage. Load the raw byte (.u8) into a temp
+                // register, then widen to the f32 VALUE register via EmitFP4BitsToF32 - the same storage
+                // ->compute conversion an FP4 buffer load uses (f32-register model).
+                if (fp8ParamBvt == BasicValueType.Float4E2M1 &&
+                    mappedParameter.Register is HardwareRegister fp4ValueRegister)
+                {
+                    var rawReg = AllocateRegister(BasicValueType.Int16, PTXRegisterKind.Int16);
+                    using (var cmd = BeginCommand(PTXInstructions.LoadParamOperation))
+                    {
+                        cmd.AppendSuffix("u8");
+                        cmd.AppendArgument(rawReg);
+                        cmd.AppendRawValue(mappedParameter.PTXName, 0);
+                    }
+                    EmitFP4BitsToF32(rawReg, fp4ValueRegister);
+                    FreeRegister(rawReg);
+                    continue;
+                }
+
                 EmitLoadParam(
                     mappedParameter.PTXName,
                     mappedParameter.Register,
@@ -1136,6 +1154,14 @@ namespace ILGPU.Backends.PTX
                     // element) is the 1-byte FP8 pattern. Declare the param at 1-byte .b8 storage so the
                     // host's 1-byte pack lines up; BindParameters loads it (.b8) and widens to f32 via
                     // EmitFP8BitsToF32. Same fix as bf16's .b16 (declaring .f32 made the 1 byte arrive 0).
+                    targetBuilder.Append("b8 ");
+                    targetBuilder.Append(paramName);
+                    break;
+                case PrimitiveType primFp4
+                    when primFp4.BasicValueType == BasicValueType.Float4E2M1:
+                    // FP4 (E2M1) - same f32-register model as FP8; 1-byte storage (value in the low
+                    // nibble). Declare .b8 so the host's 1-byte pack lines up; BindParameters loads it
+                    // (.b8) and widens to f32 via EmitFP4BitsToF32.
                     targetBuilder.Append("b8 ");
                     targetBuilder.Append(paramName);
                     break;

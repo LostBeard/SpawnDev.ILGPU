@@ -241,14 +241,16 @@ namespace ILGPU.Backends.PTX
                 }
             }
 
-            // FP8 uses the SAME f32-register model: the FP8 value lives as f32 in-register and is
-            // rounded to the 1-byte FP8 grid only at the store boundary (EmitF32ToFP8Bits). So an
-            // FP8<->f32 (or FP8<->FP8) ConvertValue is a register no-op here - this is what makes
-            // PrecisionConvert.ConvertToSingle/ConvertFromSingle<FP8> lower to nothing on PTX.
+            // FP8 AND FP4 use the SAME f32-register model: the value lives as f32 in-register and is
+            // rounded to the 1-byte grid only at the store boundary (EmitF32ToFP8Bits/EmitF32ToFP4Bits).
+            // So a (FP8/FP4)<->f32 (or same-low-precision<->same) ConvertValue is a register no-op here -
+            // this is what makes PrecisionConvert.ConvertToSingle/ConvertFromSingle<T> lower to nothing.
             bool srcFp8 = sourceType == ArithmeticBasicValueType.Float8E4M3
-                || sourceType == ArithmeticBasicValueType.Float8E5M2;
+                || sourceType == ArithmeticBasicValueType.Float8E5M2
+                || sourceType == ArithmeticBasicValueType.Float4E2M1;
             bool dstFp8 = targetType == ArithmeticBasicValueType.Float8E4M3
-                || targetType == ArithmeticBasicValueType.Float8E5M2;
+                || targetType == ArithmeticBasicValueType.Float8E5M2
+                || targetType == ArithmeticBasicValueType.Float4E2M1;
             if (srcFp8 || dstFp8)
             {
                 if (srcFp8) sourceType = ArithmeticBasicValueType.Float32;
@@ -943,6 +945,200 @@ namespace ILGPU.Backends.PTX
             FreeRegister(p); FreeRegister(p2);
         }
 
+        /// <summary>
+        /// Emits a PORTABLE FP4 E2M1 raw-nibble (low 4 bits in a .b16 reg) -&gt; f32 conversion using
+        /// only basic integer ops (every CUDA arch). E2M1FN has 16 finite codes (NO Inf/NaN); the only
+        /// subnormal is 0.5, so this is branch-light (no normalize loop). Byte-identical to the managed
+        /// ConvertFloat4E2M1ToFloat (CPU-verified bit-exact to ml_dtypes.float4_e2m1fn). f32-register model.
+        /// </summary>
+        private void EmitFP4BitsToF32(HardwareRegister srcByte, HardwareRegister dstF32)
+        {
+            var bits = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var sign = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var e = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var m = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var nrm = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var sub = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var result = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var t = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var p = AllocateRegister(BasicValueType.Int1, PTXRegisterKind.Predicate);
+
+            void EmitI(string op, HardwareRegister d, HardwareRegister a, long imm)
+            { using var c = BeginCommand(op); c.AppendArgument(d); c.AppendArgument(a); c.AppendConstant(imm); }
+
+            // bits = (u32)srcByte & 0x0F
+            using (var c = BeginCommand("cvt.u32.u16")) { c.AppendArgument(bits); c.AppendArgument(srcByte); }
+            EmitI("and.b32", bits, bits, 0x0F);
+            // sign = (bits & 0x8) << 28   (E2M1 sign bit 3 -> f32 sign bit 31)
+            EmitI("and.b32", sign, bits, 0x8);
+            EmitI("shl.b32", sign, sign, 28);
+            // e = (bits >> 1) & 0x3 ; m = bits & 0x1
+            EmitI("shr.u32", e, bits, 1);
+            EmitI("and.b32", e, e, 0x3);
+            EmitI("and.b32", m, bits, 0x1);
+
+            // NORMAL: nrm = sign | ((e - 1 + 127) << 23) | (m << 22)
+            EmitI("add.s32", t, e, 126);
+            EmitI("shl.b32", t, t, 23);
+            using (var c = BeginCommand("or.b32")) { c.AppendArgument(nrm); c.AppendArgument(sign); c.AppendArgument(t); }
+            EmitI("shl.b32", t, m, 22);
+            using (var c = BeginCommand("or.b32")) { c.AppendArgument(nrm); c.AppendArgument(nrm); c.AppendArgument(t); }
+
+            // SUBNORMAL (e==0): m==0 -> sign (+-0) ; m==1 -> sign | (126<<23) (0.5)
+            EmitI("or.b32", sub, sign, 126L << 23);
+            using (var c = BeginCommand("setp.eq.s32")) { c.AppendArgument(p); c.AppendArgument(m); c.AppendConstant(0); }
+            using (var c = BeginCommand("selp.b32")) { c.AppendArgument(sub); c.AppendArgument(sign); c.AppendArgument(sub); c.AppendArgument(p); }
+
+            // result = (e==0) ? sub : nrm
+            using (var c = BeginCommand("setp.eq.s32")) { c.AppendArgument(p); c.AppendArgument(e); c.AppendConstant(0); }
+            using (var c = BeginCommand("selp.b32")) { c.AppendArgument(result); c.AppendArgument(sub); c.AppendArgument(nrm); c.AppendArgument(p); }
+
+            using (var c = BeginCommand("mov.b32")) { c.AppendArgument(dstF32); c.AppendArgument(result); }
+
+            FreeRegister(bits); FreeRegister(sign); FreeRegister(e); FreeRegister(m);
+            FreeRegister(nrm); FreeRegister(sub); FreeRegister(result); FreeRegister(t); FreeRegister(p);
+        }
+
+        /// <summary>
+        /// Emits a PORTABLE f32 -&gt; FP4 E2M1 raw-nibble (low 4 bits in dst .b16) conversion using only
+        /// basic integer ops (every CUDA arch). Branchless (setp/selp), RNE; finite overflow AND +-Inf
+        /// saturate to +-6 (0x7/0xF), NaN -&gt; -0 (0x8). Byte-identical to the managed ConvertFloatToFloat4E2M1
+        /// (CPU-verified bit-exact to ml_dtypes.float4_e2m1fn). The subnormal shift is clamped (PTX shr is
+        /// UB for shift&gt;=32) and edge-guarded to match the managed return-0 cases.
+        /// </summary>
+        private void EmitF32ToFP4Bits(HardwareRegister srcF32, HardwareRegister dstByte)
+        {
+            const int mantBits = 1, bias = 1, dropBits = 22, eMin = 0;
+
+            var bits = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var sign = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var rest = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var f32Exp = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var f32Mant = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var ev = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var result = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var nrm = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var sub = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var signif = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var shift = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var sshift = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var mt = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var rb = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var stk = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var t = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var t2 = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var p = AllocateRegister(BasicValueType.Int1, PTXRegisterKind.Predicate);
+            var p2 = AllocateRegister(BasicValueType.Int1, PTXRegisterKind.Predicate);
+
+            void Emit(string op, params HardwareRegister[] a) { using var c = BeginCommand(op); foreach (var x in a) c.AppendArgument(x); }
+            void EmitI(string op, HardwareRegister d, HardwareRegister a, long imm) { using var c = BeginCommand(op); c.AppendArgument(d); c.AppendArgument(a); c.AppendConstant(imm); }
+            void MovI(HardwareRegister d, long imm) { using var c = BeginCommand("mov.u32"); c.AppendArgument(d); c.AppendConstant(imm); }
+            void SetpI(string op, HardwareRegister pr, HardwareRegister a, long imm) { using var c = BeginCommand(op); c.AppendArgument(pr); c.AppendArgument(a); c.AppendConstant(imm); }
+            void Selp(HardwareRegister d, HardwareRegister tv, HardwareRegister fv, HardwareRegister pr) { using var c = BeginCommand("selp.b32"); c.AppendArgument(d); c.AppendArgument(tv); c.AppendArgument(fv); c.AppendArgument(pr); }
+
+            // bits = reinterpret(srcF32); sign = (bits>>28)&0x8 (E2M1 sign bit 3); rest = bits & 0x7FFFFFFF
+            using (var c = BeginCommand("mov.b32")) { c.AppendArgument(bits); c.AppendArgument(srcF32); }
+            EmitI("shr.u32", sign, bits, 28);
+            EmitI("and.b32", sign, sign, 0x8);
+            EmitI("and.b32", rest, bits, 0x7FFFFFFF);
+            // f32Exp = (rest>>23)&0xFF; f32Mant = rest & 0x7FFFFF; ev = f32Exp - 127
+            EmitI("shr.u32", f32Exp, rest, 23);
+            EmitI("and.b32", f32Exp, f32Exp, 0xFF);
+            EmitI("and.b32", f32Mant, rest, 0x7FFFFF);
+            EmitI("sub.s32", ev, f32Exp, 127);
+
+            // ---- NORMAL candidate (ev in 0..2): round 23->1 RNE ----
+            EmitI("shr.u32", mt, f32Mant, dropBits);
+            EmitI("shr.u32", rb, f32Mant, dropBits - 1);
+            EmitI("and.b32", rb, rb, 1);
+            EmitI("and.b32", t, f32Mant, (1 << (dropBits - 1)) - 1);
+            using (var c = BeginCommand("setp.ne.s32")) { c.AppendArgument(p); c.AppendArgument(t); c.AppendConstant(0); }
+            MovI(stk, 0); MovI(t2, 1); Selp(stk, t2, stk, p);
+            // nrm = ((ev+bias)<<mantBits) | mt
+            EmitI("add.s32", t, ev, bias);
+            EmitI("shl.b32", t, t, mantBits);
+            Emit("or.b32", nrm, t, mt);
+            // roundUp if rb==1 && (stk!=0 || (mt&1))
+            EmitI("and.b32", t, mt, 1);
+            Emit("or.b32", t, stk, t);
+            SetpI("setp.ne.s32", p, t, 0);
+            SetpI("setp.eq.s32", p2, rb, 1);
+            using (var c = BeginCommand("and.pred")) { c.AppendArgument(p); c.AppendArgument(p); c.AppendArgument(p2); }
+            EmitI("add.s32", t, nrm, 1);
+            Selp(nrm, t, nrm, p);
+            // saturate: a carry past +-6 (nrm > 0x7) clamps to 0x7 (no larger finite, no Inf)
+            using (var c = BeginCommand("setp.gt.u32")) { c.AppendArgument(p); c.AppendArgument(nrm); c.AppendConstant(0x7); }
+            MovI(t2, 0x7); Selp(nrm, t2, nrm, p);
+            EmitI("and.b32", nrm, nrm, 0x7);
+            Emit("or.b32", nrm, sign, nrm);
+
+            // ---- SUBNORMAL candidate (ev < 0) ----
+            // signif = f32Mant | 0x800000 ; shift = (eMin - ev) + dropBits  (= -ev + 22)
+            EmitI("or.b32", signif, f32Mant, 0x800000);
+            MovI(t, eMin);
+            Emit("sub.s32", shift, t, ev);
+            EmitI("add.s32", shift, shift, dropBits);
+            // sshift = min(shift, 31)
+            MovI(t, 31);
+            using (var c = BeginCommand("min.s32")) { c.AppendArgument(sshift); c.AppendArgument(shift); c.AppendArgument(t); }
+            // mt = signif >> sshift
+            Emit("shr.u32", mt, signif, sshift);
+            // rb = (signif >> (sshift-1)) & 1
+            EmitI("sub.s32", t, sshift, 1);
+            Emit("shr.u32", rb, signif, t);
+            EmitI("and.b32", rb, rb, 1);
+            // stk = (signif & ((1<<(sshift-1))-1)) != 0
+            MovI(t2, 1);
+            Emit("shl.b32", t2, t2, t);
+            EmitI("sub.s32", t2, t2, 1);
+            Emit("and.b32", t2, signif, t2);
+            SetpI("setp.ne.s32", p, t2, 0);
+            MovI(stk, 0); MovI(t, 1); Selp(stk, t, stk, p);
+            // roundUp if rb==1 && (stk || mt&1)
+            EmitI("and.b32", t, mt, 1);
+            Emit("or.b32", t, stk, t);
+            SetpI("setp.ne.s32", p, t, 0);
+            SetpI("setp.eq.s32", p2, rb, 1);
+            using (var c = BeginCommand("and.pred")) { c.AppendArgument(p); c.AppendArgument(p); c.AppendArgument(p2); }
+            EmitI("add.s32", t, mt, 1);
+            Selp(mt, t, mt, p);
+            // sub = sign | (mt & 0x7)
+            EmitI("and.b32", t, mt, 0x7);
+            Emit("or.b32", sub, sign, t);
+            // guards: f32Exp==0 -> sign ; shift>31 -> sign
+            SetpI("setp.eq.s32", p, f32Exp, 0);
+            Selp(sub, sign, sub, p);
+            SetpI("setp.gt.s32", p, shift, 31);
+            Selp(sub, sign, sub, p);
+
+            // ---- assemble: result = normal; if ev<0 -> sub; overflow ev>2 -> +-6; NaN/Inf special ----
+            Emit("mov.u32", result, nrm);
+            SetpI("setp.lt.s32", p, ev, eMin);
+            Selp(result, sub, result, p);
+            // finite overflow ev>2 -> sign|0x7 (saturate to +-6)
+            SetpI("setp.gt.s32", p, ev, 2);
+            EmitI("or.b32", t, sign, 0x7);
+            Selp(result, t, result, p);
+            // Inf (rest == 0x7F800000) -> sign|0x7 (+-6)
+            EmitI("or.b32", t, sign, 0x7);
+            using (var c = BeginCommand("setp.eq.s32")) { c.AppendArgument(p); c.AppendArgument(rest); c.AppendConstant(0x7F800000); }
+            Selp(result, t, result, p);
+            // NaN (rest > 0x7F800000) -> 0x8 (-0), UNCONDITIONAL (no sign) - matches ml_dtypes
+            MovI(t2, 0x8);
+            using (var c = BeginCommand("setp.gt.u32")) { c.AppendArgument(p); c.AppendArgument(rest); c.AppendConstant(0x7F800000); }
+            Selp(result, t2, result, p);
+
+            // dstByte = (u16)(result & 0xFF)
+            EmitI("and.b32", result, result, 0xFF);
+            using (var c = BeginCommand("cvt.u16.u32")) { c.AppendArgument(dstByte); c.AppendArgument(result); }
+
+            FreeRegister(bits); FreeRegister(sign); FreeRegister(rest); FreeRegister(f32Exp);
+            FreeRegister(f32Mant); FreeRegister(ev); FreeRegister(result); FreeRegister(nrm);
+            FreeRegister(sub); FreeRegister(signif); FreeRegister(shift); FreeRegister(sshift);
+            FreeRegister(mt); FreeRegister(rb); FreeRegister(stk); FreeRegister(t); FreeRegister(t2);
+            FreeRegister(p); FreeRegister(p2);
+        }
+
         /// <summary cref="IBackendCodeGenerator.GenerateCode(Load)"/>
         public void GenerateCode(Load load)
         {
@@ -990,6 +1186,25 @@ namespace ILGPU.Backends.PTX
                     cmd.AppendArgumentValue(address, 0);
                 }
                 EmitFP8BitsToF32(rawReg, fp8Target, isE4M3);
+                FreeRegister(rawReg);
+                return;
+            }
+
+            if (load.Type.BasicValueType == BasicValueType.Float4E2M1)
+            {
+                // FP4 storage is a packed 1-byte value (4-bit E2M1 in the low nibble); load the byte
+                // into a temp .b16 register, then widen to the f32 value register via portable bit-manip
+                // (EmitFP4BitsToF32 - every CUDA arch). f32-register model like bf16/FP8.
+                var fp4Target = AllocateHardware(load);
+                var rawReg = AllocateRegister(BasicValueType.Int16, PTXRegisterKind.Int16);
+                using (var cmd = BeginCommand(PTXInstructions.LoadOperation))
+                {
+                    cmd.AppendAddressSpace(sourceType.AddressSpace);
+                    cmd.AppendSuffix("u8");
+                    cmd.AppendArgument(rawReg);
+                    cmd.AppendArgumentValue(address, 0);
+                }
+                EmitFP4BitsToF32(rawReg, fp4Target);
                 FreeRegister(rawReg);
                 return;
             }
@@ -1149,18 +1364,41 @@ namespace ILGPU.Backends.PTX
                 return;
             }
 
-            // A bf16-TYPED value stored to a NON-bf16 buffer (the target-bf16 case was handled above).
-            // bf16 is held in an f32 register and the `(float)bf16` widening Convert is a no-op alias
-            // that preserves the bf16 IR type, so `floatBuf[i] = (float)bf16Buf[i]` reaches here with a
-            // bf16-typed value register. Falling through to EmitIOStore would re-narrow it (cvt.rn.bf16.f32
-            // + st.b16) into the wider (e.g. 4-byte f32) destination slot -> the value reads back ~0
-            // (Tuvok's "bf16 store/load returns zeros" bug). Store the f32 bits directly as the target
-            // element type instead. (Struct-field bf16 stores keep using EmitIOStore: there the register
-            // type and the field storage type agree, so its register-type-keyed packing is correct.)
-            if (value is PrimitiveRegister bf16Value &&
-                bf16Value.BasicValueType == BasicValueType.BFloat16)
+            if (targetType.ElementType.BasicValueType == BasicValueType.Float4E2M1)
             {
-                var f32Reg = EnsureHardwareRegister(bf16Value);
+                // FP4 store: round the f32 value register to the 1-byte E2M1 pattern (low nibble) via
+                // portable bit-manip (EmitF32ToFP4Bits - every CUDA arch) into a temp .b16 register, then
+                // write the low byte. Keyed off the TARGET BUFFER element type (same as bf16/FP8).
+                var valueReg = EnsureHardwareRegister(value.AsNotNullCast<PrimitiveRegister>());
+                var rawReg = AllocateRegister(BasicValueType.Int16, PTXRegisterKind.Int16);
+                EmitF32ToFP4Bits(valueReg, rawReg);
+                using (var cmd = BeginCommand(PTXInstructions.StoreOperation))
+                {
+                    cmd.AppendAddressSpace(targetType.AddressSpace);
+                    cmd.AppendSuffix("u8");
+                    cmd.AppendArgumentValue(address, 0);
+                    cmd.AppendArgument(rawReg);
+                }
+                FreeRegister(rawReg);
+                return;
+            }
+
+            // A low-precision-TYPED value (bf16 / FP8 / FP4 - all held in an f32 register on PTX) stored
+            // to a NON-matching buffer (the target-matching cases were handled above). The widening
+            // Convert (`(float)bf16` etc.) is a no-op alias that preserves the low-precision IR type, so
+            // `floatBuf[i] = (float)lowpBuf[i]` reaches here with a low-precision-typed value register that
+            // actually holds the widened f32 value. Falling through to EmitIOStore would re-narrow it
+            // (cvt/round + st.b16/st.b8) into the wider (e.g. 4-byte f32) destination slot -> the value
+            // reads back ~0 (Tuvok's "bf16 store/load returns zeros" bug; the same latent bug existed for
+            // FP8/FP4). Store the f32 bits directly as the target element type instead. (Struct-field
+            // stores keep using EmitIOStore: there the register type and field storage type agree.)
+            if (value is PrimitiveRegister lowpValue &&
+                (lowpValue.BasicValueType == BasicValueType.BFloat16 ||
+                 lowpValue.BasicValueType == BasicValueType.Float8E4M3 ||
+                 lowpValue.BasicValueType == BasicValueType.Float8E5M2 ||
+                 lowpValue.BasicValueType == BasicValueType.Float4E2M1))
+            {
+                var f32Reg = EnsureHardwareRegister(lowpValue);
                 using var cmd = BeginCommand(PTXInstructions.StoreOperation);
                 cmd.AppendAddressSpace(targetType.AddressSpace);
                 cmd.AppendSuffix(ResolveIOType(targetType.ElementType.BasicValueType));

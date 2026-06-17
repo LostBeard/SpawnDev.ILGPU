@@ -43,7 +43,8 @@ namespace ILGPU.Backends.PTX
             // select were unaffected, so the bf16 parity work missed it).
             if (type == BasicValueType.BFloat16 ||
                 type == BasicValueType.Float8E4M3 ||
-                type == BasicValueType.Float8E5M2)
+                type == BasicValueType.Float8E5M2 ||
+                type == BasicValueType.Float4E2M1)
                 type = BasicValueType.Float32;
             return SelectValueOperations[type];
         }
@@ -64,7 +65,8 @@ namespace ILGPU.Backends.PTX
             // f32 registers, converted at load/store). Route those ops through the f32 tables.
             if (type == ArithmeticBasicValueType.BFloat16 ||
                 type == ArithmeticBasicValueType.Float8E4M3 ||
-                type == ArithmeticBasicValueType.Float8E5M2)
+                type == ArithmeticBasicValueType.Float8E5M2 ||
+                type == ArithmeticBasicValueType.Float4E2M1)
                 type = ArithmeticBasicValueType.Float32;
             var unorderedFloatComparison = type.IsFloat()
                 && flags.HasFlag(CompareFlags.UnsignedOrUnordered);
@@ -114,7 +116,8 @@ namespace ILGPU.Backends.PTX
         {
             if (type == ArithmeticBasicValueType.BFloat16 ||
                 type == ArithmeticBasicValueType.Float8E4M3 ||
-                type == ArithmeticBasicValueType.Float8E5M2)
+                type == ArithmeticBasicValueType.Float8E5M2 ||
+                type == ArithmeticBasicValueType.Float4E2M1)
                 type = ArithmeticBasicValueType.Float32; // bf16/FP8 compute as f32 on PTX
             if (kind == UnaryArithmeticKind.TanhF &&
                 type == ArithmeticBasicValueType.Float32 &&
@@ -155,7 +158,8 @@ namespace ILGPU.Backends.PTX
         {
             if (type == ArithmeticBasicValueType.BFloat16 ||
                 type == ArithmeticBasicValueType.Float8E4M3 ||
-                type == ArithmeticBasicValueType.Float8E5M2)
+                type == ArithmeticBasicValueType.Float8E5M2 ||
+                type == ArithmeticBasicValueType.Float4E2M1)
                 type = ArithmeticBasicValueType.Float32; // bf16/FP8 compute as f32 on PTX
             if (kind == BinaryArithmeticKind.Min &&
                type == ArithmeticBasicValueType.Float16 &&
@@ -192,7 +196,8 @@ namespace ILGPU.Backends.PTX
         {
             if (type == ArithmeticBasicValueType.BFloat16 ||
                 type == ArithmeticBasicValueType.Float8E4M3 ||
-                type == ArithmeticBasicValueType.Float8E5M2)
+                type == ArithmeticBasicValueType.Float8E5M2 ||
+                type == ArithmeticBasicValueType.Float4E2M1)
                 type = ArithmeticBasicValueType.Float32; // bf16/FP8 compute as f32 on PTX
             return TernaryArithmeticOperations.TryGetValue((kind, type), out string? operation)
                 ? operation
