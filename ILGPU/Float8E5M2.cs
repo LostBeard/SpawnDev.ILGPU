@@ -71,6 +71,26 @@ namespace ILGPU
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool IsFinite(Float8E5M2 value) => Float8E5M2Extensions.IsFinite(value);
 
+        /// <summary>
+        /// Converts a float to E5M2 with a selectable overflow convention. When
+        /// <paramref name="saturate"/> is false (the DEFAULT, matching the cast operator): finite
+        /// overflow -&gt; +-Inf (IEEE, bit-exact to ml_dtypes float8_e5m2). When true: finite overflow
+        /// clamps to +-57344 (max normal), the NVIDIA Transformer Engine / OCP saturating cast.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static Float8E5M2 FromSingle(float value, bool saturate) =>
+            saturate ? Float8E5M2Extensions.FromSingleSaturating(value)
+                     : Float8E5M2Extensions.ConvertFloatToFloat8E5M2(value);
+
+        /// <summary>
+        /// Converts a float to E5M2 using the SATURATING convention: finite overflow clamps to
+        /// +-57344 (max normal); +-Inf -&gt; +-Inf; NaN -&gt; NaN. NVIDIA Transformer Engine / OCP mode.
+        /// Use when you want overflow clamped instead of producing Inf. NOT the default.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static Float8E5M2 FromSingleSaturating(float value) =>
+            Float8E5M2Extensions.FromSingleSaturating(value);
+
         #endregion
 
         #region Constants
@@ -360,6 +380,29 @@ namespace ILGPU
                 // exponent overflowed to 0x1F it becomes Inf, which is the correct IEEE result.
             }
             return new Float8E5M2((byte)(sign | (outBits & 0x7Fu)));
+        }
+
+        /// <summary>
+        /// Converts a float to E5M2 using the SATURATING convention: finite overflow clamps to
+        /// +-57344 (max normal) instead of producing +-Inf; +-Inf -&gt; +-Inf; NaN -&gt; NaN. The
+        /// NVIDIA Transformer Engine / OCP saturating cast. Composed of existing intrinsics (the
+        /// default cast + a bit-level finite check + a max-finite-constant cast), so it transpiles
+        /// with no per-backend codegen. The finite test is a BIT check (exponent != all-ones), NOT a
+        /// float compare against Inf - those are unreliable on WebGL.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static Float8E5M2 FromSingleSaturating(float value)
+        {
+            // Clamp finite |value| above max-finite (57344) to +-57344; +-Inf and NaN fall through to
+            // the default cast (-> Inf / NaN). Computed from the INPUT only (bit-level finite check +
+            // finite-vs-finite threshold compare + max-finite-constant cast) - never reads the result's
+            // storage bits (the value is f32 in-register on the GPU backends).
+            bool finite = (Interop.FloatAsInt(value) & 0x7FFFFFFF) < 0x7F800000;
+            if (finite && value > 57344f)
+                return (Float8E5M2)57344f;
+            if (finite && value < -57344f)
+                return (Float8E5M2)(-57344f);
+            return (Float8E5M2)value;
         }
 
         #endregion

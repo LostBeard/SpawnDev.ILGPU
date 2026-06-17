@@ -775,6 +775,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             public bool IsFloat16 { get; set; }
             /// <summary>True when sub-word and bfloat16-emulated.</summary>
             public bool IsBFloat16 { get; set; }
+            /// <summary>True when sub-word and FP8-emulated (1-byte Float8E4M3/E5M2).</summary>
+            public bool IsFloat8 { get; set; }
+            /// <summary>When <see cref="IsFloat8"/>: true = Float8E4M3, false = Float8E5M2.</summary>
+            public bool IsFloat8E4M3 { get; set; }
             /// <summary>The raw element type (PrimitiveType or StructureType) of the view.</summary>
             public TypeNode? ViewElementType { get; set; }
             /// <summary>The C# field type from the user's struct (used by host-side reflection).</summary>
@@ -1017,6 +1021,18 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                                     info.SubWordElemSize = 2;
                                     info.GlslElementType = "int";
                                     info.IsBFloat16 = true;
+                                    break;
+                                case BasicValueType.Float8E4M3:
+                                    info.SubWordElemSize = 1;       // 1-byte FP8, 4 per R32I texel
+                                    info.GlslElementType = "int";
+                                    info.IsFloat8 = true;
+                                    info.IsFloat8E4M3 = true;
+                                    break;
+                                case BasicValueType.Float8E5M2:
+                                    info.SubWordElemSize = 1;
+                                    info.GlslElementType = "int";
+                                    info.IsFloat8 = true;
+                                    info.IsFloat8E4M3 = false;
                                     break;
                                 case BasicValueType.Float32:
                                     info.GlslElementType = "float";
@@ -1334,6 +1350,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         if (f.IsUnsignedSubWord) _subWordUnsignedParams.Add(synth);
                         if (f.IsFloat16) _subWordFloat16Params.Add(synth);
                         if (f.IsBFloat16) _subWordBFloat16Params.Add(synth);
+                        if (f.IsFloat8) _subWordFloat8Params[synth] = f.IsFloat8E4M3;
                     }
 
                     if (isInputBuffer)

@@ -98,6 +98,28 @@ namespace ILGPU
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool IsFinite(BFloat16 value) => BFloat16Extensions.IsFinite(value);
 
+        /// <summary>
+        /// Converts a float to BFloat16 with a selectable overflow convention. When
+        /// <paramref name="saturate"/> is false (the DEFAULT, matching the cast operator): finite
+        /// overflow -&gt; +-Inf (IEEE round-to-nearest, bit-exact to ml_dtypes.bfloat16). When true:
+        /// finite overflow clamps to the max normal magnitude (0x7F7F), the NVIDIA Transformer Engine
+        /// / OCP saturating cast. (bf16 shares fp32's exponent range, so finite f32 inputs essentially
+        /// never overflow bf16 - this is for API parity + completeness.)
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static BFloat16 FromSingle(float value, bool saturate) =>
+            saturate ? BFloat16Extensions.FromSingleSaturating(value)
+                     : BFloat16Extensions.ConvertFloatToBFloat16(value);
+
+        /// <summary>
+        /// Converts a float to BFloat16 using the SATURATING convention: finite overflow clamps to
+        /// the max normal magnitude instead of producing +-Inf; +-Inf -&gt; +-Inf; NaN -&gt; NaN.
+        /// NVIDIA Transformer Engine / OCP mode. Use when you want overflow clamped. NOT the default.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static BFloat16 FromSingleSaturating(float value) =>
+            BFloat16Extensions.FromSingleSaturating(value);
+
         #endregion
 
         #region Instance
@@ -389,6 +411,31 @@ namespace ILGPU
             uint lsb = (bits >> 16) & 1u;
             bits += 0x7FFFu + lsb;
             return new BFloat16((ushort)(bits >> 16));
+        }
+
+        /// <summary>
+        /// Converts a float to BFloat16 using the SATURATING convention: finite overflow clamps to
+        /// the max normal magnitude (0x7F7F) instead of producing +-Inf; +-Inf -&gt; +-Inf; NaN -&gt; NaN.
+        /// NVIDIA Transformer Engine / OCP saturating cast. Composed of existing intrinsics (the
+        /// default RNE cast + a bit-level finite check + a max-finite-constant cast), so it transpiles
+        /// with no per-backend codegen. The finite test is a BIT check (exponent != all-ones), NOT a
+        /// float compare against Inf - those are unreliable on WebGL. (A finite f32 only overflows
+        /// bf16 when the top of the f32 range rounds the bf16 exponent up to Inf.)
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static BFloat16 FromSingleSaturating(float value)
+        {
+            // Clamp finite |value| above max-finite (0x7F7F0000 as f32) to +-max-finite; +-Inf and NaN
+            // fall through to the default cast (-> Inf / NaN). Computed from the INPUT only (bit-level
+            // finite check + finite-vs-finite threshold compare + max-finite-constant cast) - never
+            // reads the result's storage bits (the value is f32 in-register on the GPU backends).
+            float maxFinite = Interop.IntAsFloat(0x7F7F0000u);      // largest finite bf16, as f32
+            bool finite = (Interop.FloatAsInt(value) & 0x7FFFFFFF) < 0x7F800000;
+            if (finite && value > maxFinite)
+                return (BFloat16)maxFinite;
+            if (finite && value < -maxFinite)
+                return (BFloat16)(-maxFinite);
+            return (BFloat16)value;
         }
 
         #endregion

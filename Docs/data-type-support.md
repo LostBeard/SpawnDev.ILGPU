@@ -209,6 +209,33 @@ backend** (CPU-verified idempotence 0/256 for all representable values).
 > `Float8E5M2` is IEEE-754-style (has ±Inf): overflow → ±Inf, bit-exact to `float8_e5m2` (decode 0/256,
 > encode 723/723); its canonical NaN byte is `0x7F` (ml_dtypes uses `0x7E` - both are valid NaN patterns).
 
+### All low-precision conversions are validated against the authoritative references
+
+Every `float`→low-precision conversion is **bit-exact** to its reference, verified exhaustively and pinned
+in CI (`DemoConsole -- bf16-f16-oracle` / `fp8-oracle` + the PMT `LowPrecision_ConversionPinnedToExternalReference`
+gate, which pins each backend's on-device convert to hardcoded numpy/ml_dtypes values):
+
+| Type | Reference | float→type rounding |
+|------|-----------|---------------------|
+| **Half** | `numpy.float16` (IEEE binary16) | round-to-nearest-even incl. subnormals + overflow→Inf (was truncating + flushing subnormals before 4.14.0) |
+| **BFloat16** | `ml_dtypes.bfloat16` | round-to-nearest-even (NaN-preserving) |
+| **Float8E4M3** | PyTorch/JAX/ml_dtypes `float8_e4m3fn` | RNE; overflow→NaN (fn, default) |
+| **Float8E5M2** | `float8_e5m2` | RNE; overflow→±Inf |
+
+**Selectable saturating cast (all four types).** Each type exposes `FromSingle(float, bool saturate)` and
+`FromSingleSaturating(float)` (E4M3 additionally has `FromSingleFn`, its non-saturating name). The saturating
+cast clamps finite overflow to the max finite magnitude instead of the default (→NaN for E4M3, →±Inf for the
+IEEE types) - the NVIDIA Transformer Engine / OCP mode for activations you don't want producing Inf/NaN. Each
+is composed only of existing intrinsics (a bit-level finite check + the default cast + a max-finite-constant
+cast), so it transpiles with no per-backend codegen and is bit-exact on all 6 backends.
+
+**Radix-sort: complete for all four types on all 6 backends.** Keys-only and key/value pairs, ascending and
+descending, plus body-struct key fields - every `type × {keys, pairs} × {asc, desc}` cell is covered
+(`Interop.FloatAsInt(T)` + `Ascending/Descending{Half,BFloat16,Float8E4M3,Float8E5M2}` + per-backend
+`FloatAsIntCast`; PMT `RadixGrid_*` + `Fp8Radix_*` + `BFloat16_RadixSort*`). On WebGL the FP8/Half/bf16 keys
+route through the unpacked-f32 working representation (the whole-texel scatter can't move a sub-word value);
+on the other 5 backends they sort as native packed sub-word keys.
+
 ### Sub-Word Usage Notes
 
 These apply to any kernel using `ArrayView<byte>`, `ArrayView<sbyte>`, `ArrayView<short>`, `ArrayView<ushort>`, or `ArrayView<Half>`:

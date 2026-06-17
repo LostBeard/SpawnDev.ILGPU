@@ -88,6 +88,26 @@ namespace ILGPU
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static bool IsFinite(Half half) => HalfExtensions.IsFinite(half);
 
+        /// <summary>
+        /// Converts a float to Half with a selectable overflow convention. When
+        /// <paramref name="saturate"/> is false (the DEFAULT, matching the cast operator): finite
+        /// overflow -&gt; +-Inf (IEEE round-to-nearest, bit-exact to numpy.float16). When true: finite
+        /// overflow clamps to +-65504 (max normal), the NVIDIA Transformer Engine / OCP saturating cast.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static Half FromSingle(float value, bool saturate) =>
+            saturate ? HalfExtensions.FromSingleSaturating(value)
+                     : HalfExtensions.ConvertFloatToHalf(value);
+
+        /// <summary>
+        /// Converts a float to Half using the SATURATING convention: finite overflow clamps to
+        /// +-65504 (max normal); +-Inf -&gt; +-Inf; NaN -&gt; NaN. NVIDIA Transformer Engine / OCP mode.
+        /// Use when you want overflow clamped instead of producing Inf. NOT the default.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static Half FromSingleSaturating(float value) =>
+            HalfExtensions.FromSingleSaturating(value);
+
         #endregion
 
         #region Instance
@@ -363,6 +383,30 @@ namespace ILGPU
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static Half Abs(Half half) =>
             new Half((ushort)(half.RawValue & ExponentMantissaMask));
+
+        /// <summary>
+        /// Converts a float to Half using the SATURATING convention: finite overflow clamps to
+        /// +-65504 (max normal) instead of producing +-Inf; +-Inf -&gt; +-Inf; NaN -&gt; NaN. The
+        /// NVIDIA Transformer Engine / OCP saturating cast. Composed of existing intrinsics (the
+        /// default RNE cast + a bit-level finite check + a max-finite-constant cast), so it
+        /// transpiles with no per-backend codegen. The finite test is a BIT check (exponent !=
+        /// all-ones), NOT a float compare against Inf - those are unreliable on WebGL.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static Half FromSingleSaturating(float value)
+        {
+            // Clamp finite |value| above max-finite (65504) to +-65504; +-Inf and NaN fall through
+            // to the default cast (-> Inf / NaN). The finite test is a BIT check (works for +-Inf/NaN
+            // without a float compare); the threshold compare is finite-vs-finite (safe on WebGL).
+            // Computes everything from the INPUT - never reads the result's storage bits (the value
+            // lives as f32 in-register on the GPU backends, so there is no Half.RawValue to read).
+            bool finite = (Interop.FloatAsInt(value) & 0x7FFFFFFF) < 0x7F800000;
+            if (finite && value > 65504f)
+                return (Half)65504f;
+            if (finite && value < -65504f)
+                return (Half)(-65504f);
+            return (Half)value;
+        }
 
         /// <summary>
         /// Returns true if the given half value represents a NaN value.

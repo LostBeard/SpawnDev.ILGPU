@@ -2,6 +2,16 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.14.0-local.4 (2026-06-17) - Low-precision data-type parity to 100% (selectable saturating cast + complete radix grid; fixes a WebGL FP8-struct-field bug)
+
+Closes the last parity gaps across the four low-precision float types (`Half`, `BFloat16`, `Float8E4M3`, `Float8E5M2`) so data-type support is feature-complete with no lingering items. Forks bump to `2.0.31`.
+
+- **Selectable saturating cast on all types.** Added `FromSingle(float, bool saturate)` + `FromSingleSaturating(float)` to `Half`, `BFloat16`, `Float8E5M2` (E4M3 already had them). The saturating cast clamps finite overflow to the max finite magnitude (`Half` ±65504, `E5M2` ±57344, `BFloat16` ±max-finite) instead of the default (→±Inf for these IEEE types) - the NVIDIA Transformer Engine / OCP mode. Each is composed only of existing intrinsics (a bit-level finite check + the default cast + a max-finite-constant cast - never reads the result's storage bits, which don't exist as such in the GPU backends' f32-register model), so it transpiles with no per-backend codegen and is bit-exact on all 6 backends.
+- **Radix-sort test grid completed for all four types on all 6 backends.** Filled the empty cells the audit found: keys-only ascending (all 4), key/value pairs descending (all 4), a keys-only sort for Half, and body-struct ExtractBits (Half/E4M3/E5M2 - bf16 already had it). Every `type × {keys, pairs} × {asc, desc}` combination is now tested.
+- **Fixed a real WebGL FP8-as-struct-field bug** (surfaced by the new body-struct ExtractBits test). The GLSL body-struct sub-word classification tracked `IsBFloat16`/`IsFloat16` but had no FP8 case, so a 1-byte `Float8E4M3`/`E5M2` value read through a struct view field was loaded without the FP8 extraction + `_e4m3`/`_e5m2` conversion (direct-param FP8 reads already worked; bf16 struct fields already worked). Added the FP8 cases to `BodyStructFieldInfoGL` + registered the synthetic param in `_subWordFloat8Params`. (The real FP8 radix sort on WebGL routes through the f32-widen representation, so this didn't affect sorting - but it did affect FP8 used as an arbitrary struct field on WebGL.)
+- Docs corrected: `Docs/data-type-support.md` (validated-against-references table, selectable saturating cast, radix 100%); the bf16 plan's stale "naga miscompiles WebGPU bf16 descending radix" claim (disproven in local.4 - the real cause was `arrayLength()` word-vs-element count, fixed, f32-widen workaround removed).
+- Gates: PMT `RadixGrid_*` 86/0 all backends (incl. the WebGL FP8 fix); `LowPrecision_FromSingleSaturating_ClampsOverflow` + `LowPrecision_ConversionPinnedToExternalReference` 17/0; full PMT sweep green; no regression (`PMT_FILTER=Radix` 333/0/9 pre-change baseline held).
+
 ## 4.14.0-local.3 (2026-06-17) - Half float→half is now IEEE round-to-nearest-even on every backend (was truncating)
 
 Fixes a real conversion-correctness + cross-backend-consistency bug in the most-used low-precision type, found by validating against the authoritative references (numpy.float16 / ml_dtypes.bfloat16). Forks bump to `2.0.30`.

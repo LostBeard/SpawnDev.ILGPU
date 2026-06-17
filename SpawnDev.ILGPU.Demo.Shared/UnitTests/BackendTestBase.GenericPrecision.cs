@@ -173,6 +173,68 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             sat[i] = global::ILGPU.Float8E4M3.FromSingleSaturating(x[i]);   // opt-in saturating
         }
 
+        // FromSingleSaturating (the opt-in NVIDIA-TE/OCP saturating cast) for Half / bf16 / E5M2
+        // (Geordi 2026-06-17, data-type 100% parity sweep - E4M3 already had it). Finite overflow
+        // clamps to max-finite instead of producing Inf; +-Inf stays Inf (these IEEE types have it);
+        // NaN stays NaN. Each method is intrinsic-composed (default cast + bit-level finite check +
+        // max-finite-constant cast), so it must transpile + match the managed result on every backend.
+        private static void HalfSatKernel(Index1D i,
+            ArrayView1D<float, Stride1D.Dense> x, ArrayView1D<global::ILGPU.Half, Stride1D.Dense> y) =>
+            y[i] = global::ILGPU.Half.FromSingleSaturating(x[i]);
+        private static void BF16SatKernel(Index1D i,
+            ArrayView1D<float, Stride1D.Dense> x, ArrayView1D<global::ILGPU.BFloat16, Stride1D.Dense> y) =>
+            y[i] = global::ILGPU.BFloat16.FromSingleSaturating(x[i]);
+        private static void E5M2SatKernel(Index1D i,
+            ArrayView1D<float, Stride1D.Dense> x, ArrayView1D<global::ILGPU.Float8E5M2, Stride1D.Dense> y) =>
+            y[i] = global::ILGPU.Float8E5M2.FromSingleSaturating(x[i]);
+
+        [TestMethod]
+        public async Task LowPrecision_FromSingleSaturating_ClampsOverflow() => await RunTest(async acc =>
+        {
+            // (a) pin the managed clamp values (host): finite overflow -> max-finite; +-Inf -> Inf.
+            static ushort RawH(global::ILGPU.Half h) => System.Runtime.CompilerServices.Unsafe.As<global::ILGPU.Half, ushort>(ref h);
+            static ushort RawB(global::ILGPU.BFloat16 b) => System.Runtime.CompilerServices.Unsafe.As<global::ILGPU.BFloat16, ushort>(ref b);
+            static byte RawE(global::ILGPU.Float8E5M2 e) => System.Runtime.CompilerServices.Unsafe.As<global::ILGPU.Float8E5M2, byte>(ref e);
+            void Eq(int got, int want, string w) { if (got != want) throw new Exception($"{w} ({BackendName}): got 0x{got:X}, want 0x{want:X}"); }
+            Eq(RawH(global::ILGPU.Half.FromSingleSaturating(70000f)), 0x7BFF, "Half sat 70000->65504");
+            Eq(RawH(global::ILGPU.Half.FromSingleSaturating(-70000f)), 0xFBFF, "Half sat -70000->-65504");
+            Eq(RawH(global::ILGPU.Half.FromSingleSaturating(float.PositiveInfinity)), 0x7C00, "Half sat +Inf->Inf");
+            Eq(RawB(global::ILGPU.BFloat16.FromSingleSaturating(float.MaxValue)), 0x7F7F, "bf16 sat MaxValue->0x7F7F");
+            Eq(RawB(global::ILGPU.BFloat16.FromSingleSaturating(float.PositiveInfinity)), 0x7F80, "bf16 sat +Inf->Inf");
+            Eq(RawE(global::ILGPU.Float8E5M2.FromSingleSaturating(70000f)), 0x7B, "E5M2 sat 70000->57344");
+            Eq(RawE(global::ILGPU.Float8E5M2.FromSingleSaturating(float.PositiveInfinity)), 0x7C, "E5M2 sat +Inf->Inf");
+
+            // (b) GPU-vs-managed across overflow / in-range / Inf / NaN, on every backend.
+            float[] inputs = { 70000f, -70000f, float.MaxValue, -float.MaxValue, float.PositiveInfinity, float.NegativeInfinity, float.NaN, 1.5f, -0.5f, 0f };
+            int n = inputs.Length;
+            ushort[] hExp = new ushort[n]; ushort[] bExp = new ushort[n]; byte[] eExp = new byte[n];
+            for (int i = 0; i < n; i++)
+            {
+                hExp[i] = RawH(global::ILGPU.Half.FromSingleSaturating(inputs[i]));
+                bExp[i] = RawB(global::ILGPU.BFloat16.FromSingleSaturating(inputs[i]));
+                eExp[i] = RawE(global::ILGPU.Float8E5M2.FromSingleSaturating(inputs[i]));
+            }
+            using var inBuf = acc.Allocate1D(inputs);
+            using (var oH = acc.Allocate1D<global::ILGPU.Half>(n))
+            {
+                acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<global::ILGPU.Half, Stride1D.Dense>>(HalfSatKernel)(n, inBuf.View, oH.View);
+                await acc.SynchronizeAsync(); var g = await oH.CopyToHostAsync<global::ILGPU.Half>();
+                for (int i = 0; i < n; i++) { ushort gb = RawH(g[i]); bool nan = (gb & 0x7C00) == 0x7C00 && (gb & 0x3FF) != 0 && (hExp[i] & 0x7C00) == 0x7C00 && (hExp[i] & 0x3FF) != 0; if (!nan && gb != hExp[i]) throw new Exception($"Half sat kernel @{i} ({BackendName}): in {inputs[i]} -> 0x{gb:X4}, want 0x{hExp[i]:X4}"); }
+            }
+            using (var oB = acc.Allocate1D<global::ILGPU.BFloat16>(n))
+            {
+                acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<global::ILGPU.BFloat16, Stride1D.Dense>>(BF16SatKernel)(n, inBuf.View, oB.View);
+                await acc.SynchronizeAsync(); var g = await oB.CopyToHostAsync<global::ILGPU.BFloat16>();
+                for (int i = 0; i < n; i++) { ushort gb = RawB(g[i]); bool nan = (gb & 0x7F80) == 0x7F80 && (gb & 0x7F) != 0 && (bExp[i] & 0x7F80) == 0x7F80 && (bExp[i] & 0x7F) != 0; if (!nan && gb != bExp[i]) throw new Exception($"bf16 sat kernel @{i} ({BackendName}): in {inputs[i]} -> 0x{gb:X4}, want 0x{bExp[i]:X4}"); }
+            }
+            using (var oE = acc.Allocate1D<global::ILGPU.Float8E5M2>(n))
+            {
+                acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<global::ILGPU.Float8E5M2, Stride1D.Dense>>(E5M2SatKernel)(n, inBuf.View, oE.View);
+                await acc.SynchronizeAsync(); var g = await oE.CopyToHostAsync<global::ILGPU.Float8E5M2>();
+                for (int i = 0; i < n; i++) { byte gb = RawE(g[i]); bool nan = (gb & 0x7C) == 0x7C && (gb & 0x03) != 0 && (eExp[i] & 0x7C) == 0x7C && (eExp[i] & 0x03) != 0; if (!nan && gb != eExp[i]) throw new Exception($"E5M2 sat kernel @{i} ({BackendName}): in {inputs[i]} -> 0x{gb:X2}, want 0x{eExp[i]:X2}"); }
+            }
+        });
+
         // Pin the on-device float->lowp conversions to HARDCODED values from the external authoritative
         // references (numpy.float16 / ml_dtypes.bfloat16 / float8_e4m3fn / float8_e5m2), via
         // DemoConsole -- bf16-f16-oracle / fp8-oracle (Geordi 2026-06-17). The other conversion tests
