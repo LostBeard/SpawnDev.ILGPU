@@ -90,7 +90,7 @@ WGSL only has 32-bit atomics. i64 is emulated as `vec2<u32>`. Atomic support:
 
 `Capabilities.Float16Native` exposes which mode is active — `true` only when the device enabled native `shader-f16`. `Capabilities.Float16` stays `true` in both modes so test capability checks don't skip on `!shader-f16` browsers.
 
-**Emulation is lossless.** Every f16 value is exactly representable as f32 (f16 is a strict subset of f32's encoding). The bit-conversion helpers match Wasm's `EmitF16ToF32` / `EmitF32ToF16` behavior byte-for-byte so results on emulated WebGPU and emulated Wasm agree on the same inputs. Denormals flush to signed zero, Inf/NaN propagate via mantissa preservation.
+**Decode (f16->f32) is exact** - every f16 value is a strict subset of f32. **Encode (f32->f16) is IEEE round-to-nearest-even** (`_f32_to_f16`, 4.14.0+): rebias + RNE mantissa rounding + proper subnormal rounding + overflow->Inf, bit-exact to numpy.float16 / PyTorch / CUDA (`cvt.rn.f16.f32`) / OpenCL (`vstore_half`) and the managed `HalfConversion`. (Before 4.14.0 the emitters TRUNCATED toward zero and flushed all subnormals to signed zero - which diverged from numpy AND from CUDA/OpenCL; fixed + verified by `DemoConsole -- bf16-f16-oracle` over all 65536 patterns + the PMT `Half_FloatToHalf_RoundToNearestEven` cross-backend gate.) Inf/NaN propagate via mantissa preservation.
 
 **Packed storage layout:** In emulated mode, `ArrayView<Half>` buffers use the existing `_subWordFloat16Params` machinery — 2 halves per u32 word, thread-safe stores via `atomicAnd` mask + `atomicOr` set. Load extracts the u16 bits with shift/mask then calls `_f16_to_f32`; store calls `_f32_to_f16` then packs via RMW.
 

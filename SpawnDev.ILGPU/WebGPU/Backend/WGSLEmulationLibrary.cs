@@ -1081,20 +1081,34 @@ fn _f16_to_f32(h: u32) -> f32 {
 // bits of the u32). Underflow clamps to signed zero; overflow clamps to signed
 // Inf while preserving mantissa bits so NaNs stay NaN.
 fn _f32_to_f16(f: f32) -> u32 {
+    // IEEE round-to-nearest-even f32 -> f16, incl subnormals + overflow-to-Inf. Bit-exact to
+    // numpy/PyTorch/CUDA/OpenCL and the managed HalfConversion (von der Zijp truncation replaced).
     let bits = bitcast<u32>(f);
-    let sign = (bits >> 31u) & 1u;
-    var exp: i32 = i32((bits >> 23u) & 0xFFu) - 112;
-    var mant: u32 = (bits >> 13u) & 0x3FFu;
-    // Underflow: f32 exponent below f16 min normal -> flush to signed zero
-    if (exp < 0) {
-        exp = 0;
-        mant = 0u;
+    let sign = (bits >> 16u) & 0x8000u;
+    let rest = bits & 0x7FFFFFFFu;
+    if (rest >= 0x7F800000u) {
+        if (rest > 0x7F800000u) { return sign | 0x7E00u; }   // NaN
+        return sign | 0x7C00u;                                // Inf
     }
-    // Overflow: f32 exponent above f16 max normal -> clamp exponent to f16 Inf/NaN
-    if (exp > 31) {
-        exp = 31;
+    let e: i32 = i32((rest >> 23u) & 0xFFu) - 127;
+    let f32Mant = rest & 0x7FFFFFu;
+    if (e > 15) { return sign | 0x7C00u; }                    // overflow -> Inf
+    if (e < -14) {
+        if (e < -25) { return sign; }                          // -> +-0
+        let signif = f32Mant | 0x800000u;
+        let shift = u32((-14 - e) + 13);
+        var m = signif >> shift;
+        let roundBit = (signif >> (shift - 1u)) & 1u;
+        let sticky = select(0u, 1u, (signif & ((1u << (shift - 1u)) - 1u)) != 0u);
+        if (roundBit == 1u && (sticky == 1u || (m & 1u) == 1u)) { m = m + 1u; }
+        return sign | m;
     }
-    return (sign << 15u) | (u32(exp) << 10u) | mant;
+    let mant10 = f32Mant >> 13u;
+    let roundB = (f32Mant >> 12u) & 1u;
+    let stick = select(0u, 1u, (f32Mant & 0xFFFu) != 0u);
+    var outBits = (u32(e + 15) << 10u) | mant10;
+    if (roundB == 1u && (stick == 1u || (mant10 & 1u) == 1u)) { outBits = outBits + 1u; }
+    return sign | outBits;
 }
 ";
 

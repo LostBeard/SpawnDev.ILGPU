@@ -2,6 +2,13 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.14.0-local.3 (2026-06-17) - Half float→half is now IEEE round-to-nearest-even on every backend (was truncating)
+
+Fixes a real conversion-correctness + cross-backend-consistency bug in the most-used low-precision type, found by validating against the authoritative references (numpy.float16 / ml_dtypes.bfloat16). Forks bump to `2.0.30`.
+
+- **`ILGPU.Half` `float→half` now uses IEEE round-to-nearest-even (incl. proper subnormal rounding + overflow→Inf) on CPU + WebGPU + WebGL + Wasm** - bit-exact to `numpy.float16` / PyTorch / CUDA (`cvt.rn.f16.f32`) / OpenCL (`vstore_half`). **Before:** the managed conversion used the von der Zijp TABLE method which **truncates toward zero** (`HalfConversion.tt`: shift with no round bit), and the WebGPU/WebGL/Wasm emitters **truncated AND flushed every subnormal to signed zero**. That diverged from numpy/PyTorch in ~half of all values (every non-exact conversion lost up to ½ ULP) AND from ILGPU's own CUDA/OpenCL backends (which were already round-to-nearest) - so a Half model produced different results on WebGPU vs CUDA. Replaced the managed conversion with a direct RNE bit-manip (mirrors the bf16/FP8 conversions) and rewrote the WGSL/GLSL `_f32_to_f16` + the Wasm `EmitF32ToF16` inline bytecode to match. CUDA/OpenCL unchanged (already correct). The "f16 emulation is lossless / matches numpy byte-for-byte" doc claims (which were false for encode) are corrected.
+- **Validated exhaustively:** new `DemoConsole -- bf16-f16-oracle` checks managed BFloat16 + Half vs `ml_dtypes.bfloat16` / `numpy.float16` over **all 65536 patterns** (decode + round-trip identity) + RNE/overflow/subnormal probes. `BFloat16`: bit-exact (decode 65536/65536, round-trip 65536/65536, probes 67503/67503) - was already correct. `Half`: now decode 65536/65536, round-trip 65536/65536, probes 64060/64060 (was ~32294/64060 - the subnormal region + RNE midpoints). Cross-backend gate: new PMT `Half_FloatToHalf_RoundToNearestEven` (kernel `(Half)x` over subnormals/midpoints/overflow/specials, bit-exact vs the managed=numpy reference) **9/0 all backend lanes**; existing Half suite `PMT_FILTER=Half` **204/0/8** (no regression).
+
 ## 4.14.0-local.2 (2026-06-17) - Float8E4M3 is now bit-exact to float8_e4m3fn (overflow → NaN), saturating opt-in
 
 `Float8E4M3` float→fp8 conversion changed from saturating to the `fn` (`float8_e4m3fn`) convention as the DEFAULT, matching the dtype it is named after. Forks bump to `2.0.29`.

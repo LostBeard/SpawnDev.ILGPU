@@ -916,18 +916,33 @@ float _f16_to_f32(uint h) {
 // bits of the uint). Underflow clamps to signed zero; overflow clamps to signed
 // Inf while preserving mantissa bits so NaNs stay NaN.
 uint _f32_to_f16(float f) {
+    // IEEE round-to-nearest-even f32 -> f16, incl subnormals + overflow-to-Inf. Bit-exact to
+    // numpy/PyTorch/CUDA/OpenCL and the managed HalfConversion (von der Zijp truncation replaced).
     uint bits = floatBitsToUint(f);
-    uint sign = (bits >> 31u) & 1u;
-    int exp_i = int((bits >> 23u) & 0xFFu) - 112;
-    uint mant = (bits >> 13u) & 0x3FFu;
-    if (exp_i < 0) {
-        exp_i = 0;
-        mant = 0u;
+    uint sign = (bits >> 16u) & 0x8000u;
+    uint rest = bits & 0x7FFFFFFFu;
+    if (rest >= 0x7F800000u) {
+        return (rest > 0x7F800000u) ? (sign | 0x7E00u) : (sign | 0x7C00u);   // NaN : Inf
     }
-    if (exp_i > 31) {
-        exp_i = 31;
+    int e = int((rest >> 23u) & 0xFFu) - 127;
+    uint f32Mant = rest & 0x7FFFFFu;
+    if (e > 15) { return sign | 0x7C00u; }                    // overflow -> Inf
+    if (e < -14) {
+        if (e < -25) { return sign; }                          // -> +-0
+        uint signif = f32Mant | 0x800000u;
+        uint shift = uint((-14 - e) + 13);
+        uint m = signif >> shift;
+        uint roundBit = (signif >> (shift - 1u)) & 1u;
+        uint sticky = ((signif & ((1u << (shift - 1u)) - 1u)) != 0u) ? 1u : 0u;
+        if (roundBit == 1u && (sticky == 1u || (m & 1u) == 1u)) { m = m + 1u; }
+        return sign | m;
     }
-    return (sign << 15u) | (uint(exp_i) << 10u) | mant;
+    uint mant10 = f32Mant >> 13u;
+    uint roundB = (f32Mant >> 12u) & 1u;
+    uint stick = ((f32Mant & 0xFFFu) != 0u) ? 1u : 0u;
+    uint outBits = (uint(e + 15) << 10u) | mant10;
+    if (roundB == 1u && (stick == 1u || (mant10 & 1u) == 1u)) { outBits = outBits + 1u; }
+    return sign | outBits;
 }
 ";
 

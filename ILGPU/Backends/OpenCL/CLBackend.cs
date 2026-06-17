@@ -97,9 +97,11 @@ namespace ILGPU.Backends.OpenCL
             // which AscendingHalf / DescendingHalf radix-sort encodings depend on. The
             // hardware path uses `as_short(half)` directly when shader-fp16 is on; the
             // emulated path calls these helpers instead. They are tiny, no-op when unused,
-            // and let the OpenCL compiler optimize out the call when inlined. Mirrors WGSL's
-            // _f32_to_f16 / _f16_to_f32 byte-for-byte (denormals flush to signed zero,
-            // overflow clamps exp to 31 with mantissa preserved so NaN stays NaN).
+            // and let the OpenCL compiler optimize out the call when inlined. This helper is the
+            // radix FloatAsInt(Half) bit-encoder - its inputs are already representable Half values
+            // (widened to f32), so the encoding is exact regardless of rounding mode. General
+            // float->half conversion on OpenCL goes through vstore_half (IEEE round-to-nearest, like
+            // CUDA's cvt.rn and the managed/WGSL/GLSL/Wasm RNE path as of 4.14.0).
             if (!Capabilities.Float16Native)
             {
                 extensionBuilder.AppendLine();

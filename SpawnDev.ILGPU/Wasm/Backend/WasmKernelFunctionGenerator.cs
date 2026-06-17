@@ -5512,80 +5512,103 @@ EmitSaveAllLocals();
         /// </summary>
         private void EmitF32ToF16()
         {
-            // Stack has: f32
-            // We need to produce: i32 (f16 bits, 16-bit value)
+            // Stack: f32. Produce: i32 (f16 bits, low 16). IEEE round-to-nearest-even incl subnormals
+            // + overflow-to-Inf - bit-exact to numpy/PyTorch/CUDA/OpenCL and the managed HalfConversion
+            // (replaced the old truncate + flush-all-subnormals-to-zero, which diverged from all of them).
             var bits = AllocateNewLocal(WasmOpCodes.I32);
             var sign = AllocateNewLocal(WasmOpCodes.I32);
-            var exp = AllocateNewLocal(WasmOpCodes.I32);
-            var mant = AllocateNewLocal(WasmOpCodes.I32);
+            var rest = AllocateNewLocal(WasmOpCodes.I32);
+            var e = AllocateNewLocal(WasmOpCodes.I32);
+            var f32Mant = AllocateNewLocal(WasmOpCodes.I32);
+            var result = AllocateNewLocal(WasmOpCodes.I32);
+            var done = AllocateNewLocal(WasmOpCodes.I32);
+            var signif = AllocateNewLocal(WasmOpCodes.I32);
+            var shift = AllocateNewLocal(WasmOpCodes.I32);
+            var m = AllocateNewLocal(WasmOpCodes.I32);
+            var t = AllocateNewLocal(WasmOpCodes.I32);
 
-            // Reinterpret f32 to i32
-            Code.Add(WasmOpCodes.I32ReinterpretF32);
-            WasmModuleBuilder.EmitLocalSet(Code, bits);
+            void Get(uint l) => WasmModuleBuilder.EmitLocalGet(Code, l);
+            void Set(uint l) => WasmModuleBuilder.EmitLocalSet(Code, l);
+            void C(int v) => WasmModuleBuilder.EmitI32Const(Code, v);
+            void Op(byte op) => Code.Add(op);
 
-            // sign = (bits >> 31) & 1
-            WasmModuleBuilder.EmitLocalGet(Code, bits);
-            WasmModuleBuilder.EmitI32Const(Code, 31);
-            Code.Add(WasmOpCodes.I32ShrU);
-            WasmModuleBuilder.EmitLocalSet(Code, sign);
+            Op(WasmOpCodes.I32ReinterpretF32); Set(bits);
+            // sign = (bits >> 16) & 0x8000
+            Get(bits); C(16); Op(WasmOpCodes.I32ShrU); C(0x8000); Op(WasmOpCodes.I32And); Set(sign);
+            // rest = bits & 0x7FFFFFFF
+            Get(bits); C(0x7FFFFFFF); Op(WasmOpCodes.I32And); Set(rest);
+            C(0); Set(result); C(0); Set(done);
 
-            // exp = (bits >> 23) & 0xFF
-            WasmModuleBuilder.EmitLocalGet(Code, bits);
-            WasmModuleBuilder.EmitI32Const(Code, 23);
-            Code.Add(WasmOpCodes.I32ShrU);
-            WasmModuleBuilder.EmitI32Const(Code, 0xFF);
-            Code.Add(WasmOpCodes.I32And);
-            WasmModuleBuilder.EmitLocalSet(Code, exp);
+            // NaN/Inf: if rest >= 0x7F800000 { result = sign | (rest>0x7F800000 ? 0x7E00 : 0x7C00); done=1 }
+            Get(rest); C(0x7F800000); Op(WasmOpCodes.I32GeU);
+            Op(WasmOpCodes.If); Op(WasmOpCodes.Void);
+                Get(sign);
+                C(0x7E00); C(0x7C00); Get(rest); C(0x7F800000); Op(WasmOpCodes.I32GtU); Op(WasmOpCodes.Select);
+                Op(WasmOpCodes.I32Or); Set(result);
+                C(1); Set(done);
+            Op(WasmOpCodes.End);
 
-            // mant = (bits >> 13) & 0x3FF
-            WasmModuleBuilder.EmitLocalGet(Code, bits);
-            WasmModuleBuilder.EmitI32Const(Code, 13);
-            Code.Add(WasmOpCodes.I32ShrU);
-            WasmModuleBuilder.EmitI32Const(Code, 0x3FF);
-            Code.Add(WasmOpCodes.I32And);
-            WasmModuleBuilder.EmitLocalSet(Code, mant);
+            // e = ((rest>>23)&0xFF) - 127 ; f32Mant = rest & 0x7FFFFF
+            Get(rest); C(23); Op(WasmOpCodes.I32ShrU); C(0xFF); Op(WasmOpCodes.I32And); C(127); Op(WasmOpCodes.I32Sub); Set(e);
+            Get(rest); C(0x7FFFFF); Op(WasmOpCodes.I32And); Set(f32Mant);
 
-            // Rebias exponent: f16_exp = f32_exp - 112
-            // Clamp: if f32_exp <= 112 → f16_exp = 0 (underflow to zero)
-            //         if f32_exp >= 143 → f16_exp = 31 (overflow to inf)
-            //         if f32_exp == 255 → f16_exp = 31 (inf/nan)
-            WasmModuleBuilder.EmitLocalGet(Code, exp);
-            WasmModuleBuilder.EmitI32Const(Code, 112);
-            Code.Add(WasmOpCodes.I32Sub);
-            WasmModuleBuilder.EmitLocalSet(Code, exp);
+            // overflow: if !done && e > 15 { result = sign|0x7C00; done=1 }
+            Get(done); Op(WasmOpCodes.I32Eqz); Get(e); C(15); Op(WasmOpCodes.I32GtS); Op(WasmOpCodes.I32And);
+            Op(WasmOpCodes.If); Op(WasmOpCodes.Void);
+                Get(sign); C(0x7C00); Op(WasmOpCodes.I32Or); Set(result); C(1); Set(done);
+            Op(WasmOpCodes.End);
 
-            // Clamp underflow
-            WasmModuleBuilder.EmitLocalGet(Code, exp);
-            WasmModuleBuilder.EmitI32Const(Code, 0);
-            Code.Add(WasmOpCodes.I32LtS);
-            Code.Add(WasmOpCodes.If);
-            Code.Add(WasmOpCodes.Void);
-            WasmModuleBuilder.EmitI32Const(Code, 0);
-            WasmModuleBuilder.EmitLocalSet(Code, exp);
-            WasmModuleBuilder.EmitI32Const(Code, 0);
-            WasmModuleBuilder.EmitLocalSet(Code, mant);
-            Code.Add(WasmOpCodes.End);
+            // subnormal: if !done && e < -14
+            Get(done); Op(WasmOpCodes.I32Eqz); Get(e); C(-14); Op(WasmOpCodes.I32LtS); Op(WasmOpCodes.I32And);
+            Op(WasmOpCodes.If); Op(WasmOpCodes.Void);
+                Get(e); C(-25); Op(WasmOpCodes.I32LtS);
+                Op(WasmOpCodes.If); Op(WasmOpCodes.Void);
+                    Get(sign); Set(result); C(1); Set(done);              // -> +-0
+                Op(WasmOpCodes.Else);
+                    // signif = f32Mant | 0x800000 ; shift = -1 - e  (in [14,24])
+                    Get(f32Mant); C(0x800000); Op(WasmOpCodes.I32Or); Set(signif);
+                    C(-1); Get(e); Op(WasmOpCodes.I32Sub); Set(shift);
+                    // m = signif >> shift
+                    Get(signif); Get(shift); Op(WasmOpCodes.I32ShrU); Set(m);
+                    // t = roundBit = (signif >> (shift-1)) & 1
+                    Get(signif); Get(shift); C(1); Op(WasmOpCodes.I32Sub); Op(WasmOpCodes.I32ShrU); C(1); Op(WasmOpCodes.I32And); Set(t);
+                    // roundUp = roundBit & ( ((signif & ((1<<(shift-1))-1)) != 0) | (m & 1) )
+                    //   sticky:
+                    Get(signif);
+                    C(1); Get(shift); C(1); Op(WasmOpCodes.I32Sub); Op(WasmOpCodes.I32Shl); C(1); Op(WasmOpCodes.I32Sub);
+                    Op(WasmOpCodes.I32And); C(0); Op(WasmOpCodes.I32Ne);
+                    //   | (m & 1)
+                    Get(m); C(1); Op(WasmOpCodes.I32And); Op(WasmOpCodes.I32Or);
+                    //   & roundBit
+                    Get(t); Op(WasmOpCodes.I32And);
+                    Op(WasmOpCodes.If); Op(WasmOpCodes.Void);
+                        Get(m); C(1); Op(WasmOpCodes.I32Add); Set(m);
+                    Op(WasmOpCodes.End);
+                    Get(sign); Get(m); Op(WasmOpCodes.I32Or); Set(result); C(1); Set(done);
+                Op(WasmOpCodes.End);
+            Op(WasmOpCodes.End);
 
-            // Clamp overflow
-            WasmModuleBuilder.EmitLocalGet(Code, exp);
-            WasmModuleBuilder.EmitI32Const(Code, 31);
-            Code.Add(WasmOpCodes.I32GtS);
-            Code.Add(WasmOpCodes.If);
-            Code.Add(WasmOpCodes.Void);
-            WasmModuleBuilder.EmitI32Const(Code, 31);
-            WasmModuleBuilder.EmitLocalSet(Code, exp);
-            Code.Add(WasmOpCodes.End);
+            // normal: if !done  (e in [-14,15])
+            Get(done); Op(WasmOpCodes.I32Eqz);
+            Op(WasmOpCodes.If); Op(WasmOpCodes.Void);
+                // m = mant10 = f32Mant >> 13
+                Get(f32Mant); C(13); Op(WasmOpCodes.I32ShrU); Set(m);
+                // result = ((e+15) << 10) | mant10
+                Get(e); C(15); Op(WasmOpCodes.I32Add); C(10); Op(WasmOpCodes.I32Shl); Get(m); Op(WasmOpCodes.I32Or); Set(result);
+                // t = round = (f32Mant >> 12) & 1
+                Get(f32Mant); C(12); Op(WasmOpCodes.I32ShrU); C(1); Op(WasmOpCodes.I32And); Set(t);
+                // roundUp = round & ( ((f32Mant & 0xFFF) != 0) | (mant10 & 1) )
+                Get(f32Mant); C(0xFFF); Op(WasmOpCodes.I32And); C(0); Op(WasmOpCodes.I32Ne);
+                Get(m); C(1); Op(WasmOpCodes.I32And); Op(WasmOpCodes.I32Or);
+                Get(t); Op(WasmOpCodes.I32And);
+                Op(WasmOpCodes.If); Op(WasmOpCodes.Void);
+                    Get(result); C(1); Op(WasmOpCodes.I32Add); Set(result);
+                Op(WasmOpCodes.End);
+                // result = sign | result
+                Get(sign); Get(result); Op(WasmOpCodes.I32Or); Set(result);
+            Op(WasmOpCodes.End);
 
-            // Assemble: (sign << 15) | (exp << 10) | mant
-            WasmModuleBuilder.EmitLocalGet(Code, sign);
-            WasmModuleBuilder.EmitI32Const(Code, 15);
-            Code.Add(WasmOpCodes.I32Shl);
-            WasmModuleBuilder.EmitLocalGet(Code, exp);
-            WasmModuleBuilder.EmitI32Const(Code, 10);
-            Code.Add(WasmOpCodes.I32Shl);
-            Code.Add(WasmOpCodes.I32Or);
-            WasmModuleBuilder.EmitLocalGet(Code, mant);
-            Code.Add(WasmOpCodes.I32Or);
+            Get(result);
         }
 
         /// <summary>

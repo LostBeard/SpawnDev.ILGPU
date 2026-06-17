@@ -173,6 +173,60 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             sat[i] = global::ILGPU.Float8E4M3.FromSingleSaturating(x[i]);   // opt-in saturating
         }
 
+        // ILGPU.Half float->half must be round-to-nearest-even on EVERY backend (Geordi 2026-06-17,
+        // bf16/Half oracle validation). The managed conversion is bit-exact to numpy.float16 (verified
+        // DemoConsole -- bf16-f16-oracle, all 65536 patterns); this proves the WebGPU/WebGL/Wasm
+        // emitters match it - they previously TRUNCATED + flushed all subnormals to zero (diverging
+        // from numpy AND from CUDA/OpenCL which use native round-to-nearest). Subnormals + overflow +
+        // RNE midpoints are the point.
+        private static void HalfConvertKernel(Index1D i,
+            ArrayView1D<float, Stride1D.Dense> x, ArrayView1D<global::ILGPU.Half, Stride1D.Dense> y) =>
+            y[i] = (global::ILGPU.Half)x[i];
+
+        [TestMethod]
+        public async Task Half_FloatToHalf_RoundToNearestEven() => await RunTest(async accelerator =>
+        {
+            float[] inputs =
+            {
+                1f, 1.5f, -2.5f, 100.3f, 0.333f, 1024.7f,                 // normals
+                1.00048828125f, 1.0014648438f, 0.99975586f,              // normal RNE midpoints near 1.0
+                65504f, 65519f, 65520f, 65535f, 70000f, 1e30f,           // overflow region -> 65504 / Inf
+                float.PositiveInfinity, float.NegativeInfinity, -65504f, -70000f,
+                (float)Math.Pow(2, -24), (float)Math.Pow(2, -23), (float)Math.Pow(2, -15), // exact subnormals/boundary
+                (float)Math.Pow(2, -25),                                  // tie -> +0 (even)
+                (float)(Math.Pow(2, -25) * 1.5),                          // -> smallest subnormal
+                (float)Math.Pow(2, -26),                                  // -> +0
+                -2.9831426E-08f,                                          // the original failing case -> -smallest subnormal
+                0f, -0f, float.NaN, 5.96e-8f, 1e-7f,
+            };
+            int n = inputs.Length;
+            var expected = new ushort[n];
+            for (int i = 0; i < n; i++)
+            {
+                var v = (global::ILGPU.Half)inputs[i];   // managed = bit-exact numpy.float16 (oracle-proven)
+                expected[i] = System.Runtime.CompilerServices.Unsafe.As<global::ILGPU.Half, ushort>(ref v);
+            }
+
+            using var inBuf = accelerator.Allocate1D(inputs);
+            using var outBuf = accelerator.Allocate1D<global::ILGPU.Half>(n);
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D,
+                ArrayView1D<float, Stride1D.Dense>, ArrayView1D<global::ILGPU.Half, Stride1D.Dense>>(HalfConvertKernel);
+            k(n, inBuf.View, outBuf.View);
+            await accelerator.SynchronizeAsync();
+            var got = await outBuf.CopyToHostAsync<global::ILGPU.Half>();
+
+            for (int i = 0; i < n; i++)
+            {
+                ushort g = System.Runtime.CompilerServices.Unsafe.As<global::ILGPU.Half, ushort>(ref got[i]);
+                bool bothNaN = (g & 0x7C00) == 0x7C00 && (g & 0x03FF) != 0
+                    && (expected[i] & 0x7C00) == 0x7C00 && (expected[i] & 0x03FF) != 0;
+                if (!bothNaN && g != expected[i])
+                    throw new Exception(
+                        $"float->Half kernel @{i} ({BackendName}): input {inputs[i]} -> got 0x{g:X4}, " +
+                        $"want 0x{expected[i]:X4} (must be round-to-nearest-even incl subnormals, matching numpy/managed).");
+            }
+        });
+
         [TestMethod]
         public async Task Float8E4M3_FromSingleFn_OverflowToNaN() => await RunTest(async accelerator =>
         {
