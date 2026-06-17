@@ -276,11 +276,13 @@ namespace SpawnDev.ILGPU.Wasm
         public WasmMemoryBuffer(
             Accelerator accelerator,
             long length,
-            int elementSize)
-            : base(accelerator, length, elementSize)
+            int elementSize,
+            int bitsPerElement = 0)
+            : base(accelerator, length, elementSize, bitsPerElement)
         {
-            // Compute total bytes: length (elements) × elementSize (bytes per element).
-            long totalBytesLong = length * elementSize;
+            // Total bytes = LengthInBytes (packed ceil(N*bits/8) for sub-byte types like Int4;
+            // = length*elementSize for whole-byte types).
+            long totalBytesLong = LengthInBytes;
             if (totalBytesLong > int.MaxValue || totalBytesLong < 0)
                 throw new ArgumentOutOfRangeException(nameof(length),
                     $"Buffer size {totalBytesLong} bytes exceeds maximum SharedArrayBuffer capacity (2GB)");

@@ -11,8 +11,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private static readonly GPUCommandBuffer[] _submitArray = new GPUCommandBuffer[1];
         private readonly WebGPUBuffer<byte>? _buffer;
 
-        public WebGPUMemoryBuffer(WebGPUAccelerator accelerator, long length, int elementSize)
-            : base(accelerator, length, elementSize)
+        public WebGPUMemoryBuffer(WebGPUAccelerator accelerator, long length, int elementSize, int bitsPerElement = 0)
+            : base(accelerator, length, elementSize, bitsPerElement)
         {
             _buffer = accelerator.NativeAccelerator.Allocate<byte>(LengthInBytes);
         }
@@ -21,8 +21,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// Protected constructor for subclasses that provide their own buffer (e.g. ExternalWebGPUMemoryBuffer).
         /// Does NOT allocate a new GPU buffer — the subclass is responsible for providing NativeBuffer.
         /// </summary>
-        protected WebGPUMemoryBuffer(WebGPUAccelerator accelerator, long length, int elementSize, bool skipAllocation)
-            : base(accelerator, length, elementSize)
+        protected WebGPUMemoryBuffer(WebGPUAccelerator accelerator, long length, int elementSize, bool skipAllocation, int bitsPerElement = 0)
+            : base(accelerator, length, elementSize, bitsPerElement)
         {
             // _buffer intentionally left null — subclass overrides NativeBuffer
         }

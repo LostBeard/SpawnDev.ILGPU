@@ -1225,8 +1225,8 @@ namespace SpawnDev.ILGPU.WebGL
 
         #region Abstract Method Implementations
 
-        protected override MemoryBuffer AllocateRawInternal(long length, int elementSize) =>
-            new WebGLMemoryBuffer(this, length, elementSize);
+        protected override MemoryBuffer AllocateRawInternal(long length, int elementSize, int bitsPerElement) =>
+            new WebGLMemoryBuffer(this, length, elementSize, bitsPerElement);
 
         protected override AcceleratorStream CreateStreamInternal() => new WebGLStream(this);
 

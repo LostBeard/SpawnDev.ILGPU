@@ -380,7 +380,20 @@ namespace ILGPU.Runtime
         /// <param name="length">The number of elements to allocate.</param>
         /// <param name="elementSize">The size of a single element in bytes.</param>
         /// <returns>An allocated buffer on this accelerator.</returns>
-        public MemoryBuffer AllocateRaw(long length, int elementSize)
+        public MemoryBuffer AllocateRaw(long length, int elementSize) =>
+            AllocateRaw(length, elementSize, 0);
+
+        /// <summary>
+        /// Allocates a buffer with the specified number of elements on this accelerator.
+        /// </summary>
+        /// <param name="length">The number of elements to allocate.</param>
+        /// <param name="elementSize">The size of a single element in bytes.</param>
+        /// <param name="bitsPerElement">
+        /// Bits per logical element, or 0 to derive from <paramref name="elementSize"/> (whole-byte).
+        /// Sub-byte packed types (4-bit Int4/Float4E2M1) pass 4 so the buffer packs 2 elements/byte.
+        /// </param>
+        /// <returns>An allocated buffer on this accelerator.</returns>
+        public MemoryBuffer AllocateRaw(long length, int elementSize, int bitsPerElement)
         {
             if (length < 0)
                 throw new ArgumentOutOfRangeException(nameof(length));
@@ -388,7 +401,7 @@ namespace ILGPU.Runtime
                 throw new ArgumentOutOfRangeException(nameof(elementSize));
 
             Bind();
-            return AllocateRawInternal(length, elementSize);
+            return AllocateRawInternal(length, elementSize, bitsPerElement);
         }
 
         /// <summary>
@@ -399,7 +412,8 @@ namespace ILGPU.Runtime
         /// <returns>An allocated buffer on this accelerator.</returns>
         protected abstract MemoryBuffer AllocateRawInternal(
             long length,
-            int elementSize);
+            int elementSize,
+            int bitsPerElement);
 
         /// <summary>
         /// Allocates an n-D buffer with the specified number of elements on this
@@ -426,8 +440,9 @@ namespace ILGPU.Runtime
             int elementSize = ArrayView<T>.ElementSize;
             long length = stride.ComputeBufferLength(extent);
 
-            // Allocate an unsafe buffer
-            var buffer = AllocateRaw(length, elementSize);
+            // Allocate an unsafe buffer (BitsPerElement packs sub-byte types like Int4 to 2/byte;
+            // it equals elementSize*8 for every whole-byte type, so the byte size is unchanged).
+            var buffer = AllocateRaw(length, elementSize, ArrayView<T>.BitsPerElement);
             return new ArrayView<T>(buffer, 0L, length);
         }
 

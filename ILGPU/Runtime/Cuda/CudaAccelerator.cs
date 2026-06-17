@@ -470,8 +470,9 @@ namespace ILGPU.Runtime.Cuda
         /// <inheritdoc/>
         protected override MemoryBuffer AllocateRawInternal(
             long length,
-            int elementSize) =>
-            new CudaMemoryBuffer(this, length, elementSize);
+            int elementSize,
+            int bitsPerElement) =>
+            new CudaMemoryBuffer(this, length, elementSize, bitsPerElement);
 
         /// <summary>
         /// Allocates a pitched 2D buffer with X being the leading dimension using an

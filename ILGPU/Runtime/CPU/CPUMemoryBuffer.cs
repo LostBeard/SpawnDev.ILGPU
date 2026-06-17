@@ -264,8 +264,9 @@ namespace ILGPU.Runtime.CPU
         protected internal CPUMemoryBuffer(
             Accelerator accelerator,
             long length,
-            int elementSize)
-            : base(accelerator, length, elementSize)
+            int elementSize,
+            int bitsPerElement = 0)
+            : base(accelerator, length, elementSize, bitsPerElement)
         { }
 
         #endregion
@@ -323,8 +324,9 @@ namespace ILGPU.Runtime.CPU
                 Accelerator accelerator,
                 IntPtr ptr,
                 long length,
-                int elementSize)
-                : base(accelerator, length, elementSize)
+                int elementSize,
+                int bitsPerElement = 0)
+                : base(accelerator, length, elementSize, bitsPerElement)
             {
                 NativePtr = ptr;
             }
@@ -357,12 +359,17 @@ namespace ILGPU.Runtime.CPU
             internal UnmanagedMemoryBuffer(
                 Accelerator accelerator,
                 long length,
-                int elementSize)
+                int elementSize,
+                int bitsPerElement = 0)
                 : base(
                       GetCPUAccelerator(accelerator),
-                      Marshal.AllocHGlobal(new IntPtr(length * elementSize)),
+                      // Packed byte count: ceil(length * bits / 8). For whole-byte types
+                      // (bitsPerElement<=0 -> elementSize*8) this is exactly length*elementSize.
+                      Marshal.AllocHGlobal(new IntPtr(
+                          (length * (bitsPerElement > 0 ? bitsPerElement : elementSize * 8) + 7) / 8)),
                       length,
-                      elementSize)
+                      elementSize,
+                      bitsPerElement)
             {
                 // Zero-init to match every other ILGPU backend (WebGPU, WebGL,
                 // Wasm, CUDA, OpenCL all hand back zeroed buffers). Marshal.
@@ -412,8 +419,9 @@ namespace ILGPU.Runtime.CPU
             internal PageLockedMemoryBuffer(
                 Accelerator accelerator,
                 long length,
-                int elementSize)
-                : base(accelerator, length, elementSize)
+                int elementSize,
+                int bitsPerElement = 0)
+                : base(accelerator, length, elementSize, bitsPerElement)
             {
                 pageLockScope = accelerator.CreatePageLockFromPinned<byte>(
                     NativePtr,
@@ -559,8 +567,9 @@ namespace ILGPU.Runtime.CPU
         public static unsafe CPUMemoryBuffer Create(
             Accelerator accelerator,
             long length,
-            int elementSize) =>
-            new UnmanagedMemoryBuffer(accelerator, length, elementSize);
+            int elementSize,
+            int bitsPerElement = 0) =>
+            new UnmanagedMemoryBuffer(accelerator, length, elementSize, bitsPerElement);
 
         /// <summary>
         /// Creates a new page-locked unmanaged memory view source.

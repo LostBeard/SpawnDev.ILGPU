@@ -46,8 +46,8 @@ public class P2PMemoryBuffer : MemoryBuffer
     /// </summary>
     public string BufferId { get; } = Guid.NewGuid().ToString("N");
 
-    public P2PMemoryBuffer(Accelerator accelerator, long length, int elementSize)
-        : base(accelerator, length, elementSize)
+    public P2PMemoryBuffer(Accelerator accelerator, long length, int elementSize, int bitsPerElement = 0)
+        : base(accelerator, length, elementSize, bitsPerElement)
     {
         NativePtr = IntPtr.Zero;
         ShadowData = new byte[length * elementSize];

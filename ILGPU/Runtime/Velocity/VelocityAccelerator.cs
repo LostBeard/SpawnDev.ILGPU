@@ -397,8 +397,9 @@ namespace ILGPU.Runtime.Velocity
         /// <inheritdoc/>
         protected override MemoryBuffer AllocateRawInternal(
             long length,
-            int elementSize) =>
-            new VelocityMemoryBuffer(this, length, elementSize);
+            int elementSize,
+            int bitsPerElement) =>
+            new VelocityMemoryBuffer(this, length, elementSize, bitsPerElement);
 
         /// <summary>
         /// Loads the given kernel.

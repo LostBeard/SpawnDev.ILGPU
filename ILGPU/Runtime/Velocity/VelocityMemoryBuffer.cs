@@ -32,11 +32,13 @@ namespace ILGPU.Runtime.Velocity
         internal unsafe VelocityMemoryBuffer(
             Accelerator accelerator,
             long length,
-            int elementSize)
-            : base(accelerator, length, elementSize)
+            int elementSize,
+            int bitsPerElement = 0)
+            : base(accelerator, length, elementSize, bitsPerElement)
         {
-            // Ensure that all element accesses will be properly aligned
-            var nativeLength = (UIntPtr)(length * elementSize);
+            // Ensure that all element accesses will be properly aligned. Use LengthInBytes (packed
+            // for sub-byte types) rather than length*elementSize so a 4-bit buffer allocates ceil(N/2).
+            var nativeLength = (UIntPtr)LengthInBytes;
             var alignment = (UIntPtr)(accelerator as VelocityAccelerator)!.DataAlignment;
 
             // Allocate resources and assign pointers

@@ -39,8 +39,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// </summary>
         internal string GlslType { get; set; } = "float";
 
-        public WebGLMemoryBuffer(Accelerator accelerator, long length, int elementSize)
-            : base(accelerator, length, elementSize)
+        public WebGLMemoryBuffer(Accelerator accelerator, long length, int elementSize, int bitsPerElement = 0)
+            : base(accelerator, length, elementSize, bitsPerElement)
         {
             if (LengthInBytes > int.MaxValue)
                 throw new ArgumentOutOfRangeException(nameof(length),

@@ -2290,7 +2290,7 @@ namespace SpawnDev.ILGPU.WebGPU
             }
         }
 
-        protected override MemoryBuffer AllocateRawInternal(long length, int elementSize) => new WebGPUMemoryBuffer(this, length, elementSize);
+        protected override MemoryBuffer AllocateRawInternal(long length, int elementSize, int bitsPerElement) => new WebGPUMemoryBuffer(this, length, elementSize, bitsPerElement);
         protected override AcceleratorStream CreateStreamInternal() => new WebGPUStream(this);
         protected override void SynchronizeInternal() =>
             // Synchronous Synchronize() is DESKTOP-ONLY. On WebGPU (browser, single-threaded) the

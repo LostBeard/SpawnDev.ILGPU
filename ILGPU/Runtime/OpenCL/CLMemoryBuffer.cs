@@ -142,8 +142,9 @@ namespace ILGPU.Runtime.OpenCL
         public CLMemoryBuffer(
             CLAccelerator accelerator,
             long length,
-            int elementSize)
-            : base(accelerator, length, elementSize)
+            int elementSize,
+            int bitsPerElement = 0)
+            : base(accelerator, length, elementSize, bitsPerElement)
         {
             if (LengthInBytes == 0)
             {

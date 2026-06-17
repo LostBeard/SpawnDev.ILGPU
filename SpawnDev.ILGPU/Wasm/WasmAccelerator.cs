@@ -3091,9 +3091,9 @@ namespace SpawnDev.ILGPU.Wasm
         #region Memory Management
 
         /// <inheritdoc/>
-        protected override MemoryBuffer AllocateRawInternal(long length, int elementSize)
+        protected override MemoryBuffer AllocateRawInternal(long length, int elementSize, int bitsPerElement)
         {
-            return new WasmMemoryBuffer(this, length, elementSize);
+            return new WasmMemoryBuffer(this, length, elementSize, bitsPerElement);
         }
 
         protected override void SynchronizeInternal() =>

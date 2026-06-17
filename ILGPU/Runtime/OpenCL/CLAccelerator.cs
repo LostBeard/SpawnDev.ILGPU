@@ -329,8 +329,9 @@ namespace ILGPU.Runtime.OpenCL
         /// <inheritdoc/>
         protected override MemoryBuffer AllocateRawInternal(
             long length,
-            int elementSize) =>
-            new CLMemoryBuffer(this, length, elementSize);
+            int elementSize,
+            int bitsPerElement) =>
+            new CLMemoryBuffer(this, length, elementSize, bitsPerElement);
 
         /// <inheritdoc/>
         protected override CLKernel CreateKernel(CLCompiledKernel compiledKernel)

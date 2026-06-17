@@ -198,8 +198,9 @@ namespace ILGPU.Runtime.CPU
         /// <inheritdoc/>
         protected override MemoryBuffer AllocateRawInternal(
             long length,
-            int elementSize) =>
-            CPUMemoryBuffer.Create(this, length, elementSize);
+            int elementSize,
+            int bitsPerElement) =>
+            CPUMemoryBuffer.Create(this, length, elementSize, bitsPerElement);
 
         /// <summary>
         /// Loads the given kernel.

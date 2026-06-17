@@ -337,9 +337,9 @@ public class P2PAccelerator : KernelAccelerator<P2PCompiledKernel, P2PKernel>
     protected override void SynchronizeInternal() { }
 
     /// <inheritdoc/>
-    protected override MemoryBuffer AllocateRawInternal(long length, int elementSize)
+    protected override MemoryBuffer AllocateRawInternal(long length, int elementSize, int bitsPerElement)
     {
-        return new P2PMemoryBuffer(this, length, elementSize);
+        return new P2PMemoryBuffer(this, length, elementSize, bitsPerElement);
     }
 
     /// <inheritdoc/>

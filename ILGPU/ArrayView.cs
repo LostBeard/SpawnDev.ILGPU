@@ -182,6 +182,18 @@ namespace ILGPU
         public static readonly int ElementSize = Interop.SizeOf<T>();
 
         /// <summary>
+        /// The number of bits a single element occupies in a buffer. Equals
+        /// <see cref="ElementSize"/> * 8 for every whole-byte type; a type annotated with
+        /// <see cref="PackedBitsAttribute"/> (the 4-bit Int4 / UInt4 / Float4E2M1) reports its
+        /// packed width (4), so the buffer allocates ceil(N * BitsPerElement / 8) bytes (2/byte).
+        /// </summary>
+        public static readonly int BitsPerElement =
+            Attribute.GetCustomAttribute(typeof(T), typeof(PackedBitsAttribute))
+                is PackedBitsAttribute packed && packed.Bits > 0
+                ? packed.Bits
+                : ElementSize * 8;
+
+        /// <summary>
         /// Represents an empty view that is not valid and has a length of 0 elements.
         /// </summary>
         public static readonly ArrayView<T> Empty;
@@ -328,7 +340,7 @@ namespace ILGPU
         public readonly long LengthInBytes
         {
             [ViewIntrinsic(ViewIntrinsicKind.GetViewLengthInBytes)]
-            get => Length * ElementSize;
+            get => (Length * (long)BitsPerElement + 7) / 8;
         }
 
         /// <summary>
@@ -395,7 +407,7 @@ namespace ILGPU
         /// <returns>The index in bytes of the given view.</returns>
         /// <remarks>This method is not supported on accelerators.</remarks>
         [NotInsideKernel]
-        internal readonly long GetIndexInBytes() => Index * ElementSize;
+        internal readonly long GetIndexInBytes() => (Index * (long)BitsPerElement) / 8;
 
         /// <summary>
         /// Converts the given generic array view into a raw view of bytes.

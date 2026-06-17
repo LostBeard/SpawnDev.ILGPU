@@ -40,10 +40,11 @@ namespace ILGPU.Runtime
         protected MemoryBuffer(
             Accelerator accelerator,
             long length,
-            int elementSize)
+            int elementSize,
+            int bitsPerElement = 0)
             : base(accelerator)
         {
-            Init(length, elementSize);
+            Init(length, elementSize, bitsPerElement);
         }
 
         /// <summary>
@@ -51,7 +52,13 @@ namespace ILGPU.Runtime
         /// </summary>
         /// <param name="length">The length of this buffer.</param>
         /// <param name="elementSize">The element size.</param>
-        private void Init(long length, int elementSize)
+        /// <param name="bitsPerElement">
+        /// The number of bits per logical element, or 0/negative to derive it from
+        /// <paramref name="elementSize"/> (the normal whole-byte case). Sub-byte packed types
+        /// (e.g. 4-bit Int4/Float4E2M1) pass 4 here so the buffer allocates the packed
+        /// ceil(length * bits / 8) bytes instead of length * elementSize.
+        /// </param>
+        private void Init(long length, int elementSize, int bitsPerElement)
         {
             if (length < 0)
                 throw new ArgumentOutOfRangeException(nameof(length));
@@ -60,6 +67,9 @@ namespace ILGPU.Runtime
 
             Length = length;
             ElementSize = elementSize;
+            // Default (0/negative) = whole-byte storage: bits = elementSize * 8, so
+            // LengthInBytes below collapses to the historical length * elementSize exactly.
+            BitsPerElement = bitsPerElement > 0 ? bitsPerElement : elementSize * 8;
         }
 
         #endregion
@@ -82,9 +92,18 @@ namespace ILGPU.Runtime
         public int ElementSize { get; private set; }
 
         /// <summary>
-        /// Returns the length of this buffer in bytes.
+        /// Returns the number of bits per logical element. Equals <see cref="ElementSize"/> * 8 for
+        /// every whole-byte type; 4 for the sub-byte packed 4-bit types (Int4 / UInt4 / Float4E2M1),
+        /// where two elements share a byte.
         /// </summary>
-        public long LengthInBytes => Length * ElementSize;
+        public int BitsPerElement { get; private set; }
+
+        /// <summary>
+        /// Returns the length of this buffer in bytes. For whole-byte types this is
+        /// <see cref="Length"/> * <see cref="ElementSize"/>; for sub-byte packed types it is the
+        /// packed ceil(Length * BitsPerElement / 8) (e.g. a 4-bit buffer of N elements = ceil(N/2)).
+        /// </summary>
+        public long LengthInBytes => (Length * (long)BitsPerElement + 7) / 8;
 
         #endregion
 
@@ -533,7 +552,10 @@ namespace ILGPU.Runtime
         /// <param name="accelerator">The associated accelerator.</param>
         /// <param name="view">The extent (number of elements).</param>
         protected internal MemoryBuffer(Accelerator accelerator, in TView view)
-            : base(accelerator, view.Length, view.ElementSize)
+            // Inherit the packed bit-width from the underlying buffer (4 for the sub-byte 4-bit
+            // types, ElementSize*8 otherwise) so this typed wrapper reports the same packed
+            // LengthInBytes the raw buffer was allocated with.
+            : base(accelerator, view.Length, view.ElementSize, view.Buffer?.BitsPerElement ?? 0)
         {
             View = view;
             NativePtr = Buffer?.NativePtr ?? IntPtr.Zero;

@@ -520,9 +520,11 @@ namespace ILGPU.Runtime
         }
 
         /// <summary>
-        /// Returns the length of this array view in bytes.
+        /// Returns the length of this array view in bytes. Sub-byte packed types (the 4-bit
+        /// Int4 / UInt4 / Float4E2M1) report the packed ceil(Length * BitsPerElement / 8).
         /// </summary>
-        public readonly long LengthInBytes => Length * ElementSize;
+        public readonly long LengthInBytes =>
+            (Length * (long)ArrayView<T>.BitsPerElement + 7) / 8;
 
         /// <summary>
         /// Access the element at the given 32-bit index.
@@ -822,9 +824,11 @@ namespace ILGPU.Runtime
         }
 
         /// <summary>
-        /// Returns the length of this array view in bytes.
+        /// Returns the length of this array view in bytes. Sub-byte packed types (the 4-bit
+        /// Int4 / UInt4 / Float4E2M1) report the packed ceil(Length * BitsPerElement / 8).
         /// </summary>
-        public readonly long LengthInBytes => Length * ElementSize;
+        public readonly long LengthInBytes =>
+            (Length * (long)ArrayView<T>.BitsPerElement + 7) / 8;
 
         /// <summary>
         /// Access the element at the given 32-bit index.
@@ -1154,9 +1158,11 @@ namespace ILGPU.Runtime
         }
 
         /// <summary>
-        /// Returns the length of this array view in bytes.
+        /// Returns the length of this array view in bytes. Sub-byte packed types (the 4-bit
+        /// Int4 / UInt4 / Float4E2M1) report the packed ceil(Length * BitsPerElement / 8).
         /// </summary>
-        public readonly long LengthInBytes => Length * ElementSize;
+        public readonly long LengthInBytes =>
+            (Length * (long)ArrayView<T>.BitsPerElement + 7) / 8;
 
         /// <summary>
         /// Access the element at the given 32-bit index.
