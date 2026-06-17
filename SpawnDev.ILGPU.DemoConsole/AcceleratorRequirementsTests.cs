@@ -56,6 +56,29 @@ public class AcceleratorRequirementsTests
     }
 
     [TestMethod]
+    public Task Satisfies_LowPrecisionFloats_AllDevicesPass()
+    {
+        using var context = Context.CreateDefault();
+        // bf16 + both FP8 formats are supported (always emulated) on every backend, so these are
+        // no-op documentation filters - every device must satisfy them, including combined.
+        var req = new AcceleratorRequirements
+        {
+            RequiresFloat16 = true,
+            RequiresBFloat16 = true,
+            RequiresFloat8E4M3 = true,
+            RequiresFloat8E5M2 = true,
+        };
+        foreach (var device in context.Devices)
+        {
+            if (!device.Satisfies(req))
+                throw new Exception(
+                    $"Device {device.AcceleratorType} (name={device.Name}) failed the low-precision-float " +
+                    $"requirements - Half/bf16/FP8 are supported on every backend and must never filter.");
+        }
+        return Task.CompletedTask;
+    }
+
+    [TestMethod]
     public Task CreatePreferredAccelerator_NoRequirements_Returns()
     {
         using var context = Context.CreateDefault();

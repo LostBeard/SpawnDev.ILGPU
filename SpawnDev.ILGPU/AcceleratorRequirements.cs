@@ -72,12 +72,29 @@ public sealed class AcceleratorRequirements
 
     /// <summary>
     /// Kernel uses BFloat16 (<c>ILGPU.BFloat16</c>, "brain float"). Every backend supports it -
-    /// always emulated (top-16-bits-of-fp32 + round-to-nearest-even), with native <c>cvt.*.bf16</c>
-    /// on CUDA sm_80+ used only at the load/store boundary. There is no native-vs-emulated split
-    /// (no hardware has native bf16 arithmetic), so this is a no-op documentation filter like
+    /// always emulated (top-16-bits-of-fp32 + round-to-nearest-even). The conversion is portable
+    /// bit-manipulation on every backend including CUDA (4.13.0+ uses basic integer ops, NOT the
+    /// sm_80+ native <c>cvt.*.bf16</c>, so bf16 runs on pre-Ampere cards too). There is no
+    /// native-vs-emulated split, so this is a no-op documentation filter like
     /// <see cref="RequiresFloat16"/> - it never rules out a backend.
     /// </summary>
     public bool RequiresBFloat16 { get; init; }
+
+    /// <summary>
+    /// Kernel uses the 8-bit float <c>ILGPU.Float8E4M3</c> (E4M3FN: 1/4/3, bias 7, no Inf, saturates
+    /// to +-448 - the FP8 forward/inference format). Every backend supports it - always emulated
+    /// (1-byte storage, f32-register compute, portable conversion on every backend incl. CUDA). Like
+    /// <see cref="RequiresBFloat16"/> this is a no-op documentation filter - it never rules out a backend.
+    /// </summary>
+    public bool RequiresFloat8E4M3 { get; init; }
+
+    /// <summary>
+    /// Kernel uses the 8-bit float <c>ILGPU.Float8E5M2</c> (1/5/2, bias 15, IEEE Inf/NaN - the FP8
+    /// backward/gradient format). Every backend supports it - always emulated (1-byte storage,
+    /// f32-register compute, portable conversion on every backend incl. CUDA). Like
+    /// <see cref="RequiresBFloat16"/> this is a no-op documentation filter - it never rules out a backend.
+    /// </summary>
+    public bool RequiresFloat8E5M2 { get; init; }
 
     /// <summary>
     /// Kernel uses Float64 (<c>double</c>). True is compatible with every backend - WebGPU
@@ -233,6 +250,8 @@ public static class AcceleratorRequirementsExtensions
         if (requirements.RequiresFloat16 && !HasFloat16(device)) return false;
         if (requirements.RequiresFloat16Native && !HasFloat16Native(device)) return false;
         if (requirements.RequiresBFloat16 && !HasBFloat16(device)) return false;
+        if (requirements.RequiresFloat8E4M3 && !HasFloat8(device)) return false;
+        if (requirements.RequiresFloat8E5M2 && !HasFloat8(device)) return false;
         if (requirements.RequiresFloat64 && !HasFloat64(device)) return false;
         if (requirements.RequiresFloat64Native && !HasFloat64Native(device)) return false;
         if (requirements.RequiresFloat64Strict && !HasFloat64Strict(device)) return false;
@@ -280,9 +299,13 @@ public static class AcceleratorRequirementsExtensions
     private static bool HasFloat16(Device device)
         => device.Capabilities?.Float16 ?? true; // every shipped backend supports Float16 via emulation
 
-    // Every backend supports BFloat16 (always emulated; native cvt only at the load/store
-    // boundary on CUDA). No native-vs-emulated split, so this is always true.
+    // Every backend supports BFloat16 (always emulated; portable bit-manip conversion on every
+    // backend incl. CUDA). No native-vs-emulated split, so this is always true.
     private static bool HasBFloat16(Device device) => true;
+
+    // Every backend supports FP8 (Float8E4M3 + Float8E5M2) - always emulated (1-byte storage,
+    // f32-register compute, portable conversion on every backend incl. CUDA). Always true.
+    private static bool HasFloat8(Device device) => true;
 
     private static bool HasFloat16Native(Device device)
     {
@@ -363,6 +386,8 @@ public static class AcceleratorRequirementsExtensions
         if (r.RequiresFloat16) flags.Add("Float16");
         if (r.RequiresFloat16Native) flags.Add("Float16Native");
         if (r.RequiresBFloat16) flags.Add("BFloat16");
+        if (r.RequiresFloat8E4M3) flags.Add("Float8E4M3");
+        if (r.RequiresFloat8E5M2) flags.Add("Float8E5M2");
         if (r.RequiresFloat64) flags.Add("Float64");
         if (r.RequiresFloat64Native) flags.Add("Float64Native");
         if (r.RequiresFloat64Strict) flags.Add("Float64Strict");
