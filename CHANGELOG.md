@@ -2,7 +2,9 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
-## 4.13.0 (unreleased) - BFloat16 (bfloat16) Phases 0-3b: core type (CPU) + WebGPU + WebGL + Wasm + OpenCL + CUDA codegen (all 6 backends)
+## 4.13.0 (2026-06-16) - Low-precision floats on all 6 backends: BFloat16 + FP8 (Float8E4M3 / Float8E5M2), generic INumber<T> mixed-precision kernels, PrecisionConvert, and bf16/FP8 portability to pre-Ampere CUDA cards
+
+> 4.13.0 was developed across the local.5 -> local.10 series; the dated headline above is the stable cut. Per-milestone detail follows.
 
 ### local.10 - FP8 complete on ALL 6 backends + bf16 pre-Ampere CUDA fix
 
