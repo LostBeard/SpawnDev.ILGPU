@@ -173,6 +173,78 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             sat[i] = global::ILGPU.Float8E4M3.FromSingleSaturating(x[i]);   // opt-in saturating
         }
 
+        // Pin the on-device float->lowp conversions to HARDCODED values from the external authoritative
+        // references (numpy.float16 / ml_dtypes.bfloat16 / float8_e4m3fn / float8_e5m2), via
+        // DemoConsole -- bf16-f16-oracle / fp8-oracle (Geordi 2026-06-17). The other conversion tests
+        // compare GPU-vs-managed (so they'd miss an IDENTICAL regression in both); this pins every
+        // backend's convert to the reference itself, locking in the Half-RNE + FP8-fn fixes in CI.
+        private static void RefConvertKernel<T>(Index1D i,
+            ArrayView1D<float, Stride1D.Dense> x, ArrayView1D<T, Stride1D.Dense> y)
+            where T : unmanaged, INumber<T> =>
+            y[i] = PrecisionConvert.ConvertFromSingle<T>(x[i]);
+
+        private async Task<T[]> ConvertOnDevice<T>(Accelerator acc, uint[] inBits)
+            where T : unmanaged, INumber<T>
+        {
+            var inputs = new float[inBits.Length];
+            for (int i = 0; i < inBits.Length; i++) inputs[i] = BitConverter.UInt32BitsToSingle(inBits[i]);
+            using var inBuf = acc.Allocate1D(inputs);
+            using var outBuf = acc.Allocate1D<T>(inBits.Length);
+            var k = acc.LoadAutoGroupedStreamKernel<Index1D,
+                ArrayView1D<float, Stride1D.Dense>, ArrayView1D<T, Stride1D.Dense>>(RefConvertKernel<T>);
+            k(inBits.Length, inBuf.View, outBuf.View);
+            await acc.SynchronizeAsync();
+            return await outBuf.CopyToHostAsync<T>();
+        }
+
+        [TestMethod]
+        public async Task LowPrecision_ConversionPinnedToExternalReference() => await RunTest(async acc =>
+        {
+            // (f32 input bits, expected raw lowp bits) from numpy.float16. NaN row compared tolerant.
+            uint[] hIn = { 855638016u, 3003129856u, 864026624u, 1199562752u, 1199566848u, 1200142336u, 1065357312u, 2139095040u, 2143289344u };
+            ushort[] hExp = { 0x0000, 0x8001, 0x0001, 0x7BFF, 0x7C00, 0x7C00, 0x3C00, 0x7C00, 0x7E00 };
+            var hGot = await ConvertOnDevice<global::ILGPU.Half>(acc, hIn);
+            for (int i = 0; i < hIn.Length; i++)
+            {
+                ushort g = System.Runtime.CompilerServices.Unsafe.As<global::ILGPU.Half, ushort>(ref hGot[i]);
+                bool nan = (g & 0x7C00) == 0x7C00 && (g & 0x3FF) != 0 && (hExp[i] & 0x7C00) == 0x7C00 && (hExp[i] & 0x3FF) != 0;
+                if (!nan && g != hExp[i]) throw new Exception($"Half convert @{i} ({BackendName}): in 0x{hIn[i]:X8} -> 0x{g:X4}, want numpy.float16 0x{hExp[i]:X4}.");
+            }
+
+            // ml_dtypes.bfloat16
+            uint[] bIn = { 1065353216u, 1078530000u, 2139095040u, 2143289344u, 3223322624u, 1900671690u };
+            ushort[] bExp = { 0x3F80, 0x4049, 0x7F80, 0x7FC0, 0xC020, 0x714A };
+            var bGot = await ConvertOnDevice<global::ILGPU.BFloat16>(acc, bIn);
+            for (int i = 0; i < bIn.Length; i++)
+            {
+                ushort g = System.Runtime.CompilerServices.Unsafe.As<global::ILGPU.BFloat16, ushort>(ref bGot[i]);
+                bool nan = (g & 0x7F80) == 0x7F80 && (g & 0x7F) != 0 && (bExp[i] & 0x7F80) == 0x7F80 && (bExp[i] & 0x7F) != 0;
+                if (!nan && g != bExp[i]) throw new Exception($"BFloat16 convert @{i} ({BackendName}): in 0x{bIn[i]:X8} -> 0x{g:X4}, want ml_dtypes.bfloat16 0x{bExp[i]:X4}.");
+            }
+
+            // float8_e4m3fn (fn: overflow -> NaN)
+            uint[] e4In = { 1138753536u, 1138786304u, 1139277824u, 1139802112u, 1140850688u, 2139095040u, 4286578688u, 2143289344u, 1065353216u };
+            byte[] e4Exp = { 0x7E, 0x7E, 0x7E, 0x7F, 0x7F, 0x7F, 0xFF, 0x7F, 0x38 };
+            var e4Got = await ConvertOnDevice<global::ILGPU.Float8E4M3>(acc, e4In);
+            for (int i = 0; i < e4In.Length; i++)
+            {
+                byte g = System.Runtime.CompilerServices.Unsafe.As<global::ILGPU.Float8E4M3, byte>(ref e4Got[i]);
+                bool nan = (g & 0x7F) == 0x7F && (e4Exp[i] & 0x7F) == 0x7F;
+                if (!nan && g != e4Exp[i]) throw new Exception($"Float8E4M3 convert @{i} ({BackendName}): in 0x{e4In[i]:X8} -> 0x{g:X2}, want float8_e4m3fn 0x{e4Exp[i]:X2}.");
+            }
+
+            // float8_e5m2 (overflow -> Inf; NaN byte tolerant - ILGPU 0x7F vs ml_dtypes 0x7E, both valid)
+            uint[] e5In = { 1197473792u, 1198522368u, 1200142336u, 2139095040u, 2143289344u, 1065353216u };
+            byte[] e5Exp = { 0x7B, 0x7C, 0x7C, 0x7C, 0x7E, 0x3C };
+            var e5Got = await ConvertOnDevice<global::ILGPU.Float8E5M2>(acc, e5In);
+            for (int i = 0; i < e5In.Length; i++)
+            {
+                byte g = System.Runtime.CompilerServices.Unsafe.As<global::ILGPU.Float8E5M2, byte>(ref e5Got[i]);
+                bool nan = (g & 0x7C) == 0x7C && (g & 0x03) != 0 && (e5Exp[i] & 0x7C) == 0x7C && (e5Exp[i] & 0x03) != 0;
+                if (!nan && g != e5Exp[i]) throw new Exception($"Float8E5M2 convert @{i} ({BackendName}): in 0x{e5In[i]:X8} -> 0x{g:X2}, want float8_e5m2 0x{e5Exp[i]:X2}.");
+            }
+        });
+
         // ILGPU.Half float->half must be round-to-nearest-even on EVERY backend (Geordi 2026-06-17,
         // bf16/Half oracle validation). The managed conversion is bit-exact to numpy.float16 (verified
         // DemoConsole -- bf16-f16-oracle, all 65536 patterns); this proves the WebGPU/WebGL/Wasm
