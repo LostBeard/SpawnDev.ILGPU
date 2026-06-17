@@ -2,6 +2,14 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.14.0-local.1 (2026-06-17) - Float8E4M3 selectable overflow convention (float8_e4m3fn parity)
+
+Additive new API on `Float8E4M3` (forks bump to `2.0.28`). No change to any existing behavior - the cast operator is unchanged.
+
+- **Validated `Float8E4M3` / `Float8E5M2` conversions against the `ml_dtypes` reference** (the impl PyTorch / JAX `float8_e4m3fn` / `float8_e5m2` share) with a new evidence harness `DemoConsole -- fp8-oracle` (generators in `_research/fp8_oracle/`). Result: decode is bit-exact (0/256) and encode rounding/subnormal is bit-exact (0 divergences across 1099 / 723 probes) for both types. The **only** divergence was E4M3 finite overflow: ILGPU saturated to ±448 (the NVIDIA Transformer Engine / OCP saturating cast), whereas the dtype literally named `e4m3fn` overflows to **NaN**. Both are real-world conventions; they agree everywhere except `|x| > 464` (the region that rounds up past the 448 slot).
+- **Made the overflow convention selectable.** The bare cast `(Float8E4M3)x`, `Float8E4M3.FromSingleSaturating(x)`, and `FromSingle(x, saturate: true)` keep the **saturating** behavior (finite overflow → ±448, ±Inf → NaN). New **`Float8E4M3.FromSingleFn(x)`** / `FromSingle(x, saturate: false)` use the **fn** convention (finite overflow AND ±Inf → NaN), **bit-exact to PyTorch / JAX / ml_dtypes `float8_e4m3fn`** - use it for reference-matching ML (loading/comparing FP8 checkpoints). `FromSingleFn` is composed only of existing intrinsics (compare + the saturating cast + Neg + cast-of-NaN), so it transpiles with **no per-backend conversion codegen** and is bit-exact on all 6 backends.
+- Gates: `DemoConsole -- fp8-oracle` (managed `FromSingleFn` 1099/1099 vs `float8_e4m3fn`; saturating cast's 62 overflow points reported as the documented convention) + `fp8-verify` desktop kernel (`FromSingleFn` 24/24 bit-exact on CPU/OpenCL/CUDA) + **PMT `Float8E4M3_FromSingleFn_OverflowToNaN` 9/0 across all backend lanes** (CPU/CUDA/OpenCL/WebGPU/WebGPU-NoSubgroups/WebGL/Wasm). No regression to existing FP8/bf16/Half gates. `Float8E5M2` already matched its reference (overflow → ±Inf); its canonical NaN byte is `0x7F` (ml_dtypes uses `0x7E` - both valid NaN patterns).
+
 ## 4.13.2 (2026-06-16) - Packaging fix (no code changes)
 
 Wrapper-package-only fix over 4.13.1 (forks unchanged at `2.0.27`). No library/runtime behavior changed.

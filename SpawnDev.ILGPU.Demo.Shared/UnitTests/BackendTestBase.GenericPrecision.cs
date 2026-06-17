@@ -157,5 +157,53 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                         "must transpile + marshal correctly.");
             }
         });
+
+        // Float8E4M3.FromSingleFn (the float8_e4m3fn convention: finite overflow AND +-Inf -> NaN,
+        // NOT saturation - Geordi 2026-06-17, from the FP8 ML-oracle validation). FromSingleFn is
+        // composed only of existing intrinsics (compare + the saturating cast + Neg + cast-of-NaN)
+        // so it must transpile and produce the SAME byte as the managed fn result (which fp8-oracle
+        // proved bit-exact to ml_dtypes/PyTorch float8_e4m3fn) on EVERY backend. The overflow region
+        // is the point: a correct kernel emits NaN (0x7F/0xFF) there, not 0x7E (+-448).
+        private static void Float8FromSingleFnKernel(Index1D i,
+            ArrayView1D<float, Stride1D.Dense> x, ArrayView1D<global::ILGPU.Float8E4M3, Stride1D.Dense> y) =>
+            y[i] = global::ILGPU.Float8E4M3.FromSingleFn(x[i]);
+
+        [TestMethod]
+        public async Task Float8E4M3_FromSingleFn_OverflowToNaN() => await RunTest(async accelerator =>
+        {
+            float[] inputs =
+            {
+                480f, 512f, 1000f, 1e30f, float.PositiveInfinity,        // +overflow -> +NaN
+                -480f, -512f, -1e30f, float.NegativeInfinity,            // -overflow -> -NaN
+                448f, 449f, 463f, 464f, -448f, -464f,                    // round-to-448 region (finite)
+                1f, 1.25f, 256f, -2.5f, 0.5f, 0.001953125f, 0f, -0f, float.NaN,
+            };
+            int n = inputs.Length;
+            var expected = new byte[n];
+            for (int i = 0; i < n; i++)
+            {
+                var v = global::ILGPU.Float8E4M3.FromSingleFn(inputs[i]);   // managed = proven reference
+                expected[i] = System.Runtime.CompilerServices.Unsafe.As<global::ILGPU.Float8E4M3, byte>(ref v);
+            }
+
+            using var inBuf = accelerator.Allocate1D(inputs);
+            using var outBuf = accelerator.Allocate1D<global::ILGPU.Float8E4M3>(n);
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D,
+                ArrayView1D<float, Stride1D.Dense>, ArrayView1D<global::ILGPU.Float8E4M3, Stride1D.Dense>>(
+                Float8FromSingleFnKernel);
+            k(n, inBuf.View, outBuf.View);
+            await accelerator.SynchronizeAsync();
+            var got = await outBuf.CopyToHostAsync<global::ILGPU.Float8E4M3>();
+
+            for (int i = 0; i < n; i++)
+            {
+                byte g = System.Runtime.CompilerServices.Unsafe.As<global::ILGPU.Float8E4M3, byte>(ref got[i]);
+                bool bothNaN = (g & 0x7F) == 0x7F && (expected[i] & 0x7F) == 0x7F;   // NaN-slot tolerant
+                if (!bothNaN && g != expected[i])
+                    throw new Exception(
+                        $"FromSingleFn kernel @{i} ({BackendName}): input {inputs[i]} -> got 0x{g:X2}, " +
+                        $"want 0x{expected[i]:X2} (fn: overflow/+-Inf must be NaN, not saturated +-448).");
+            }
+        });
     }
 }

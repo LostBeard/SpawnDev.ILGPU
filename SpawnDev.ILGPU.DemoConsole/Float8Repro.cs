@@ -135,6 +135,7 @@ internal static class Float8Repro
                 Console.WriteLine($"  [{acc.AcceleratorType} {acc.Name}]");
                 kFails += RunKernel<Float8E4M3>(acc, "E4M3", f => (Float8E4M3)f, v => (float)v);
                 kFails += RunKernel<Float8E5M2>(acc, "E5M2", f => (Float8E5M2)f, v => (float)v);
+                kFails += RunFnConvertKernel(acc);
             }
         }
 
@@ -224,6 +225,66 @@ internal static class Float8Repro
             var stk = (deepest.StackTrace ?? "").Split('\n');
             for (int i = 0; i < stk.Length && i < 6; i++)
                 Console.WriteLine($"        @ {stk[i].Trim()}");
+            return 1;
+        }
+    }
+
+    // y[i] = Float8E4M3.FromSingleFn(x[i]) - the fn (overflow->NaN) convention, IN-KERNEL.
+    private static void FnConvertKernel(Index1D i,
+        ArrayView1D<float, Stride1D.Dense> x, ArrayView1D<Float8E4M3, Stride1D.Dense> y) =>
+        y[i] = Float8E4M3.FromSingleFn(x[i]);
+
+    // Proves FromSingleFn transpiles AND matches the managed (= reference, per fp8-oracle) result
+    // BIT-EXACT in a real kernel - especially the overflow region where it must produce NaN, not 448.
+    private static int RunFnConvertKernel(Accelerator acc)
+    {
+        float[] inputs =
+        {
+            // overflow (-> NaN), both signs, incl +-Inf
+            480f, 512f, 1000f, 1e30f, float.PositiveInfinity,
+            -480f, -512f, -1e30f, float.NegativeInfinity,
+            // round-to-448 boundary region (-> finite, NOT NaN)
+            448f, 449f, 463f, 464f, -448f, -464f,
+            // normals / subnormals / zero / NaN
+            1f, 1.25f, 256f, -2.5f, 0.5f, 0.001953125f /*2^-9*/, 0f, -0f, float.NaN,
+        };
+        int n = inputs.Length;
+        var expected = new byte[n];
+        for (int i = 0; i < n; i++)
+        {
+            var v = Float8E4M3.FromSingleFn(inputs[i]);   // managed = proven reference
+            expected[i] = Unsafe.As<Float8E4M3, byte>(ref v);
+        }
+        try
+        {
+            using var inBuf = acc.Allocate1D(inputs);
+            using var outBuf = acc.Allocate1D<Float8E4M3>(n);
+            var k = acc.LoadAutoGroupedStreamKernel<Index1D,
+                ArrayView1D<float, Stride1D.Dense>, ArrayView1D<Float8E4M3, Stride1D.Dense>>(FnConvertKernel);
+            k(n, inBuf.View, outBuf.View);
+            acc.Synchronize();
+            var got = outBuf.GetAsArray1D();
+
+            int bad = 0, firstBad = -1;
+            for (int i = 0; i < n; i++)
+            {
+                byte g = Unsafe.As<Float8E4M3, byte>(ref got[i]);
+                // NaN-slot tolerant (0x7F/0xFF both NaN); else bit-exact.
+                bool bothNaN = (g & 0x7F) == 0x7F && (expected[i] & 0x7F) == 0x7F;
+                if (!bothNaN && g != expected[i]) { if (bad == 0) firstBad = i; bad++; }
+            }
+            if (bad == 0)
+            {
+                Console.WriteLine($"  E4M3 FromSingleFn kernel: OK ({n}/{n} bit-exact vs managed fn)");
+                return 0;
+            }
+            Console.WriteLine($"  E4M3 FromSingleFn kernel: WRONG {bad}/{n}, first@{firstBad} " +
+                $"in={inputs[firstBad]} got=0x{Unsafe.As<Float8E4M3, byte>(ref got[firstBad]):X2} want=0x{expected[firstBad]:X2}");
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"  E4M3 FromSingleFn kernel: {ex.GetType().Name}: {ex.Message}");
             return 1;
         }
     }

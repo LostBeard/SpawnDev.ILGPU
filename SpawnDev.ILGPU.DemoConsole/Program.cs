@@ -49,6 +49,11 @@ try
     if (args.Length > 0 && args[0] == "fp8-verify")
         return await Float8Repro.Run();
 
+    // FP8 conversions vs the ml_dtypes reference (float8_e4m3fn / e5m2) - answers the
+    // overflow-convention question flagged in Float8E4M3.cs with evidence.
+    if (args.Length > 0 && args[0] == "fp8-oracle")
+        return await Float8OracleCompare.Run(args);
+
     // Generic in-kernel float<->T conversion (Tuvok's PrecisionConvert ask) on desktop backends.
     if (args.Length > 0 && args[0] == "precision-convert")
         return await GenericConvertRepro.Run();

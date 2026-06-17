@@ -12,7 +12,7 @@
          SpawnDev.ILGPU.Fork* PackageReference Versions inside SpawnDev.ILGPU.csproj.
          Run `_check-fork-version-sync.bat` at repo root. See the banner comment in
          SpawnDev.ILGPU.csproj for the full procedure. -->
-    <Version>2.0.27</Version>
+    <Version>2.0.28</Version>
     <IsPackable>true</IsPackable>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
   </PropertyGroup>
