@@ -6,32 +6,43 @@ Float8E4M3, Float8E5M2) are feature-complete + reference-validated (4.14.0-local
 tier. Precedent to mirror: the FP8 core-type work (`ILGPU/Float8E4M3.cs` + per-backend emitters + radix +
 capability), and the GGUF Q4_K/Q6_K dequant pattern for the block-quant formats.
 
-## The foundational new piece: 4-bit (nibble) sub-word storage
+## STORAGE MODEL DECISION (corrected 2026-06-17 after reading the IR size model)
 
-bf16/FP8 reused the existing sub-word machinery, which bottoms out at **1 byte** (Int8/FP8 = 1 byte, 4 per
-`u32`; Int16/Half/bf16 = 2 bytes, 2 per `u32`). **FP4 and INT4 are 4 bits = 8 per `u32`** — a NEW stride the
-current load/store/LEA/atomic-RMW code does not handle. This nibble path is the shared prerequisite for both
-FP4 and INT4 and must land first, on all 6 backends:
+**The IR type-size model is byte-granular and integer (minimum 1 byte).** `PrimitiveTypes.BasicTypeInformation`
+sizes `Int1` as **4 bytes** (stored as i32!) and `Float8E4M3`/`E5M2` as 1 byte; `PrimitiveType.Size` is an `int`
+(bytes) used pervasively for offsets/strides/alloca (`view[i]` offset = `i * Size`). A true 0.5-byte packed type
+(8 per u32) does **not** fit this model without a deep allocation+offset-layer change (a separate "packed storage
+size" threaded everywhere) — high risk, and NOT where ML actually needs the win.
 
-- **WebGPU (WGSL):** packed `array<atomic<u32>>`, 8 nibbles/word. Load = `atomicLoad` + shift `(idx%8)*4` +
-  `& 0xFu`. Store = `atomicAnd` clear-nibble-mask + `atomicOr` set (thread-safe nibble RMW). Extends the
-  existing 1-byte/2-byte sub-word switches (binding-type / body-LEA / direct-LEA / coalesce — the four sites
-  the FP8 radix fix touched).
-- **WebGL (GLSL):** `texelFetch` R32I + shift/mask nibble extract; Transform-Feedback nibble pack. The
-  `BodyStructFieldInfoGL` sub-word path + `_subWord*Params` (just extended for FP8) need a 4-bit case.
-- **Wasm:** `i32.load8_u` the byte + nibble shift/mask (no native 4-bit load); store = read-modify-write the
-  byte. Inline bytecode like the FP8 path.
-- **OpenCL:** `uchar*` storage + nibble shift/mask (no `vload` for 4-bit); RMW store.
-- **CUDA (PTX):** `ld.global.u8` + nibble extract; `atom`/RMW store. Portable bit-manip, every arch.
-- **CPU:** managed nibble pack/unpack in the struct.
-- Decision: model as `BasicValueType.Int4`/`UInt4`/`Float4E2M1` (new IR primitives, append-only) with a
-  **4-bit element size** the sub-word machinery keys on (new `SubWordElemSize`-style "half-byte" case). The
-  `arrayLength()`-style element-count math (×8 per word) needs the same care as the FP8 radix `view.Length` fix.
+**Therefore: the per-element core types `Float4E2M1` + `Int4`/`UInt4` use 1-BYTE storage (Size=1), exactly the
+FP8/Int8 pattern** — the 4-bit VALUE in a byte. This reuses the existing 1-byte sub-word machinery wholesale (no
+new nibble storage, no allocation change, no codegen surgery): `BasicValueType.Int4`/`UInt4`/`Float4E2M1` appended
+(append-only), Size=1, wired exactly like FP8 (the IR core + 6 emitters already handle 1-byte sub-word).
 
-**Risk/open:** atomic nibble RMW on WebGPU (two threads writing different nibbles of one word) — the existing
-sub-word atomic AND/OR mask generalizes (4-bit mask instead of 8-bit), but verify no lost-update under the
-barrier kernels. WebGL nibble scatter has the same one-store-per-thread caveat as FP8 (use the f32-widen
-working representation for radix).
+**The 4-bit MEMORY SAVING lives in the MXFP4/NF4 DEQUANT layer, NOT the core per-element type.** MXFP4/NF4 store
+PACKED nibbles (2 per byte) in raw `ArrayView<byte>`/`ArrayView<uint>` buffers, and the dequant kernel reads them
+with shift/mask + scale/codebook → f32 — exactly the GGUF Q4_K model that already exists. That is where the 2×
+compression matters for browser big-models, and it needs no core-type packing. (My earlier "nibble storage as
+foundational core mechanism" framing was over-engineered — superseded by this.)
+
+## FP4 (E2M1FN) reference spec — `ml_dtypes.float4_e2m1fn` (verified 2026-06-17, ml_dtypes 0.5.4)
+16 finite codes, NO Inf, NO NaN:
+
+| code | value | code | value |
+|---|---|---|---|
+| 0x0 | 0.0 | 0x8 | -0.0 |
+| 0x1 | 0.5 | 0x9 | -0.5 |
+| 0x2 | 1.0 | 0xA | -1.0 |
+| 0x3 | 1.5 | 0xB | -1.5 |
+| 0x4 | 2.0 | 0xC | -2.0 |
+| 0x5 | 3.0 | 0xD | -3.0 |
+| 0x6 | 4.0 | 0xE | -4.0 |
+| 0x7 | 6.0 | 0xF | -6.0 |
+
+Encode (RNE among the 16): `0.25→0x0` (tie→even 0), `0.75→0x2` (tie→even 1.0), `5.0→0x6` (tie 4/6→even 4),
+finite overflow + **±Inf → saturate to ±6** (0x7/0xF), **NaN → 0x8 (-0)** (the format has no NaN; ml_dtypes maps
+NaN→0x8 — match it for bit-exactness). 1-byte storage (value in the low nibble). Oracle harness: extend
+`bf16-f16-oracle` to all 16 codes + an encode probe sweep, pin in CI like the other types.
 
 ## Category A — per-element CORE types (my lane: core ILGPU + 6 emitters)
 
@@ -68,13 +79,17 @@ Dequant kernel: `codebook[nibble] * blockScale` → f32. The 16 NF4 codebook con
 Pure software, every backend. **Oracle:** bitsandbytes / the published NF4 codebook + a reference dequant.
 The plan calls NF4 the highest mission value (browser big-model compression, no HW dependency).
 
-## Sequencing
-1. **Nibble (4-bit) sub-word storage** on all 6 backends + a round-trip `ArrayView<Int4>` PMT gate. (Foundational.)
-2. **FP4 (E2M1)** core type on the nibble storage + oracle (`float4_e2m1fn`) + radix + capability + pinned CI.
-3. **INT4** (signed+unsigned) core type on the nibble storage + radix + sign-extend + CI.
-4. **MXFP4** dequant (ML layer, reuses FP4 decode) — coordinate Tuvok.
-5. **NF4** dequant (ML layer, codebook) — coordinate Tuvok.
-Each phase: cross-backend PMT + external-reference oracle pin, shipped as its own `-local.N`, before the next.
+## Sequencing (corrected — no foundational nibble phase; core types are 1-byte, FP8 pattern)
+1. **FP4 (E2M1FN)** core type — `ILGPU.Float4E2M1`, 1-byte storage, the exact FP8 bring-up pattern: struct +
+   conversion (CPU-verify vs `float4_e2m1fn` first) → `BasicValueType.Float4E2M1` IR primitive (append-only) +
+   GenericMath → 6-backend convert (reuse the 1-byte sub-word machinery) → radix keys + capability + FromSingle/
+   Saturating → `bf16-f16-oracle` extended to FP4 (16 codes + probes) + pinned CI + cross-backend PMT.
+2. **INT4** (`Int4` signed −8..7 / `UInt4` 0..15) core type — 1-byte storage, the Int8 sub-word pattern +
+   sign-extend on widen + radix + capability + CI.
+3. **MXFP4** dequant (ML layer, Tuvok) — packed FP4 nibbles + `float8_e8m0fnu` block scale → f32; I provide the
+   FP4 decode primitive, Tuvok wires the dequant-matmul (GGUF Q-format pattern). ml_dtypes has `float8_e8m0fnu`.
+4. **NF4** dequant (ML layer, Tuvok) — packed 4-bit index + 16-entry NormalFloat codebook + block scale → f32.
+Each phase: external-reference oracle pin + cross-backend PMT, shipped as its own `-local.N`, before the next.
 
 ## Verification standard (same as the existing 4 types)
 External-reference oracle (ml_dtypes/NumPy/bitsandbytes) over all representable codes + encode probes;

@@ -26,6 +26,7 @@ internal static class LowPrecisionOracleCompare
         Console.WriteLine($"oracle dir: {dir}");
 
         int total = 0;
+        total += CompareFP4(Path.Combine(dir, "oracle_float4_e2m1.json"));
         total += Compare(Path.Combine(dir, "oracle_bfloat16.json"), "BFloat16",
             raw => (float)Unsafe.As<ushort, BFloat16>(ref raw),
             f => { var v = (BFloat16)f; return Unsafe.As<BFloat16, ushort>(ref v); },
@@ -42,6 +43,50 @@ internal static class LowPrecisionOracleCompare
             ? "RESULT: managed bf16 + Half conversions MATCH their references exactly."
             : $"RESULT: {total} divergences vs the references (see above).");
         return Task.FromResult(total == 0 ? 0 : 1);
+    }
+
+    private static int CompareFP4(string path)
+    {
+        Console.WriteLine("\n--- Float4E2M1 vs float4_e2m1fn ---");
+        if (!File.Exists(path)) { Console.WriteLine($"  MISSING {path} (run the fp4 oracle generator)"); return 1; }
+        using var doc = JsonDocument.Parse(File.ReadAllText(path));
+        var root = doc.RootElement;
+
+        // DECODE: all 16 codes (low nibble). NaN-tolerant (E2M1 has no NaN, so none expected).
+        var dec = root.GetProperty("decode");
+        int decodeFail = 0;
+        for (int code = 0; code < 16; code++)
+        {
+            byte raw = (byte)code;
+            float got = (float)Unsafe.As<byte, Float4E2M1>(ref raw);
+            uint oracleBits = dec[code].GetUInt32();
+            uint gotBits = BitConverter.SingleToUInt32Bits(got);
+            if (gotBits != oracleBits)
+            {
+                Console.WriteLine($"  DECODE 0x{code:X}: managed {got} (0x{gotBits:X8}) != oracle 0x{oracleBits:X8}");
+                decodeFail++;
+            }
+        }
+        Console.WriteLine($"  decode (all 16 codes): {16 - decodeFail}/16  mismatches: {decodeFail}");
+
+        // ENCODE probes: managed (Float4E2M1)x vs oracle raw nibble.
+        var enc = root.GetProperty("encode");
+        int n = enc.GetArrayLength(), encFail = 0; string first = null;
+        foreach (var row in enc.EnumerateArray())
+        {
+            uint inBits = row.GetProperty("f32bits").GetUInt32();
+            int oracle = row.GetProperty("raw").GetInt32();
+            float input = BitConverter.UInt32BitsToSingle(inBits);
+            Float4E2M1 v = (Float4E2M1)input;
+            int got = Unsafe.As<Float4E2M1, byte>(ref v) & 0x0F;
+            if (got != oracle)
+            {
+                encFail++;
+                first ??= $"input {input} (0x{inBits:X8}) -> managed 0x{got:X} vs oracle 0x{oracle:X}";
+            }
+        }
+        Console.WriteLine($"  encode probes: {n - encFail}/{n}  divergences: {encFail}" + (first != null ? $"  e.g. {first}" : ""));
+        return decodeFail + encFail;
     }
 
     private static int Compare(string path, string name,
