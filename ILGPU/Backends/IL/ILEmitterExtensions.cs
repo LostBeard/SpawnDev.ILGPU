@@ -110,6 +110,20 @@ namespace ILGPU.Backends.IL
                     null)
                 .AsNotNull();
 
+        /// <summary>
+        /// Stores the constructor of the <see cref="Float4E2M1"/> type.
+        /// </summary>
+        private static readonly ConstructorInfo Float4E2M1Constructor =
+            typeof(Float4E2M1).GetConstructor(
+                    BindingFlags.NonPublic | BindingFlags.CreateInstance,
+                    null,
+                    new Type[]
+                    {
+                        typeof(byte)
+                    },
+                    null)
+                .AsNotNull();
+
         #endregion
 
         #region Methods
@@ -185,6 +199,14 @@ namespace ILGPU.Backends.IL
                     emitter.EmitConstant(value.Float8E5M2Value.RawValue);
                     emitter.EmitNewObject(Float8E5M2Constructor);
                     emitter.Emit(LocalOperation.Load, temporaryE5M2);
+                    break;
+                case BasicValueType.Float4E2M1:
+                    // Allocate a temporary variable and invoke the E2M1 constructor
+                    var temporaryE2M1 = emitter.DeclareLocal(typeof(Float4E2M1));
+                    emitter.Emit(LocalOperation.LoadAddress, temporaryE2M1);
+                    emitter.EmitConstant(value.Float4E2M1Value.RawValue);
+                    emitter.EmitNewObject(Float4E2M1Constructor);
+                    emitter.Emit(LocalOperation.Load, temporaryE2M1);
                     break;
                 case BasicValueType.Float32:
                     emitter.EmitConstant(value.Float32Value);

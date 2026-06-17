@@ -99,6 +99,8 @@ namespace ILGPU.IR.Construction
                     CreatePrimitiveValue(location, (Float8E4M3)value),
                 ArithmeticBasicValueType.Float8E5M2 =>
                     CreatePrimitiveValue(location, (Float8E5M2)value),
+                ArithmeticBasicValueType.Float4E2M1 =>
+                    CreatePrimitiveValue(location, (Float4E2M1)value),
                 ArithmeticBasicValueType.Float32 =>
                     CreatePrimitiveValue(location, (float)value),
                 ArithmeticBasicValueType.Float64 =>
@@ -283,6 +285,18 @@ namespace ILGPU.IR.Construction
                 value.RawValue));
 
         /// <summary>
+        /// Creates a primitive <see cref="Float4E2M1"/> value.
+        /// </summary>
+        /// <param name="location">The current location.</param>
+        /// <param name="value">The value.</param>
+        /// <returns>The created primitive value.</returns>
+        public PrimitiveValue CreatePrimitiveValue(Location location, Float4E2M1 value) =>
+            Append(new PrimitiveValue(
+                GetInitializer(location),
+                BasicValueType.Float4E2M1,
+                value.RawValue));
+
+        /// <summary>
         /// Creates a primitive <see cref="float"/> value.
         /// </summary>
         /// <param name="location">The current location.</param>
@@ -380,6 +394,11 @@ namespace ILGPU.IR.Construction
                         value == null
                         ? Float8E5M2.Zero
                         : (Float8E5M2)value),
+                ArithmeticBasicValueType.Float4E2M1 =>
+                    CreatePrimitiveValue(location,
+                        value == null
+                        ? Float4E2M1.Zero
+                        : (Float4E2M1)value),
                 ArithmeticBasicValueType.Float32 =>
                     CreatePrimitiveValue(location, Convert.ToSingle(value)),
                 ArithmeticBasicValueType.Float64 =>

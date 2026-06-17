@@ -78,6 +78,13 @@ namespace ILGPU
         /// ordinals (and the positional type tables indexed by them) are unchanged.
         /// </summary>
         Float8E5M2,
+
+        /// <summary>
+        /// Represents a 4-bit float in OCP E2M1 (E2M1FN) layout (the NVFP4/MXFP4 element
+        /// format; 1-byte storage, value in the low nibble). Appended at the end so existing
+        /// ordinals (and the positional type tables indexed by them) are unchanged.
+        /// </summary>
+        Float4E2M1,
     }
 
     /// <summary>
@@ -167,5 +174,11 @@ namespace ILGPU
         /// ordinals are unchanged.
         /// </summary>
         Float8E5M2,
+
+        /// <summary>
+        /// Represents a 4-bit float in OCP E2M1 (E2M1FN) layout. Appended at the end so
+        /// existing ordinals are unchanged.
+        /// </summary>
+        Float4E2M1,
     }
 }

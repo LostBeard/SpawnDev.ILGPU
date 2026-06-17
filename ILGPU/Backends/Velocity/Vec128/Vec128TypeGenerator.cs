@@ -45,6 +45,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vec128Operations.WarpType32, // BFloat16 (ordinal 9) - placeholder (Phase 3)
             Vec128Operations.WarpType32, // Float8E4M3 (ordinal 10) - placeholder
             Vec128Operations.WarpType32, // Float8E5M2 (ordinal 11) - placeholder
+            Vec128Operations.WarpType32, // Float4E2M1 (ordinal 12) - placeholder
         };
 
         #endregion

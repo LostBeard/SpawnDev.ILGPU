@@ -239,6 +239,24 @@ namespace ILGPU
             value.RawValue;
 
         /// <summary>
+        /// Casts the given E2M1 FP4 value to its raw 4-bit pattern (low nibble of a byte) via a
+        /// reinterpret cast.
+        /// </summary>
+        /// <param name="value">The value to cast.</param>
+        /// <returns>The 4-bit Float4E2M1 pattern (in the low nibble of the byte).</returns>
+        /// <remarks>
+        /// Enables Float4E2M1 radix sorting (see <c>AscendingFloat4E2M1</c>). As with
+        /// <see cref="FloatAsInt(Float8E4M3)"/> there is deliberately no <c>IntAsFloat(byte)
+        /// -&gt; Float4E2M1</c> twin: the radix sort never reconstructs a value from bits
+        /// (it permutes the original value array). Use <c>new Float4E2M1(bits)</c> on the
+        /// host if you need it.
+        /// </remarks>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        [InteropIntrinsic(InteropIntrinsicKind.FloatAsInt)]
+        public static byte FloatAsInt(Float4E2M1 value) =>
+            value.RawValue;
+
+        /// <summary>
         /// Casts the given float to an int via a reinterpret cast.
         /// </summary>
         /// <param name="value">The value to cast.</param>

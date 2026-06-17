@@ -119,6 +119,16 @@ namespace ILGPU.IR.Construction
 <#              } else { #>
                         (Float8E5M2)(<#= op.GetOpOrCall(false, "(float)value.Float8E5M2Value") #>));
 <#              } #>
+                case BasicValueType.Float4E2M1:
+                    return CreatePrimitiveValue(
+                        location,
+<#              if (op.HasOp) { #>
+                        <#= op.GetOpOrCall(false, "value.Float4E2M1Value") #>);
+<#              } else if (op.IsPredicate) { #>
+                        <#= op.GetOpOrCall(false, "(float)value.Float4E2M1Value") #>);
+<#              } else { #>
+                        (Float4E2M1)(<#= op.GetOpOrCall(false, "(float)value.Float4E2M1Value") #>));
+<#              } #>
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(
                         location,
@@ -369,6 +379,14 @@ namespace ILGPU.IR.Construction
                         <#= op.GetOpOrCall(false, "left.Float8E5M2Value", "right.Float8E5M2Value") #>);
 <#              } else { #>
                         (Float8E5M2)(<#= op.GetOpOrCall(false, "(float)left.Float8E5M2Value", "(float)right.Float8E5M2Value") #>));
+<#              } #>
+                case BasicValueType.Float4E2M1:
+                    return CreatePrimitiveValue(
+                        location,
+<#              if (op.HasOp) { #>
+                        <#= op.GetOpOrCall(false, "left.Float4E2M1Value", "right.Float4E2M1Value") #>);
+<#              } else { #>
+                        (Float4E2M1)(<#= op.GetOpOrCall(false, "(float)left.Float4E2M1Value", "(float)right.Float4E2M1Value") #>));
 <#              } #>
                 case BasicValueType.Float32:
                     return CreatePrimitiveValue(

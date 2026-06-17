@@ -76,7 +76,8 @@ namespace ILGPU.Backends.OpenCL
                 "double",
                 "float", // BFloat16 (ordinal 9) - emulated as float on OpenCL (no native cl bf16)
                 "float", // Float8E4M3 (ordinal 10) - emulated as float on OpenCL
-                "float"); // Float8E5M2 (ordinal 11) - emulated as float on OpenCL
+                "float", // Float8E5M2 (ordinal 11) - emulated as float on OpenCL
+                "float"); // Float4E2M1 (ordinal 12) - emulated as float on OpenCL
 
         /// <summary>
         /// Maps arithmetic-basic value types to OpenCL language types.
@@ -98,7 +99,8 @@ namespace ILGPU.Backends.OpenCL
                 "ulong",
                 "float", // BFloat16 (ordinal 13) - emulated as float on OpenCL
                 "float", // Float8E4M3 (ordinal 14) - emulated as float on OpenCL
-                "float"); // Float8E5M2 (ordinal 15) - emulated as float on OpenCL
+                "float", // Float8E5M2 (ordinal 15) - emulated as float on OpenCL
+                "float"); // Float4E2M1 (ordinal 16) - emulated as float on OpenCL
 
         /// <summary>
         /// Maps arithmetic-basic value types to atomic OpenCL language types.
@@ -120,7 +122,8 @@ namespace ILGPU.Backends.OpenCL
                 "atomic_ulong",
                 null, // BFloat16 (ordinal 13) - no bf16 atomics
                 null, // Float8E4M3 (ordinal 14) - no fp8 atomics
-                null); // Float8E5M2 (ordinal 15) - no fp8 atomics
+                null, // Float8E5M2 (ordinal 15) - no fp8 atomics
+                null); // Float4E2M1 (ordinal 16) - no fp4 atomics
 
         /// <summary>
         /// Resolves the given basic-value type to an OpenCL type name.

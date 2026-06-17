@@ -207,6 +207,11 @@ namespace ILGPU.IR.Values
         public Float8E5M2 Float8E5M2Value => Unsafe.As<long, Float8E5M2>(ref rawValue);
 
         /// <summary>
+        /// Returns the value as a 4-bit float in E2M1 layout (low nibble of the byte).
+        /// </summary>
+        public Float4E2M1 Float4E2M1Value => Unsafe.As<long, Float4E2M1>(ref rawValue);
+
+        /// <summary>
         /// Returns the value as f32.
         /// </summary>
         public float Float32Value => Unsafe.As<long, float>(ref rawValue);
@@ -271,6 +276,7 @@ namespace ILGPU.IR.Values
                 BasicValueType.BFloat16 => BFloat16Value == f32Value,
                 BasicValueType.Float8E4M3 => Float8E4M3Value == f32Value,
                 BasicValueType.Float8E5M2 => Float8E5M2Value == f32Value,
+                BasicValueType.Float4E2M1 => Float4E2M1Value == f32Value,
                 BasicValueType.Float32 => Float32Value == f32Value,
                 BasicValueType.Float64 => Float64Value == f64Value,
                 _ => false
@@ -333,6 +339,7 @@ namespace ILGPU.IR.Values
                 BasicValueType.BFloat16 => BFloat16Value.ToString(),
                 BasicValueType.Float8E4M3 => Float8E4M3Value.ToString(),
                 BasicValueType.Float8E5M2 => Float8E5M2Value.ToString(),
+                BasicValueType.Float4E2M1 => Float4E2M1Value.ToString(),
                 BasicValueType.Float32 => Float32Value.ToString(),
                 BasicValueType.Float64 => Float64Value.ToString(),
                 _ => $"Raw({rawValue})",

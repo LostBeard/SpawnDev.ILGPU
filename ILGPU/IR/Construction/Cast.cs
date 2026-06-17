@@ -185,6 +185,9 @@ namespace ILGPU.IR.Construction
                     BasicValueType.Float8E5M2 => CreatePrimitiveValue(
                         location,
                         Interop.FloatAsInt(primitive.Float8E5M2Value)),
+                    BasicValueType.Float4E2M1 => CreatePrimitiveValue(
+                        location,
+                        Interop.FloatAsInt(primitive.Float4E2M1Value)),
                     BasicValueType.Float32 => CreatePrimitiveValue(
                         location,
                         Interop.FloatAsInt(primitive.Float32Value)),
@@ -203,6 +206,7 @@ namespace ILGPU.IR.Construction
                 BasicValueType.BFloat16 => BasicValueType.Int16,
                 BasicValueType.Float8E4M3 => BasicValueType.Int8,
                 BasicValueType.Float8E5M2 => BasicValueType.Int8,
+                BasicValueType.Float4E2M1 => BasicValueType.Int8,
                 BasicValueType.Float32 => BasicValueType.Int32,
                 BasicValueType.Float64 => BasicValueType.Int64,
                 _ => throw location.GetNotSupportedException(

@@ -696,6 +696,7 @@ namespace ILGPU.IR.Values
                 basicValueType == BasicValueType.BFloat16 ||
                 basicValueType == BasicValueType.Float8E4M3 ||
                 basicValueType == BasicValueType.Float8E5M2 ||
+                basicValueType == BasicValueType.Float4E2M1 ||
                 basicValueType == BasicValueType.Float32 ||
                 basicValueType == BasicValueType.Float64);
             initializer.Assert(

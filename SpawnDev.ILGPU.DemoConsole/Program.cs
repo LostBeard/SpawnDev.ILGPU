@@ -49,6 +49,11 @@ try
     if (args.Length > 0 && args[0] == "fp8-verify")
         return await Float8Repro.Run();
 
+    // FP4 conversion verification (CPU/managed + CPU/CUDA/OpenCL kernel) — E2M1 idempotence +
+    // decode reference + exact values + overflow saturation + generic INumber relu kernel.
+    if (args.Length > 0 && args[0] == "fp4-verify")
+        return await Float4Repro.Run();
+
     // FP8 conversions vs the ml_dtypes reference (float8_e4m3fn / e5m2) - answers the
     // overflow-convention question flagged in Float8E4M3.cs with evidence.
     if (args.Length > 0 && args[0] == "fp8-oracle")
