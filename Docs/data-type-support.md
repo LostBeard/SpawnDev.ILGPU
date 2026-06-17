@@ -187,22 +187,24 @@ backend** (CPU-verified idempotence 0/256 for all representable values).
 | **CUDA** | f32-register model. The FP8<->f32 conversion is **inline PTX bit-manipulation** (branchless `setp`/`selp`, unrolled normalize) using only basic integer ops - FP8 has no portable native PTX cvt (`cvt.*.e4m3` is sm_89/Hopper only), so this works on every CUDA arch. Load = `ld.global.u8` + convert; store = convert + `st.global.u8`. |
 | **CPU** | Native - the managed `Float8E4M3`/`Float8E5M2` structs run directly. |
 
-> **Convention note (E4M3 overflow) - SELECTABLE.** E4M3 has two real-world overflow conventions and
-> both are exposed; the conversion is otherwise **bit-exact** to the `ml_dtypes` reference (the impl
-> PyTorch / JAX `float8_e4m3fn` share) - verified by `DemoConsole -- fp8-oracle`: decode 0/256, encode
-> rounding/subnormal 0 divergences across 1099 probes.
+> **Convention note (E4M3 overflow).** The conversion is **bit-exact** to the `ml_dtypes` reference (the
+> impl PyTorch / JAX `float8_e4m3fn` share) - verified by `DemoConsole -- fp8-oracle`: decode 0/256,
+> encode rounding/subnormal/overflow 0 divergences across 1099 probes, on all 6 backends. The overflow
+> behavior is **selectable**, with the reference-matching `fn` convention as the default:
 >
-> | Entry point | Finite overflow | ±Inf | Matches |
+> | Entry point | Finite overflow (`\|x\|>464`) | ±Inf | Matches |
 > |---|---|---|---|
-> | `(Float8E4M3)x` cast / `FromSingleSaturating(x)` / `FromSingle(x, saturate: true)` | clamps to ±448 | → NaN | NVIDIA Transformer Engine default cast / OCP saturating-forward |
-> | `FromSingleFn(x)` / `FromSingle(x, saturate: false)` | → NaN | → NaN | **PyTorch / JAX / ml_dtypes `float8_e4m3fn`** (bit-exact) |
+> | `(Float8E4M3)x` cast / `FromSingleFn(x)` / `FromSingle(x, saturate: false)` — **DEFAULT** | → NaN | → NaN | **PyTorch / JAX / ml_dtypes `float8_e4m3fn`** (bit-exact) |
+> | `FromSingleSaturating(x)` / `FromSingle(x, saturate: true)` | clamps to ±448 | → NaN | NVIDIA Transformer Engine saturating cast / OCP saturating-forward |
 >
-> The two agree everywhere except `|x| > 464` (the region that rounds up past the 448 slot): saturating
-> gives ±448, fn gives NaN. Every *representable* value round-trips exactly under both. `FromSingleFn` is
-> composed only of existing intrinsics (compare + the saturating cast + Neg + cast-of-NaN), so it
-> transpiles and is bit-exact on **all 6 backends** (PMT `Float8E4M3_FromSingleFn_OverflowToNaN`). Use
-> `FromSingleFn` for reference-matching ML (e.g. loading/comparing PyTorch FP8 checkpoints); use the
-> saturating cast when you want overflow clamped rather than NaN-poisoning a downstream reduction.
+> The cast operator and the IR-level convert (so `PrecisionConvert` and the generic `INumber<T>` path too)
+> are all `fn`. `449..464` round **down** to 448 under both conventions; the two differ only for `|x|>464`,
+> which rounds up past the 448 slot (`fn` → NaN, saturating → ±448). Every *representable* value round-trips
+> exactly. `FromSingleSaturating` is composed only of existing intrinsics (a bit-level finite check + the fn
+> cast + a `>464` redirect), so it transpiles and is bit-exact on **all 6 backends** (PMT
+> `Float8E4M3_FromSingleFn_OverflowToNaN`). Use the default for reference-matching ML (loading/comparing
+> PyTorch FP8 checkpoints); use `FromSingleSaturating` when you want overflow clamped rather than
+> NaN-poisoning a downstream reduction.
 >
 > `Float8E5M2` is IEEE-754-style (has ±Inf): overflow → ±Inf, bit-exact to `float8_e5m2` (decode 0/256,
 > encode 723/723); its canonical NaN byte is `0x7F` (ml_dtypes uses `0x7E` - both are valid NaN patterns).

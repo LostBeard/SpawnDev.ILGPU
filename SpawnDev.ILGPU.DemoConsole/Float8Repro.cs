@@ -76,7 +76,7 @@ internal static class Float8Repro
             : $"  E5M2 FAIL: {fails} problems");
 
         // ===================== E4M3 =====================
-        Console.WriteLine("--- E4M3 (no Inf; NaN=0x7F; max 448; saturate) ---");
+        Console.WriteLine("--- E4M3 (no Inf; NaN=0x7F; max 448; default cast = fn overflow->NaN, FromSingleSaturating opt-in) ---");
         int e4Fails = 0, e4Idem = 0, e4Decode = 0;
         for (int raw = 0; raw < 256; raw++)
         {
@@ -107,10 +107,16 @@ internal static class Float8Repro
         e4Fails += Check("E4M3 1.0 exact", (float)(Float8E4M3)1.0f == 1.0f);
         e4Fails += Check("E4M3 1.25 exact", (float)(Float8E4M3)1.25f == 1.25f);    // 1.010b (3 mantissa)
         e4Fails += Check("E4M3 max=448", (float)(Float8E4M3)448f == 448f);
-        e4Fails += Check("E4M3 overflow saturates to 448", (float)(Float8E4M3)100000f == 448f);
-        e4Fails += Check("E4M3 -overflow saturates to -448", (float)(Float8E4M3)(-100000f) == -448f);
+        // DEFAULT (cast operator) = fn (float8_e4m3fn): finite overflow AND Inf -> NaN.
+        e4Fails += Check("E4M3 fn overflow->NaN", float.IsNaN((float)(Float8E4M3)100000f));
+        e4Fails += Check("E4M3 fn -overflow->NaN", float.IsNaN((float)(Float8E4M3)(-100000f)));
         e4Fails += Check("E4M3 Inf->NaN", float.IsNaN((float)(Float8E4M3)float.PositiveInfinity));
         e4Fails += Check("E4M3 NaN->NaN", float.IsNaN((float)(Float8E4M3)float.NaN));
+        // Opt-in SATURATING: finite overflow -> +-448; Inf -> NaN.
+        e4Fails += Check("E4M3 sat overflow->448", (float)Float8E4M3.FromSingleSaturating(100000f) == 448f);
+        e4Fails += Check("E4M3 sat -overflow->-448", (float)Float8E4M3.FromSingleSaturating(-100000f) == -448f);
+        e4Fails += Check("E4M3 sat Inf->NaN", float.IsNaN((float)Float8E4M3.FromSingleSaturating(float.PositiveInfinity)));
+        e4Fails += Check("E4M3 sat in-range==fn", (float)Float8E4M3.FromSingleSaturating(1.25f) == 1.25f);
         e4Fails += Check("E4M3 +0", (float)(Float8E4M3)0f == 0f);
         e4Fails += Check("E4M3 arith 1.5*2-0.5=2.5", (float)((Float8E4M3)1.5f * (Float8E4M3)2f - (Float8E4M3)0.5f) == 2.5f);
         Console.WriteLine(e4Fails == 0 ? "  E4M3 PASS" : $"  E4M3 FAIL: {e4Fails} problems");

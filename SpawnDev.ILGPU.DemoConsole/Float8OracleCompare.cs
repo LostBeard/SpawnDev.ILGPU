@@ -64,52 +64,52 @@ internal static class Float8OracleCompare
         }
         Console.WriteLine($"  decode mismatches: {decodeFail}/256");
 
-        // ENCODE: f32 -> e4m3. Categorize the divergences (the flagged convention lives here).
-        int encExact = 0, encOverflowSatVsNaN = 0, encOther = 0, n = 0;
-        string firstSat = null, firstOther = null;
+        // ENCODE: f32 -> e4m3. The DEFAULT (cast operator AND FromSingleFn) is now fn = bit-exact
+        // to float8_e4m3fn, INCLUDING overflow->NaN. Any divergence here is a real bug.
+        int n = 0, castFail = 0, fnFail = 0;
+        string firstCastFail = null, firstFnFail = null;
         foreach (var row in root.GetProperty("encode").EnumerateArray())
         {
             n++;
             uint inBits = row.GetProperty("f32bits").GetUInt32();
             byte oracle = (byte)row.GetProperty("e4m3").GetInt32();
             float input = BitConverter.UInt32BitsToSingle(inBits);
-            Float8E4M3 v = (Float8E4M3)input;
-            byte got = Unsafe.As<Float8E4M3, byte>(ref v);
-            if (got == oracle) { encExact++; continue; }
-            bool gotNaN = (got & 0x7F) == 0x7F, oracleNaN = (oracle & 0x7F) == 0x7F;
-            bool gotSat = (got & 0x7F) == 0x7E;   // managed saturates to +-448
-            if (gotSat && oracleNaN)
-            {
-                encOverflowSatVsNaN++;
-                firstSat ??= $"input {input} -> managed 0x{got:X2} (448) vs oracle 0x{oracle:X2} (NaN)";
-            }
-            else
-            {
-                encOther++;
-                if (firstOther == null && encOther <= 1)
-                    firstOther = $"input {input} (0x{inBits:X8}) -> managed 0x{got:X2} vs oracle 0x{oracle:X2}";
-            }
-        }
-        Console.WriteLine($"  [saturating cast] encode exact: {encExact}/{n}");
-        Console.WriteLine($"  [saturating cast] encode overflow saturate-vs-NaN divergences (EXPECTED - convention): {encOverflowSatVsNaN}" + (firstSat != null ? $"  e.g. {firstSat}" : ""));
-        Console.WriteLine($"  [saturating cast] encode OTHER divergences (rounding/subnormal - real bugs if >0): {encOther}" + (firstOther != null ? $"  e.g. {firstOther}" : ""));
+            bool oracleNaN = (oracle & 0x7F) == 0x7F;
 
-        // fn convention: FromSingleFn must match float8_e4m3fn EXACTLY, including overflow->NaN.
-        int fnExact = 0, fnFail = 0; string firstFnFail = null;
+            Float8E4M3 c = (Float8E4M3)input;                 // cast operator = fn
+            byte cb = Unsafe.As<Float8E4M3, byte>(ref c);
+            if (!(cb == oracle || ((cb & 0x7F) == 0x7F && oracleNaN)))
+            { castFail++; firstCastFail ??= $"input {input} (0x{inBits:X8}) -> cast 0x{cb:X2} vs oracle 0x{oracle:X2}"; }
+
+            Float8E4M3 f = Float8E4M3.FromSingleFn(input);    // explicit fn (should equal the cast)
+            byte fb = Unsafe.As<Float8E4M3, byte>(ref f);
+            if (!(fb == oracle || ((fb & 0x7F) == 0x7F && oracleNaN)))
+            { fnFail++; firstFnFail ??= $"input {input} (0x{inBits:X8}) -> FromSingleFn 0x{fb:X2} vs oracle 0x{oracle:X2}"; }
+        }
+        Console.WriteLine($"  [cast operator = fn] encode exact vs float8_e4m3fn: {n - castFail}/{n}  divergences (must be 0): {castFail}" + (firstCastFail != null ? $"  e.g. {firstCastFail}" : ""));
+        Console.WriteLine($"  [FromSingleFn] encode exact vs float8_e4m3fn: {n - fnFail}/{n}  divergences (must be 0): {fnFail}" + (firstFnFail != null ? $"  e.g. {firstFnFail}" : ""));
+
+        // FromSingleSaturating: the OPT-IN saturating convention. Expected = the fn oracle EXCEPT a
+        // FINITE input the oracle maps to NaN (overflow) becomes +-448; +-Inf stays NaN.
+        int satFail = 0; string firstSatFail = null;
         foreach (var row in root.GetProperty("encode").EnumerateArray())
         {
             uint inBits = row.GetProperty("f32bits").GetUInt32();
             byte oracle = (byte)row.GetProperty("e4m3").GetInt32();
             float input = BitConverter.UInt32BitsToSingle(inBits);
-            Float8E4M3 v = Float8E4M3.FromSingleFn(input);
-            byte got = Unsafe.As<Float8E4M3, byte>(ref v);
-            if (got == oracle) { fnExact++; continue; }
-            bool gotNaN = (got & 0x7F) == 0x7F, oracleNaN = (oracle & 0x7F) == 0x7F;
-            if (gotNaN && oracleNaN) { fnExact++; continue; } // both NaN-slot (sign tolerant)
-            fnFail++;
-            firstFnFail ??= $"input {input} (0x{inBits:X8}) -> FromSingleFn 0x{got:X2} vs oracle 0x{oracle:X2}";
+            bool oracleNaN = (oracle & 0x7F) == 0x7F;
+            // expected saturating byte
+            byte expSat;
+            if (oracleNaN && !float.IsNaN(input) && !float.IsInfinity(input))
+                expSat = (byte)((oracle & 0x80) | 0x7E);   // finite overflow -> +-448
+            else
+                expSat = oracle;                            // in-range / +-Inf / NaN = same as fn
+            Float8E4M3 s = Float8E4M3.FromSingleSaturating(input);
+            byte sb = Unsafe.As<Float8E4M3, byte>(ref s);
+            bool ok = sb == expSat || ((sb & 0x7F) == 0x7F && (expSat & 0x7F) == 0x7F);
+            if (!ok) { satFail++; firstSatFail ??= $"input {input} (0x{inBits:X8}) -> sat 0x{sb:X2} vs expected 0x{expSat:X2}"; }
         }
-        Console.WriteLine($"  [FromSingleFn] encode exact vs float8_e4m3fn: {fnExact}/{n}");
+        Console.WriteLine($"  [FromSingleSaturating] matches saturating convention: {n - satFail}/{n}  divergences (must be 0): {satFail}" + (firstSatFail != null ? $"  e.g. {firstSatFail}" : ""));
         Console.WriteLine($"  [FromSingleFn] divergences (must be 0): {fnFail}" + (firstFnFail != null ? $"  e.g. {firstFnFail}" : ""));
 
         // Specials (also covered by the encode sweep's Inf/NaN inputs; printed explicitly):
@@ -118,10 +118,9 @@ internal static class Float8OracleCompare
         PrintSpecialE4("-Inf", sp.GetProperty("neg_inf"));
         PrintSpecialE4("NaN", sp.GetProperty("nan"));
 
-        // Decode bugs + encode "other" (rounding/subnormal) + any FromSingleFn divergence are
-        // unconditional failures. The saturating cast's overflow->448 vs reference NaN is the
-        // documented CONVENTION (counted separately above, NOT auto-failed).
-        return decodeFail + encOther + fnFail;
+        // Every path must be exact: decode, the fn cast operator, FromSingleFn, and the
+        // FromSingleSaturating convention. All count as unconditional failures.
+        return decodeFail + castFail + fnFail + satFail;
     }
 
     private static int CompareE5M2(string path)

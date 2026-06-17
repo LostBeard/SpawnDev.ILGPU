@@ -773,8 +773,8 @@ namespace ILGPU.Backends.PTX
 
         /// <summary>
         /// Emits a PORTABLE f32 -&gt; FP8 raw-byte (low 8 bits in dst .b16) conversion using only basic
-        /// integer ops (every CUDA arch). Branchless (setp/selp), RNE rounding; E4M3 saturates finite
-        /// overflow to +-448 + maps Inf-&gt;NaN, E5M2 overflows to Inf. Byte-identical to the managed/Wasm
+        /// integer ops (every CUDA arch). Branchless (setp/selp), RNE rounding; E4M3 = fn (finite
+        /// overflow AND Inf -&gt; NaN, float8_e4m3fn), E5M2 overflows to Inf. Byte-identical to the managed/Wasm
         /// ConvertFloatToFloat8E*M* (CPU-verified). The subnormal shift is clamped (PTX shr is UB for
         /// shift&gt;=32) and edge-guarded to match the managed return-0 cases.
         /// </summary>
@@ -844,10 +844,10 @@ namespace ILGPU.Backends.PTX
             Selp(nrm, t, nrm, p);
             if (isE4M3)
             {
-                // if (nrm & 0x7F) >= 0x7F -> 0x7E (avoid NaN slot)
-                EmitI("and.b32", t, nrm, 0x7F);
-                using (var c = BeginCommand("setp.ge.u32")) { c.AppendArgument(p); c.AppendArgument(t); c.AppendConstant(0x7F); }
-                MovI(t2, 0x7E); Selp(nrm, t2, nrm, p);
+                // fn: if nrm (FULL, incl a 0x80 carry) reaches the 0x7F slot -> 0x7F (NaN).
+                // Compare nrm directly (not masked) so the round-up-past-448 carry is caught.
+                using (var c = BeginCommand("setp.ge.u32")) { c.AppendArgument(p); c.AppendArgument(nrm); c.AppendConstant(0x7F); }
+                MovI(t2, 0x7F); Selp(nrm, t2, nrm, p);
             }
             EmitI("and.b32", nrm, nrm, 0x7F);
             Emit("or.b32", nrm, sign, nrm);
@@ -899,20 +899,10 @@ namespace ILGPU.Backends.PTX
             // overflow
             if (isE4M3)
             {
-                // (ev>8) || (ev==8 && f32Mant>0x600000) -> sign|0x7E
+                // fn: only ev>8 is unconditional overflow -> sign|0x7F (NaN). ev==8 is handled by
+                // the normal RNE path + its full-outBits>=0x7F clamp (449->448, >464->NaN).
                 SetpI("setp.gt.s32", p, ev, 8);
-                SetpI("setp.eq.s32", p2, ev, 8);
-                using (var c = BeginCommand("setp.gt.u32")) { c.AppendArgument(p2); c.AppendArgument(f32Mant); c.AppendConstant(0x600000); }
-                // need ev==8 AND f32Mant>0x600000: recompute (p2 got overwritten); use a temp predicate via and.pred
-                SetpI("setp.eq.s32", p2, ev, 8);
-                {
-                    var p3 = AllocateRegister(BasicValueType.Int1, PTXRegisterKind.Predicate);
-                    using (var c = BeginCommand("setp.gt.u32")) { c.AppendArgument(p3); c.AppendArgument(f32Mant); c.AppendConstant(0x600000); }
-                    using (var c = BeginCommand("and.pred")) { c.AppendArgument(p2); c.AppendArgument(p2); c.AppendArgument(p3); }
-                    using (var c = BeginCommand("or.pred")) { c.AppendArgument(p); c.AppendArgument(p); c.AppendArgument(p2); }
-                    FreeRegister(p3);
-                }
-                EmitI("or.b32", t, sign, 0x7E);
+                EmitI("or.b32", t, sign, 0x7F);
                 Selp(result, t, result, p);
             }
             else

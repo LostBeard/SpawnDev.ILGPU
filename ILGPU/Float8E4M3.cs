@@ -11,17 +11,18 @@
 // bit vs E5M2, which is what forward activations/weights want.
 //
 // OVERFLOW CONVENTION (verified vs the ml_dtypes reference, `DemoConsole -- fp8-oracle` -
-// ml_dtypes is the impl PyTorch / JAX float8_e4m3fn share). E4M3 has two real-world conventions
-// and BOTH are selectable here; the conversion is otherwise bit-exact to the reference (decode
-// 0/256, encode rounding/subnormal 0 divergences across 1099 probes):
-//   * SATURATING (the bare cast operator + FromSingleSaturating): finite overflow clamps to
-//     +-448; +-Inf -> NaN; NaN -> NaN. Matches the NVIDIA Transformer Engine default cast /
-//     OCP saturating-forward mode. Avoids NaN propagation when activations overflow unscaled.
-//   * fn / non-saturating (FromSingleFn): finite overflow AND +-Inf -> NaN; NaN -> NaN. Bit-
-//     exact to PyTorch/JAX/ml_dtypes float8_e4m3fn (the dtype this layout is named after). Use
-//     this for reference-matching ML. The two conventions agree everywhere except |x|>464 (the
-//     region that rounds up past the 448 slot): saturating gives +-448, fn gives NaN.
-// Every REPRESENTABLE value round-trips exactly under both (CPU idempotence harness fp8-verify).
+// ml_dtypes is the impl PyTorch / JAX float8_e4m3fn share). E4M3 has two real-world conventions;
+// the conversion is otherwise bit-exact to the reference (decode 0/256, encode rounding/subnormal
+// 0 divergences across 1099 probes):
+//   * fn / non-saturating = the DEFAULT (the cast operator, FromSingleFn, the IR-level convert all
+//     FP8 paths share): finite overflow AND +-Inf -> NaN; NaN -> NaN. Bit-exact to PyTorch/JAX/
+//     ml_dtypes float8_e4m3fn - the dtype this layout is named after, so this is the correct
+//     default for reference-matching ML.
+//   * SATURATING (opt-in via FromSingleSaturating / FromSingle(x, saturate:true)): finite overflow
+//     clamps to +-448; +-Inf -> NaN; NaN -> NaN. Matches the NVIDIA Transformer Engine saturating
+//     cast / OCP saturating-forward mode - use it when you want overflow clamped instead of NaN.
+// The two agree everywhere except |x|>464 (the region that rounds up past the 448 slot): fn gives
+// NaN, saturating gives +-448. Every REPRESENTABLE value round-trips exactly under both (fp8-verify).
 //
 // Modeled on ILGPU.Half / BFloat16 / Float8E5M2: FP32-based [MathIntrinsic]/[CompareIntrinisc]/
 // [ConvertIntrinisc] operators (transpiled on every backend). 1-byte storage.
@@ -69,32 +70,34 @@ namespace ILGPU
 
         /// <summary>
         /// Converts a float to E4M3 with a selectable overflow convention. When
-        /// <paramref name="saturate"/> is true (the default, matching the cast operator): finite
-        /// overflow clamps to +-448 (NVIDIA Transformer Engine / OCP saturating cast). When false:
-        /// finite overflow and +-Inf map to NaN, bit-exact to PyTorch/JAX/ml_dtypes float8_e4m3fn.
+        /// <paramref name="saturate"/> is false (the DEFAULT behavior, matching the cast operator):
+        /// finite overflow and +-Inf map to NaN - bit-exact to PyTorch/JAX/ml_dtypes float8_e4m3fn.
+        /// When true: finite overflow clamps to +-448 (NVIDIA Transformer Engine / OCP saturating cast).
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static Float8E4M3 FromSingle(float value, bool saturate) =>
-            saturate ? Float8E4M3Extensions.ConvertFloatToFloat8E4M3(value)
-                     : Float8E4M3Extensions.FromSingleFn(value);
+            saturate ? Float8E4M3Extensions.FromSingleSaturating(value)
+                     : Float8E4M3Extensions.ConvertFloatToFloat8E4M3(value);
 
         /// <summary>
-        /// Converts a float to E4M3 using the SATURATING convention: finite overflow clamps to
-        /// +-448; +-Inf -> NaN; NaN -> NaN. Identical to the explicit cast operator. Matches the
-        /// NVIDIA Transformer Engine default cast / OCP saturating-forward mode.
-        /// </summary>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static Float8E4M3 FromSingleSaturating(float value) =>
-            Float8E4M3Extensions.ConvertFloatToFloat8E4M3(value);
-
-        /// <summary>
-        /// Converts a float to E4M3 using the fn (non-saturating) convention: finite overflow AND
-        /// +-Inf map to NaN; NaN -> NaN. Bit-exact to PyTorch/JAX/ml_dtypes float8_e4m3fn - use
-        /// this for reference-matching ML. Differs from the saturating cast only for |value|>464.
+        /// Converts a float to E4M3 using the fn convention - finite overflow AND +-Inf map to NaN;
+        /// NaN -> NaN. This is what the explicit cast operator does. Bit-exact to PyTorch/JAX/
+        /// ml_dtypes float8_e4m3fn (the layout this type is named after). Use the explicit name when
+        /// reading reference FP8 (PyTorch checkpoints, oracles) and you want it unambiguous.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static Float8E4M3 FromSingleFn(float value) =>
-            Float8E4M3Extensions.FromSingleFn(value);
+            Float8E4M3Extensions.ConvertFloatToFloat8E4M3(value);
+
+        /// <summary>
+        /// Converts a float to E4M3 using the SATURATING convention: finite overflow clamps to
+        /// +-448; +-Inf -> NaN; NaN -> NaN. Matches the NVIDIA Transformer Engine saturating cast /
+        /// OCP saturating-forward mode. Use this when you want overflow clamped rather than
+        /// NaN-poisoning a downstream reduction. NOT the default - the cast operator is fn.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static Float8E4M3 FromSingleSaturating(float value) =>
+            Float8E4M3Extensions.FromSingleSaturating(value);
 
         #endregion
 
@@ -264,8 +267,7 @@ namespace ILGPU
         // E4M3: 1 sign / 4 exponent / 3 mantissa, bias 7. NaN = 0x7F/0xFF. Max finite = 448 (0x7E).
         private const byte SignBitMask = 0x80;
         private const byte MagnitudeMask = 0x7F;        // exponent+mantissa
-        private const byte NaNMagnitude = 0x7F;         // exp=0xF, mant=0x7 (the only NaN)
-        private const byte MaxFiniteMagnitude = 0x7E;   // exp=0xF, mant=0x6 = 448
+        private const byte NaNMagnitude = 0x7F;         // exp=0xF, mant=0x7 (the only NaN); fn overflow target
 
         #endregion
 
@@ -303,9 +305,11 @@ namespace ILGPU
         }
 
         /// <summary>
-        /// Converts a float to an E4M3 value using round-to-nearest-even. Finite overflow
-        /// SATURATES to +-448; +-Inf -&gt; NaN (E4M3 has no Inf); NaN -&gt; NaN. (Convention flagged
-        /// for ML-oracle confirmation - see the file header.)
+        /// Converts a float to an E4M3 value using round-to-nearest-even, the fn (float8_e4m3fn)
+        /// convention: finite overflow AND +-Inf map to NaN; NaN -&gt; NaN. This is the DEFAULT
+        /// (what the cast operator does) and is bit-exact to PyTorch/JAX/ml_dtypes float8_e4m3fn
+        /// (verified, <c>DemoConsole -- fp8-oracle</c>). For the saturating (clamp-to-+-448)
+        /// convention use <see cref="FromSingleSaturating"/>.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static Float8E4M3 ConvertFloatToFloat8E4M3(float value)
@@ -323,10 +327,13 @@ namespace ILGPU
             int e = f32Exp - 127;                        // unbiased
 
             // E4M3 normal exponent range: -6..8 (bias 7); max finite magnitude 448 at e=8, mant=6.
-            if (e > 8 || (e == 8 && f32Mant > 0x600000u))
+            // fn: only e>8 is unconditional overflow -> NaN. e==8 falls through to RNE rounding,
+            // which gives 448 for (448,464] (rounds down) and NaN for >464 (rounds up past the 448
+            // slot) - handled by the post-round clamp below. (Saturating used e==8 && mant>0x600000
+            // to clamp everything above 448 to 448; fn must NOT - 449 rounds to 448, not NaN.)
+            if (e > 8)
             {
-                // Finite overflow -> saturate to +-448 (no Inf in E4M3).
-                return new Float8E4M3((byte)(sign | MaxFiniteMagnitude));
+                return new Float8E4M3((byte)(sign | NaNMagnitude));
             }
             if (e < -6)
             {
@@ -353,30 +360,35 @@ namespace ILGPU
             uint outBits = (eField << 3) | mant3;
             if (round == 1u && (stick == 1u || (mant3 & 1u) == 1u))
                 outBits += 1u;                           // ties-to-even; may carry into the exponent
-            // A carry that reaches 0x7F would be NaN; clamp finite overflow to 448 instead.
-            if ((outBits & 0x7Fu) >= NaNMagnitude)
-                outBits = MaxFiniteMagnitude;
+            // fn: a rounded result that reaches the 0x7F slot (480) or carries past it (0x80) is
+            // overflow -> NaN. Check the FULL outBits (not masked) so the 0x80 carry is caught;
+            // 256..448 (0x78..0x7E) stay finite, 0x7F/0x80 -> NaN.
+            if (outBits >= NaNMagnitude)
+                outBits = NaNMagnitude;
             return new Float8E4M3((byte)(sign | (outBits & 0x7Fu)));
         }
 
         /// <summary>
-        /// Converts a float to E4M3 using the fn (float8_e4m3fn) convention: finite overflow and
-        /// +-Inf map to NaN (NOT saturation); NaN -> NaN. Bit-exact to PyTorch / JAX / ml_dtypes
-        /// (verified, <c>DemoConsole -- fp8-oracle</c>). Composed only of existing intrinsics
-        /// (compare, the saturating cast, Neg, cast-of-NaN) so it transpiles on every backend with
-        /// no per-backend conversion codegen.
+        /// Converts a float to E4M3 using the SATURATING convention: finite overflow clamps to
+        /// +-448; +-Inf -> NaN; NaN -> NaN. Matches the NVIDIA Transformer Engine saturating cast /
+        /// OCP saturating-forward mode. Composed only of existing intrinsics (compare + the fn cast
+        /// operator + cast-of-448-constant) so it transpiles on every backend with no per-backend
+        /// conversion codegen. The fn cast and this agree everywhere except |value|>464 (finite):
+        /// fn gives NaN, this gives +-448.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static Float8E4M3 FromSingleFn(float value)
+        public static Float8E4M3 FromSingleSaturating(float value)
         {
-            // |value| <= 464 rounds to <= 448 (bit-exact to the reference) via the saturating base
-            // convert; |value| > 464 is the round-up-past-448 region -> NaN. A NaN input fails both
-            // ordered compares (NaN > / < are false) and falls through to the base convert, which
-            // already maps NaN -> NaN. +-Inf trip the compares -> signed NaN.
-            if (value > 464.0f)
-                return (Float8E4M3)float.NaN;          // +overflow / +Inf -> +NaN (0x7F)
-            if (value < -464.0f)
-                return -(Float8E4M3)float.NaN;         // -overflow / -Inf -> -NaN (0xFF)
+            // Redirect FINITE overflow (|value|>464, the region the fn cast maps to NaN) to +-448;
+            // +-Inf and NaN fall through to the fn cast (-> NaN). The finite test is a BIT check
+            // (exponent != all-ones) NOT a float compare against MaxValue - float Inf/NaN compares are
+            // unreliable on WebGL (its GLSL clamps the 3.4e38 literal so Inf <= MaxValue read true ->
+            // +-448 instead of NaN). 448 is exactly representable, so (Float8E4M3)448f = 0x7E.
+            bool finite = (Interop.FloatAsInt(value) & 0x7FFFFFFF) < 0x7F800000;
+            if (finite && value > 464.0f)
+                return (Float8E4M3)448.0f;
+            if (finite && value < -464.0f)
+                return (Float8E4M3)(-448.0f);
             return (Float8E4M3)value;
         }
 

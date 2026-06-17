@@ -158,51 +158,67 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
         });
 
-        // Float8E4M3.FromSingleFn (the float8_e4m3fn convention: finite overflow AND +-Inf -> NaN,
-        // NOT saturation - Geordi 2026-06-17, from the FP8 ML-oracle validation). FromSingleFn is
-        // composed only of existing intrinsics (compare + the saturating cast + Neg + cast-of-NaN)
-        // so it must transpile and produce the SAME byte as the managed fn result (which fp8-oracle
-        // proved bit-exact to ml_dtypes/PyTorch float8_e4m3fn) on EVERY backend. The overflow region
-        // is the point: a correct kernel emits NaN (0x7F/0xFF) there, not 0x7E (+-448).
-        private static void Float8FromSingleFnKernel(Index1D i,
-            ArrayView1D<float, Stride1D.Dense> x, ArrayView1D<global::ILGPU.Float8E4M3, Stride1D.Dense> y) =>
-            y[i] = global::ILGPU.Float8E4M3.FromSingleFn(x[i]);
+        // Float8E4M3 overflow convention (Geordi 2026-06-17, FP8 ML-oracle validation). The DEFAULT
+        // = fn (float8_e4m3fn): the bare cast operator AND FromSingleFn map finite overflow (>464)
+        // AND +-Inf to NaN; 449..464 round DOWN to 448 (NOT NaN). The IR-level convert itself is fn
+        // on every backend (the emitters' E4M3 f32->fp8 overflow branch -> 0x7F), so this verifies the
+        // changed codegen. FromSingleSaturating is the OPT-IN clamp-to-+-448 path (composed of the fn
+        // cast + a >464 redirect). All three are checked in-kernel vs the managed (oracle-proven) result.
+        private static void Float8OverflowKernel(Index1D i,
+            ArrayView1D<float, Stride1D.Dense> x,
+            ArrayView1D<global::ILGPU.Float8E4M3, Stride1D.Dense> cast,
+            ArrayView1D<global::ILGPU.Float8E4M3, Stride1D.Dense> sat)
+        {
+            cast[i] = (global::ILGPU.Float8E4M3)x[i];                       // operator = fn (the emitter)
+            sat[i] = global::ILGPU.Float8E4M3.FromSingleSaturating(x[i]);   // opt-in saturating
+        }
 
         [TestMethod]
         public async Task Float8E4M3_FromSingleFn_OverflowToNaN() => await RunTest(async accelerator =>
         {
             float[] inputs =
             {
-                480f, 512f, 1000f, 1e30f, float.PositiveInfinity,        // +overflow -> +NaN
-                -480f, -512f, -1e30f, float.NegativeInfinity,            // -overflow -> -NaN
-                448f, 449f, 463f, 464f, -448f, -464f,                    // round-to-448 region (finite)
+                465f, 480f, 512f, 1000f, 1e30f, float.PositiveInfinity,  // >464 finite + Inf -> NaN
+                -465f, -480f, -512f, -1e30f, float.NegativeInfinity,     // negatives
+                448f, 449f, 463f, 464f, -448f, -449f, -464f,             // round-to-448 region (finite, NOT NaN)
                 1f, 1.25f, 256f, -2.5f, 0.5f, 0.001953125f, 0f, -0f, float.NaN,
             };
             int n = inputs.Length;
-            var expected = new byte[n];
+            var expCast = new byte[n];   // fn (operator)
+            var expSat = new byte[n];    // saturating
             for (int i = 0; i < n; i++)
             {
-                var v = global::ILGPU.Float8E4M3.FromSingleFn(inputs[i]);   // managed = proven reference
-                expected[i] = System.Runtime.CompilerServices.Unsafe.As<global::ILGPU.Float8E4M3, byte>(ref v);
+                var c = (global::ILGPU.Float8E4M3)inputs[i];                       // managed fn = proven reference
+                var s = global::ILGPU.Float8E4M3.FromSingleSaturating(inputs[i]);
+                expCast[i] = System.Runtime.CompilerServices.Unsafe.As<global::ILGPU.Float8E4M3, byte>(ref c);
+                expSat[i] = System.Runtime.CompilerServices.Unsafe.As<global::ILGPU.Float8E4M3, byte>(ref s);
             }
 
             using var inBuf = accelerator.Allocate1D(inputs);
-            using var outBuf = accelerator.Allocate1D<global::ILGPU.Float8E4M3>(n);
+            using var castBuf = accelerator.Allocate1D<global::ILGPU.Float8E4M3>(n);
+            using var satBuf = accelerator.Allocate1D<global::ILGPU.Float8E4M3>(n);
             var k = accelerator.LoadAutoGroupedStreamKernel<Index1D,
-                ArrayView1D<float, Stride1D.Dense>, ArrayView1D<global::ILGPU.Float8E4M3, Stride1D.Dense>>(
-                Float8FromSingleFnKernel);
-            k(n, inBuf.View, outBuf.View);
+                ArrayView1D<float, Stride1D.Dense>, ArrayView1D<global::ILGPU.Float8E4M3, Stride1D.Dense>,
+                ArrayView1D<global::ILGPU.Float8E4M3, Stride1D.Dense>>(Float8OverflowKernel);
+            k(n, inBuf.View, castBuf.View, satBuf.View);
             await accelerator.SynchronizeAsync();
-            var got = await outBuf.CopyToHostAsync<global::ILGPU.Float8E4M3>();
+            var gotCast = await castBuf.CopyToHostAsync<global::ILGPU.Float8E4M3>();
+            var gotSat = await satBuf.CopyToHostAsync<global::ILGPU.Float8E4M3>();
 
             for (int i = 0; i < n; i++)
             {
-                byte g = System.Runtime.CompilerServices.Unsafe.As<global::ILGPU.Float8E4M3, byte>(ref got[i]);
-                bool bothNaN = (g & 0x7F) == 0x7F && (expected[i] & 0x7F) == 0x7F;   // NaN-slot tolerant
-                if (!bothNaN && g != expected[i])
+                byte gc = System.Runtime.CompilerServices.Unsafe.As<global::ILGPU.Float8E4M3, byte>(ref gotCast[i]);
+                byte gs = System.Runtime.CompilerServices.Unsafe.As<global::ILGPU.Float8E4M3, byte>(ref gotSat[i]);
+                bool castOk = gc == expCast[i] || ((gc & 0x7F) == 0x7F && (expCast[i] & 0x7F) == 0x7F);
+                bool satOk = gs == expSat[i] || ((gs & 0x7F) == 0x7F && (expSat[i] & 0x7F) == 0x7F);
+                if (!castOk)
                     throw new Exception(
-                        $"FromSingleFn kernel @{i} ({BackendName}): input {inputs[i]} -> got 0x{g:X2}, " +
-                        $"want 0x{expected[i]:X2} (fn: overflow/+-Inf must be NaN, not saturated +-448).");
+                        $"fn cast operator kernel @{i} ({BackendName}): input {inputs[i]} -> got 0x{gc:X2}, " +
+                        $"want 0x{expCast[i]:X2} (fn: >464/+-Inf must be NaN, 449..464 must round to +-448).");
+                if (!satOk)
+                    throw new Exception(
+                        $"FromSingleSaturating kernel @{i} ({BackendName}): input {inputs[i]} -> got 0x{gs:X2}, " +
+                        $"want 0x{expSat[i]:X2} (saturating: finite overflow -> +-448, +-Inf -> NaN).");
             }
         });
     }

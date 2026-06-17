@@ -5930,7 +5930,7 @@ EmitSaveAllLocals();
             Code.Add(WasmOpCodes.I32Sub);
             WasmModuleBuilder.EmitLocalSet(Code, ev);
 
-            // OVERFLOW. E4M3: (ev > 8) || (ev==8 && f32Mant > 0x600000) -> saturate sign|0x7E.
+            // OVERFLOW. E4M3 (fn): (ev > 8) || (ev==8 && f32Mant > 0x600000) finite overflow -> sign|0x7F (NaN).
             //           E5M2: ev > 15 -> Inf sign|0x7C.
             WasmModuleBuilder.EmitLocalGet(Code, done);
             Code.Add(WasmOpCodes.I32Eqz);
@@ -5938,22 +5938,15 @@ EmitSaveAllLocals();
             Code.Add(WasmOpCodes.Void);
             if (isE4M3)
             {
-                // cond = (ev > 8) | ((ev==8) & (f32Mant > 0x600000))
+                // fn: cond = (ev > 8) only. ev==8 is handled by the normal RNE path + its
+                // full-signif>=0x7F clamp below (449->448, >464->NaN) - NOT unconditional overflow.
                 WasmModuleBuilder.EmitLocalGet(Code, ev);
                 WasmModuleBuilder.EmitI32Const(Code, 8);
                 Code.Add(WasmOpCodes.I32GtS);
-                WasmModuleBuilder.EmitLocalGet(Code, ev);
-                WasmModuleBuilder.EmitI32Const(Code, 8);
-                Code.Add(WasmOpCodes.I32Eq);
-                WasmModuleBuilder.EmitLocalGet(Code, f32Mant);
-                WasmModuleBuilder.EmitI32Const(Code, 0x600000);
-                Code.Add(WasmOpCodes.I32GtU);
-                Code.Add(WasmOpCodes.I32And);
-                Code.Add(WasmOpCodes.I32Or);
                 Code.Add(WasmOpCodes.If);
                 Code.Add(WasmOpCodes.Void);
                 WasmModuleBuilder.EmitLocalGet(Code, sign);
-                WasmModuleBuilder.EmitI32Const(Code, 0x7E);
+                WasmModuleBuilder.EmitI32Const(Code, 0x7F);   // fn: e>8 overflow -> NaN
                 Code.Add(WasmOpCodes.I32Or);
                 WasmModuleBuilder.EmitLocalSet(Code, result);
                 WasmModuleBuilder.EmitI32Const(Code, 1);
@@ -6146,15 +6139,14 @@ EmitSaveAllLocals();
                 Code.Add(WasmOpCodes.End);
                 if (isE4M3)
                 {
-                    // E4M3: if (outBits & 0x7F) >= 0x7F -> saturate to 0x7E (avoid the NaN slot)
+                    // E4M3 (fn): if signif (FULL, incl a 0x80 carry) reaches the 0x7F slot -> 0x7F (NaN).
+                    // Compare the full value (not masked) so the round-up-past-448 carry is caught.
                     WasmModuleBuilder.EmitLocalGet(Code, signif);
-                    WasmModuleBuilder.EmitI32Const(Code, 0x7F);
-                    Code.Add(WasmOpCodes.I32And);
                     WasmModuleBuilder.EmitI32Const(Code, 0x7F);
                     Code.Add(WasmOpCodes.I32GeU);
                     Code.Add(WasmOpCodes.If);
                     Code.Add(WasmOpCodes.Void);
-                    WasmModuleBuilder.EmitI32Const(Code, 0x7E);
+                    WasmModuleBuilder.EmitI32Const(Code, 0x7F);   // fn: NaN
                     WasmModuleBuilder.EmitLocalSet(Code, signif);
                     Code.Add(WasmOpCodes.End);
                 }

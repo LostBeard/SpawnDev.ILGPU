@@ -220,7 +220,7 @@ namespace ILGPU.Backends.OpenCL
             extensionBuilder.AppendLine("    int f32Exp = (int)((rest >> 23) & 0xFFu);");
             extensionBuilder.AppendLine("    uint f32Mant = rest & 0x7FFFFFu;");
             extensionBuilder.AppendLine("    int e = f32Exp - 127;");
-            extensionBuilder.AppendLine("    if (e > 8 || (e == 8 && f32Mant > 0x600000u)) return (uchar)(sign | 0x7Eu);");
+            extensionBuilder.AppendLine("    if (e > 8) return (uchar)(sign | 0x7Fu);"); // fn: e>8 unconditional overflow -> NaN; e==8 rounds below
             extensionBuilder.AppendLine("    if (e < -6) {");
             extensionBuilder.AppendLine("        if (f32Exp == 0) return (uchar)sign;");
             extensionBuilder.AppendLine("        uint signif = f32Mant | 0x800000u;");
@@ -238,7 +238,7 @@ namespace ILGPU.Backends.OpenCL
             extensionBuilder.AppendLine("    uint eField = (uint)(e + 7);");
             extensionBuilder.AppendLine("    uint outBits = (eField << 3) | mant3;");
             extensionBuilder.AppendLine("    if (round == 1u && (stick == 1u || (mant3 & 1u) == 1u)) outBits += 1u;");
-            extensionBuilder.AppendLine("    if ((outBits & 0x7Fu) >= 0x7Fu) outBits = 0x7Eu;");
+            extensionBuilder.AppendLine("    if (outBits >= 0x7Fu) outBits = 0x7Fu;"); // fn: full outBits (incl 0x80 carry) reaching the 0x7F slot -> NaN
             extensionBuilder.AppendLine("    return (uchar)(sign | (outBits & 0x7Fu));");
             extensionBuilder.AppendLine("}");
             extensionBuilder.AppendLine();

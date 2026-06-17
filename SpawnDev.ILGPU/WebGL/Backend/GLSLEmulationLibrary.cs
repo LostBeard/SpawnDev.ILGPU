@@ -1044,7 +1044,7 @@ uint _f32_to_e4m3(float f) {
     int f32Exp = int((rest >> 23u) & 0xFFu);
     uint f32Mant = rest & 0x7FFFFFu;
     int e = f32Exp - 127;
-    if (e > 8 || (e == 8 && f32Mant > 0x600000u)) { return sign | 0x7Eu; }
+    if (e > 8) { return sign | 0x7Fu; } // fn: e>8 unconditional overflow -> NaN; e==8 rounds below
     if (e < -6) {
         if (f32Exp == 0) { return sign; }
         uint signif = f32Mant | 0x800000u;
@@ -1062,7 +1062,7 @@ uint _f32_to_e4m3(float f) {
     uint eField = uint(e + 7);
     uint outBits = (eField << 3u) | mant3;
     if (roundB == 1u && (stick == 1u || (mant3 & 1u) == 1u)) { outBits = outBits + 1u; }
-    if ((outBits & 0x7Fu) >= 0x7Fu) { outBits = 0x7Eu; }
+    if (outBits >= 0x7Fu) { outBits = 0x7Fu; } // fn: full outBits (incl 0x80 carry) reaching the 0x7F slot -> NaN
     return sign | (outBits & 0x7Fu);
 }
 ";
