@@ -307,6 +307,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         protected bool _kernelReferencesF16Helpers { get; set; } = false;
         protected bool _kernelReferencesBF16Helpers { get; set; } = false;
         protected bool _kernelReferencesFP8Helpers { get; set; } = false;
+        protected bool _kernelReferencesFP4Helpers { get; set; } = false;
 
         private StringBuilder prefixBuilder = new StringBuilder();
         private StringBuilder suffixBuilder = new StringBuilder();
@@ -2108,6 +2109,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 BasicValueType.BFloat16 => FormatFloat((float)value.BFloat16Value),
                 BasicValueType.Float8E4M3 => FormatFloat((float)value.Float8E4M3Value),
                 BasicValueType.Float8E5M2 => FormatFloat((float)value.Float8E5M2Value),
+                BasicValueType.Float4E2M1 => FormatFloat((float)value.Float4E2M1Value),
                 BasicValueType.Float32 => FormatFloat(value.Float32Value),
                 BasicValueType.Float64 => FormatFloat((float)value.Float64Value),
                 _ => "0"
@@ -2856,6 +2858,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     ? "_f32_to_e4m3" : "_f32_to_e5m2";
                 AppendLine($"{target} = i32({fn}({source}));");
             }
+            else if (value.Value.Type is global::ILGPU.IR.Types.PrimitiveType f4pt &&
+                f4pt.BasicValueType == global::ILGPU.BasicValueType.Float4E2M1)
+            {
+                // FP4 is always emulated (WGSL "f32"); FloatAsInt(fp4) must yield the 4-bit E2M1
+                // pattern in the low nibble (AscendingFloat4E2M1 radix sort) - recover it via
+                // _f32_to_e2m1, not a bitcast of the promoted f32.
+                _kernelReferencesFP4Helpers = true;
+                AppendLine($"{target} = i32(_f32_to_e2m1({source}));");
+            }
             else if (source.Type == "emu_f64")
             {
                 // emu_f64 is a Dekker vec2<f32> pair — not the raw IEEE-754 double bits.
@@ -2910,6 +2921,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 var fn = fpt.BasicValueType == global::ILGPU.BasicValueType.Float8E4M3
                     ? "_e4m3_to_f32" : "_e5m2_to_f32";
                 AppendLine($"{target} = {fn}(u32({source}) & 0xFFu);");
+            }
+            else if (value.Type is global::ILGPU.IR.Types.PrimitiveType f4pt &&
+                f4pt.BasicValueType == global::ILGPU.BasicValueType.Float4E2M1)
+            {
+                // Symmetric inverse for FP4 (always emulated): widen the low-nibble E2M1 pattern
+                // to f32. Defensive - no IntAsFloat->Float4E2M1 frontend overload today.
+                _kernelReferencesFP4Helpers = true;
+                AppendLine($"{target} = _e2m1_to_f32(u32({source}) & 0x0Fu);");
             }
             else if (target.Type == "emu_f64")
             {

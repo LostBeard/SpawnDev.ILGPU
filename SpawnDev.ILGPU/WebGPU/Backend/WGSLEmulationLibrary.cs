@@ -1253,6 +1253,66 @@ fn _f32_to_e4m3(f: f32) -> u32 {
 }
 ";
 
+        /// <summary>
+        /// FP4 (OCP E2M1FN) bit-conversion helpers. Always emulated (no native WGSL fp4).
+        /// Direct WGSL port of the managed ConvertFloat4E2M1ToFloat / ConvertFloatToFloat4E2M1
+        /// (CPU-verified bit-exact to ml_dtypes.float4_e2m1fn; the OpenCL C twins
+        /// _e2m1_bits_to_f32 / _f32_to_e2m1_bits are PMT-verified) so every representable value
+        /// round-trips bit-identically. 16 finite codes, NO Inf, NO NaN; magnitudes
+        /// {0,.5,1,1.5,2,3,4,6}, max 6. The 4-bit value lives in the LOW NIBBLE of an 8-bit
+        /// storage element; the raw byte sits in the low 8 bits of a u32. Sign = bit 3 (0x8).
+        /// finite overflow AND +-Inf saturate to +-6 (0x7/0xF); NaN -> -0 (0x8).
+        /// </summary>
+        public const string FP4Functions = @"
+// ============================================================================
+// FP4 Emulation Functions (E2M1FN = 1/2/1 bias 1; no Inf/NaN; mags {0,.5,1,1.5,2,3,4,6}; value in low nibble)
+// ============================================================================
+
+fn _e2m1_to_f32(raw: u32) -> f32 {
+    let code = raw & 0x0Fu;
+    let sign = (code & 0x8u) << 28u;
+    let e = (code >> 1u) & 0x3u;
+    let m = code & 0x1u;
+    if (e == 0u) {
+        if (m == 0u) { return bitcast<f32>(sign); }
+        return bitcast<f32>(sign | (126u << 23u)); // subnormal 0.5
+    }
+    let f32Exp = e - 1u + 127u;
+    return bitcast<f32>(sign | (f32Exp << 23u) | (m << 22u));
+}
+
+fn _f32_to_e2m1(f: f32) -> u32 {
+    let bits = bitcast<u32>(f);
+    let sign = (bits >> 28u) & 0x8u;
+    let rest = bits & 0x7FFFFFFFu;
+    if (rest > 0x7F800000u) { return 0x8u; }          // NaN -> -0
+    if (rest >= 0x7F800000u) { return sign | 0x7u; }  // +-Inf -> +-6
+    let f32Exp = i32((rest >> 23u) & 0xFFu);
+    let f32Mant = rest & 0x7FFFFFu;
+    let e = f32Exp - 127;
+    if (e > 2) { return sign | 0x7u; }                // finite overflow -> +-6
+    if (e < 0) {
+        if (f32Exp == 0) { return sign; }             // +-0
+        let signif = f32Mant | 0x800000u;
+        let shift = (-1 - e) + 23;
+        if (shift > 31) { return sign; }              // underflow -> +-0
+        var q: u32 = signif >> u32(shift);
+        let roundBit = (signif >> u32(shift - 1)) & 1u;
+        let sticky = select(0u, 1u, (signif & ((1u << u32(shift - 1)) - 1u)) != 0u);
+        if (roundBit == 1u && (sticky == 1u || (q & 1u) == 1u)) { q = q + 1u; }
+        return sign | (q & 0x7u);
+    }
+    let mant1 = f32Mant >> 22u;
+    let round = (f32Mant >> 21u) & 1u;
+    let stick = select(0u, 1u, (f32Mant & 0x1FFFFFu) != 0u);
+    let eField = u32(e + 1);
+    var outBits: u32 = (eField << 1u) | mant1;
+    if (round == 1u && (stick == 1u || (mant1 & 1u) == 1u)) { outBits = outBits + 1u; }
+    if (outBits > 0x7u) { outBits = 0x7u; }           // carry past +-6 saturates (no larger finite/Inf)
+    return sign | (outBits & 0x7u);
+}
+";
+
         #endregion
 
         #region Combined Library
@@ -1320,12 +1380,14 @@ fn _f32_to_e4m3(f: f32) -> u32 {
         private static readonly List<EmulationFunc> _f16Funcs;
         private static readonly List<EmulationFunc> _bf16Funcs;
         private static readonly List<EmulationFunc> _fp8Funcs;
+        private static readonly List<EmulationFunc> _fp4Funcs;
         private static readonly Dictionary<string, HashSet<string>> _dekkerF64Deps;
         private static readonly Dictionary<string, HashSet<string>> _ozakiF64Deps;
         private static readonly Dictionary<string, HashSet<string>> _i64Deps;
         private static readonly Dictionary<string, HashSet<string>> _f16Deps;
         private static readonly Dictionary<string, HashSet<string>> _bf16Deps;
         private static readonly Dictionary<string, HashSet<string>> _fp8Deps;
+        private static readonly Dictionary<string, HashSet<string>> _fp4Deps;
 
         static WGSLEmulationLibrary()
         {
@@ -1335,12 +1397,14 @@ fn _f32_to_e4m3(f: f32) -> u32 {
             _f16Funcs = SplitIntoFunctions(F16Functions);
             _bf16Funcs = SplitIntoFunctions(BF16Functions);
             _fp8Funcs = SplitIntoFunctions(FP8Functions);
+            _fp4Funcs = SplitIntoFunctions(FP4Functions);
             _dekkerF64Deps = BuildDependencies(_dekkerF64Funcs);
             _ozakiF64Deps = BuildDependencies(_ozakiF64Funcs);
             _i64Deps = BuildDependencies(_i64Funcs);
             _f16Deps = BuildDependencies(_f16Funcs);
             _bf16Deps = BuildDependencies(_bf16Funcs);
             _fp8Deps = BuildDependencies(_fp8Funcs);
+            _fp4Deps = BuildDependencies(_fp4Funcs);
         }
 
         /// <summary>
@@ -1364,7 +1428,8 @@ fn _f32_to_e4m3(f: f32) -> u32 {
         /// emitted only if the kernel body actually calls it.</param>
         public static string GetMinimalEmulationLibrary(
             bool includeF64, bool useOzakiF64, bool includeI64, bool includeF16,
-            string kernelBody, bool includeBF16 = false, bool includeFP8 = false)
+            string kernelBody, bool includeBF16 = false, bool includeFP8 = false,
+            bool includeFP4 = false)
         {
             var sb = new System.Text.StringBuilder();
 
@@ -1433,6 +1498,14 @@ fn _f32_to_e4m3(f: f32) -> u32 {
                 // only when the kernel/helper body references them, includeFP8 raised by
                 // needsFP8Emulation upstream.
                 AppendUsedFunctions(sb, _fp8Funcs, _fp8Deps, kernelBody);
+            }
+
+            if (includeFP4)
+            {
+                // FP4 helpers (_e2m1 <-> f32) - same minimal-trim path as FP8; emitted
+                // only when the kernel/helper body references them, includeFP4 raised by
+                // needsFP4Emulation upstream.
+                AppendUsedFunctions(sb, _fp4Funcs, _fp4Deps, kernelBody);
             }
 
             return sb.ToString();

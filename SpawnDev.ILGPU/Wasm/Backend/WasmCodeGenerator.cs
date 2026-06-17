@@ -299,6 +299,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     BasicValueType.BFloat16 => WasmOpCodes.F32, // bf16 promoted to f32 for compute
                     BasicValueType.Float8E4M3 => WasmOpCodes.F32, // FP8 promoted to f32 for compute
                     BasicValueType.Float8E5M2 => WasmOpCodes.F32,
+                    BasicValueType.Float4E2M1 => WasmOpCodes.F32, // FP4 promoted to f32 for compute
                     BasicValueType.Float32 => WasmOpCodes.F32,
                     BasicValueType.Float64 => WasmOpCodes.F64,
                     _ => WasmOpCodes.I32,
@@ -324,6 +325,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 BasicValueType.BFloat16 => 2, // bf16: 2-byte storage
                 BasicValueType.Float8E4M3 => 1, // FP8: 1-byte storage
                 BasicValueType.Float8E5M2 => 1,
+                BasicValueType.Float4E2M1 => 1, // FP4: 1-byte storage (4-bit value in low nibble)
                 BasicValueType.Float32 => 4,
                 BasicValueType.Float64 => 8,
                 _ => 4,
@@ -1343,6 +1345,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         ? (float)value.Float8E4M3Value
                         : value.BasicValueType == BasicValueType.Float8E5M2
                         ? (float)value.Float8E5M2Value
+                        : value.BasicValueType == BasicValueType.Float4E2M1
+                        ? (float)value.Float4E2M1Value
                         : value.Float32Value;
                     WasmModuleBuilder.EmitF32Const(Code, f32Const);
                     break;

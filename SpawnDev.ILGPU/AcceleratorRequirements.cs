@@ -97,6 +97,15 @@ public sealed class AcceleratorRequirements
     public bool RequiresFloat8E5M2 { get; init; }
 
     /// <summary>
+    /// Kernel uses the 4-bit float <c>ILGPU.Float4E2M1</c> (E2M1FN: 1/2/1, bias 1, no Inf/NaN, 16 finite
+    /// codes {0,.5,1,1.5,2,3,4,6}, saturates to +-6 - the NVFP4/MXFP4 element format). Every backend
+    /// supports it - always emulated (1-byte storage with the value in the low nibble, f32-register
+    /// compute, portable conversion on every backend incl. CUDA). Like <see cref="RequiresBFloat16"/>
+    /// this is a no-op documentation filter - it never rules out a backend.
+    /// </summary>
+    public bool RequiresFloat4E2M1 { get; init; }
+
+    /// <summary>
     /// Kernel uses Float64 (<c>double</c>). True is compatible with every backend - WebGPU
     /// and WebGL run Float64 through Dekker emulation (see <c>CLAUDE.md</c>). Use
     /// <see cref="RequiresFloat64Native"/> to rule out emulated paths when the performance
@@ -252,6 +261,7 @@ public static class AcceleratorRequirementsExtensions
         if (requirements.RequiresBFloat16 && !HasBFloat16(device)) return false;
         if (requirements.RequiresFloat8E4M3 && !HasFloat8(device)) return false;
         if (requirements.RequiresFloat8E5M2 && !HasFloat8(device)) return false;
+        if (requirements.RequiresFloat4E2M1 && !HasFloat4(device)) return false;
         if (requirements.RequiresFloat64 && !HasFloat64(device)) return false;
         if (requirements.RequiresFloat64Native && !HasFloat64Native(device)) return false;
         if (requirements.RequiresFloat64Strict && !HasFloat64Strict(device)) return false;
@@ -306,6 +316,10 @@ public static class AcceleratorRequirementsExtensions
     // Every backend supports FP8 (Float8E4M3 + Float8E5M2) - always emulated (1-byte storage,
     // f32-register compute, portable conversion on every backend incl. CUDA). Always true.
     private static bool HasFloat8(Device device) => true;
+
+    // Every backend supports FP4 (Float4E2M1) - always emulated (1-byte storage, value in the low
+    // nibble, f32-register compute, portable conversion on every backend incl. CUDA). Always true.
+    private static bool HasFloat4(Device device) => true;
 
     private static bool HasFloat16Native(Device device)
     {
@@ -388,6 +402,7 @@ public static class AcceleratorRequirementsExtensions
         if (r.RequiresBFloat16) flags.Add("BFloat16");
         if (r.RequiresFloat8E4M3) flags.Add("Float8E4M3");
         if (r.RequiresFloat8E5M2) flags.Add("Float8E5M2");
+        if (r.RequiresFloat4E2M1) flags.Add("Float4E2M1");
         if (r.RequiresFloat64) flags.Add("Float64");
         if (r.RequiresFloat64Native) flags.Add("Float64Native");
         if (r.RequiresFloat64Strict) flags.Add("Float64Strict");

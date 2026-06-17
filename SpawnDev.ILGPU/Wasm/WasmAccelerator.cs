@@ -1552,6 +1552,17 @@ namespace SpawnDev.ILGPU.Wasm
                             flatArgs.Add(((float)hv16).ToString("G9", System.Globalization.CultureInfo.InvariantCulture));
                         else if (value is global::ILGPU.BFloat16 bf16v)
                             flatArgs.Add(((float)bf16v).ToString("G9", System.Globalization.CultureInfo.InvariantCulture));
+                        // FP8 (Float8E4M3/E5M2) + FP4 (Float4E2M1) by-value SCALAR params: same f32-register
+                        // model as Half/bf16 - they compute as f32 in the kernel (the scalar param local is
+                        // an f32, GetWasmType -> F32), so pass the WIDENED f32 value, not the 1-byte struct.
+                        // Without this the struct falls into the struct-serialize branch and the kernel reads
+                        // its raw bits as the value. (Lossless: every FP8/FP4 code is an exact f32.)
+                        else if (value is global::ILGPU.Float8E4M3 fp8a)
+                            flatArgs.Add(((float)fp8a).ToString("G9", System.Globalization.CultureInfo.InvariantCulture));
+                        else if (value is global::ILGPU.Float8E5M2 fp8b)
+                            flatArgs.Add(((float)fp8b).ToString("G9", System.Globalization.CultureInfo.InvariantCulture));
+                        else if (value is global::ILGPU.Float4E2M1 fp4v)
+                            flatArgs.Add(((float)fp4v).ToString("G9", System.Globalization.CultureInfo.InvariantCulture));
                         else if (value is long lv) flatArgs.Add($"{lv}n"); // BigInt for i64
                         else if (value is ulong ulv) flatArgs.Add($"{ulv}n"); // BigInt for i64
                         else if (value != null && !value.GetType().IsPrimitive && !value.GetType().IsEnum

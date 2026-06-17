@@ -1082,6 +1082,65 @@ uint _f32_to_e4m3(float f) {
 }
 ";
 
+        /// <summary>
+        /// FP4 (OCP E2M1FN, the NVFP4/MXFP4 element format) bit-conversion helpers (GLSL ES 3.0).
+        /// Always emulated (no native GLSL fp4); direct port of the managed / OpenCL / CUDA conversion
+        /// (CPU-verified bit-exact to ml_dtypes.float4_e2m1fn), so every representable value round-trips
+        /// bit-identically. 1 sign / 2 exp / 1 mantissa, bias 1; 16 finite codes, NO Inf, NO NaN;
+        /// magnitudes {0,.5,1,1.5,2,3,4,6}, max 6; finite overflow + +-Inf saturate to +-6; NaN -> -0
+        /// (0x8). The 4-bit value lives in the LOW NIBBLE of the low 8 bits of a uint; values compute
+        /// as float in-register. Mirrors the OpenCL _e2m1_bits_to_f32 / _f32_to_e2m1_bits.
+        /// </summary>
+        public const string FP4Functions = @"
+// ============================================================================
+// FP4 Emulation Functions (E2M1FN = 1/2/1 bias 1, no Inf, no NaN; magnitudes {0,.5,1,1.5,2,3,4,6})
+// ============================================================================
+
+float _e2m1_to_f32(uint raw) {
+    uint code = raw & 0x0Fu;
+    uint sign = (code & 0x8u) << 28u;
+    uint e = (code >> 1u) & 0x3u;
+    uint m = code & 0x1u;
+    if (e == 0u) {
+        if (m == 0u) { return uintBitsToFloat(sign); }
+        return uintBitsToFloat(sign | (126u << 23u)); // subnormal 0.5
+    }
+    uint f32Exp = e - 1u + 127u;
+    return uintBitsToFloat(sign | (f32Exp << 23u) | (m << 22u));
+}
+
+uint _f32_to_e2m1(float f) {
+    uint bits = floatBitsToUint(f);
+    uint sign = (bits >> 28u) & 0x8u;
+    uint rest = bits & 0x7FFFFFFFu;
+    if (rest > 0x7F800000u) { return 0x8u; } // NaN -> -0
+    if (rest >= 0x7F800000u) { return sign | 0x7u; } // +-Inf -> +-6
+    int f32Exp = int((rest >> 23u) & 0xFFu);
+    uint f32Mant = rest & 0x7FFFFFu;
+    int e = f32Exp - 127;
+    if (e > 2) { return sign | 0x7u; } // finite overflow -> +-6
+    if (e < 0) {
+        if (f32Exp == 0) { return sign; } // +-0
+        uint signif = f32Mant | 0x800000u;
+        int shift = (-1 - e) + 23;
+        if (shift > 31) { return sign; } // underflow -> +-0
+        uint q = signif >> uint(shift);
+        uint roundBit = (signif >> uint(shift - 1)) & 1u;
+        uint sticky = ((signif & ((1u << uint(shift - 1)) - 1u)) != 0u) ? 1u : 0u;
+        if (roundBit == 1u && (sticky == 1u || (q & 1u) == 1u)) { q = q + 1u; }
+        return sign | (q & 0x7u);
+    }
+    uint mant1 = f32Mant >> 22u;
+    uint round = (f32Mant >> 21u) & 1u;
+    uint stick = ((f32Mant & 0x1FFFFFu) != 0u) ? 1u : 0u;
+    uint eField = uint(e + 1);
+    uint outBits = (eField << 1u) | mant1;
+    if (round == 1u && (stick == 1u || (mant1 & 1u) == 1u)) { outBits = outBits + 1u; }
+    if (outBits > 0x7u) { outBits = 0x7u; } // carry past +-6 saturates (no larger finite/Inf)
+    return sign | (outBits & 0x7u);
+}
+";
+
         #endregion
 
         #region Combined Library
@@ -1099,7 +1158,7 @@ uint _f32_to_e4m3(float f) {
         /// <param name="includeF16">When true, emits the Float16 bit-conversion helpers
         /// (<c>_f16_to_f32</c>, <c>_f32_to_f16</c>). WebGL has no native f16, so this is
         /// the only f16 path available on this backend.</param>
-        public static string GetEmulationLibrary(bool includeF64, bool useOzakiF64, bool includeI64, bool includeF16, bool includeBF16 = false, bool includeFP8 = false)
+        public static string GetEmulationLibrary(bool includeF64, bool useOzakiF64, bool includeI64, bool includeF16, bool includeBF16 = false, bool includeFP8 = false, bool includeFP4 = false)
         {
             var sb = new System.Text.StringBuilder();
 
@@ -1133,6 +1192,11 @@ uint _f32_to_e4m3(float f) {
             if (includeFP8)
             {
                 sb.AppendLine(FP8Functions);
+            }
+
+            if (includeFP4)
+            {
+                sb.AppendLine(FP4Functions);
             }
 
             return sb.ToString();

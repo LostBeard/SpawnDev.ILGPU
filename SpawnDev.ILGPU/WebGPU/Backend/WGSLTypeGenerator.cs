@@ -121,6 +121,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 BasicValueType.BFloat16 => "f32", // bfloat16 always emulated (no native WGSL bf16); value held as f32
                 BasicValueType.Float8E4M3 => "f32", // FP8 always emulated; value held as f32
                 BasicValueType.Float8E5M2 => "f32",
+                BasicValueType.Float4E2M1 => "f32", // FP4 always emulated; value held as f32
                 BasicValueType.Float32 => "f32",
                 BasicValueType.Float64 => useF64Emu ? "emu_f64" : "f32",
                 _ => null
@@ -147,6 +148,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 ArithmeticBasicValueType.BFloat16 => "f32", // bfloat16 always emulated; value held as f32
                 ArithmeticBasicValueType.Float8E4M3 => "f32", // FP8 always emulated; value held as f32
                 ArithmeticBasicValueType.Float8E5M2 => "f32",
+                ArithmeticBasicValueType.Float4E2M1 => "f32", // FP4 always emulated; value held as f32
                 ArithmeticBasicValueType.Float32 => "f32",
                 ArithmeticBasicValueType.Float64 => useF64Emu ? "emu_f64" : "f32",
                 _ => null

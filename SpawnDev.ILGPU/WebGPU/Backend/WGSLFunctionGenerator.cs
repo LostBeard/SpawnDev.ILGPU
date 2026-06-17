@@ -48,6 +48,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private readonly HashSet<int> _subWordFloat16Params = new();            // emulated f16 (no shader-f16)
         private readonly HashSet<int> _subWordBFloat16Params = new();           // emulated bf16 (always - no native WGSL bf16)
         private readonly Dictionary<int, bool> _subWordFloat8Params = new();    // emulated FP8 (always); value = isE4M3 (false = E5M2)
+        private readonly HashSet<int> _subWordFloat4Params = new();             // emulated FP4 (always, E2M1; single type, value in low nibble)
         private readonly Dictionary<string, int> _subWordLEAVars = new();       // LEA target Variable name -> paramIdx
         private readonly Dictionary<int, string> _paramIndexToLocalVar = new(); // paramIdx -> "v_X" (the helper's `let v_X : ptr<...> = p_Y;` local name)
 
@@ -541,6 +542,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         _subWordParams[param.Index] = 1;
                         _subWordFloat8Params[param.Index] = false;
                         break;
+                    case BasicValueType.Float4E2M1:
+                        // FP4 is always emulated (no native WGSL fp4) - 1-byte sub-word, 4 per word,
+                        // E2M1 code in the low nibble.
+                        _subWordParams[param.Index] = 1;
+                        _subWordFloat4Params.Add(param.Index);
+                        break;
                 }
             }
         }
@@ -809,6 +816,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         // garbage - the WebGPU-only FP8 radix corruption (the direct-param key load uses
                         // the kernel generator's correct FP8 path, which is why ExtractBits passed).
                         extractExpr = isE4M3Ld ? $"_e4m3_to_f32({rawByte})" : $"_e5m2_to_f32({rawByte})";
+                    else if (_subWordFloat4Params.Contains(subWordParamIdx))
+                        // FP4 (4 per word): convert the byte (E2M1 code in low nibble) to f32, same
+                        // f32-register model as FP8 - the helper-side LEA key load path.
+                        extractExpr = $"_e2m1_to_f32({rawByte})";
                     else if (_subWordUnsignedParams.Contains(subWordParamIdx))
                         extractExpr = $"i32({rawByte})";                                    // byte: zero-extend
                     else
@@ -910,6 +921,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     var packFn = isE4M3St ? "_f32_to_e4m3" : "_f32_to_e5m2";
                     AppendLine($"atomicAnd(&{subWordBinding}[{wordIdx}], ~(0xFFu << {shift}));");
                     AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], (({packFn}({val}) & 0xFFu) << {shift}));");
+                }
+                else if (elemSize == 1 && _subWordFloat4Params.Contains(storeParamIdx))
+                {
+                    // FP4 (4 per word): round the f32 value to its E2M1 byte (code in low nibble) before
+                    // packing, mirroring the FP8 store branch. Converting through _f32_to_e2m1 (not
+                    // u32(val)) re-narrows a widened f32 to the FP4 storage type.
+                    var wordIdx = $"(u32({idx}) / 4u)";
+                    var shift = $"((u32({idx}) % 4u) * 8u)";
+                    AppendLine($"atomicAnd(&{subWordBinding}[{wordIdx}], ~(0xFFu << {shift}));");
+                    AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], ((_f32_to_e2m1({val}) & 0xFFu) << {shift}));");
                 }
                 else if (elemSize == 1)
                 {

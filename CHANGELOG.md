@@ -2,6 +2,15 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.14.0-local.5 (2026-06-17) - New 4-bit float type `Float4E2M1` (NVFP4/MXFP4 element format) on all 6 backends + a latent low-precision store-widening bug fix
+
+Adds `ILGPU.Float4E2M1`, the OCP **E2M1FN** 4-bit float (the element format of NVFP4 / MXFP4): 1 sign / 2 exp / 1 mantissa, bias 1, **16 finite codes (no Inf, no NaN)**, magnitudes `{0,.5,1,1.5,2,3,4,6}`, max 6, finite overflow + ±Inf saturate to ±6, NaN→-0. 1-byte storage (value in the low nibble), f32-register compute. Forks bump to `2.0.32`. Bit-exact to `ml_dtypes.float4_e2m1fn` (PyTorch/JAX share it).
+
+- **First-class IR primitive on all 6 backends** (CPU, CUDA, OpenCL, WebGPU, WebGL, Wasm), mirroring the FP8 wiring: `BasicValueType.Float4E2M1` + `ArithmeticBasicValueType.Float4E2M1` (appended at the end - all existing ordinals + positional type tables unchanged), `INumber<Float4E2M1>` (E2M1 has neither Inf nor NaN), const-fold, `Interop.FloatAsInt`, and `AcceleratorRequirements.RequiresFloat4E2M1` (always-true no-op filter like bf16/FP8). The float↔FP4 conversion is **portable bit-manipulation** on every backend (no native cvt → works on every CUDA arch incl. pre-Ampere 1080/2060), byte-identical across all 6.
+- **Fixed a real latent low-precision store bug (Rule 2a).** On PTX the "low-precision value stored to a wider buffer" guard (`floatBuf[i] = (float)lowpBuf[i]`) covered only bf16, so an FP8 **or** FP4 decode-to-float emitted `st.b8` into the 4-byte slot → read back ~0. Found via the FP4 decode kernel + a PTX dump; generalized the guard to bf16 + Float8E4M3 + Float8E5M2 + Float4E2M1. FP8 decode-to-float was silently broken (untested) before this.
+- **Fixed FP8/FP4 by-value sub-word SCALAR params on Wasm + WebGL.** A by-value 1-byte float scalar (e.g. `scale`/`bias` in a generic relu kernel) fell through the host scalar-marshaling switch (no FP8/FP4 case) → struct-serialized (Wasm: garbage) / uniform never sent (WebGL: arrived as 0). Added FP8 + FP4 to the host widen-to-f32 path next to Half/bf16 (the f32-register model). This was a latent FP8 gap too - FP8 only had buffer round-trip tests, never a scalar-param test.
+- Gates: PMT `Float4E2M1` (round-trip + generic relu with FP4 scalar params + float→FP4 RNE/saturate/NaN) **23/0 all 6 backends**; `GenericPrecision` (Half/bf16/FP4 scalar relu) 30/0; `AcceleratorRequirements` 19/0/1; no regression (`PrecisionConvert_Float8` 16/0, desktop `fp8-verify` 257/257, `bf16-f16-oracle` 65536/65536). New harness `DemoConsole -- fp4-verify` (CPU/OpenCL/CUDA bit-exact: convert 24/24, decode 16/16, relu 256/256). Radix-sort keys for `Float4E2M1` follow in a later release.
+
 ## 4.14.0-local.4 (2026-06-17) - Low-precision data-type parity to 100% (selectable saturating cast + complete radix grid; fixes a WebGL FP8-struct-field bug)
 
 Closes the last parity gaps across the four low-precision float types (`Half`, `BFloat16`, `Float8E4M3`, `Float8E5M2`) so data-type support is feature-complete with no lingering items. Forks bump to `2.0.31`.

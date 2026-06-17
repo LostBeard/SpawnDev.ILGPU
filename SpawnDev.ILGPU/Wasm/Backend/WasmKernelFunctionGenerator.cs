@@ -1836,6 +1836,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // FP8 load (1-byte element, promoted to f32 via inline bit conversion)
             bool isFloat8E4M3Ld = value.Type is PrimitiveType ptF8a && ptF8a.BasicValueType == BasicValueType.Float8E4M3;
             bool isFloat8E5M2Ld = value.Type is PrimitiveType ptF8b && ptF8b.BasicValueType == BasicValueType.Float8E5M2;
+            // FP4 load (1-byte element, 4-bit E2M1 value in low nibble, promoted to f32 via inline bit conversion)
+            bool isFloat4E2M1Ld = value.Type is PrimitiveType ptF4 && ptF4.BasicValueType == BasicValueType.Float4E2M1;
 
             // Push the address (byte offset in linear memory)
             EmitGetLocal(source2);
@@ -1879,6 +1881,19 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 else
                     WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load8U, 0, 0);
                 EmitFP8ToF32(isFloat8E4M3Ld);
+            }
+            else if (isFloat4E2M1Ld)
+            {
+                // FP4: load 1 byte (zero-extend), convert the raw 4-bit E2M1 nibble to f32 inline.
+                if (_hasBarriers)
+                {
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad8U);
+                    Code.Add(0x00); Code.Add(0x00); // align=0 (1 byte), offset=0
+                }
+                else
+                    WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load8U, 0, 0);
+                EmitFP4ToF32();
             }
             else if (isInt16)
             {
@@ -2736,6 +2751,22 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 return;
             }
 
+            // Global FP4 store (ArrayView1D<Float4E2M1>[idx] = …): value is f32 on the stack,
+            // convert to the 1-byte E2M1 pattern (4-bit value in low nibble) inline, 1-byte store.
+            if (target.Type is AddressSpaceType addrFp4Global
+                && addrFp4Global.ElementType is PrimitiveType ptFp4Global
+                && ptFp4Global.BasicValueType == BasicValueType.Float4E2M1)
+            {
+                EmitGetLocal(target);
+                EmitGetLocal(storeValue);
+                EmitF32ToFP4();
+                if (_hasBarriers)
+                    EmitVerifiedAtomicStore(8);
+                else
+                    WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store8, 0, 0);
+                return;
+            }
+
             // Fix B v4: DISABLED — #1's analysis shows barriers already separate Load/Store
             // phases. Each thread writes to a unique position (guaranteed by exclusive scan),
             // and struct Load scratch copies preserve data across barriers. The extra yield
@@ -2792,6 +2823,21 @@ EmitSaveAllLocals();
                     EmitGetLocal(storeValue);
                     if (GetWasmType(storeValue) == WasmOpCodes.F32)
                         EmitF32ToFP8(ptFp8Mis.BasicValueType == BasicValueType.Float8E4M3);
+                    WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store8, 0, 0);
+                    return;
+                }
+
+                // Same mis-lowering for FP4: the stored Float4E2M1 can arrive as a small
+                // StructureType wrapper. Convert the f32 to the 1-byte E2M1 pattern, 1-byte store.
+                if (target.Type is AddressSpaceType addrFp4Mis
+                    && addrFp4Mis.ElementType is PrimitiveType ptFp4Mis
+                    && ptFp4Mis.BasicValueType == BasicValueType.Float4E2M1
+                    && structType.Size <= 8)
+                {
+                    EmitGetLocal(target);
+                    EmitGetLocal(storeValue);
+                    if (GetWasmType(storeValue) == WasmOpCodes.F32)
+                        EmitF32ToFP4();
                     WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store8, 0, 0);
                     return;
                 }
@@ -6177,6 +6223,388 @@ EmitSaveAllLocals();
                 WasmModuleBuilder.EmitLocalGet(Code, sign);
                 WasmModuleBuilder.EmitLocalGet(Code, signif);
                 WasmModuleBuilder.EmitI32Const(Code, 0x7F);
+                Code.Add(WasmOpCodes.I32And);
+                Code.Add(WasmOpCodes.I32Or);
+                WasmModuleBuilder.EmitLocalSet(Code, result);
+            }
+            Code.Add(WasmOpCodes.End);
+
+            WasmModuleBuilder.EmitLocalGet(Code, result);
+        }
+
+        /// <summary>
+        /// Emits inline Wasm to convert an FP4 E2M1 raw byte (i32, the 4-bit value in the low nibble on
+        /// stack) to f32. E2M1FN: 1 sign / 2 exp / 1 mantissa, bias 1, 16 finite codes (NO Inf, NO NaN);
+        /// magnitudes {0,.5,1,1.5,2,3,4,6}. Direct port of the OpenCL <c>_e2m1_bits_to_f32</c> helper /
+        /// the managed <c>ConvertFloat4E2M1ToFloat</c> (CPU-verified bit-exact to ml_dtypes.float4_e2m1fn).
+        /// The only subnormal is 0.5 (e==0, m==1) -> f32 exp 126; no loop needed.
+        /// </summary>
+        private void EmitFP4ToF32()
+        {
+            var code = AllocateNewLocal(WasmOpCodes.I32);
+            var sign = AllocateNewLocal(WasmOpCodes.I32);
+            var expo = AllocateNewLocal(WasmOpCodes.I32);
+            var mant = AllocateNewLocal(WasmOpCodes.I32);
+            var result = AllocateNewLocal(WasmOpCodes.I32);
+
+            // code = raw & 0x0F
+            WasmModuleBuilder.EmitI32Const(Code, 0x0F);
+            Code.Add(WasmOpCodes.I32And);
+            WasmModuleBuilder.EmitLocalSet(Code, code);
+
+            // sign = (code & 0x8) << 28   (E2M1 sign bit 3 -> f32 sign bit 31)
+            WasmModuleBuilder.EmitLocalGet(Code, code);
+            WasmModuleBuilder.EmitI32Const(Code, 0x8);
+            Code.Add(WasmOpCodes.I32And);
+            WasmModuleBuilder.EmitI32Const(Code, 28);
+            Code.Add(WasmOpCodes.I32Shl);
+            WasmModuleBuilder.EmitLocalSet(Code, sign);
+
+            // expo = (code >> 1) & 0x3
+            WasmModuleBuilder.EmitLocalGet(Code, code);
+            WasmModuleBuilder.EmitI32Const(Code, 1);
+            Code.Add(WasmOpCodes.I32ShrU);
+            WasmModuleBuilder.EmitI32Const(Code, 0x3);
+            Code.Add(WasmOpCodes.I32And);
+            WasmModuleBuilder.EmitLocalSet(Code, expo);
+
+            // mant = code & 0x1
+            WasmModuleBuilder.EmitLocalGet(Code, code);
+            WasmModuleBuilder.EmitI32Const(Code, 0x1);
+            Code.Add(WasmOpCodes.I32And);
+            WasmModuleBuilder.EmitLocalSet(Code, mant);
+
+            // Default = NORMAL: result = sign | ((expo - 1 + 127) << 23) | (mant << 22)
+            WasmModuleBuilder.EmitLocalGet(Code, sign);
+            WasmModuleBuilder.EmitLocalGet(Code, expo);
+            WasmModuleBuilder.EmitI32Const(Code, 126); // -1 + 127
+            Code.Add(WasmOpCodes.I32Add);
+            WasmModuleBuilder.EmitI32Const(Code, 23);
+            Code.Add(WasmOpCodes.I32Shl);
+            Code.Add(WasmOpCodes.I32Or);
+            WasmModuleBuilder.EmitLocalGet(Code, mant);
+            WasmModuleBuilder.EmitI32Const(Code, 22);
+            Code.Add(WasmOpCodes.I32Shl);
+            Code.Add(WasmOpCodes.I32Or);
+            WasmModuleBuilder.EmitLocalSet(Code, result);
+
+            // expo == 0 -> zero or subnormal (0.5)
+            WasmModuleBuilder.EmitLocalGet(Code, expo);
+            Code.Add(WasmOpCodes.I32Eqz);
+            Code.Add(WasmOpCodes.If);
+            Code.Add(WasmOpCodes.Void);
+            {
+                // mant == 0 -> result = sign (+-0); else -> result = sign | (126 << 23) (= +-0.5)
+                WasmModuleBuilder.EmitLocalGet(Code, mant);
+                Code.Add(WasmOpCodes.I32Eqz);
+                Code.Add(WasmOpCodes.If);
+                Code.Add(WasmOpCodes.Void);
+                WasmModuleBuilder.EmitLocalGet(Code, sign);
+                WasmModuleBuilder.EmitLocalSet(Code, result);
+                Code.Add(WasmOpCodes.Else);
+                WasmModuleBuilder.EmitLocalGet(Code, sign);
+                WasmModuleBuilder.EmitI32Const(Code, 126 << 23);
+                Code.Add(WasmOpCodes.I32Or);
+                WasmModuleBuilder.EmitLocalSet(Code, result);
+                Code.Add(WasmOpCodes.End);
+            }
+            Code.Add(WasmOpCodes.End);
+
+            // f32.reinterpret(result)
+            WasmModuleBuilder.EmitLocalGet(Code, result);
+            Code.Add(WasmOpCodes.F32ReinterpretI32);
+        }
+
+        /// <summary>
+        /// Emits inline Wasm to convert f32 (on stack) to an FP4 E2M1 raw byte (i32, 4-bit value in the
+        /// low nibble). RNE rounding; finite overflow AND +-Inf saturate to +-6 (0x7 / 0xF); NaN -> -0
+        /// (0x8). Direct port of the OpenCL <c>_f32_to_e2m1_bits</c> helper / the managed
+        /// <c>ConvertFloatToFloat4E2M1</c> (CPU-verified bit-exact to ml_dtypes.float4_e2m1fn). The
+        /// subnormal path is branchless; the shift is clamped (shift &gt; 31 -> +-0) like the reference.
+        /// </summary>
+        private void EmitF32ToFP4()
+        {
+            var bits = AllocateNewLocal(WasmOpCodes.I32);
+            var sign = AllocateNewLocal(WasmOpCodes.I32);
+            var rest = AllocateNewLocal(WasmOpCodes.I32);
+            var f32Exp = AllocateNewLocal(WasmOpCodes.I32);
+            var f32Mant = AllocateNewLocal(WasmOpCodes.I32);
+            var e = AllocateNewLocal(WasmOpCodes.I32);
+            var result = AllocateNewLocal(WasmOpCodes.I32);
+            var signif = AllocateNewLocal(WasmOpCodes.I32);
+            var shift = AllocateNewLocal(WasmOpCodes.I32);
+            var q = AllocateNewLocal(WasmOpCodes.I32);
+            var roundBit = AllocateNewLocal(WasmOpCodes.I32);
+            var sticky = AllocateNewLocal(WasmOpCodes.I32);
+            var mant1 = AllocateNewLocal(WasmOpCodes.I32);
+            var outBits = AllocateNewLocal(WasmOpCodes.I32);
+            var done = AllocateNewLocal(WasmOpCodes.I32); // 1 once result is final
+
+            Code.Add(WasmOpCodes.I32ReinterpretF32);
+            WasmModuleBuilder.EmitLocalSet(Code, bits);
+            WasmModuleBuilder.EmitI32Const(Code, 0);
+            WasmModuleBuilder.EmitLocalSet(Code, done);
+
+            // sign = (bits >> 28) & 0x8   (E2M1 sign bit 3)
+            WasmModuleBuilder.EmitLocalGet(Code, bits);
+            WasmModuleBuilder.EmitI32Const(Code, 28);
+            Code.Add(WasmOpCodes.I32ShrU);
+            WasmModuleBuilder.EmitI32Const(Code, 0x8);
+            Code.Add(WasmOpCodes.I32And);
+            WasmModuleBuilder.EmitLocalSet(Code, sign);
+
+            // rest = bits & 0x7FFFFFFF
+            WasmModuleBuilder.EmitLocalGet(Code, bits);
+            WasmModuleBuilder.EmitI32Const(Code, 0x7FFFFFFF);
+            Code.Add(WasmOpCodes.I32And);
+            WasmModuleBuilder.EmitLocalSet(Code, rest);
+
+            // NaN: rest > 0x7F800000 -> 0x8 (-0)
+            WasmModuleBuilder.EmitLocalGet(Code, rest);
+            WasmModuleBuilder.EmitI32Const(Code, 0x7F800000);
+            Code.Add(WasmOpCodes.I32GtU);
+            Code.Add(WasmOpCodes.If);
+            Code.Add(WasmOpCodes.Void);
+            WasmModuleBuilder.EmitI32Const(Code, 0x8);
+            WasmModuleBuilder.EmitLocalSet(Code, result);
+            WasmModuleBuilder.EmitI32Const(Code, 1);
+            WasmModuleBuilder.EmitLocalSet(Code, done);
+            Code.Add(WasmOpCodes.End);
+
+            // +-Inf: rest == 0x7F800000 -> sign | 0x7 (+-6)
+            WasmModuleBuilder.EmitLocalGet(Code, done);
+            Code.Add(WasmOpCodes.I32Eqz);
+            Code.Add(WasmOpCodes.If);
+            Code.Add(WasmOpCodes.Void);
+            WasmModuleBuilder.EmitLocalGet(Code, rest);
+            WasmModuleBuilder.EmitI32Const(Code, 0x7F800000);
+            Code.Add(WasmOpCodes.I32Eq);
+            Code.Add(WasmOpCodes.If);
+            Code.Add(WasmOpCodes.Void);
+            WasmModuleBuilder.EmitLocalGet(Code, sign);
+            WasmModuleBuilder.EmitI32Const(Code, 0x7);
+            Code.Add(WasmOpCodes.I32Or);
+            WasmModuleBuilder.EmitLocalSet(Code, result);
+            WasmModuleBuilder.EmitI32Const(Code, 1);
+            WasmModuleBuilder.EmitLocalSet(Code, done);
+            Code.Add(WasmOpCodes.End);
+            Code.Add(WasmOpCodes.End);
+
+            // f32Exp = (rest >> 23) & 0xFF ; f32Mant = rest & 0x7FFFFF ; e = f32Exp - 127
+            WasmModuleBuilder.EmitLocalGet(Code, rest);
+            WasmModuleBuilder.EmitI32Const(Code, 23);
+            Code.Add(WasmOpCodes.I32ShrU);
+            WasmModuleBuilder.EmitI32Const(Code, 0xFF);
+            Code.Add(WasmOpCodes.I32And);
+            WasmModuleBuilder.EmitLocalSet(Code, f32Exp);
+            WasmModuleBuilder.EmitLocalGet(Code, rest);
+            WasmModuleBuilder.EmitI32Const(Code, 0x7FFFFF);
+            Code.Add(WasmOpCodes.I32And);
+            WasmModuleBuilder.EmitLocalSet(Code, f32Mant);
+            WasmModuleBuilder.EmitLocalGet(Code, f32Exp);
+            WasmModuleBuilder.EmitI32Const(Code, 127);
+            Code.Add(WasmOpCodes.I32Sub);
+            WasmModuleBuilder.EmitLocalSet(Code, e);
+
+            // FINITE OVERFLOW: e > 2 -> sign | 0x7 (+-6)
+            WasmModuleBuilder.EmitLocalGet(Code, done);
+            Code.Add(WasmOpCodes.I32Eqz);
+            Code.Add(WasmOpCodes.If);
+            Code.Add(WasmOpCodes.Void);
+            WasmModuleBuilder.EmitLocalGet(Code, e);
+            WasmModuleBuilder.EmitI32Const(Code, 2);
+            Code.Add(WasmOpCodes.I32GtS);
+            Code.Add(WasmOpCodes.If);
+            Code.Add(WasmOpCodes.Void);
+            WasmModuleBuilder.EmitLocalGet(Code, sign);
+            WasmModuleBuilder.EmitI32Const(Code, 0x7);
+            Code.Add(WasmOpCodes.I32Or);
+            WasmModuleBuilder.EmitLocalSet(Code, result);
+            WasmModuleBuilder.EmitI32Const(Code, 1);
+            WasmModuleBuilder.EmitLocalSet(Code, done);
+            Code.Add(WasmOpCodes.End);
+            Code.Add(WasmOpCodes.End);
+
+            // UNDERFLOW / subnormal: e < 0
+            WasmModuleBuilder.EmitLocalGet(Code, done);
+            Code.Add(WasmOpCodes.I32Eqz);
+            Code.Add(WasmOpCodes.If);
+            Code.Add(WasmOpCodes.Void);
+            WasmModuleBuilder.EmitLocalGet(Code, e);
+            WasmModuleBuilder.EmitI32Const(Code, 0);
+            Code.Add(WasmOpCodes.I32LtS);
+            Code.Add(WasmOpCodes.If);
+            Code.Add(WasmOpCodes.Void);
+            {
+                // f32Exp == 0 -> +-0 = sign  (f32 zero/subnormal)
+                WasmModuleBuilder.EmitLocalGet(Code, f32Exp);
+                Code.Add(WasmOpCodes.I32Eqz);
+                Code.Add(WasmOpCodes.If);
+                Code.Add(WasmOpCodes.Void);
+                WasmModuleBuilder.EmitLocalGet(Code, sign);
+                WasmModuleBuilder.EmitLocalSet(Code, result);
+                WasmModuleBuilder.EmitI32Const(Code, 1);
+                WasmModuleBuilder.EmitLocalSet(Code, done);
+                Code.Add(WasmOpCodes.End);
+
+                // signif = f32Mant | 0x800000 ; shift = (-1 - e) + 23
+                WasmModuleBuilder.EmitLocalGet(Code, f32Mant);
+                WasmModuleBuilder.EmitI32Const(Code, 0x800000);
+                Code.Add(WasmOpCodes.I32Or);
+                WasmModuleBuilder.EmitLocalSet(Code, signif);
+                WasmModuleBuilder.EmitI32Const(Code, -1);
+                WasmModuleBuilder.EmitLocalGet(Code, e);
+                Code.Add(WasmOpCodes.I32Sub);
+                WasmModuleBuilder.EmitI32Const(Code, 23);
+                Code.Add(WasmOpCodes.I32Add);
+                WasmModuleBuilder.EmitLocalSet(Code, shift);
+
+                // shift > 31 -> +-0 (only if not already done)
+                WasmModuleBuilder.EmitLocalGet(Code, done);
+                Code.Add(WasmOpCodes.I32Eqz);
+                Code.Add(WasmOpCodes.If);
+                Code.Add(WasmOpCodes.Void);
+                WasmModuleBuilder.EmitLocalGet(Code, shift);
+                WasmModuleBuilder.EmitI32Const(Code, 31);
+                Code.Add(WasmOpCodes.I32GtS);
+                Code.Add(WasmOpCodes.If);
+                Code.Add(WasmOpCodes.Void);
+                WasmModuleBuilder.EmitLocalGet(Code, sign);
+                WasmModuleBuilder.EmitLocalSet(Code, result);
+                WasmModuleBuilder.EmitI32Const(Code, 1);
+                WasmModuleBuilder.EmitLocalSet(Code, done);
+                Code.Add(WasmOpCodes.End);
+                Code.Add(WasmOpCodes.End);
+
+                // if still not done: q = signif >> shift; RNE; result = sign | (q & 0x7)
+                WasmModuleBuilder.EmitLocalGet(Code, done);
+                Code.Add(WasmOpCodes.I32Eqz);
+                Code.Add(WasmOpCodes.If);
+                Code.Add(WasmOpCodes.Void);
+                {
+                    // q = signif >> shift
+                    WasmModuleBuilder.EmitLocalGet(Code, signif);
+                    WasmModuleBuilder.EmitLocalGet(Code, shift);
+                    Code.Add(WasmOpCodes.I32ShrU);
+                    WasmModuleBuilder.EmitLocalSet(Code, q);
+                    // roundBit = (signif >> (shift-1)) & 1
+                    WasmModuleBuilder.EmitLocalGet(Code, signif);
+                    WasmModuleBuilder.EmitLocalGet(Code, shift);
+                    WasmModuleBuilder.EmitI32Const(Code, 1);
+                    Code.Add(WasmOpCodes.I32Sub);
+                    Code.Add(WasmOpCodes.I32ShrU);
+                    WasmModuleBuilder.EmitI32Const(Code, 1);
+                    Code.Add(WasmOpCodes.I32And);
+                    WasmModuleBuilder.EmitLocalSet(Code, roundBit);
+                    // sticky = (signif & ((1 << (shift-1)) - 1)) != 0
+                    WasmModuleBuilder.EmitLocalGet(Code, signif);
+                    WasmModuleBuilder.EmitI32Const(Code, 1);
+                    WasmModuleBuilder.EmitLocalGet(Code, shift);
+                    WasmModuleBuilder.EmitI32Const(Code, 1);
+                    Code.Add(WasmOpCodes.I32Sub);
+                    Code.Add(WasmOpCodes.I32Shl);
+                    WasmModuleBuilder.EmitI32Const(Code, 1);
+                    Code.Add(WasmOpCodes.I32Sub);
+                    Code.Add(WasmOpCodes.I32And);
+                    WasmModuleBuilder.EmitI32Const(Code, 0);
+                    Code.Add(WasmOpCodes.I32Ne);
+                    WasmModuleBuilder.EmitLocalSet(Code, sticky);
+                    // if roundBit==1 && (sticky != 0 || (q & 1)) -> q++
+                    WasmModuleBuilder.EmitLocalGet(Code, roundBit);
+                    WasmModuleBuilder.EmitI32Const(Code, 1);
+                    Code.Add(WasmOpCodes.I32Eq);
+                    WasmModuleBuilder.EmitLocalGet(Code, sticky);
+                    WasmModuleBuilder.EmitLocalGet(Code, q);
+                    WasmModuleBuilder.EmitI32Const(Code, 1);
+                    Code.Add(WasmOpCodes.I32And);
+                    Code.Add(WasmOpCodes.I32Or);
+                    Code.Add(WasmOpCodes.I32And);
+                    Code.Add(WasmOpCodes.If);
+                    Code.Add(WasmOpCodes.Void);
+                    WasmModuleBuilder.EmitLocalGet(Code, q);
+                    WasmModuleBuilder.EmitI32Const(Code, 1);
+                    Code.Add(WasmOpCodes.I32Add);
+                    WasmModuleBuilder.EmitLocalSet(Code, q);
+                    Code.Add(WasmOpCodes.End);
+                    // result = sign | (q & 0x7)
+                    WasmModuleBuilder.EmitLocalGet(Code, sign);
+                    WasmModuleBuilder.EmitLocalGet(Code, q);
+                    WasmModuleBuilder.EmitI32Const(Code, 0x7);
+                    Code.Add(WasmOpCodes.I32And);
+                    Code.Add(WasmOpCodes.I32Or);
+                    WasmModuleBuilder.EmitLocalSet(Code, result);
+                    WasmModuleBuilder.EmitI32Const(Code, 1);
+                    WasmModuleBuilder.EmitLocalSet(Code, done);
+                }
+                Code.Add(WasmOpCodes.End);
+            }
+            Code.Add(WasmOpCodes.End);
+            Code.Add(WasmOpCodes.End);
+
+            // NORMAL range (e in 0..2, if not done): round mantissa 23 -> 1 bit (RNE).
+            WasmModuleBuilder.EmitLocalGet(Code, done);
+            Code.Add(WasmOpCodes.I32Eqz);
+            Code.Add(WasmOpCodes.If);
+            Code.Add(WasmOpCodes.Void);
+            {
+                // mant1 = f32Mant >> 22  (top mantissa bit)
+                WasmModuleBuilder.EmitLocalGet(Code, f32Mant);
+                WasmModuleBuilder.EmitI32Const(Code, 22);
+                Code.Add(WasmOpCodes.I32ShrU);
+                WasmModuleBuilder.EmitLocalSet(Code, mant1);
+                // roundBit = (f32Mant >> 21) & 1
+                WasmModuleBuilder.EmitLocalGet(Code, f32Mant);
+                WasmModuleBuilder.EmitI32Const(Code, 21);
+                Code.Add(WasmOpCodes.I32ShrU);
+                WasmModuleBuilder.EmitI32Const(Code, 1);
+                Code.Add(WasmOpCodes.I32And);
+                WasmModuleBuilder.EmitLocalSet(Code, roundBit);
+                // sticky = (f32Mant & 0x1FFFFF) != 0
+                WasmModuleBuilder.EmitLocalGet(Code, f32Mant);
+                WasmModuleBuilder.EmitI32Const(Code, 0x1FFFFF);
+                Code.Add(WasmOpCodes.I32And);
+                WasmModuleBuilder.EmitI32Const(Code, 0);
+                Code.Add(WasmOpCodes.I32Ne);
+                WasmModuleBuilder.EmitLocalSet(Code, sticky);
+                // outBits = ((e + 1) << 1) | mant1
+                WasmModuleBuilder.EmitLocalGet(Code, e);
+                WasmModuleBuilder.EmitI32Const(Code, 1);
+                Code.Add(WasmOpCodes.I32Add);
+                WasmModuleBuilder.EmitI32Const(Code, 1);
+                Code.Add(WasmOpCodes.I32Shl);
+                WasmModuleBuilder.EmitLocalGet(Code, mant1);
+                Code.Add(WasmOpCodes.I32Or);
+                WasmModuleBuilder.EmitLocalSet(Code, outBits);
+                // if roundBit==1 && (sticky != 0 || (mant1 & 1)) -> outBits++
+                WasmModuleBuilder.EmitLocalGet(Code, roundBit);
+                WasmModuleBuilder.EmitI32Const(Code, 1);
+                Code.Add(WasmOpCodes.I32Eq);
+                WasmModuleBuilder.EmitLocalGet(Code, sticky);
+                WasmModuleBuilder.EmitLocalGet(Code, mant1);
+                WasmModuleBuilder.EmitI32Const(Code, 1);
+                Code.Add(WasmOpCodes.I32And);
+                Code.Add(WasmOpCodes.I32Or);
+                Code.Add(WasmOpCodes.I32And);
+                Code.Add(WasmOpCodes.If);
+                Code.Add(WasmOpCodes.Void);
+                WasmModuleBuilder.EmitLocalGet(Code, outBits);
+                WasmModuleBuilder.EmitI32Const(Code, 1);
+                Code.Add(WasmOpCodes.I32Add);
+                WasmModuleBuilder.EmitLocalSet(Code, outBits);
+                Code.Add(WasmOpCodes.End);
+                // carry past max magnitude (0x7 = 6) saturates to 6: if outBits > 0x7 -> outBits = 0x7
+                WasmModuleBuilder.EmitLocalGet(Code, outBits);
+                WasmModuleBuilder.EmitI32Const(Code, 0x7);
+                Code.Add(WasmOpCodes.I32GtU);
+                Code.Add(WasmOpCodes.If);
+                Code.Add(WasmOpCodes.Void);
+                WasmModuleBuilder.EmitI32Const(Code, 0x7);
+                WasmModuleBuilder.EmitLocalSet(Code, outBits);
+                Code.Add(WasmOpCodes.End);
+                // result = sign | (outBits & 0x7)
+                WasmModuleBuilder.EmitLocalGet(Code, sign);
+                WasmModuleBuilder.EmitLocalGet(Code, outBits);
+                WasmModuleBuilder.EmitI32Const(Code, 0x7);
                 Code.Add(WasmOpCodes.I32And);
                 Code.Add(WasmOpCodes.I32Or);
                 WasmModuleBuilder.EmitLocalSet(Code, result);

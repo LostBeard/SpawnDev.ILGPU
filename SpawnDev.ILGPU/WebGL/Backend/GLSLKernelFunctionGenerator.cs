@@ -97,6 +97,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         // FP8 sub-word params (1-byte storage, 4 per R32I texel): paramIdx -> isE4M3
         // (true = Float8E4M3, false = Float8E5M2). Load/store apply _e4m3/_e5m2 conversion.
         private readonly Dictionary<int, bool> _subWordFloat8Params = new();
+        // FP4 sub-word params (E2M1FN, 1-byte storage, 4-bit value in low nibble, 4 per R32I texel).
+        // Load/store apply _e2m1_to_f32 / _f32_to_e2m1 conversion (value computes as float).
+        private readonly HashSet<int> _subWordFloat4Params = new();
         // Unsigned sub-word params need zero-extension instead of sign extension
         private readonly HashSet<int> _subWordUnsignedParams = new();
         // Maps LEA variable names to their sub-word param index
@@ -573,13 +576,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // 4. Emit emulation library only if the kernel actually uses f64/i64/f16 types.
             //    Including the library unconditionally produces a massive vertex shader
             //    that ANGLE's D3D11 backend cannot compile with Transform Feedback.
-            var (kernelNeedsF64, kernelNeedsI64, kernelNeedsF16, kernelNeedsBF16, kernelNeedsFP8) = KernelUsesEmulatedTypes();
+            var (kernelNeedsF64, kernelNeedsI64, kernelNeedsF16, kernelNeedsBF16, kernelNeedsFP8, kernelNeedsFP4) = KernelUsesEmulatedTypes();
             // Float16 emulation is always active on WebGL when the kernel uses Half
             // types - GLSL ES 3.0 has no hardware f16 path. Detected via IR scan above,
             // not just _subWordFloat16Params (which is populated AFTER library emission).
             if ((Backend.EnableF64Emulation && kernelNeedsF64) ||
                 (Backend.EnableI64Emulation && kernelNeedsI64) ||
-                kernelNeedsF16 || kernelNeedsBF16 || kernelNeedsFP8)
+                kernelNeedsF16 || kernelNeedsBF16 || kernelNeedsFP8 || kernelNeedsFP4)
             {
                 Builder.AppendLine("// ============ Emulation Library ============");
                 Builder.AppendLine(GLSLEmulationLibrary.GetEmulationLibrary(
@@ -588,7 +591,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     Backend.EnableI64Emulation && kernelNeedsI64,
                     kernelNeedsF16,
                     includeBF16: kernelNeedsBF16,
-                    includeFP8: kernelNeedsFP8));
+                    includeFP8: kernelNeedsFP8,
+                    includeFP4: kernelNeedsFP4));
             }
 
             // 5. Insert a placeholder for struct type definitions.
@@ -659,16 +663,17 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// the entire emulation library for simple float32 kernels, which causes
         /// ANGLE D3D11 to fail compiling the large vertex shader.
         /// </summary>
-        private (bool needsF64, bool needsI64, bool needsF16, bool needsBF16, bool needsFP8) KernelUsesEmulatedTypes()
+        private (bool needsF64, bool needsI64, bool needsF16, bool needsBF16, bool needsFP8, bool needsFP4) KernelUsesEmulatedTypes()
         {
             bool needsF64 = _emulatedF64Params.Count > 0;
             bool needsI64 = _emulatedI64Params.Count > 0;
             bool needsF16 = _subWordFloat16Params.Count > 0;
             bool needsBF16 = _subWordBFloat16Params.Count > 0;
             bool needsFP8 = _subWordFloat8Params.Count > 0;
+            bool needsFP4 = _subWordFloat4Params.Count > 0;
 
             // Early exit if all already detected from parameters
-            if (needsF64 && needsI64 && needsF16 && needsBF16 && needsFP8) return (needsF64, needsI64, needsF16, needsBF16, needsFP8);
+            if (needsF64 && needsI64 && needsF16 && needsBF16 && needsFP8 && needsFP4) return (needsF64, needsI64, needsF16, needsBF16, needsFP8, needsFP4);
 
             // Scan all values in the kernel's IR blocks for f64/i64/f16 usage
             foreach (var block in Method.Blocks)
@@ -686,12 +691,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         needsBF16 = true;
                     if (!needsFP8 && (bvt == BasicValueType.Float8E4M3 || bvt == BasicValueType.Float8E5M2))
                         needsFP8 = true;
+                    if (!needsFP4 && bvt == BasicValueType.Float4E2M1)
+                        needsFP4 = true;
 
-                    if (needsF64 && needsI64 && needsF16 && needsBF16 && needsFP8) return (needsF64, needsI64, needsF16, needsBF16, needsFP8);
+                    if (needsF64 && needsI64 && needsF16 && needsBF16 && needsFP8 && needsFP4) return (needsF64, needsI64, needsF16, needsBF16, needsFP8, needsFP4);
                 }
             }
 
-            return (needsF64, needsI64, needsF16, needsBF16, needsFP8);
+            return (needsF64, needsI64, needsF16, needsBF16, needsFP8, needsFP4);
         }
 
         private static TypeNode UnwrapType(TypeNode type)
@@ -779,6 +786,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             public bool IsFloat8 { get; set; }
             /// <summary>When <see cref="IsFloat8"/>: true = Float8E4M3, false = Float8E5M2.</summary>
             public bool IsFloat8E4M3 { get; set; }
+            /// <summary>True when sub-word and FP4-emulated (E2M1FN, 1-byte storage, 4-bit low nibble).</summary>
+            public bool IsFloat4 { get; set; }
             /// <summary>The raw element type (PrimitiveType or StructureType) of the view.</summary>
             public TypeNode? ViewElementType { get; set; }
             /// <summary>The C# field type from the user's struct (used by host-side reflection).</summary>
@@ -1034,6 +1043,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                                     info.IsFloat8 = true;
                                     info.IsFloat8E4M3 = false;
                                     break;
+                                case BasicValueType.Float4E2M1:
+                                    info.SubWordElemSize = 1;       // 1-byte FP4 (4-bit low nibble), 4 per R32I texel
+                                    info.GlslElementType = "int";
+                                    info.IsFloat4 = true;
+                                    break;
                                 case BasicValueType.Float32:
                                     info.GlslElementType = "float";
                                     break;
@@ -1190,6 +1204,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         {
                             _subWordParams[param.Index] = 1; // FP8 = 1 byte (4 per texel)
                             _subWordFloat8Params[param.Index] = swPt.BasicValueType == BasicValueType.Float8E4M3;
+                            glslType = "int"; // Force R32I texture for packed sub-word bit data
+                        }
+                        else if (swPt.BasicValueType == BasicValueType.Float4E2M1)
+                        {
+                            _subWordParams[param.Index] = 1; // FP4 = 1 byte storage (4-bit low nibble, 4 per texel)
+                            _subWordFloat4Params.Add(param.Index);
                             glslType = "int"; // Force R32I texture for packed sub-word bit data
                         }
                     }
@@ -1351,6 +1371,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         if (f.IsFloat16) _subWordFloat16Params.Add(synth);
                         if (f.IsBFloat16) _subWordBFloat16Params.Add(synth);
                         if (f.IsFloat8) _subWordFloat8Params[synth] = f.IsFloat8E4M3;
+                        if (f.IsFloat4) _subWordFloat4Params.Add(synth);
                     }
 
                     if (isInputBuffer)
@@ -3029,6 +3050,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     if (_subWordFloat8Params.TryGetValue(subWordParamIdx, out bool fp8IsE4M3))
                         // FP8: same 1-byte storage, convert the raw byte to float (value computes as float).
                         extractExpr = $"{(fp8IsE4M3 ? "_e4m3_to_f32" : "_e5m2_to_f32")}(uint({rawByte}))";
+                    else if (_subWordFloat4Params.Contains(subWordParamIdx))
+                        // FP4: same 1-byte storage, convert the raw byte (4-bit value in low nibble) to float.
+                        extractExpr = $"_e2m1_to_f32(uint({rawByte}))";
                     else if (_subWordUnsignedParams.Contains(subWordParamIdx))
                         extractExpr = rawByte; // byte: zero-extend (0-255)
                     else
@@ -3257,6 +3281,17 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         // FP8 sub-word store: convert f32 -> 8-bit pattern, write to the TF varying;
                         // host readback packs 4 bytes per texel (the byte sub-word layout).
                         AppendLine($"{output.VaryingName} = int({(fp8IsE4M3Store ? "_f32_to_e4m3" : "_f32_to_e5m2")}({val}));");
+                        return;
+                    }
+                    if (_subWordFloat4Params.Contains(leaParamIdx))
+                    {
+                        // FP4 sub-word store: convert f32 -> 4-bit pattern (low nibble), write to the TF
+                        // varying; host readback packs 4 bytes per texel (the byte sub-word layout).
+                        // This branch fires ONLY when the TARGET element is FP4. A widening store to a
+                        // wider buffer (floatBuf[i] = (float)fp4Buf[i]) has a Float32 target param so it
+                        // is NOT in _subWordFloat4Params and falls through to the f32 single-element
+                        // store below with the already-widened val - no re-narrowing.
+                        AppendLine($"{output.VaryingName} = int(_f32_to_e2m1({val}));");
                         return;
                     }
 

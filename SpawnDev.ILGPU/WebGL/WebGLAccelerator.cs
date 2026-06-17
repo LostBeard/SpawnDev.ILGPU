@@ -972,6 +972,12 @@ namespace SpawnDev.ILGPU.WebGL
                             // The arg-switch + EncodeUniformScalarValue below widen the value to f32.
                             global::ILGPU.Half => "float",
                             global::ILGPU.BFloat16 => "float",
+                            // FP8 (Float8E4M3/E5M2) + FP4 (Float4E2M1) scalars map to GLSL `float` (emulated,
+                            // same f32-register model as Half/bf16 - the scalar param is declared `float`).
+                            // Without these the by-value scalar fell to `_ => null` and arrived as 0.
+                            global::ILGPU.Float8E4M3 => "float",
+                            global::ILGPU.Float8E5M2 => "float",
+                            global::ILGPU.Float4E2M1 => "float",
                             bool => "bool",
                             byte => "int",
                             sbyte => "int",
@@ -1010,6 +1016,11 @@ namespace SpawnDev.ILGPU.WebGL
                                 // arrived as 0.
                                 global::ILGPU.Half hVal => (float)hVal,
                                 global::ILGPU.BFloat16 bfVal => (float)bfVal,
+                                // FP8/FP4 scalars: widen to f32 (lossless) so the float-uniform path
+                                // delivers the value; the GLSL scalar param is declared `float`.
+                                global::ILGPU.Float8E4M3 e4Val => (float)e4Val,
+                                global::ILGPU.Float8E5M2 e5Val => (float)e5Val,
+                                global::ILGPU.Float4E2M1 fp4Val => (float)fp4Val,
                                 bool blVal => blVal ? 1 : 0,
                                 byte bVal => (int)bVal,
                                 sbyte sbVal => (int)sbVal,

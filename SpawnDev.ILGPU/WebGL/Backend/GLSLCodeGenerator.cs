@@ -1711,6 +1711,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 BasicValueType.BFloat16 => FormatFloat((float)value.BFloat16Value),
                 BasicValueType.Float8E4M3 => FormatFloat((float)value.Float8E4M3Value),
                 BasicValueType.Float8E5M2 => FormatFloat((float)value.Float8E5M2Value),
+                BasicValueType.Float4E2M1 => FormatFloat((float)value.Float4E2M1Value),
                 BasicValueType.Float32 => FormatFloat(value.Float32Value),
                 BasicValueType.Float64 => FormatFloat((float)value.Float64Value),
                 _ => "0"
@@ -2163,6 +2164,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 AppendLine($"{target} = int(_f32_to_e4m3({source}));");
             else if (value.Value.BasicValueType == BasicValueType.Float8E5M2)
                 AppendLine($"{target} = int(_f32_to_e5m2({source}));");
+            else if (value.Value.BasicValueType == BasicValueType.Float4E2M1)
+                // Emulated FP4 is a GLSL `float`; FloatAsInt(fp4) must yield the 4-bit FP4 pattern
+                // (low nibble; AscendingFloat4E2M1 radix sort, NumBits=4), not floatBitsToInt of the
+                // widened f32. Compress via _f32_to_e2m1, parallel to the FP8 case above.
+                AppendLine($"{target} = int(_f32_to_e2m1({source}));");
             else
                 AppendLine($"{target} = floatBitsToInt({source});");
         }
@@ -2189,6 +2195,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 AppendLine($"{target} = _e4m3_to_f32(uint({source}));");
             else if (value.BasicValueType == BasicValueType.Float8E5M2)
                 AppendLine($"{target} = _e5m2_to_f32(uint({source}));");
+            else if (value.BasicValueType == BasicValueType.Float4E2M1)
+                // Reverse for FP4: expand the low-nibble FP4 pattern to the emulated GLSL `float`.
+                // Defensive - no IntAsFloat->Float4 frontend overload today.
+                AppendLine($"{target} = _e2m1_to_f32(uint({source}));");
             else
                 AppendLine($"{target} = intBitsToFloat({source});");
         }

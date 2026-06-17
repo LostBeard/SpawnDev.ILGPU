@@ -84,6 +84,14 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             => await RunTest(async accelerator =>
                 await RunPrecisionRoundTripCore<T>(accelerator, toT, toF));
 
+        // FP4 (Float4E2M1) round-trip on all 6 backends (1-byte storage, value in the low nibble,
+        // f32-register compute, portable conversion incl. CUDA). Bit-exact vs the concrete (T)(float)x.
+        [TestMethod]
+        public async Task PrecisionConvert_Float4E2M1_RoundTripBitExact() =>
+            await RunTest(async accelerator =>
+                await RunPrecisionRoundTripCore<global::ILGPU.Float4E2M1>(accelerator,
+                    v => (global::ILGPU.Float4E2M1)v, v => (float)v));
+
         private async Task RunPrecisionRoundTrip<T>(Func<float, T> toT, Func<T, float> toF)
             where T : unmanaged, INumber<T>
             => await RunTest(async accelerator =>
@@ -407,6 +415,95 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     throw new Exception(
                         $"FromSingleSaturating kernel @{i} ({BackendName}): input {inputs[i]} -> got 0x{gs:X2}, " +
                         $"want 0x{expSat[i]:X2} (saturating: finite overflow -> +-448, +-Inf -> NaN).");
+            }
+        });
+
+        // FP4 (Float4E2M1) generic INumber relu kernel on all 6 backends - load/store, in-kernel
+        // arithmetic, FP4 const, compare+select, AND by-value FP4 sub-word scalar params (scale/bias).
+        // scale=1.5 / bias=0.5 are EXACTLY representable in E2M1 (so the FP4-rounded scalar params match
+        // their float values); the reference rounds per the f32-register model (round once at the end).
+        // E2M1 has 1 mantissa bit so per-op (CPU) vs round-once (GPU) differ by <=1 step - 0.55 rel tol.
+        [TestMethod]
+        public async Task GenericPrecision_Float4E2M1_RunsAndMatchesCpu() => await RunTest(async accelerator =>
+        {
+            const int n = 256;
+            var st = (global::ILGPU.Float4E2M1)1.5f;
+            var bt = (global::ILGPU.Float4E2M1)0.5f;
+            float sf = (float)st, bf = (float)bt;
+            var x = new global::ILGPU.Float4E2M1[n];
+            var expected = new float[n];
+            for (int i = 0; i < n; i++)
+            {
+                // Cover all 16 input codes repeatedly (low nibble), so every representable FP4 input is hit.
+                byte raw = (byte)(i & 0x0F);
+                x[i] = System.Runtime.CompilerServices.Unsafe.As<byte, global::ILGPU.Float4E2M1>(ref raw);
+                float vf = (float)x[i] * sf + bf;
+                expected[i] = vf > 0f ? vf : 0f;
+            }
+
+            using var inBuf = accelerator.Allocate1D(x);
+            using var outBuf = accelerator.Allocate1D<global::ILGPU.Float4E2M1>(n);
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D,
+                ArrayView1D<global::ILGPU.Float4E2M1, Stride1D.Dense>,
+                ArrayView1D<global::ILGPU.Float4E2M1, Stride1D.Dense>,
+                global::ILGPU.Float4E2M1, global::ILGPU.Float4E2M1>(FusedReluGeneric<global::ILGPU.Float4E2M1>);
+            k(n, inBuf.View, outBuf.View, st, bt);
+            await accelerator.SynchronizeAsync();
+            var got = await outBuf.CopyToHostAsync<global::ILGPU.Float4E2M1>();
+
+            for (int i = 0; i < n; i++)
+            {
+                float g = (float)got[i];
+                float tol = MathF.Max(MathF.Abs(expected[i]), 1f) * 0.55f;
+                if (MathF.Abs(g - expected[i]) > tol)
+                    throw new Exception(
+                        $"Generic Float4E2M1 kernel @{i} ({BackendName}): in {(float)x[i]} -> got {g}, want " +
+                        $"{expected[i]} (tol {tol}) - FP4 by-value sub-word scalar params + arith must transpile.");
+            }
+        });
+
+        // FP4 (Float4E2M1) float->FP4 convert (E2M1FN, the NVFP4/MXFP4 element format): RNE among the 16
+        // codes; finite overflow AND +-Inf saturate to +-6 (0x7/0xF); NaN -> -0 (0x8). Bit-exact vs the
+        // managed conversion (CPU-verified bit-exact to ml_dtypes.float4_e2m1fn). Proves every backend's
+        // f32->FP4 emitter matches - the overflow-saturate + NaN->-0 branches are the point.
+        private static void Float4ConvertKernel(Index1D i,
+            ArrayView1D<float, Stride1D.Dense> x, ArrayView1D<global::ILGPU.Float4E2M1, Stride1D.Dense> y) =>
+            y[i] = (global::ILGPU.Float4E2M1)x[i];
+
+        [TestMethod]
+        public async Task Float4E2M1_FloatToFP4_RneSaturateNaN() => await RunTest(async accelerator =>
+        {
+            float[] inputs =
+            {
+                0f, 0.5f, 1f, 1.5f, 2f, 3f, 4f, 6f,                       // exact magnitudes
+                0.25f, 0.7f, 1.25f, 2.5f, 5f, 0.75f,                     // RNE (0.25->0, 2.5->2, 5->4 ties-to-even)
+                7f, 100f, 1e30f, float.PositiveInfinity,                  // overflow + +Inf -> +6
+                -0.5f, -1.5f, -6f, -7f, -100f, float.NegativeInfinity,    // negatives + -Inf -> -6
+                float.NaN, -0f,                                           // NaN -> 0x8 (-0); -0 -> 0x8
+            };
+            int n = inputs.Length;
+            var expected = new byte[n];
+            for (int i = 0; i < n; i++)
+            {
+                var v = (global::ILGPU.Float4E2M1)inputs[i];   // managed = oracle-proven reference
+                expected[i] = (byte)(System.Runtime.CompilerServices.Unsafe.As<global::ILGPU.Float4E2M1, byte>(ref v) & 0x0F);
+            }
+
+            using var inBuf = accelerator.Allocate1D(inputs);
+            using var outBuf = accelerator.Allocate1D<global::ILGPU.Float4E2M1>(n);
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D,
+                ArrayView1D<float, Stride1D.Dense>, ArrayView1D<global::ILGPU.Float4E2M1, Stride1D.Dense>>(Float4ConvertKernel);
+            k(n, inBuf.View, outBuf.View);
+            await accelerator.SynchronizeAsync();
+            var got = await outBuf.CopyToHostAsync<global::ILGPU.Float4E2M1>();
+
+            for (int i = 0; i < n; i++)
+            {
+                byte g = (byte)(System.Runtime.CompilerServices.Unsafe.As<global::ILGPU.Float4E2M1, byte>(ref got[i]) & 0x0F);
+                if (g != expected[i])
+                    throw new Exception(
+                        $"float->Float4E2M1 kernel @{i} ({BackendName}): input {inputs[i]} -> got 0x{g:X1}, " +
+                        $"want 0x{expected[i]:X1} (E2M1FN: RNE, overflow/+-Inf -> +-6, NaN -> 0x8).");
             }
         });
     }
