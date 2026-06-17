@@ -54,6 +54,10 @@ try
     if (args.Length > 0 && args[0] == "fp8-oracle")
         return await Float8OracleCompare.Run(args);
 
+    // bf16 + Half conversions vs ml_dtypes.bfloat16 / numpy.float16 (exhaustive, all 65536 patterns).
+    if (args.Length > 0 && args[0] == "bf16-f16-oracle")
+        return await LowPrecisionOracleCompare.Run(args);
+
     // Generic in-kernel float<->T conversion (Tuvok's PrecisionConvert ask) on desktop backends.
     if (args.Length > 0 && args[0] == "precision-convert")
         return await GenericConvertRepro.Run();
