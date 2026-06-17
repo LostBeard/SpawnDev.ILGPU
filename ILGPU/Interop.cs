@@ -208,6 +208,37 @@ namespace ILGPU
             value.RawValue;
 
         /// <summary>
+        /// Casts the given E4M3 FP8 value to its raw 8-bit pattern via a reinterpret cast.
+        /// </summary>
+        /// <param name="value">The value to cast.</param>
+        /// <returns>The 8-bit Float8E4M3 pattern.</returns>
+        /// <remarks>
+        /// Enables Float8E4M3 radix sorting (see <c>AscendingFloat8E4M3</c>). As with
+        /// <see cref="FloatAsInt(BFloat16)"/> there is deliberately no <c>IntAsFloat(byte)
+        /// -&gt; Float8E4M3</c> twin: the radix sort never reconstructs a value from bits
+        /// (it permutes the original value array). Use <c>new Float8E4M3(bits)</c> on the
+        /// host if you need it.
+        /// </remarks>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        [InteropIntrinsic(InteropIntrinsicKind.FloatAsInt)]
+        public static byte FloatAsInt(Float8E4M3 value) =>
+            value.RawValue;
+
+        /// <summary>
+        /// Casts the given E5M2 FP8 value to its raw 8-bit pattern via a reinterpret cast.
+        /// </summary>
+        /// <param name="value">The value to cast.</param>
+        /// <returns>The 8-bit Float8E5M2 pattern.</returns>
+        /// <remarks>
+        /// Enables Float8E5M2 radix sorting (see <c>AscendingFloat8E5M2</c>). See
+        /// <see cref="FloatAsInt(Float8E4M3)"/> for why there is no reconstructing twin.
+        /// </remarks>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        [InteropIntrinsic(InteropIntrinsicKind.FloatAsInt)]
+        public static byte FloatAsInt(Float8E5M2 value) =>
+            value.RawValue;
+
+        /// <summary>
         /// Casts the given float to an int via a reinterpret cast.
         /// </summary>
         /// <param name="value">The value to cast.</param>

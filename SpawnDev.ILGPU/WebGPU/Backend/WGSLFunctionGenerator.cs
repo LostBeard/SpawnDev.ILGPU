@@ -47,6 +47,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private readonly HashSet<int> _subWordUnsignedParams = new();           // byte / ushort
         private readonly HashSet<int> _subWordFloat16Params = new();            // emulated f16 (no shader-f16)
         private readonly HashSet<int> _subWordBFloat16Params = new();           // emulated bf16 (always - no native WGSL bf16)
+        private readonly Dictionary<int, bool> _subWordFloat8Params = new();    // emulated FP8 (always); value = isE4M3 (false = E5M2)
         private readonly Dictionary<string, int> _subWordLEAVars = new();       // LEA target Variable name -> paramIdx
         private readonly Dictionary<int, string> _paramIndexToLocalVar = new(); // paramIdx -> "v_X" (the helper's `let v_X : ptr<...> = p_Y;` local name)
 
@@ -531,6 +532,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         _subWordParams[param.Index] = 2;
                         _subWordBFloat16Params.Add(param.Index);
                         break;
+                    case BasicValueType.Float8E4M3:
+                        // FP8 is always emulated (no native WGSL fp8) - 1-byte sub-word, 4 per word.
+                        _subWordParams[param.Index] = 1;
+                        _subWordFloat8Params[param.Index] = true;
+                        break;
+                    case BasicValueType.Float8E5M2:
+                        _subWordParams[param.Index] = 1;
+                        _subWordFloat8Params[param.Index] = false;
+                        break;
                 }
             }
         }
@@ -792,7 +802,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     var wordIdx = $"(u32({idx}) / 4u)";
                     var shift = $"((u32({idx}) % 4u) * 8u)";
                     var rawByte = $"((u32(atomicLoad(&{subWordBinding}[{wordIdx}])) >> {shift}) & 0xFFu)";
-                    if (_subWordUnsignedParams.Contains(subWordParamIdx))
+                    if (_subWordFloat8Params.TryGetValue(subWordParamIdx, out var isE4M3Ld))
+                        // FP8 (4 per word): convert the 8-bit pattern to f32 (the f32-register model),
+                        // mirroring the bf16 branch below. Without this the packed key load returned the
+                        // raw byte int, so a radix kernel reading keys through this LEA path operated on
+                        // garbage - the WebGPU-only FP8 radix corruption (the direct-param key load uses
+                        // the kernel generator's correct FP8 path, which is why ExtractBits passed).
+                        extractExpr = isE4M3Ld ? $"_e4m3_to_f32({rawByte})" : $"_e5m2_to_f32({rawByte})";
+                    else if (_subWordUnsignedParams.Contains(subWordParamIdx))
                         extractExpr = $"i32({rawByte})";                                    // byte: zero-extend
                     else
                         extractExpr = $"select(i32({rawByte}), (i32({rawByte}) - 256), ({rawByte}) >= 128u)"; // sbyte: sign-extend
@@ -883,7 +900,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     ? $"(*{local})"
                     : $"param{storeParamIdx}";
 
-                if (elemSize == 1)
+                if (elemSize == 1 && _subWordFloat8Params.TryGetValue(storeParamIdx, out var isE4M3St))
+                {
+                    // FP8 (4 per word): round the f32 value to its 8-bit pattern before packing,
+                    // mirroring the bf16 store branch. Without this the packed key store wrote the raw
+                    // int bits, so a radix scatter through this LEA path corrupted the keys (WebGPU only).
+                    var wordIdx = $"(u32({idx}) / 4u)";
+                    var shift = $"((u32({idx}) % 4u) * 8u)";
+                    var packFn = isE4M3St ? "_f32_to_e4m3" : "_f32_to_e5m2";
+                    AppendLine($"atomicAnd(&{subWordBinding}[{wordIdx}], ~(0xFFu << {shift}));");
+                    AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], (({packFn}({val}) & 0xFFu) << {shift}));");
+                }
+                else if (elemSize == 1)
                 {
                     var wordIdx = $"(u32({idx}) / 4u)";
                     var shift = $"((u32({idx}) % 4u) * 8u)";

@@ -2156,6 +2156,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // pattern (AscendingBFloat16 radix sort, NumBits=16), not floatBitsToInt of the
                 // widened f32. Compress via _f32_to_bf16, parallel to the Half case above.
                 AppendLine($"{target} = int(_f32_to_bf16({source}));");
+            else if (value.Value.BasicValueType == BasicValueType.Float8E4M3)
+                // Emulated FP8 is a GLSL `float`; FloatAsInt(fp8) must yield the 8-bit FP8 pattern
+                // (AscendingFloat8E4M3 radix sort, NumBits=8), not floatBitsToInt of the widened
+                // f32. Compress via _f32_to_e4m3, parallel to the bf16 case above.
+                AppendLine($"{target} = int(_f32_to_e4m3({source}));");
+            else if (value.Value.BasicValueType == BasicValueType.Float8E5M2)
+                AppendLine($"{target} = int(_f32_to_e5m2({source}));");
             else
                 AppendLine($"{target} = floatBitsToInt({source});");
         }
@@ -2176,6 +2183,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // Reverse for bf16: expand the low-16 bf16 pattern to the emulated GLSL `float`.
                 // Defensive - no IntAsFloat->BFloat16 frontend overload today.
                 AppendLine($"{target} = _bf16_to_f32(uint({source}));");
+            else if (value.BasicValueType == BasicValueType.Float8E4M3)
+                // Reverse for FP8: expand the low-8 FP8 pattern to the emulated GLSL `float`.
+                // Defensive - no IntAsFloat->Float8 frontend overload today.
+                AppendLine($"{target} = _e4m3_to_f32(uint({source}));");
+            else if (value.BasicValueType == BasicValueType.Float8E5M2)
+                AppendLine($"{target} = _e5m2_to_f32(uint({source}));");
             else
                 AppendLine($"{target} = intBitsToFloat({source});");
         }

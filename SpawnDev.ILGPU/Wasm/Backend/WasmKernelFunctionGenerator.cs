@@ -2481,6 +2481,22 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 WasmModuleBuilder.EmitLocalSet(Code, target);
                 return;
             }
+            // FP8 (E4M3/E5M2) also lives in an F32 local (promoted). EmitF32ToFP8 rounds it to
+            // its 8-bit FP8 bit pattern as an I32 - what Interop.FloatAsInt(Float8E*) returns
+            // (drives AscendingFloat8E4M3/E5M2 radix sort, NumBits=8).
+            bool isSrcFP8 = srcIRType is PrimitiveType ptSrcF
+                && (ptSrcF.BasicValueType == BasicValueType.Float8E4M3
+                    || ptSrcF.BasicValueType == BasicValueType.Float8E5M2);
+            if (isSrcFP8)
+            {
+                bool isE4M3 = ((PrimitiveType)srcIRType).BasicValueType
+                    == BasicValueType.Float8E4M3;
+                var target = AllocateLocal(value, WasmOpCodes.I32);
+                EmitGetLocal(value.Value.Resolve());
+                EmitF32ToFP8(isE4M3);
+                WasmModuleBuilder.EmitLocalSet(Code, target);
+                return;
+            }
             base.GenerateCode(value);
         }
 
@@ -2509,6 +2525,21 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 var target = AllocateLocal(value, WasmOpCodes.F32);
                 EmitGetLocal(value.Value.Resolve());
                 EmitBF16ToF32();
+                WasmModuleBuilder.EmitLocalSet(Code, target);
+                return;
+            }
+            // Reverse for FP8: expand the low-8 FP8 pattern to the promoted F32 local.
+            // Defensive - no IntAsFloat->Float8 frontend overload today.
+            bool isDstFP8 = dstIRType is PrimitiveType ptDstF
+                && (ptDstF.BasicValueType == BasicValueType.Float8E4M3
+                    || ptDstF.BasicValueType == BasicValueType.Float8E5M2);
+            if (isDstFP8)
+            {
+                bool isE4M3 = ((PrimitiveType)dstIRType).BasicValueType
+                    == BasicValueType.Float8E4M3;
+                var target = AllocateLocal(value, WasmOpCodes.F32);
+                EmitGetLocal(value.Value.Resolve());
+                EmitFP8ToF32(isE4M3);
                 WasmModuleBuilder.EmitLocalSet(Code, target);
                 return;
             }

@@ -276,6 +276,23 @@ namespace ILGPU.Backends.OpenCL
                 return;
             }
 
+            // FP8 is ALWAYS emulated as float on OpenCL. FloatAsInt(fp8) must yield the 1-byte
+            // FP8 pattern, not the promoted-f32 bits - use the _f32_to_e4m3_bits/_f32_to_e5m2_bits
+            // helper (same one the store path uses). Drives the AscendingFloat8E4M3/E5M2 radix
+            // sort (NumBits=8).
+            if (value.Value.BasicValueType == BasicValueType.Float8E4M3 ||
+                value.Value.BasicValueType == BasicValueType.Float8E5M2)
+            {
+                using var statement = BeginStatement(target);
+                statement.AppendCommand(
+                    value.Value.BasicValueType == BasicValueType.Float8E4M3 ?
+                    "_f32_to_e4m3_bits" : "_f32_to_e5m2_bits");
+                statement.BeginArguments();
+                statement.AppendArgument(source);
+                statement.EndArguments();
+                return;
+            }
+
             using var statement2 = BeginStatement(target);
             statement2.AppendCommand(
                 value.BasicValueType == BasicValueType.Int64 ?
@@ -314,6 +331,21 @@ namespace ILGPU.Backends.OpenCL
             {
                 using var statement = BeginStatement(target);
                 statement.AppendCommand("_bf16_bits_to_f32");
+                statement.BeginArguments();
+                statement.AppendArgument(source);
+                statement.EndArguments();
+                return;
+            }
+
+            // Symmetric inverse for FP8 (always emulated): widen the 1-byte pattern to f32.
+            // Defensive - the frontend has no IntAsFloat->Float8 overload today.
+            if (value.BasicValueType == BasicValueType.Float8E4M3 ||
+                value.BasicValueType == BasicValueType.Float8E5M2)
+            {
+                using var statement = BeginStatement(target);
+                statement.AppendCommand(
+                    value.BasicValueType == BasicValueType.Float8E4M3 ?
+                    "_e4m3_bits_to_f32" : "_e5m2_bits_to_f32");
                 statement.BeginArguments();
                 statement.AppendArgument(source);
                 statement.EndArguments();

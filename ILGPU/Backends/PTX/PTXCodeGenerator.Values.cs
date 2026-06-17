@@ -295,6 +295,20 @@ namespace ILGPU.Backends.PTX
                 EmitF32ToBF16Bits(bf16Source, bf16Target);
                 return;
             }
+            if (value.Value.BasicValueType == BasicValueType.Float8E4M3 ||
+                value.Value.BasicValueType == BasicValueType.Float8E5M2)
+            {
+                // FloatAsInt(fp8): the value lives in an f32 register (f32-register model). Round
+                // it to its 1-byte FP8 pattern via portable bit-manip (EmitF32ToFP8Bits - every
+                // CUDA arch) into the Int8 target register (held as .b16 in PTX, low 8 bits = the
+                // raw FP8 byte, exactly the store-side conversion). Drives the
+                // AscendingFloat8E4M3/E5M2 radix sort (NumBits=8).
+                bool isE4M3 = value.Value.BasicValueType == BasicValueType.Float8E4M3;
+                var fp8Source = LoadHardware(value.Value);
+                var fp8Target = AllocateHardware(value);
+                EmitF32ToFP8Bits(fp8Source, fp8Target, isE4M3);
+                return;
+            }
 
             var source = LoadHardware(value.Value);
             if (source.Kind == PTXRegisterKind.Int16)
@@ -328,6 +342,18 @@ namespace ILGPU.Backends.PTX
                 var src = LoadHardware(value.Value);
                 var tgt = AllocateHardware(value);
                 EmitBF16BitsToF32(src, tgt);
+                return;
+            }
+            if (value.BasicValueType == BasicValueType.Float8E4M3 ||
+                value.BasicValueType == BasicValueType.Float8E5M2)
+            {
+                // IntAsFloat(fp8 bits): widen the 1-byte pattern (Int8 reg) to the f32 value
+                // register via portable bit-manip (EmitFP8BitsToF32 - every CUDA arch). Defensive
+                // symmetry - the frontend has no IntAsFloat->Float8 overload today.
+                bool isE4M3 = value.BasicValueType == BasicValueType.Float8E4M3;
+                var src = LoadHardware(value.Value);
+                var tgt = AllocateHardware(value);
+                EmitFP8BitsToF32(src, tgt, isE4M3);
                 return;
             }
 

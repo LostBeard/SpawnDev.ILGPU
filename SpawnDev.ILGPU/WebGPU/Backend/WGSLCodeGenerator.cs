@@ -306,6 +306,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         protected bool _kernelReferencesF16Helpers { get; set; } = false;
         protected bool _kernelReferencesBF16Helpers { get; set; } = false;
+        protected bool _kernelReferencesFP8Helpers { get; set; } = false;
 
         private StringBuilder prefixBuilder = new StringBuilder();
         private StringBuilder suffixBuilder = new StringBuilder();
@@ -2843,6 +2844,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 _kernelReferencesBF16Helpers = true;
                 AppendLine($"{target} = i32(_f32_to_bf16({source}));");
             }
+            else if (value.Value.Type is global::ILGPU.IR.Types.PrimitiveType fpt &&
+                (fpt.BasicValueType == global::ILGPU.BasicValueType.Float8E4M3 ||
+                 fpt.BasicValueType == global::ILGPU.BasicValueType.Float8E5M2))
+            {
+                // FP8 is always emulated (WGSL "f32"); FloatAsInt(fp8) must yield the 8-bit FP8
+                // pattern (AscendingFloat8E4M3/E5M2 radix sort, NumBits=8) - recover it via
+                // _f32_to_e4m3/_f32_to_e5m2, not a bitcast of the promoted f32.
+                _kernelReferencesFP8Helpers = true;
+                var fn = fpt.BasicValueType == global::ILGPU.BasicValueType.Float8E4M3
+                    ? "_f32_to_e4m3" : "_f32_to_e5m2";
+                AppendLine($"{target} = i32({fn}({source}));");
+            }
             else if (source.Type == "emu_f64")
             {
                 // emu_f64 is a Dekker vec2<f32> pair — not the raw IEEE-754 double bits.
@@ -2886,6 +2899,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // to f32. Defensive - no IntAsFloat->BFloat16 frontend overload today.
                 _kernelReferencesBF16Helpers = true;
                 AppendLine($"{target} = _bf16_to_f32(u32({source}) & 0xFFFFu);");
+            }
+            else if (value.Type is global::ILGPU.IR.Types.PrimitiveType fpt &&
+                (fpt.BasicValueType == global::ILGPU.BasicValueType.Float8E4M3 ||
+                 fpt.BasicValueType == global::ILGPU.BasicValueType.Float8E5M2))
+            {
+                // Symmetric inverse for FP8 (always emulated): widen the low-8 FP8 pattern to
+                // f32. Defensive - no IntAsFloat->Float8 frontend overload today.
+                _kernelReferencesFP8Helpers = true;
+                var fn = fpt.BasicValueType == global::ILGPU.BasicValueType.Float8E4M3
+                    ? "_e4m3_to_f32" : "_e5m2_to_f32";
+                AppendLine($"{target} = {fn}(u32({source}) & 0xFFu);");
             }
             else if (target.Type == "emu_f64")
             {

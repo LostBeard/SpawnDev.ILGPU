@@ -84,7 +84,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         // FP8 sub-word params (1-byte storage, 4 per atomic<u32>): paramIdx -> isE4M3
         // (true = Float8E4M3, false = Float8E5M2). Load/store apply _e4m3/_e5m2 conversion.
         private Dictionary<int, bool> _subWordFloat8Params = new Dictionary<int, bool>();
-        private bool _kernelReferencesFP8Helpers = false;
+        // _kernelReferencesFP8Helpers is declared protected on the base WGSLCodeGenerator
+        // (next to the bf16/f16 twins) so the base FloatAsIntCast/IntAsFloatCast lowering can
+        // set it for FP8 radix-key extraction; the header emission below reads it.
         // Unsigned sub-word params need zero-extension instead of sign extension
         private HashSet<int> _subWordUnsignedParams = new HashSet<int>();
         // Maps LEA variable names to their sub-word param index (for Load/Store extraction)
@@ -1166,6 +1168,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         subWordIsFloat16 = true;
                         bindingType = "atomic<u32>"; stride = 1;
                         break;
+                    case BasicValueType.Float8E4M3:
+                        // FP8 always emulated (no native WGSL fp8) - 1-byte packed, 4 per word.
+                        // Own bucket so the registration routes it to _subWordFloat8Params (the
+                        // _e4m3_to_f32/_f32_to_e4m3 conversion path at load/store).
+                        typeKey = "swfp8e4m3"; subWordElemSize = 1; isSubWord = true;
+                        bindingType = "atomic<u32>"; stride = 1;
+                        break;
+                    case BasicValueType.Float8E5M2:
+                        typeKey = "swfp8e5m2"; subWordElemSize = 1; isSubWord = true;
+                        bindingType = "atomic<u32>"; stride = 1;
+                        break;
                     default:
                         {
                             var wgslElem = TypeGenerator[elemType];
@@ -1238,6 +1251,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             if (cand.typeKey == "swbf16") _subWordBFloat16Params.Add(p.Index);
                             else _subWordFloat16Params.Add(p.Index);
                         }
+                        // FP8 buckets (1-byte, 4 per word) - route to the _e4m3/_e5m2 conversion path.
+                        else if (cand.typeKey == "swfp8e4m3") _subWordFloat8Params[p.Index] = true;
+                        else if (cand.typeKey == "swfp8e5m2") _subWordFloat8Params[p.Index] = false;
                         _subWordBodyStructBindingNames[p.Index] = bindingName;
                     }
                 }
@@ -1815,6 +1831,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                     bsElemSize = 2;
                                 else if (bsPt.BasicValueType == BasicValueType.BFloat16)
                                     bsElemSize = 2; // bf16 is always emulated (2-byte packed)
+                                else if (bsPt.BasicValueType == BasicValueType.Float8E4M3
+                                    || bsPt.BasicValueType == BasicValueType.Float8E5M2)
+                                    bsElemSize = 1; // FP8 always emulated (1-byte packed, 4 per atomic<u32>)
                                 if (bsElemSize > 0)
                                 {
                                     // Use syntheticViewParamIdx as key since body struct fields
@@ -1829,6 +1848,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                         // packed atomicLoad the bf16 load path emits. Without this the
                                         // declaration was array<f32> -> atomicLoad-on-f32 WGSL error.
                                         _subWordBFloat16Params.Add(synthIdx);
+                                    else if (bsPt.BasicValueType == BasicValueType.Float8E4M3)
+                                        // FP8 body-struct view field: same reason as bf16 - declare
+                                        // array<atomic<u32>> (4 per word) so the packed atomicLoad +
+                                        // _e4m3_to_f32 the FP8 load path emits has a matching binding
+                                        // (was array<f32> -> atomicLoad-on-f32 mismatch, the radix
+                                        // sort key buffer corruption on WebGPU).
+                                        _subWordFloat8Params[synthIdx] = true;
+                                    else if (bsPt.BasicValueType == BasicValueType.Float8E5M2)
+                                        _subWordFloat8Params[synthIdx] = false;
                                     isSubWordField = true;
                                 }
                             }
@@ -5081,6 +5109,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         int bsLeaElemSize = 0;
                         bool bsLeaIsFloat16 = false;
                         bool bsLeaIsBFloat16 = false;
+                        bool bsLeaIsFloat8 = false;
+                        bool bsLeaFloat8IsE4M3 = false;
                         switch (bsLeaPt.BasicValueType)
                         {
                             case BasicValueType.Int8: bsLeaElemSize = 1; break;
@@ -5090,6 +5120,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 break;
                             case BasicValueType.BFloat16:
                                 bsLeaElemSize = 2; bsLeaIsBFloat16 = true; // always emulated
+                                break;
+                            case BasicValueType.Float8E4M3:
+                                // FP8 is its own BasicValueType (NOT Int8) - without this case a
+                                // body-struct FP8 view field (e.g. the radix sort's param0_f0 keys)
+                                // stayed elemSize=0 -> raw `*&atomic<u32>` word deref instead of the
+                                // 4-per-word byte extract + _e4m3_to_f32, corrupting the sort on WebGPU.
+                                bsLeaElemSize = 1; bsLeaIsFloat8 = true; bsLeaFloat8IsE4M3 = true;
+                                break;
+                            case BasicValueType.Float8E5M2:
+                                bsLeaElemSize = 1; bsLeaIsFloat8 = true; bsLeaFloat8IsE4M3 = false;
                                 break;
                         }
                         if (bsLeaElemSize > 0)
@@ -5103,6 +5143,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 _subWordFloat16Params.Add(synthIdx);
                             if (bsLeaIsBFloat16)
                                 _subWordBFloat16Params.Add(synthIdx);
+                            if (bsLeaIsFloat8)
+                                _subWordFloat8Params[synthIdx] = bsLeaFloat8IsE4M3;
                             _subWordBodyStructBindingNames[synthIdx] = bindingName;
                             _subWordLEAVars[target.Name] = synthIdx;
                             // Sub-word LEA stores the i32 element index, not a pointer (matches
@@ -5252,6 +5294,20 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 elemSize = 2;
                                 _subWordBFloat16Params.Add(param.Index);
                             }
+                            else if (leaPt.BasicValueType == BasicValueType.Float8E4M3)
+                            {
+                                // FP8 is its own BasicValueType (NOT Int8), so without this case
+                                // the LEA stayed elemSize=0 -> a raw `*ptr` word deref instead of the
+                                // 4-per-word byte extract + _e4m3_to_f32. That is the WebGPU-only FP8
+                                // radix corruption: the sort read the packed u32 word as the key.
+                                elemSize = 1;
+                                _subWordFloat8Params[param.Index] = true;
+                            }
+                            else if (leaPt.BasicValueType == BasicValueType.Float8E5M2)
+                            {
+                                elemSize = 1;
+                                _subWordFloat8Params[param.Index] = false;
+                            }
                             if (elemSize > 0)
                                 _subWordParams[param.Index] = elemSize; // register for Load/Store
                         }
@@ -5305,7 +5361,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             // expression directly without referencing the var name.
                             string swBindRef = _subWordBodyStructBindingNames.TryGetValue(param.Index, out var swCoalBindName)
                                 ? swCoalBindName : $"param{param.Index}";
-                            if (elemSize == 1) // byte
+                            if (_subWordFloat8Params.TryGetValue(param.Index, out var cbIsE4M3))
+                            {
+                                // FP8 (4 per word): the cross-block inline use is the loaded VALUE,
+                                // so convert the extracted byte to f32 (matches the Load path), not
+                                // the raw byte the generic elemSize==1 branch would emit.
+                                var cbRaw = $"((u32(atomicLoad(&{swBindRef}[(u32({target.Name}) / 4u)])) >> ((u32({target.Name}) % 4u) * 8u)) & 0xFFu)";
+                                _crossBlockPointerExprs[target.Name] = $"{(cbIsE4M3 ? "_e4m3_to_f32" : "_e5m2_to_f32")}({cbRaw})";
+                            }
+                            else if (elemSize == 1) // byte
                                 _crossBlockPointerExprs[target.Name] = $"((u32(atomicLoad(&{swBindRef}[(u32({target.Name}) / 4u)])) >> ((u32({target.Name}) % 4u) * 8u)) & 0xFFu)";
                             else // short (2 bytes)
                                 _crossBlockPointerExprs[target.Name] = $"((u32(atomicLoad(&{swBindRef}[(u32({target.Name}) / 2u)])) >> ((u32({target.Name}) % 2u) * 16u)) & 0xFFFFu)";

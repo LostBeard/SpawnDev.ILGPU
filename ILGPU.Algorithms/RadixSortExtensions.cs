@@ -1176,6 +1176,40 @@ namespace ILGPU.Algorithms
                 return (RadixSortPairs<TKey, TKeyStride, TValue, TValueStride>)handler;
             }
 
+            // Float8E4M3 KEY (+ any 4/8-byte non-FP8 value): same sub-word unpacked-f32 path.
+            if (accelerator.AcceleratorType == AcceleratorType.WebGL &&
+                accelerator is IScatterProvider scatterProviderE4M3Key &&
+                typeof(TKey) == typeof(Float8E4M3) &&
+                (Interop.SizeOf<TValue>() == 4 || Interop.SizeOf<TValue>() == 8) &&
+                typeof(TValue) != typeof(Float8E4M3))
+            {
+                var handler = typeof(RadixSortExtensions)
+                    .GetMethod(nameof(CreateWebGLScatterRadixSortPairsFloat8E4M3Key),
+                        BindingFlags.NonPublic | BindingFlags.Static)!
+                    .MakeGenericMethod(
+                        typeof(TKeyStride), typeof(TValue), typeof(TValueStride),
+                        typeof(TRadixSortOperation))
+                    .Invoke(null, new object[] { accelerator, scatterProviderE4M3Key })!;
+                return (RadixSortPairs<TKey, TKeyStride, TValue, TValueStride>)handler;
+            }
+
+            // Float8E5M2 KEY (+ any 4/8-byte non-FP8 value): same sub-word unpacked-f32 path.
+            if (accelerator.AcceleratorType == AcceleratorType.WebGL &&
+                accelerator is IScatterProvider scatterProviderE5M2Key &&
+                typeof(TKey) == typeof(Float8E5M2) &&
+                (Interop.SizeOf<TValue>() == 4 || Interop.SizeOf<TValue>() == 8) &&
+                typeof(TValue) != typeof(Float8E5M2))
+            {
+                var handler = typeof(RadixSortExtensions)
+                    .GetMethod(nameof(CreateWebGLScatterRadixSortPairsFloat8E5M2Key),
+                        BindingFlags.NonPublic | BindingFlags.Static)!
+                    .MakeGenericMethod(
+                        typeof(TKeyStride), typeof(TValue), typeof(TValueStride),
+                        typeof(TRadixSortOperation))
+                    .Invoke(null, new object[] { accelerator, scatterProviderE5M2Key })!;
+                return (RadixSortPairs<TKey, TKeyStride, TValue, TValueStride>)handler;
+            }
+
             if (accelerator.AcceleratorType == AcceleratorType.WebGL &&
                 accelerator is IScatterProvider scatterProviderPairs &&
                 (Interop.SizeOf<TKey>() == 4 || Interop.SizeOf<TKey>() == 8) &&
@@ -1505,6 +1539,26 @@ namespace ILGPU.Algorithms
             {
                 var handler = typeof(RadixSortExtensions)
                     .GetMethod(nameof(CreateWebGLScatterRadixSortBFloat16),
+                        BindingFlags.NonPublic | BindingFlags.Static)!
+                    .MakeGenericMethod(typeof(TStride), typeof(TRadixSortOperation))
+                    .Invoke(null, new object[] { accelerator, scatterProvider })!;
+                return (RadixSort<T, TStride>)handler;
+            }
+            // FP8 (E4M3/E5M2) is a 1-byte sub-word key - same unpacked-f32 working
+            // representation as Half/bf16 (every FP8 value is a strict subset of f32).
+            if (typeof(T) == typeof(Float8E4M3))
+            {
+                var handler = typeof(RadixSortExtensions)
+                    .GetMethod(nameof(CreateWebGLScatterRadixSortFloat8E4M3),
+                        BindingFlags.NonPublic | BindingFlags.Static)!
+                    .MakeGenericMethod(typeof(TStride), typeof(TRadixSortOperation))
+                    .Invoke(null, new object[] { accelerator, scatterProvider })!;
+                return (RadixSort<T, TStride>)handler;
+            }
+            if (typeof(T) == typeof(Float8E5M2))
+            {
+                var handler = typeof(RadixSortExtensions)
+                    .GetMethod(nameof(CreateWebGLScatterRadixSortFloat8E5M2),
                         BindingFlags.NonPublic | BindingFlags.Static)!
                     .MakeGenericMethod(typeof(TStride), typeof(TRadixSortOperation))
                     .Invoke(null, new object[] { accelerator, scatterProvider })!;
