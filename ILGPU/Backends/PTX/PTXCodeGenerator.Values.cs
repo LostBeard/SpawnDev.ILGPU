@@ -311,6 +311,17 @@ namespace ILGPU.Backends.PTX
                 EmitF32ToFP8Bits(fp8Source, fp8Target, isE4M3);
                 return;
             }
+            if (value.Value.BasicValueType == BasicValueType.Float4E2M1)
+            {
+                // FloatAsInt(fp4): the value lives in an f32 register (f32-register model). Round it
+                // to its 4-bit E2M1 pattern (low nibble) via portable bit-manip (EmitF32ToFP4Bits -
+                // every CUDA arch) into the Int8 target register (held as .b16, low 4 bits = the raw
+                // FP4 nibble). Drives the AscendingFloat4E2M1 radix sort (NumBits=4).
+                var fp4Source = LoadHardware(value.Value);
+                var fp4Target = AllocateHardware(value);
+                EmitF32ToFP4Bits(fp4Source, fp4Target);
+                return;
+            }
 
             var source = LoadHardware(value.Value);
             if (source.Kind == PTXRegisterKind.Int16)
@@ -356,6 +367,16 @@ namespace ILGPU.Backends.PTX
                 var src = LoadHardware(value.Value);
                 var tgt = AllocateHardware(value);
                 EmitFP8BitsToF32(src, tgt, isE4M3);
+                return;
+            }
+            if (value.BasicValueType == BasicValueType.Float4E2M1)
+            {
+                // IntAsFloat(fp4 bits): widen the 4-bit nibble (Int8 reg) to the f32 value register
+                // via portable bit-manip (EmitFP4BitsToF32 - every CUDA arch). Defensive symmetry -
+                // the frontend has no IntAsFloat->Float4E2M1 overload today.
+                var src = LoadHardware(value.Value);
+                var tgt = AllocateHardware(value);
+                EmitFP4BitsToF32(src, tgt);
                 return;
             }
 

@@ -1210,6 +1210,23 @@ namespace ILGPU.Algorithms
                 return (RadixSortPairs<TKey, TKeyStride, TValue, TValueStride>)handler;
             }
 
+            // Float4E2M1 KEY (+ any 4/8-byte non-FP4 value): same sub-word unpacked-f32 path.
+            if (accelerator.AcceleratorType == AcceleratorType.WebGL &&
+                accelerator is IScatterProvider scatterProviderE2M1Key &&
+                typeof(TKey) == typeof(Float4E2M1) &&
+                (Interop.SizeOf<TValue>() == 4 || Interop.SizeOf<TValue>() == 8) &&
+                typeof(TValue) != typeof(Float4E2M1))
+            {
+                var handler = typeof(RadixSortExtensions)
+                    .GetMethod(nameof(CreateWebGLScatterRadixSortPairsFloat4E2M1Key),
+                        BindingFlags.NonPublic | BindingFlags.Static)!
+                    .MakeGenericMethod(
+                        typeof(TKeyStride), typeof(TValue), typeof(TValueStride),
+                        typeof(TRadixSortOperation))
+                    .Invoke(null, new object[] { accelerator, scatterProviderE2M1Key })!;
+                return (RadixSortPairs<TKey, TKeyStride, TValue, TValueStride>)handler;
+            }
+
             if (accelerator.AcceleratorType == AcceleratorType.WebGL &&
                 accelerator is IScatterProvider scatterProviderPairs &&
                 (Interop.SizeOf<TKey>() == 4 || Interop.SizeOf<TKey>() == 8) &&
@@ -1559,6 +1576,18 @@ namespace ILGPU.Algorithms
             {
                 var handler = typeof(RadixSortExtensions)
                     .GetMethod(nameof(CreateWebGLScatterRadixSortFloat8E5M2),
+                        BindingFlags.NonPublic | BindingFlags.Static)!
+                    .MakeGenericMethod(typeof(TStride), typeof(TRadixSortOperation))
+                    .Invoke(null, new object[] { accelerator, scatterProvider })!;
+                return (RadixSort<T, TStride>)handler;
+            }
+            // FP4 (E2M1FN) is a 1-byte sub-word key (value in the low nibble) - same
+            // unpacked-f32 working representation as Half/bf16/FP8 (every one of the 16
+            // finite FP4 codes is a strict subset of f32).
+            if (typeof(T) == typeof(Float4E2M1))
+            {
+                var handler = typeof(RadixSortExtensions)
+                    .GetMethod(nameof(CreateWebGLScatterRadixSortFloat4E2M1),
                         BindingFlags.NonPublic | BindingFlags.Static)!
                     .MakeGenericMethod(typeof(TStride), typeof(TRadixSortOperation))
                     .Invoke(null, new object[] { accelerator, scatterProvider })!;

@@ -2512,6 +2512,19 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 WasmModuleBuilder.EmitLocalSet(Code, target);
                 return;
             }
+            // FP4 (E2M1) also lives in an F32 local (promoted). EmitF32ToFP4 rounds it to its
+            // 4-bit FP4 bit pattern (low nibble) as an I32 - what Interop.FloatAsInt(Float4E2M1)
+            // returns (drives AscendingFloat4E2M1 radix sort, NumBits=4).
+            bool isSrcFloat4E2M1 = srcIRType is PrimitiveType ptSrcF4
+                && ptSrcF4.BasicValueType == BasicValueType.Float4E2M1;
+            if (isSrcFloat4E2M1)
+            {
+                var target = AllocateLocal(value, WasmOpCodes.I32);
+                EmitGetLocal(value.Value.Resolve());
+                EmitF32ToFP4();
+                WasmModuleBuilder.EmitLocalSet(Code, target);
+                return;
+            }
             base.GenerateCode(value);
         }
 
@@ -2555,6 +2568,18 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 var target = AllocateLocal(value, WasmOpCodes.F32);
                 EmitGetLocal(value.Value.Resolve());
                 EmitFP8ToF32(isE4M3);
+                WasmModuleBuilder.EmitLocalSet(Code, target);
+                return;
+            }
+            // Reverse for FP4: expand the low-4 (nibble) FP4 pattern to the promoted F32 local.
+            // Defensive - no IntAsFloat->Float4E2M1 frontend overload today.
+            bool isDstFloat4E2M1 = dstIRType is PrimitiveType ptDstF4
+                && ptDstF4.BasicValueType == BasicValueType.Float4E2M1;
+            if (isDstFloat4E2M1)
+            {
+                var target = AllocateLocal(value, WasmOpCodes.F32);
+                EmitGetLocal(value.Value.Resolve());
+                EmitFP4ToF32();
                 WasmModuleBuilder.EmitLocalSet(Code, target);
                 return;
             }

@@ -2,6 +2,15 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.14.0-local.6 (2026-06-17) - `Float4E2M1` radix-sort keys on all 6 backends + a latent PTX struct-field IO bug fix
+
+Closes the FP4 follow-up from local.5: `Float4E2M1` arrays can now be radix-sorted (keys-only + pairs, ascending + descending) on CPU/CUDA/OpenCL/WebGPU/WebGL/Wasm. Forks bump to `2.0.33`.
+
+- **`Ascending/DescendingFloat4E2M1` radix operations.** The same sign-flip + ones-complement key transform Half/bf16/FP8 use, adapted to the 4-bit E2M1 layout (sign at **bit 3**, not the top bit; magnitude in the low 3 bits). FP4 is stored as a 1-byte element (value in the low nibble), so it sorts as a native 1-byte key (NumBits=8, the key is 0..15 so it stays monotonic) on 5 backends; WebGL uses the unpacked-f32 working representation (the whole-texel scatter can't move a 1-byte sub-word), like Half/bf16/FP8.
+- **Per-backend `FloatAsInt(Float4E2M1)` radix codegen** completed: the PTX + Wasm `FloatAsIntCast`/`IntAsFloatCast` for FP4 (the convert release wired OpenCL/WGSL/GLSL; PTX/Wasm got it here) recover the 4-bit pattern via the portable bit-manip helpers.
+- **Fixed a real latent PTX struct-field IO bug (Rule 2a).** The PTX `EmitIOLoad`/`EmitIOStore` (the path the `RadixSortPairs` kernel uses to bundle the 1-byte key with the value) handled bf16 + FP8 but not FP4, so an FP4 key field was stored as the f32 register's raw low byte (= 0 for most values) → CUDA FP4 pairs returned **all-zero keys**. Added FP4 to both (round f32 → the 4-bit pattern via `EmitF32ToFP4Bits` on store, widen via `EmitFP4BitsToF32` on load). Root-caused with a desktop repro printing the actual CUDA sorted output (keys-only worked; only the key-bundle pairs path was wrong).
+- Gates: PMT `Fp4Radix` (ExtractBits GPU-vs-CPU + KeysDescending + PairsAscending) **23/0 all 6 backends**; no regression (`Fp8Radix` 44/0, `Float4E2M1` convert 23/0).
+
 ## 4.14.0-local.5 (2026-06-17) - New 4-bit float type `Float4E2M1` (NVFP4/MXFP4 element format) on all 6 backends + a latent low-precision store-widening bug fix
 
 Adds `ILGPU.Float4E2M1`, the OCP **E2M1FN** 4-bit float (the element format of NVFP4 / MXFP4): 1 sign / 2 exp / 1 mantissa, bias 1, **16 finite codes (no Inf, no NaN)**, magnitudes `{0,.5,1,1.5,2,3,4,6}`, max 6, finite overflow + ±Inf saturate to ±6, NaN→-0. 1-byte storage (value in the low nibble), f32-register compute. Forks bump to `2.0.32`. Bit-exact to `ml_dtypes.float4_e2m1fn` (PyTorch/JAX share it).

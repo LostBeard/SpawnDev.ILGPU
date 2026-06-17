@@ -921,6 +921,19 @@ namespace ILGPU.Backends.PTX
                 return;
             }
 
+            // FP4 field/value: 1-byte storage (value in the low nibble), f32 register. Load the byte,
+            // widen via portable bit-manip (every CUDA arch). Same model as bf16/FP8 - this is the
+            // struct-field path the RadixSortPairs kernel uses to bundle the FP4 key with the value
+            // (a top-level ArrayView<FP4> element load is handled in GenerateCode(Load)).
+            if (register.BasicValueType == BasicValueType.Float4E2M1)
+            {
+                var rawReg = AllocateRegister(BasicValueType.Int16, PTXRegisterKind.Int16);
+                emitter.Emit(this, command, rawReg, userState);
+                EmitFP4BitsToF32(rawReg, register);
+                FreeRegister(rawReg);
+                return;
+            }
+
             HardwareRegister? originalRegister = null;
             // We need a temporary 32bit register for predicate conversion at this point:
             // 1) load value into temporary register
@@ -986,6 +999,19 @@ namespace ILGPU.Backends.PTX
                 var f32Register = EnsureHardwareRegister(register);
                 var rawReg = AllocateRegister(BasicValueType.Int16, PTXRegisterKind.Int16);
                 EmitF32ToFP8Bits(f32Register, rawReg, register.BasicValueType == BasicValueType.Float8E4M3);
+                emitter.Emit(this, command, rawReg, userState);
+                FreeRegister(rawReg);
+                return;
+            }
+
+            // FP4 field/value store: round the f32 value to its 4-bit pattern (low nibble) via portable
+            // bit-manip, then write the raw byte. The RadixSortPairs key-bundle store path; without it
+            // the f32 register's raw low byte was stored (= 0 for most values -> "keys all 0" on CUDA).
+            if (register.BasicValueType == BasicValueType.Float4E2M1)
+            {
+                var f32Register = EnsureHardwareRegister(register);
+                var rawReg = AllocateRegister(BasicValueType.Int16, PTXRegisterKind.Int16);
+                EmitF32ToFP4Bits(f32Register, rawReg);
                 emitter.Emit(this, command, rawReg, userState);
                 FreeRegister(rawReg);
                 return;
