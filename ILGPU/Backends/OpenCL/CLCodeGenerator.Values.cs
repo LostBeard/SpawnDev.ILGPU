@@ -708,6 +708,21 @@ namespace ILGPU.Backends.OpenCL
                 return;
             }
 
+            // Int4 PACKED emulation: write the (index&1) nibble of byte (index>>1) via the atomic
+            // word RMW helper (adjacent threads write the two nibbles of one byte concurrently). The
+            // value's low 4 bits are the stored nibble; signedness is irrelevant on store.
+            if (_qint4EmulatedLEAs.TryGetValue(address.ToString(), out var int4StoreLea))
+            {
+                using var statement = BeginStatement("_qint4_store(");
+                statement.AppendArgument(int4StoreLea.BasePtr);
+                statement.AppendCommand(", ");
+                statement.AppendArgument(int4StoreLea.Index);
+                statement.AppendCommand(", ");
+                statement.AppendArgument(value);
+                statement.AppendCommand(")");
+                return;
+            }
+
             using var statement2 = BeginStatement(CLInstructions.DereferenceOperation);
             statement2.AppendArgument(address);
             statement2.AppendCommand(CLInstructions.AssignmentOperation);

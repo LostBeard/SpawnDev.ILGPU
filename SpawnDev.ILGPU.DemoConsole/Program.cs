@@ -62,6 +62,10 @@ try
     if (args.Length > 0 && args[0] == "packed-qint4-verify")
         return await PackedQInt4Verify.Run();
 
+    // Packed QInt4 nibble STORE (CUDA/OpenCL atomic-word-RMW; CPU fail-loud): dst[i] = (QInt4)src[i].
+    if (args.Length > 0 && args[0] == "packed-qint4-store-verify")
+        return await PackedQInt4StoreVerify.Run();
+
     // FP8 conversions vs the ml_dtypes reference (float8_e4m3fn / e5m2) - answers the
     // overflow-convention question flagged in Float8E4M3.cs with evidence.
     if (args.Length > 0 && args[0] == "fp8-oracle")

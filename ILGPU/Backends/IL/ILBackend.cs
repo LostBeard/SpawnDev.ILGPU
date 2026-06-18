@@ -13,6 +13,8 @@ using ILGPU.Backends.EntryPoints;
 using ILGPU.Backends.IL.Transformations;
 using ILGPU.IR;
 using ILGPU.IR.Transformations;
+using ILGPU.IR.Types;
+using ILGPU.IR.Values;
 using ILGPU.Resources;
 using ILGPU.Runtime;
 using ILGPU.Runtime.CPU;
@@ -149,6 +151,14 @@ namespace ILGPU.Backends.IL
             in BackendContext backendContext,
             in KernelSpecialization specialization)
         {
+            // The CPU (IL) backend executes the original managed kernel method directly, so an
+            // in-kernel `packedView[i] = value` runs the managed ArrayView indexer, whose ref model
+            // cannot address a single nibble of a packed sub-byte buffer (QInt4/QUInt4). A nibble
+            // store would silently write to a per-thread scratch and lose the result. Fail loud at
+            // compile time instead. (Reading packed views IS supported - the indexer decodes the
+            // nibble by value; only in-kernel writes are unsupported on this backend.)
+            VerifyNoPackedSubByteStores(backendContext);
+
             // Build the custom strongly type task type and define the kernel method
             var taskType = GenerateAcceleratorTask(
                 entryPoint.Parameters,
@@ -200,6 +210,47 @@ namespace ILGPU.Backends.IL
                 backendContext.SharedAllocations.Length +
                     backendContext.DynamicSharedAllocations.Length,
                 backendContext.SharedMemorySpecification.StaticSize);
+        }
+
+        /// <summary>
+        /// Throws if the kernel stores into a packed sub-byte view (e.g. QInt4/QUInt4) - the CPU (IL)
+        /// backend runs the managed array-view indexer, which returns a ref and cannot write a single
+        /// nibble in place, so such a store would be silently lost. Reading packed views is supported.
+        /// </summary>
+        private static void VerifyNoPackedSubByteStores(in BackendContext backendContext)
+        {
+            // The kernel method itself (the enumerator below yields only the OTHER, non-kernel
+            // methods) plus every callee.
+            ScanMethodForPackedStores(backendContext.KernelMethod);
+            foreach (var (method, _) in backendContext)
+                ScanMethodForPackedStores(method);
+        }
+
+        /// <summary>
+        /// Throws <see cref="NotSupportedException"/> if the given IR method stores into a packed
+        /// sub-byte (QInt4/QUInt4) view - unsupported on the CPU backend (see
+        /// <see cref="VerifyNoPackedSubByteStores"/>).
+        /// </summary>
+        private static void ScanMethodForPackedStores(Method method)
+        {
+            foreach (var block in method.Blocks)
+            {
+                foreach (var valueEntry in block)
+                {
+                    if (valueEntry.Value is Store store &&
+                        store.Target.Type is PointerType pt &&
+                        pt.ElementType.BasicValueType == BasicValueType.QInt4)
+                    {
+                        throw new NotSupportedException(
+                            "Packed sub-byte views (QInt4/QUInt4) do not support in-kernel " +
+                            "element stores on the CPU backend: the managed array-view indexer " +
+                            "cannot address a single nibble in place. Use a GPU backend for " +
+                            "packed in-kernel writes, or build the packed buffer via an " +
+                            "ArrayView<byte>/<uint> with explicit nibble packing. Reading a " +
+                            "packed view (e.g. (int)packed[i]) IS supported on the CPU backend.");
+                    }
+                }
+            }
         }
 
         /// <summary>

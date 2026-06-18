@@ -295,6 +295,25 @@ namespace ILGPU.Backends.OpenCL
             extensionBuilder.AppendLine("}");
             extensionBuilder.AppendLine();
 
+            // Packed 4-bit (QInt4/QUInt4) STORE: write a single nibble into a 2-nibbles-per-byte
+            // buffer. Adjacent elements share a byte and adjacent threads write the two nibbles of
+            // the SAME 32-bit word concurrently, so a plain byte read-modify-write would race and
+            // clobber. Do an ATOMIC word RMW: each thread only ever clears + sets ITS nibble, and
+            // since the nibble masks across threads are disjoint the atomicAnd/atomicOr pair composes
+            // correctly regardless of interleaving (same contract as the WebGPU/WebGL sub-word store).
+            // base must be 4-byte aligned (buffer allocations are); word = base[index>>3].
+            // Generic-address-space C11 atomics (atomic_uint / atomic_fetch_*), matching the rest of
+            // the backend's atomics - the buffer pointers are __generic, so a __global-qualified
+            // helper param would reject them. base[index>>3] is the containing 32-bit word.
+            extensionBuilder.AppendLine(
+                "static inline void _qint4_store(uchar* base, int index, int value) {");
+            extensionBuilder.AppendLine("    volatile atomic_uint* w = (volatile atomic_uint*)base + (index >> 3);");
+            extensionBuilder.AppendLine("    int shift = (index & 7) << 2;");
+            extensionBuilder.AppendLine("    atomic_fetch_and(w, ~(0xFu << shift));");
+            extensionBuilder.AppendLine("    atomic_fetch_or(w, ((uint)(value & 0xF)) << shift);");
+            extensionBuilder.AppendLine("}");
+            extensionBuilder.AppendLine();
+
             extensions = extensionBuilder.ToString();
         }
 

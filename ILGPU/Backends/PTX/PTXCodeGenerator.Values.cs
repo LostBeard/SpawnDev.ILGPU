@@ -1456,6 +1456,80 @@ namespace ILGPU.Backends.PTX
                 return;
             }
 
+            if (targetType.ElementType.BasicValueType == BasicValueType.QInt4)
+            {
+                // Packed 4-bit STORE: write the (index&1) nibble of byte (index>>1) WITHOUT disturbing
+                // the adjacent nibble. `address` is the byte ptr (base+index>>1, from the keep-index
+                // LEA) and _qint4LEAShift holds the in-byte nibble shift (0 or 4). Adjacent elements
+                // share a byte and adjacent threads write the two nibbles of the SAME 32-bit word, so a
+                // plain st.u8 races (clobbers the neighbor). Do an ATOMIC word RMW: each thread only
+                // clears + sets ITS nibble (disjoint masks compose correctly under any interleaving -
+                // the same contract as the OpenCL/WebGPU sub-word store). The containing word is
+                // byteAddr & ~3 (base is 4-byte aligned); the in-word shift is (byteAddr&3)*8 + nibble.
+                var valueReg = EnsureHardwareRegister(value.AsNotNullCast<PrimitiveRegister>());
+                bool ptr64 = Backend.PointerBasicValueType == BasicValueType.Int64;
+                string addrSuffix = ptr64 ? "b64" : "b32";
+
+                // wordAddr = byteAddr & ~3
+                var wordAddr = AllocatePlatformRegister(out var _);
+                using (var c = BeginCommand("and." + addrSuffix))
+                { c.AppendArgument(wordAddr); c.AppendArgument(address); c.AppendConstant(~3L); }
+
+                // byteInWord = (u32)(byteAddr & 3)
+                var lowBits = AllocatePlatformRegister(out var _);
+                using (var c = BeginCommand("and." + addrSuffix))
+                { c.AppendArgument(lowBits); c.AppendArgument(address); c.AppendConstant(3L); }
+                var byteInWord = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+                if (ptr64)
+                    using (var c = BeginCommand("cvt.u32.u64")) { c.AppendArgument(byteInWord); c.AppendArgument(lowBits); }
+                else
+                    using (var c = BeginCommand("mov.u32")) { c.AppendArgument(byteInWord); c.AppendArgument(lowBits); }
+
+                // shift = byteInWord*8 + nibbleShift
+                var shift = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+                using (var c = BeginCommand("shl.b32")) { c.AppendArgument(shift); c.AppendArgument(byteInWord); c.AppendConstant(3); }
+                if (_qint4LEAShift.TryGetValue(store.Target, out var keptShift))
+                    using (var c = BeginCommand("add.u32")) { c.AppendArgument(shift); c.AppendArgument(shift); c.AppendArgument(keptShift); }
+
+                // mask = 0xF << shift ; clearMask = ~mask
+                var mask = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+                using (var c = BeginCommand("mov.u32")) { c.AppendArgument(mask); c.AppendConstant(0xF); }
+                using (var c = BeginCommand("shl.b32")) { c.AppendArgument(mask); c.AppendArgument(mask); c.AppendArgument(shift); }
+                var clearMask = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+                using (var c = BeginCommand("not.b32")) { c.AppendArgument(clearMask); c.AppendArgument(mask); }
+
+                // setBits = (value & 0xF) << shift
+                var vnib = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+                using (var c = BeginCommand("and.b32")) { c.AppendArgument(vnib); c.AppendArgument(valueReg); c.AppendConstant(0xF); }
+                using (var c = BeginCommand("shl.b32")) { c.AppendArgument(vnib); c.AppendArgument(vnib); c.AppendArgument(shift); }
+
+                // red.<space>.and.b32 [wordAddr], clearMask ; red.<space>.or.b32 [wordAddr], setBits
+                var asp = targetType.AddressSpace;
+                using (var c = BeginCommand(PTXInstructions.GetAtomicOperation(AtomicKind.And, false)))
+                {
+                    c.AppendNonLocalAddressSpace(asp);
+                    c.AppendSuffix(PTXInstructions.GetAtomicOperationSuffix(AtomicKind.And, ArithmeticBasicValueType.UInt32));
+                    c.AppendArgumentValue(wordAddr);
+                    c.AppendArgument(clearMask);
+                }
+                using (var c = BeginCommand(PTXInstructions.GetAtomicOperation(AtomicKind.Or, false)))
+                {
+                    c.AppendNonLocalAddressSpace(asp);
+                    c.AppendSuffix(PTXInstructions.GetAtomicOperationSuffix(AtomicKind.Or, ArithmeticBasicValueType.UInt32));
+                    c.AppendArgumentValue(wordAddr);
+                    c.AppendArgument(vnib);
+                }
+
+                FreeRegister(wordAddr);
+                FreeRegister(lowBits);
+                FreeRegister(byteInWord);
+                FreeRegister(shift);
+                FreeRegister(mask);
+                FreeRegister(clearMask);
+                FreeRegister(vnib);
+                return;
+            }
+
             // A low-precision-TYPED value (bf16 / FP8 / FP4 - all held in an f32 register on PTX) stored
             // to a NON-matching buffer (the target-matching cases were handled above). The widening
             // Convert (`(float)bf16` etc.) is a no-op alias that preserves the low-precision IR type, so
