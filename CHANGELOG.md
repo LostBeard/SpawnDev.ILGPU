@@ -2,6 +2,16 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.14.0-local.7 (2026-06-18) - TRUE packed 4-bit `QInt4` storage (2 nibbles/byte) - load + store on 5 of 6 backends
+
+Introduces `ILGPU.QInt4` (signed -8..7) / `ILGPU.QUInt4` (unsigned 0..15), TRUE packed 4-bit integers: an `ArrayView<QInt4>` of N elements allocates **ceil(N/2) bytes** (2 nibbles per byte, 8 per 32-bit word) - the real 4-bit memory win for INT4 quantization, not a 1-byte-per-element placeholder. Forks bump to `2.0.34`. The host representation is RAW PACKED bytes (consumers upload pre-packed `byte`/`uint` words and decode in-register - the zero-copy fused-dequant path); there is no transparent typed pack/unpack.
+
+- **LOAD on CPU, CUDA, OpenCL, WebGPU, WebGL** (5/6). Reads element `i` by nibble-addressing the packed buffer (byte `i>>1`, nibble `(i&1)*4`, mask `0xF`, sign-extend for QInt4). CPU runs the literal managed `ArrayView<QInt4>` indexer, which decodes the nibble by value into a per-thread scratch (the ref model can't address a nibble in place); the GPU backends lower the indexer to a nibble load (PTX `ld.u8`+shr+mask; OpenCL `base[i>>1]`; WebGPU `atomicLoad`+shift; WebGL `texelFetch`+shift).
+- **STORE on CUDA, OpenCL, WebGPU** (atomic word RMW - adjacent threads write the two nibbles of one byte concurrently, so each thread clears + sets ONLY its nibble via `atom.and`/`atom.or` (CUDA), `atomic_fetch_and`/`_or` (OpenCL), `atomicAnd`/`atomicOr` (WebGPU); disjoint masks compose under any interleaving).
+- **No silent garbage anywhere.** Packed in-kernel STORE is fail-loud on the CPU backend (the managed ref indexer can't write a nibble) and on WebGL (Transform-Feedback host repack at 8-nibbles/texel not yet wired); ALL packed QInt4 access is fail-loud on Wasm (the nibble keep-index load + atomic-RMW store are not yet wired). Reading a packed QInt4 view is supported on all 5 wired backends.
+- **`[PackedBits(4)]`** attribute → `ArrayView<T>.BitsPerElement` (4 for QInt4, else ElementSize*8) drives `LengthInBytes = ceil(N*bits/8)` through all 8 backend allocators (collapses to `N*ElementSize` for whole-byte types - zero effect on existing types).
+- Gates: new cross-backend PMT test `BackendTestBase.PackedQInt4` (load decodes sign-extended nibbles; store round-trips int -8..7 through a packed buffer) **0 failed** on the wired backends; desktop `packed-qint4-verify` / `packed-qint4-store-verify` / `packed-alloc-verify` green; no regression (`Fp4Radix`, `BFloat16` round-trip, whole-byte allocation all unchanged). Wasm full support + QInt4 radix + the `RequiresQInt4` capability follow in a later release.
+
 ## 4.14.0-local.6 (2026-06-17) - `Float4E2M1` radix-sort keys on all 6 backends + a latent PTX struct-field IO bug fix
 
 Closes the FP4 follow-up from local.5: `Float4E2M1` arrays can now be radix-sorted (keys-only + pairs, ascending + descending) on CPU/CUDA/OpenCL/WebGPU/WebGL/Wasm. Forks bump to `2.0.33`.
