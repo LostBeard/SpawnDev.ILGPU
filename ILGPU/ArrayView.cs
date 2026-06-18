@@ -198,6 +198,16 @@ namespace ILGPU
         /// </summary>
         public static readonly ArrayView<T> Empty;
 
+        /// <summary>
+        /// Per-thread scratch element used by the CPU (IL) backend to return a by-value
+        /// decoded element for packed sub-byte views (<see cref="BitsPerElement"/> &lt; 8).
+        /// The managed ref model cannot address a nibble in place, so a packed read decodes
+        /// the nibble into this scratch and returns a ref to it. Thread-static so concurrent
+        /// CPU kernel threads do not clobber each other.
+        /// </summary>
+        [ThreadStatic]
+        private static T PackedElementScratch;
+
         #endregion
 
         #region Instance
@@ -392,9 +402,41 @@ namespace ILGPU
             {
                 Trace.Assert(index >= 0 && index < Length, "Index out of range");
                 EnsureCPUBuffer();
+                // Packed sub-byte views (4-bit QInt4/QUInt4/Float4E2M1): the element lives in a
+                // nibble that cannot be addressed by a managed ref, so decode it by value into a
+                // per-thread scratch. (On GPU backends this whole body is replaced by the
+                // GetViewElementAddress view-intrinsic and is never executed.)
+                if (BitsPerElement < 8)
+                    return ref LoadPackedElement(index);
                 ref var ptr = ref LoadEffectiveAddress(index);
                 return ref Unsafe.As<byte, T>(ref ptr);
             }
+        }
+
+        /// <summary>
+        /// Decodes a packed sub-byte element (<see cref="BitsPerElement"/> &lt; 8) by value into
+        /// the per-thread <see cref="PackedElementScratch"/> and returns a ref to it. Used only by
+        /// the CPU (IL) backend, which runs this managed body directly; the GPU backends lower the
+        /// indexer to a nibble-addressing load and never reach here.
+        /// </summary>
+        /// <param name="index">The relative element index.</param>
+        /// <returns>A ref to the thread-static scratch holding the decoded element.</returns>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private readonly unsafe ref T LoadPackedElement(long index)
+        {
+            // bit offset of the element within the buffer; byte = offset/8, shift = offset%8.
+            long bitOffset = (Index + index) * BitsPerElement;
+            long byteIndex = bitOffset >> 3;
+            int shift = (int)(bitOffset & 7L);
+            int mask = (1 << BitsPerElement) - 1;
+            ref byte packedByte = ref Unsafe.Add(
+                ref Unsafe.AsRef<byte>(Buffer.NativePtr.ToPointer()),
+                (nint)byteIndex);
+            // Keep only this element's bits in the low part of the byte; the consuming
+            // conversion operator (e.g. QInt4->int) sign/zero-extends from there.
+            byte raw = (byte)((packedByte >> shift) & mask);
+            PackedElementScratch = Unsafe.As<byte, T>(ref raw);
+            return ref PackedElementScratch;
         }
 
         #endregion

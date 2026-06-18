@@ -45,13 +45,15 @@ internal static class PackedQInt4Verify
             if (type != AcceleratorType.CPU && type != AcceleratorType.Cuda && type != AcceleratorType.OpenCL)
                 continue;
 
-            // WIRED backends (packed QInt4 nibble load implemented + asserted). CPU/Velocity is a
-            // tracked follow-on: its Specializer.Load dispatches by width (no sub-byte path) and the
-            // vectorized LEA has no per-lane parity channel - a deeper Velocity-SIMD gather change.
-            bool wired = type == AcceleratorType.Cuda || type == AcceleratorType.OpenCL;
+            // WIRED backends (packed QInt4 nibble load implemented + asserted). The CPU (IL) backend
+            // runs the managed ArrayView<QInt4> indexer directly, which decodes the packed nibble by
+            // value (ArrayView.LoadPackedElement). The separate Velocity SIMD accelerator
+            // (AcceleratorType.Velocity, not exercised here) is a tracked follow-on.
+            bool wired = type == AcceleratorType.Cuda || type == AcceleratorType.OpenCL
+                || type == AcceleratorType.CPU;
             if (!wired)
             {
-                Console.WriteLine($"  [{type}] PENDING - packed nibble load not yet wired (Velocity sub-byte gather; tracked)");
+                Console.WriteLine($"  [{type}] PENDING - packed nibble load not yet wired (tracked)");
                 continue;
             }
 
@@ -96,7 +98,7 @@ internal static class PackedQInt4Verify
         }
 
         Console.WriteLine(totalFails == 0
-            ? "=== PACKED QInt4 LOAD PASS (wired: OpenCL + CUDA; CPU/Velocity pending) ==="
+            ? "=== PACKED QInt4 LOAD PASS (wired: CPU + OpenCL + CUDA) ==="
             : $"=== PACKED QInt4 LOAD: {totalFails} problems ===");
         return Task.FromResult(totalFails == 0 ? 0 : 1);
     }
