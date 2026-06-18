@@ -1838,6 +1838,41 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             bool isFloat8E5M2Ld = value.Type is PrimitiveType ptF8b && ptF8b.BasicValueType == BasicValueType.Float8E5M2;
             // FP4 load (1-byte element, 4-bit E2M1 value in low nibble, promoted to f32 via inline bit conversion)
             bool isFloat4E2M1Ld = value.Type is PrimitiveType ptF4 && ptF4.BasicValueType == BasicValueType.Float4E2M1;
+            // Packed QInt4 load: the address local holds the NIBBLE ADDRESS 2*base+index.
+            bool isQInt4Ld = value.Type is PrimitiveType ptQ4 && ptQ4.BasicValueType == BasicValueType.QInt4;
+
+            if (isQInt4Ld)
+            {
+                // byte = addr>>1; load the byte; nibble = (byte >> ((addr&1)*4)) & 0xF; sign-extend
+                // signed 4-bit via (n ^ 8) - 8. Plain i32.load8_u (a read of packed input - no atomicity
+                // needed; matches the FP4 read shape, atomic only under barriers for consistency).
+                EmitGetLocal(source2);
+                WasmModuleBuilder.EmitI32Const(Code, 1);
+                Code.Add(WasmOpCodes.I32ShrU);                  // addr>>1 = byte address
+                if (_hasBarriers)
+                {
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad8U);
+                    Code.Add(0x00); Code.Add(0x00);             // align=0 (1 byte), offset=0
+                }
+                else
+                    WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load8U, 0, 0);  // byte on stack
+                // shift = (addr & 1) << 2
+                EmitGetLocal(source2);
+                WasmModuleBuilder.EmitI32Const(Code, 1);
+                Code.Add(WasmOpCodes.I32And);                   // addr & 1
+                WasmModuleBuilder.EmitI32Const(Code, 2);
+                Code.Add(WasmOpCodes.I32Shl);                   // (addr&1) << 2
+                Code.Add(WasmOpCodes.I32ShrU);                  // byte >> shift
+                WasmModuleBuilder.EmitI32Const(Code, 0xF);
+                Code.Add(WasmOpCodes.I32And);                   // & 0xF -> nibble 0..15
+                WasmModuleBuilder.EmitI32Const(Code, 8);
+                Code.Add(WasmOpCodes.I32Xor);                   // n ^ 8
+                WasmModuleBuilder.EmitI32Const(Code, 8);
+                Code.Add(WasmOpCodes.I32Sub);                   // (n^8) - 8  (sign-extend)
+                WasmModuleBuilder.EmitLocalSet(Code, target2);
+                return;
+            }
 
             // Push the address (byte offset in linear memory)
             EmitGetLocal(source2);
@@ -2056,21 +2091,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         public override void GenerateCode(LoadElementAddress value)
         {
-            // Packed 4-bit (QInt4) is not yet wired on Wasm: the LEA folds index*GetElementSize to a
-            // BYTE address (GetElementSize(QInt4) has no entry -> defaults to 4), so a packed buffer
-            // (ceil(N/2) bytes) would be read 4-bytes-per-element out of bounds. Fail loud (no silent
-            // garbage) until the nibble keep-index load + atomic-RMW store land. Packed QInt4 works on
-            // CPU/CUDA/OpenCL/WebGPU/WebGL today.
-            if (value.Type is global::ILGPU.IR.Types.AddressSpaceType q4Ast
+            // Packed 4-bit (QInt4): the buffer is 2 nibbles/byte. The DIRECT-param path below encodes a
+            // NIBBLE ADDRESS = 2*base + index (so the Load/Store recover byte=addr>>1, nibble=addr&1
+            // with no side channel). The struct-wrapped (body-struct / traced) paths are not yet wired
+            // for QInt4 and would fold index*GetElementSize(=4 default) to an out-of-bounds byte addr -
+            // fail loud there (no silent garbage) rather than mis-read.
+            bool isQInt4View = value.Type is global::ILGPU.IR.Types.AddressSpaceType q4Ast
                 && q4Ast.ElementType is PrimitiveType q4Pt
-                && q4Pt.BasicValueType == BasicValueType.QInt4)
-            {
-                throw new SpawnDev.ILGPU.UnsupportedKernelFeatureException(
-                    feature: "packed QInt4 view access",
-                    backend: global::ILGPU.Runtime.AcceleratorType.Wasm,
-                    remediation: "Packed 4-bit (QInt4) nibble load/store is not yet wired on the Wasm " +
-                        "backend. Use WebGPU/WebGL/CUDA/OpenCL/CPU for packed QInt4.");
-            }
+                && q4Pt.BasicValueType == BasicValueType.QInt4;
 
             var target = AllocateLocal(value);
             var source = value.Source.Resolve();
@@ -2085,6 +2113,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         && bsInfoLea.IsView
                         && _bodyStructViewLocals.TryGetValue((bsParamLea.Index, bsInfoLea.FieldIndex), out var bsViewLocalsLea))
                     {
+                        if (isQInt4View) ThrowWasmQInt4BodyStructUnsupported();
                         WasmModuleBuilder.EmitLocalGet(Code, bsViewLocalsLea[0]);
                         EmitGetLocal(index.Resolve());
                         if (GetWasmTypeFromIR(index.Type) == WasmOpCodes.I64)
@@ -2133,6 +2162,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     if (viewFi >= 0
                         && _bodyStructViewLocals.TryGetValue((bsParamIdx, viewFi), out var bsViewLocalsTraced))
                     {
+                        if (isQInt4View) ThrowWasmQInt4BodyStructUnsupported();
                         WasmModuleBuilder.EmitLocalGet(Code, bsViewLocalsTraced[0]);
                         EmitGetLocal(index.Resolve());
                         if (GetWasmTypeFromIR(index.Type) == WasmOpCodes.I64)
@@ -2156,6 +2186,23 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             {
                 WasmBackend.Log($"[Wasm-LEA] target=local_{target}, source=local_{sourceLocal} (IR={source.GetType().Name} id={source.Id} type={source.Type}), index=local_{indexLocal} (IR={index.GetType().Name} id={index.Id})");
                 WasmBackend.Log($"[Wasm-LEA] _localMap dump: {string.Join(", ", _localMap.Select(kv => $"{kv.Key}={kv.Value}"))}");
+            }
+
+            // Packed 4-bit (QInt4): emit the NIBBLE ADDRESS = 2*source + index. The Load/Store recover
+            // byte = addr>>1 and nibble parity = addr&1 (2*source is even, so the low bit is index&1).
+            if (isQInt4View)
+            {
+                EmitGetLocal(source);
+                if (GetWasmTypeFromIR(source.Type) == WasmOpCodes.I64)
+                    Code.Add(WasmOpCodes.I32WrapI64);
+                WasmModuleBuilder.EmitI32Const(Code, 2);
+                Code.Add(WasmOpCodes.I32Mul);          // 2*source
+                EmitGetLocal(index);
+                if (GetWasmTypeFromIR(index.Type) == WasmOpCodes.I64)
+                    Code.Add(WasmOpCodes.I32WrapI64);
+                Code.Add(WasmOpCodes.I32Add);          // 2*source + index
+                WasmModuleBuilder.EmitLocalSet(Code, target);
+                return;
             }
 
             // Determine element size
@@ -2186,6 +2233,46 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             Code.Add(WasmOpCodes.I32Add);
 
             WasmModuleBuilder.EmitLocalSet(Code, target);
+        }
+
+        private static void ThrowWasmQInt4BodyStructUnsupported() =>
+            throw new SpawnDev.ILGPU.UnsupportedKernelFeatureException(
+                feature: "packed QInt4 view inside a struct/body-struct",
+                backend: global::ILGPU.Runtime.AcceleratorType.Wasm,
+                remediation: "Packed 4-bit (QInt4) is wired on Wasm for DIRECT ArrayView<QInt4> kernel " +
+                    "params only; a QInt4 view nested in a struct param is not yet supported. Pass the " +
+                    "packed view as a direct kernel parameter.");
+
+        /// <summary>Pushes the 4-byte-aligned containing word address for a QInt4 nibble address
+        /// (2*base+index): wordAddr = (addr&gt;&gt;1) &amp; ~3.</summary>
+        private void EmitQInt4WordAddr(Value addrValue)
+        {
+            EmitGetLocal(addrValue);
+            WasmModuleBuilder.EmitI32Const(Code, 1);
+            Code.Add(WasmOpCodes.I32ShrU);            // byte = addr>>1
+            WasmModuleBuilder.EmitI32Const(Code, -4);
+            Code.Add(WasmOpCodes.I32And);             // & ~3
+        }
+
+        /// <summary>Pushes the in-word bit shift for a QInt4 nibble address (2*base+index):
+        /// shift = ((addr&gt;&gt;1)&amp;3)*8 + (addr&amp;1)*4 (= (index&amp;7)*4 for a 4-aligned base).</summary>
+        private void EmitQInt4NibbleShift(Value addrValue)
+        {
+            // ((addr>>1) & 3) << 3
+            EmitGetLocal(addrValue);
+            WasmModuleBuilder.EmitI32Const(Code, 1);
+            Code.Add(WasmOpCodes.I32ShrU);
+            WasmModuleBuilder.EmitI32Const(Code, 3);
+            Code.Add(WasmOpCodes.I32And);
+            WasmModuleBuilder.EmitI32Const(Code, 3);
+            Code.Add(WasmOpCodes.I32Shl);
+            // (addr & 1) << 2
+            EmitGetLocal(addrValue);
+            WasmModuleBuilder.EmitI32Const(Code, 1);
+            Code.Add(WasmOpCodes.I32And);
+            WasmModuleBuilder.EmitI32Const(Code, 2);
+            Code.Add(WasmOpCodes.I32Shl);
+            Code.Add(WasmOpCodes.I32Add);             // sum = shift
         }
 
         #endregion
@@ -2805,6 +2892,38 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     EmitVerifiedAtomicStore(8);
                 else
                     WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store8, 0, 0);
+                return;
+            }
+
+            // Packed QInt4 store (ArrayView<QInt4>[idx] = …): target is the NIBBLE ADDRESS 2*base+idx;
+            // the value is an i32 with the nibble in the low 4 bits. Write ONE nibble without disturbing
+            // its neighbor. byte=target>>1, word=byte&~3 (4-aligned), shift=(byte&3)*8 + (target&1)*4.
+            // Adjacent workers write the two nibbles of one byte concurrently, so this MUST be an ATOMIC
+            // word RMW (regardless of _hasBarriers - the Wasm worker pool runs threads in parallel):
+            // clear this nibble (rmw.and ~(0xF<<shift)) then set it (rmw.or (val&0xF)<<shift); disjoint
+            // per-thread masks compose under any interleaving.
+            if (target.Type is AddressSpaceType addrQ4Global
+                && addrQ4Global.ElementType is PrimitiveType ptQ4Global
+                && ptQ4Global.BasicValueType == BasicValueType.QInt4)
+            {
+                // atomic.rmw.and(wordAddr, ~(0xF << shift))
+                EmitQInt4WordAddr(target);
+                WasmModuleBuilder.EmitI32Const(Code, 0xF);
+                EmitQInt4NibbleShift(target);
+                Code.Add(WasmOpCodes.I32Shl);                 // 0xF << shift
+                WasmModuleBuilder.EmitI32Const(Code, -1);
+                Code.Add(WasmOpCodes.I32Xor);                 // ~(0xF << shift)
+                WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicRmwAnd, 2, 0);
+                Code.Add(WasmOpCodes.Drop);                   // discard old value
+                // atomic.rmw.or(wordAddr, (val & 0xF) << shift)
+                EmitQInt4WordAddr(target);
+                EmitGetLocal(storeValue);
+                WasmModuleBuilder.EmitI32Const(Code, 0xF);
+                Code.Add(WasmOpCodes.I32And);                 // val & 0xF
+                EmitQInt4NibbleShift(target);
+                Code.Add(WasmOpCodes.I32Shl);                 // (val & 0xF) << shift
+                WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicRmwOr, 2, 0);
+                Code.Add(WasmOpCodes.Drop);
                 return;
             }
 

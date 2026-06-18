@@ -24,10 +24,6 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task PackedQInt4_Load_SignExtendedNibbles() => await RunTest(async accelerator =>
         {
-            var type = accelerator.AcceleratorType;
-            if (type == AcceleratorType.Wasm)
-                throw new UnsupportedTestException($"Packed QInt4 load not yet wired on {type} (WebGPU + WebGL + desktop done).");
-
             int n = 256; // spans multiple groups; every nibble value at both byte positions
             var expected = new int[n];
             for (int i = 0; i < n; i++) expected[i] = (i % 16) - 8;
@@ -64,8 +60,6 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new UnsupportedTestException("Packed QInt4 in-kernel store is fail-loud on the CPU backend (managed ref indexer can't write a nibble).");
             if (type == AcceleratorType.WebGL)
                 throw new UnsupportedTestException("Packed QInt4 store needs atomic word RMW; WebGL has no atomics.");
-            if (type == AcceleratorType.Wasm)
-                throw new UnsupportedTestException("Packed QInt4 store not yet wired on Wasm (WebGPU + desktop done).");
 
             int n = 256; // large enough that adjacent threads write the two nibbles of one byte concurrently
             var input = new int[n];
