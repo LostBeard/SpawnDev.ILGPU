@@ -122,6 +122,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 BasicValueType.Float8E4M3 => "f32", // FP8 always emulated; value held as f32
                 BasicValueType.Float8E5M2 => "f32",
                 BasicValueType.Float4E2M1 => "f32", // FP4 always emulated; value held as f32
+                BasicValueType.QInt4 => "i32", // packed signed 4-bit; the nibble load sign-extends to i32
                 BasicValueType.Float32 => "f32",
                 BasicValueType.Float64 => useF64Emu ? "emu_f64" : "f32",
                 _ => null
@@ -149,6 +150,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 ArithmeticBasicValueType.Float8E4M3 => "f32", // FP8 always emulated; value held as f32
                 ArithmeticBasicValueType.Float8E5M2 => "f32",
                 ArithmeticBasicValueType.Float4E2M1 => "f32", // FP4 always emulated; value held as f32
+                ArithmeticBasicValueType.QInt4 => "i32", // packed signed 4-bit; sign-extended to i32
+                ArithmeticBasicValueType.QUInt4 => "u32", // packed unsigned 4-bit; zero-extended to u32
                 ArithmeticBasicValueType.Float32 => "f32",
                 ArithmeticBasicValueType.Float64 => useF64Emu ? "emu_f64" : "f32",
                 _ => null

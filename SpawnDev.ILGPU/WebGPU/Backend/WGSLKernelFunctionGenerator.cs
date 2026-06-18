@@ -87,6 +87,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         // FP4 sub-word params (1-byte storage, 4-bit value in the LOW NIBBLE, 4 per atomic<u32>):
         // single type (Float4E2M1, no Inf/NaN). Load/store apply _e2m1 conversion.
         private HashSet<int> _subWordFloat4Params = new HashSet<int>();
+        // Packed 4-bit int params (QInt4/QUInt4): TRUE 4-bit packing - 2 nibbles per byte, 8 per
+        // atomic<u32> word (NOT 4 like FP4's 1-byte storage). Load extracts the (idx&7) nibble of
+        // word (idx>>3) and sign-extends (signed QInt4); store is an atomic nibble RMW. Distinct from
+        // _subWordFloat4Params/_subWordParams which assume >=1 whole byte per element.
+        private HashSet<int> _subWordQInt4Params = new HashSet<int>();
         // _kernelReferencesFP8Helpers / _kernelReferencesFP4Helpers are declared protected on the
         // base WGSLCodeGenerator (next to the bf16/f16 twins) so the base FloatAsIntCast/
         // IntAsFloatCast lowering can set them for FP8/FP4 radix-key extraction; the header
@@ -2052,6 +2057,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             case BasicValueType.Float4E2M1:
                                 _subWordParams[param.Index] = 1; // FP4 always emulated = 1 byte (nibble in low 4 bits)
                                 _subWordFloat4Params.Add(param.Index);
+                                break;
+                            case BasicValueType.QInt4:
+                                _subWordParams[param.Index] = 1; // packed 4-bit: registers as sub-word (atomic<u32>)
+                                _subWordQInt4Params.Add(param.Index); // routes Load/Store to the 8-per-word nibble path
                                 break;
                         }
                     }
@@ -5360,6 +5369,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 elemSize = 1;
                                 _subWordFloat4Params.Add(param.Index);
                             }
+                            else if (leaPt.BasicValueType == BasicValueType.QInt4)
+                            {
+                                // Packed 4-bit int: TRUE 2-nibbles-per-byte (8 per word). elemSize=1
+                                // makes the LEA register as sub-word (atomic<u32> binding + LEAVars);
+                                // the _subWordQInt4Params tag routes Load/Store to the NIBBLE path
+                                // (word=idx>>3) instead of the 4-per-word byte path.
+                                elemSize = 1;
+                                _subWordQInt4Params.Add(param.Index);
+                            }
                             if (elemSize > 0)
                                 _subWordParams[param.Index] = elemSize; // register for Load/Store
                         }
@@ -5637,7 +5655,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     ? bsName
                     : $"param{subWordParamIdx}";
                 string extractExpr;
-                if (elemSize == 1)
+                if (_subWordQInt4Params.Contains(subWordParamIdx))
+                {
+                    // Packed 4-bit nibble extraction: 8 nibbles per atomic<u32> word.
+                    // word = idx>>3, shift = (idx&7)*4, mask 0xF, then sign-extend (signed QInt4):
+                    // values 0..7 stay, 8..15 -> -8..-1.
+                    var wordIdx = $"(u32({idx}) >> 3u)";
+                    var shift = $"((u32({idx}) & 7u) * 4u)";
+                    var rawNib = $"((u32(atomicLoad(&{subWordBinding}[{wordIdx}])) >> {shift}) & 0xFu)";
+                    extractExpr = $"select(i32({rawNib}), (i32({rawNib}) - 16), ({rawNib}) >= 8u)";
+                }
+                else if (elemSize == 1)
                 {
                     // Byte extraction: 4 bytes per atomic<u32> word
                     var wordIdx = $"(u32({idx}) / 4u)";
@@ -5857,6 +5885,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 string subWordBinding = _subWordBodyStructBindingNames.TryGetValue(storeParamIdx, out var bsName)
                     ? bsName
                     : $"param{storeParamIdx}";
+                if (_subWordQInt4Params.Contains(storeParamIdx))
+                {
+                    // Packed 4-bit nibble store: atomic RMW on atomic<u32> word (8 nibbles per word).
+                    // Adjacent threads write the two nibbles of one byte concurrently, so clear+set
+                    // ONLY this thread's nibble (disjoint masks compose under any interleaving).
+                    var wordIdx = $"(u32({idx}) >> 3u)";
+                    var shift = $"((u32({idx}) & 7u) * 4u)";
+                    AppendLine($"atomicAnd(&{subWordBinding}[{wordIdx}], ~(0xFu << {shift}));");
+                    AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], ((u32({val}) & 0xFu) << {shift}));");
+                    return;
+                }
                 if (elemSize == 1)
                 {
                     // Byte store: atomic RMW on atomic<u32> word (4 bytes per word)
