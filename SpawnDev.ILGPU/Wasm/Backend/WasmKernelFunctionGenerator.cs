@@ -2056,6 +2056,22 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         public override void GenerateCode(LoadElementAddress value)
         {
+            // Packed 4-bit (QInt4) is not yet wired on Wasm: the LEA folds index*GetElementSize to a
+            // BYTE address (GetElementSize(QInt4) has no entry -> defaults to 4), so a packed buffer
+            // (ceil(N/2) bytes) would be read 4-bytes-per-element out of bounds. Fail loud (no silent
+            // garbage) until the nibble keep-index load + atomic-RMW store land. Packed QInt4 works on
+            // CPU/CUDA/OpenCL/WebGPU/WebGL today.
+            if (value.Type is global::ILGPU.IR.Types.AddressSpaceType q4Ast
+                && q4Ast.ElementType is PrimitiveType q4Pt
+                && q4Pt.BasicValueType == BasicValueType.QInt4)
+            {
+                throw new SpawnDev.ILGPU.UnsupportedKernelFeatureException(
+                    feature: "packed QInt4 view access",
+                    backend: global::ILGPU.Runtime.AcceleratorType.Wasm,
+                    remediation: "Packed 4-bit (QInt4) nibble load/store is not yet wired on the Wasm " +
+                        "backend. Use WebGPU/WebGL/CUDA/OpenCL/CPU for packed QInt4.");
+            }
+
             var target = AllocateLocal(value);
             var source = value.Source.Resolve();
             var index = value.Offset.Resolve();
