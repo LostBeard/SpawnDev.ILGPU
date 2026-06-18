@@ -25,8 +25,8 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         public async Task PackedQInt4_Load_SignExtendedNibbles() => await RunTest(async accelerator =>
         {
             var type = accelerator.AcceleratorType;
-            if (type == AcceleratorType.WebGL || type == AcceleratorType.Wasm)
-                throw new UnsupportedTestException($"Packed QInt4 load not yet wired on {type} (WebGPU + desktop done).");
+            if (type == AcceleratorType.Wasm)
+                throw new UnsupportedTestException($"Packed QInt4 load not yet wired on {type} (WebGPU + WebGL + desktop done).");
 
             int n = 256; // spans multiple groups; every nibble value at both byte positions
             var expected = new int[n];

@@ -115,6 +115,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 BasicValueType.Float8E4M3 => "float", // FP8 always emulated as float on WebGL
                 BasicValueType.Float8E5M2 => "float",
                 BasicValueType.Float4E2M1 => "float", // FP4 (E2M1FN) always emulated as float on WebGL
+                BasicValueType.QInt4 => "int", // packed signed 4-bit; nibble load sign-extends to int
                 BasicValueType.Float32 => "float",
                 BasicValueType.Float64 => Backend.EnableF64Emulation ? (Backend.UseOzakiF64Emulation ? "vec4" : "vec2") : "float",
                 _ => null
@@ -142,6 +143,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 ArithmeticBasicValueType.Float8E4M3 => "float",
                 ArithmeticBasicValueType.Float8E5M2 => "float",
                 ArithmeticBasicValueType.Float4E2M1 => "float",
+                ArithmeticBasicValueType.QInt4 => "int", // packed signed 4-bit; sign-extended to int
+                ArithmeticBasicValueType.QUInt4 => "uint", // packed unsigned 4-bit; zero-extended to uint
                 ArithmeticBasicValueType.Float32 => "float",
                 ArithmeticBasicValueType.Float64 => Backend.EnableF64Emulation ? (Backend.UseOzakiF64Emulation ? "vec4" : "vec2") : "float",
                 _ => null

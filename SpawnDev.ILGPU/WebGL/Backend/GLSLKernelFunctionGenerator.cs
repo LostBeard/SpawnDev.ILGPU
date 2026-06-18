@@ -100,6 +100,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         // FP4 sub-word params (E2M1FN, 1-byte storage, 4-bit value in low nibble, 4 per R32I texel).
         // Load/store apply _e2m1_to_f32 / _f32_to_e2m1 conversion (value computes as float).
         private readonly HashSet<int> _subWordFloat4Params = new();
+        // Packed 4-bit int params (QInt4/QUInt4): TRUE 2-nibbles-per-byte (8 per R32I texel). LOAD
+        // extracts the (idx&7) nibble of texel (idx>>3) and sign-extends. STORE needs atomic word
+        // RMW which WebGL has no instruction for (Transform Feedback is gather-only, one record per
+        // thread) - so a packed in-kernel store is structurally impossible on WebGL and fails loud.
+        private readonly HashSet<int> _subWordQInt4Params = new();
         // Unsigned sub-word params need zero-extension instead of sign extension
         private readonly HashSet<int> _subWordUnsignedParams = new();
         // Maps LEA variable names to their sub-word param index
@@ -1210,6 +1215,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         {
                             _subWordParams[param.Index] = 1; // FP4 = 1 byte storage (4-bit low nibble, 4 per texel)
                             _subWordFloat4Params.Add(param.Index);
+                            glslType = "int"; // Force R32I texture for packed sub-word bit data
+                        }
+                        else if (swPt.BasicValueType == BasicValueType.QInt4)
+                        {
+                            _subWordParams[param.Index] = 1; // registers as sub-word; the QInt4 tag routes Load to the 8-per-texel nibble path
+                            _subWordQInt4Params.Add(param.Index);
                             glslType = "int"; // Force R32I texture for packed sub-word bit data
                         }
                     }
@@ -3040,7 +3051,17 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 var elemSize = _subWordParams[subWordParamIdx];
                 string swBn = GetParamBindingName(subWordParamIdx);
                 string extractExpr;
-                if (elemSize == 1)
+                if (_subWordQInt4Params.Contains(subWordParamIdx))
+                {
+                    // Packed 4-bit nibble extraction: 8 nibbles per R32I texel.
+                    // texel = idx>>3, shift = (idx&7)*4, mask 0xF, sign-extend (signed QInt4).
+                    var texelIdx = $"(({idx}) / 8 + {swBn}_offset)";
+                    var shift = $"(({idx}) % 8) * 4";
+                    var fetch = $"texelFetch({swBn}, ivec2({texelIdx} % {swBn}_tileW, {texelIdx} / {swBn}_tileW), 0).r";
+                    var rawNib = $"(({fetch}) >> ({shift})) & 0xF";
+                    extractExpr = $"(({rawNib}) >= 8 ? ({rawNib}) - 16 : ({rawNib}))"; // sign-extend signed 4-bit
+                }
+                else if (elemSize == 1)
                 {
                     // Byte extraction: 4 bytes per texel
                     var texelIdx = $"(({idx}) / 4 + {swBn}_offset)";
@@ -3293,6 +3314,20 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         // store below with the already-widened val - no re-narrowing.
                         AppendLine($"{output.VaryingName} = int(_f32_to_e2m1({val}));");
                         return;
+                    }
+                    if (_subWordQInt4Params.Contains(leaParamIdx))
+                    {
+                        // Packed 4-bit (QInt4) store: each thread writes ONE nibble, but 8 share a
+                        // texel - the host readback would have to repack at 8-nibbles-per-texel (the
+                        // FP4/byte path packs 4). That host-side density is not yet wired, so a store
+                        // here would silently mis-pack. Fail loud (no silent garbage - WebGL rule).
+                        // Reading packed QInt4 on WebGL IS supported (the nibble texelFetch+shift load).
+                        throw new SpawnDev.ILGPU.UnsupportedKernelFeatureException(
+                            feature: "packed QInt4 in-kernel store",
+                            backend: global::ILGPU.Runtime.AcceleratorType.WebGL,
+                            remediation: "Packed 4-bit (QInt4) stores need host-side 8-nibbles-per-texel repacking " +
+                                "not yet wired on WebGL. Use WebGPU/CUDA/OpenCL for packed writes; reading a packed " +
+                                "QInt4 view on WebGL is supported.");
                     }
 
                     // Single-element TF output (one value per vertex invocation)
