@@ -54,9 +54,13 @@ try
     if (args.Length > 0 && args[0] == "fp4-verify")
         return await Float4Repro.Run();
 
-    // Packed 4-bit storage allocation foundation: ArrayView<Int4> = ceil(N/2) bytes.
+    // Packed 4-bit storage allocation foundation: ArrayView<QInt4> = ceil(N/2) bytes.
     if (args.Length > 0 && args[0] == "packed-alloc-verify")
         return await PackedAllocVerify.Run();
+
+    // Packed QInt4 nibble LOAD end-to-end (CPU/CUDA/OpenCL): y[i] = (int)x[i].
+    if (args.Length > 0 && args[0] == "packed-qint4-verify")
+        return await PackedQInt4Verify.Run();
 
     // FP8 conversions vs the ml_dtypes reference (float8_e4m3fn / e5m2) - answers the
     // overflow-convention question flagged in Float8E4M3.cs with evidence.

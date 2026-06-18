@@ -216,6 +216,12 @@ namespace ILGPU.Backends.OpenCL
         // buffers (4-bit E2M1 value in the low nibble). Load/Store convert via _e2m1 helpers.
         internal readonly Dictionary<string, (Variable BasePtr, Variable Index)> _fp4EmulatedLEAs = new();
 
+        // Int4/UInt4 PACKED emulation: tracks LEAs into uchar* buffers where 2 elements share a byte
+        // (the [PackedBits(4)] device layout). Load/Store nibble-address: byte = index>>1, nibble =
+        // (index&1)*4, then sign-extend (Int4) / zero-extend (UInt4) to an i32 register. IsSigned
+        // selects the extension. The index is KEPT (not folded to a byte address) so >>1 / &1 work.
+        internal readonly Dictionary<string, (Variable BasePtr, Variable Index, bool IsSigned)> _qint4EmulatedLEAs = new();
+
         private StringBuilder prefixBuilder = new StringBuilder();
         private StringBuilder suffixBuilder = new StringBuilder();
 

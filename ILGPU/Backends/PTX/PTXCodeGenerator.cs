@@ -205,7 +205,8 @@ namespace ILGPU.Backends.PTX
                 "f32", // BFloat16 (ordinal 9) - bf16 value held in an f32 register (storage uses literal b16)
                 "f32", // Float8E4M3 (ordinal 10) - held in an f32 register (storage uses literal b8)
                 "f32", // Float8E5M2 (ordinal 11) - held in an f32 register (storage uses literal b8)
-                "f32"); // Float4E2M1 (ordinal 12) - held in an f32 register (storage uses literal b8)
+                "f32", // Float4E2M1 (ordinal 12) - held in an f32 register (storage uses literal b8)
+                "b32"); // QInt4 (ordinal 13) - packed 4-bit int held in an i32 register (storage b8)
 
         /// <summary>
         /// Maps basic types to constant-loading target basic types.
@@ -220,7 +221,8 @@ namespace ILGPU.Backends.PTX
                 BasicValueType.Float32, // BFloat16 (ordinal 9) - f32-register model (mov as f32)
                 BasicValueType.Float32, // Float8E4M3 (ordinal 10) - f32-register model
                 BasicValueType.Float32, // Float8E5M2 (ordinal 11) - f32-register model
-                BasicValueType.Float32); // Float4E2M1 (ordinal 12) - f32-register model
+                BasicValueType.Float32, // Float4E2M1 (ordinal 12) - f32-register model
+                BasicValueType.Int32); // QInt4 (ordinal 13) - i32-register model (mov as i32)
 
         /// <summary>
         /// Maps basic types to constant-loading target basic types.
@@ -235,7 +237,8 @@ namespace ILGPU.Backends.PTX
                 BasicValueType.Int16, // BFloat16 (ordinal 9) - placeholder (Phase 3)
                 BasicValueType.Int8, // Float8E4M3 (ordinal 10) - 1-byte storage IO
                 BasicValueType.Int8, // Float8E5M2 (ordinal 11) - 1-byte storage IO
-                BasicValueType.Int8); // Float4E2M1 (ordinal 12) - 1-byte storage IO
+                BasicValueType.Int8, // Float4E2M1 (ordinal 12) - 1-byte storage IO
+                BasicValueType.Int8); // QInt4 (ordinal 13) - 1-byte packed storage IO
 
         /// <summary>
         /// Resolves the PTX suffix for the given basic value type.

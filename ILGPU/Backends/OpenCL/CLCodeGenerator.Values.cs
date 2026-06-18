@@ -586,6 +586,20 @@ namespace ILGPU.Backends.OpenCL
                 statement.AppendCommand(")");
                 return;
             }
+
+            // Int4 PACKED emulation: read the byte at (index>>1), extract the (index&1) nibble, and
+            // sign-extend to i32 inline ( (nib ^ 0x8) - 0x8 ). No address-space-qualified helper:
+            // the nibble math is emitted directly over the base-ptr + index variables.
+            if (_qint4EmulatedLEAs.TryGetValue(address.ToString(), out var int4Lea))
+            {
+                string b = int4Lea.BasePtr.ToString();
+                string i = int4Lea.Index.ToString();
+                string nib = $"(({b}[({i}) >> 1] >> ((({i}) & 1) << 2)) & 0xF)";
+                string expr = int4Lea.IsSigned ? $"((((int){nib}) ^ 0x8) - 0x8)" : $"((int){nib})";
+                using var statement = BeginStatement(target);
+                statement.AppendCommand(expr);
+                return;
+            }
             if (IsFloat4PointerEmulated(load.Source.Type))
             {
                 using var statement = BeginStatement(target);

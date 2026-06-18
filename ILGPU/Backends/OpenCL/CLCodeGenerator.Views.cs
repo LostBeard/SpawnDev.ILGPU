@@ -103,6 +103,29 @@ namespace ILGPU.Backends.OpenCL
                 return;
             }
 
+            // Int4/UInt4 PACKED emulation: the buffer is uchar* with 2 nibbles per byte. Keep the
+            // element index (do NOT fold into a byte address) so the Load/Store can compute the byte
+            // (index>>1) and nibble ((index&1)*4). Track (basePtr, index, isSigned).
+            if (value.Type is PointerType ptrTypeInt4
+                && ptrTypeInt4.ElementType is PrimitiveType ptElemQInt4
+                && ptElemQInt4.BasicValueType == BasicValueType.QInt4)
+            {
+                var targetInt4 = AllocatePointerType(ptrTypeInt4);
+                using (var statement = BeginStatement(targetInt4))
+                {
+                    statement.AppendCommand(CLInstructions.AddressOfOperation);
+                    statement.Append(source);
+                    statement.AppendIndexer(elementIndex);
+                }
+                Bind(value, targetInt4);
+                // NOTE: BasicValueType.QInt4 does not carry signedness (Int4 and UInt4 both lower to
+                // it), so the packed LOAD sign-extends (signed Int4 semantics). UInt4 (zero-extend)
+                // is a follow-up: it needs the sign threaded via the ArithmeticBasicValueType at the
+                // load or a separate BasicValueType. Signed Int4 is the prioritized path here.
+                _qint4EmulatedLEAs[targetInt4.ToString()] = (source, elementIndex, true);
+                return;
+            }
+
             var target2 = AllocatePointerType(value.Type.AsNotNullCast<PointerType>());
 
             using (var statement = BeginStatement(target2))

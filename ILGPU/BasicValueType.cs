@@ -85,6 +85,14 @@ namespace ILGPU
         /// ordinals (and the positional type tables indexed by them) are unchanged.
         /// </summary>
         Float4E2M1,
+
+        /// <summary>
+        /// Represents a 4-bit integer (QInt4 signed / QUInt4 unsigned; signedness carried by the
+        /// <see cref="ArithmeticBasicValueType"/>). Packed 2 per byte in device buffers, value in
+        /// the low nibble. Appended at the end so existing ordinals (and the positional type tables
+        /// indexed by them) are unchanged.
+        /// </summary>
+        QInt4,
     }
 
     /// <summary>
@@ -180,5 +188,17 @@ namespace ILGPU
         /// existing ordinals are unchanged.
         /// </summary>
         Float4E2M1,
+
+        /// <summary>
+        /// Represents a 4-bit signed integer (QInt4, two's complement -8..7). Appended at the end
+        /// so existing ordinals are unchanged.
+        /// </summary>
+        QInt4,
+
+        /// <summary>
+        /// Represents a 4-bit unsigned integer (QUInt4, 0..15). Appended at the end so existing
+        /// ordinals are unchanged.
+        /// </summary>
+        QUInt4,
     }
 }

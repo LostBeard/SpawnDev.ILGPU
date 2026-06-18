@@ -243,7 +243,7 @@ namespace ILGPU.Util
                 case TypeCode.UInt64:
                     return true;
                 default:
-                    return false;
+                    return type == typeof(ILGPU.QUInt4);
             }
         }
 
@@ -277,6 +277,7 @@ namespace ILGPU.Util
                 BasicValueType.Float8E4M3 => typeof(Float8E4M3),
                 BasicValueType.Float8E5M2 => typeof(Float8E5M2),
                 BasicValueType.Float4E2M1 => typeof(Float4E2M1),
+                BasicValueType.QInt4 => typeof(ILGPU.QInt4),
                 _ => null,
             };
 
@@ -304,6 +305,8 @@ namespace ILGPU.Util
                 ArithmeticBasicValueType.Float8E4M3 => typeof(Float8E4M3),
                 ArithmeticBasicValueType.Float8E5M2 => typeof(Float8E5M2),
                 ArithmeticBasicValueType.Float4E2M1 => typeof(Float4E2M1),
+                ArithmeticBasicValueType.QInt4 => typeof(ILGPU.QInt4),
+                ArithmeticBasicValueType.QUInt4 => typeof(ILGPU.QUInt4),
                 _ => throw new ArgumentOutOfRangeException(nameof(type)),
             };
 
@@ -345,6 +348,10 @@ namespace ILGPU.Util
                         return BasicValueType.Float8E5M2;
                     if (type == typeof(Float4E2M1))
                         return BasicValueType.Float4E2M1;
+                    if (type == typeof(ILGPU.QInt4))
+                        return BasicValueType.QInt4;
+                    if (type == typeof(ILGPU.QUInt4))
+                        return BasicValueType.QInt4;
                     return BasicValueType.None;
             }
         }
@@ -374,6 +381,8 @@ namespace ILGPU.Util
                     : type == typeof(Float8E4M3) ? ArithmeticBasicValueType.Float8E4M3
                     : type == typeof(Float8E5M2) ? ArithmeticBasicValueType.Float8E5M2
                     : type == typeof(Float4E2M1) ? ArithmeticBasicValueType.Float4E2M1
+                    : type == typeof(ILGPU.QInt4) ? ArithmeticBasicValueType.QInt4
+                    : type == typeof(ILGPU.QUInt4) ? ArithmeticBasicValueType.QUInt4
                     : ArithmeticBasicValueType.None
             };
 
@@ -415,6 +424,9 @@ namespace ILGPU.Util
                     return BasicValueType.Float8E5M2;
                 case ArithmeticBasicValueType.Float4E2M1:
                     return BasicValueType.Float4E2M1;
+                case ArithmeticBasicValueType.QInt4:
+                case ArithmeticBasicValueType.QUInt4:
+                    return BasicValueType.QInt4;
                 default:
                     return BasicValueType.None;
             }
@@ -453,6 +465,9 @@ namespace ILGPU.Util
                 BasicValueType.Float8E4M3 => ArithmeticBasicValueType.Float8E4M3,
                 BasicValueType.Float8E5M2 => ArithmeticBasicValueType.Float8E5M2,
                 BasicValueType.Float4E2M1 => ArithmeticBasicValueType.Float4E2M1,
+                BasicValueType.QInt4 => isUnsigned
+                    ? ArithmeticBasicValueType.QUInt4
+                    : ArithmeticBasicValueType.QInt4,
                 _ => ArithmeticBasicValueType.None,
             };
 
@@ -483,6 +498,8 @@ namespace ILGPU.Util
                 ArithmeticBasicValueType.Float8E4M3 => ArithmeticBasicValueType.Float32,
                 ArithmeticBasicValueType.Float8E5M2 => ArithmeticBasicValueType.Float32,
                 ArithmeticBasicValueType.Float4E2M1 => ArithmeticBasicValueType.Float32,
+                ArithmeticBasicValueType.QInt4 => ArithmeticBasicValueType.Int32,
+                ArithmeticBasicValueType.QUInt4 => ArithmeticBasicValueType.UInt32,
                 _ => ArithmeticBasicValueType.None,
             };
 
@@ -521,10 +538,13 @@ namespace ILGPU.Util
                 case ArithmeticBasicValueType.Int16:
                 case ArithmeticBasicValueType.Int32:
                     return ArithmeticBasicValueType.Int64;
+                case ArithmeticBasicValueType.QInt4:
+                    return ArithmeticBasicValueType.Int64;
                 case ArithmeticBasicValueType.UInt1:
                 case ArithmeticBasicValueType.UInt8:
                 case ArithmeticBasicValueType.UInt16:
                 case ArithmeticBasicValueType.UInt32:
+                case ArithmeticBasicValueType.QUInt4:
                     return ArithmeticBasicValueType.UInt64;
                 case ArithmeticBasicValueType.Float16:
                 case ArithmeticBasicValueType.BFloat16:
@@ -560,6 +580,7 @@ namespace ILGPU.Util
                 case BasicValueType.Int16:
                 case BasicValueType.Int32:
                 case BasicValueType.Int64:
+                case BasicValueType.QInt4:
                     return true;
                 default:
                     return false;

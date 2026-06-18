@@ -4,7 +4,7 @@ using ILGPU;
 using ILGPU.Runtime;
 
 /// <summary>
-/// Validates the packed 4-bit STORAGE foundation: an ArrayView&lt;Int4&gt; ([PackedBits(4)]) of N
+/// Validates the packed 4-bit STORAGE foundation: an ArrayView&lt;QInt4&gt; ([PackedBits(4)]) of N
 /// elements allocates ceil(N/2) DEVICE bytes (2 nibbles/byte) - the real 4-bit memory win - while
 /// every whole-byte type is byte-for-byte unchanged (byte=N, int=4N). Host-only (no kernel, no copy):
 /// proves the allocation byte-math + the no-op default for existing types. The nibble load/store and
@@ -30,17 +30,17 @@ internal static class PackedAllocVerify
             int[] sizes = { 1, 2, 3, 4, 5, 15, 16, 17, 255, 256, 257, 4096 };
             foreach (int n in sizes)
             {
-                using var buf = acc.Allocate1D<Int4>(n);
+                using var buf = acc.Allocate1D<QInt4>(n);
                 long expectedBytes = (n + 1) / 2;          // ceil(n/2)
                 long gotBytes = buf.LengthInBytes;
                 long gotElems = buf.Length;
                 if (gotBytes != expectedBytes || gotElems != n)
                 {
-                    Console.WriteLine($"    Int4 N={n}: bytes={gotBytes} (want {expectedBytes}), elems={gotElems} (want {n})  FAIL");
+                    Console.WriteLine($"    QInt4 N={n}: bytes={gotBytes} (want {expectedBytes}), elems={gotElems} (want {n})  FAIL");
                     fails++;
                 }
             }
-            Console.WriteLine($"    Int4 packed (2/byte): {sizes.Length - 0} sizes checked, {fails} fail");
+            Console.WriteLine($"    QInt4 packed (2/byte): {sizes.Length - 0} sizes checked, {fails} fail");
 
             // Whole-byte regression: byte = N bytes, int = 4N bytes, double = 8N bytes (unchanged).
             int rfails = 0;
@@ -53,13 +53,13 @@ internal static class PackedAllocVerify
             fails += rfails;
 
             // BitsPerElement static sanity.
-            if (ArrayView<Int4>.BitsPerElement != 4) { Console.WriteLine($"    ArrayView<Int4>.BitsPerElement={ArrayView<Int4>.BitsPerElement} != 4  FAIL"); fails++; }
+            if (ArrayView<QInt4>.BitsPerElement != 4) { Console.WriteLine($"    ArrayView<QInt4>.BitsPerElement={ArrayView<QInt4>.BitsPerElement} != 4  FAIL"); fails++; }
             if (ArrayView<byte>.BitsPerElement != 8) { Console.WriteLine($"    ArrayView<byte>.BitsPerElement != 8  FAIL"); fails++; }
             if (ArrayView<int>.BitsPerElement != 32) { Console.WriteLine($"    ArrayView<int>.BitsPerElement != 32  FAIL"); fails++; }
         }
 
         Console.WriteLine(fails == 0
-            ? "=== PACKED ALLOC PASS (Int4 = 2/byte, whole-byte types unchanged) ==="
+            ? "=== PACKED ALLOC PASS (QInt4 = 2/byte, whole-byte types unchanged) ==="
             : $"=== PACKED ALLOC FAIL: {fails} problems ===");
         return Task.FromResult(fails == 0 ? 0 : 1);
     }

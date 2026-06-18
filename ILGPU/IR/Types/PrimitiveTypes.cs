@@ -38,7 +38,9 @@ namespace ILGPU.IR.Types
                 2, // BFloat16 (appended at the end; 2-byte storage like Float16)
                 1, // Float8E4M3 (appended; 1-byte storage)
                 1, // Float8E5M2 (appended; 1-byte storage)
-                1); // Float4E2M1 (appended; 1-byte storage, value in the low nibble)
+                1, // Float4E2M1 (appended; 1-byte storage, value in the low nibble)
+                1); // Int4/UInt4 (appended; 1-byte IR storage, value in the low nibble; the
+                    // device buffer is packed 2/byte via [PackedBits(4)])
 
         /// <summary>
         /// Maps integer-based type size values to <see cref="BasicValueType"/> entries.

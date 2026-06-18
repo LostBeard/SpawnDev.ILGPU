@@ -13,12 +13,21 @@ using ILGPU.IR;
 using ILGPU.IR.Types;
 using ILGPU.IR.Values;
 using ILGPU.Util;
+using System.Collections.Generic;
 using System.Diagnostics;
 
 namespace ILGPU.Backends.PTX
 {
     partial class PTXCodeGenerator
     {
+        /// <summary>
+        /// Maps a packed-4-bit (QInt4) <see cref="LoadElementAddress"/> to the kept nibble-shift
+        /// register ((index &amp; 1) &lt;&lt; 2 = 0 or 4) so the corresponding Load can extract + sign-extend
+        /// the right nibble of the byte at base + (index &gt;&gt; 1). The shift register is intentionally
+        /// not freed (it must outlive the LEA to the Load, and one LEA may feed several Loads).
+        /// </summary>
+        private readonly Dictionary<Value, HardwareRegister> _qint4LEAShift = new();
+
         /// <summary cref="IBackendCodeGenerator.GenerateCode(LoadElementAddress)"/>
         public void GenerateCode(LoadElementAddress value)
         {
@@ -30,6 +39,43 @@ namespace ILGPU.Backends.PTX
             var sourceType = value.Source.Type.AsNotNullCast<AddressSpaceType>();
             var elementSize = sourceType.ElementType.Size;
 
+            // Packed 4-bit (QInt4): 2 nibbles per byte. Address by the BYTE (index >> 1) and keep the
+            // nibble shift (index & 1) << 2 for the Load. effIndex/effSize feed the normal address
+            // math below with a stride of 1 byte over the packed buffer.
+            var effIndex = elementIndex;
+            var effSize = elementSize;
+            if (sourceType.ElementType is PrimitiveType qpt
+                && qpt.BasicValueType == BasicValueType.QInt4)
+            {
+                bool is32 = value.Is32BitAccess;
+                // byteIndex = index >> 1
+                var byteIndex = is32
+                    ? AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32)
+                    : AllocateRegister(BasicValueType.Int64, PTXRegisterKind.Int64);
+                using (var c = BeginCommand(is32 ? "shr.u32" : "shr.u64"))
+                { c.AppendArgument(byteIndex); c.AppendArgument(elementIndex); c.AppendConstant(1); }
+                effIndex = byteIndex;
+                effSize = 1;
+
+                // keptShift (i32) = (index & 1) << 2   (0 for the low nibble, 4 for the high nibble)
+                var keptShift = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+                if (is32)
+                {
+                    using var c = BeginCommand("and.b32");
+                    c.AppendArgument(keptShift); c.AppendArgument(elementIndex); c.AppendConstant(1);
+                }
+                else
+                {
+                    using (var c = BeginCommand("cvt.u32.u64"))
+                    { c.AppendArgument(keptShift); c.AppendArgument(elementIndex); }
+                    using var c2 = BeginCommand("and.b32");
+                    c2.AppendArgument(keptShift); c2.AppendArgument(keptShift); c2.AppendConstant(1);
+                }
+                using (var c = BeginCommand("shl.b32"))
+                { c.AppendArgument(keptShift); c.AppendArgument(keptShift); c.AppendConstant(2); }
+                _qint4LEAShift[value] = keptShift;
+            }
+
             if (value.Is32BitAccess)
             {
                 // Perform two efficient operations TODO
@@ -38,8 +84,8 @@ namespace ILGPU.Backends.PTX
                     PTXInstructions.GetLEAMulOperation(Backend.PointerArithmeticType)))
                 {
                     command.AppendArgument(offsetRegister);
-                    command.AppendArgument(elementIndex);
-                    command.AppendConstant(elementSize);
+                    command.AppendArgument(effIndex);
+                    command.AppendConstant(effSize);
                 }
 
                 using (var command = BeginCommand(
@@ -64,8 +110,8 @@ namespace ILGPU.Backends.PTX
                         TernaryArithmeticKind.MultiplyAdd,
                         Backend.PointerArithmeticType));
                 command.AppendArgument(targetAddressRegister);
-                command.AppendArgument(elementIndex);
-                command.AppendConstant(elementSize);
+                command.AppendArgument(effIndex);
+                command.AppendConstant(effSize);
                 command.AppendArgument(address);
             }
         }

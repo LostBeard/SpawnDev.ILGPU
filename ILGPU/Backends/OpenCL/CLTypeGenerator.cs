@@ -77,7 +77,9 @@ namespace ILGPU.Backends.OpenCL
                 "float", // BFloat16 (ordinal 9) - emulated as float on OpenCL (no native cl bf16)
                 "float", // Float8E4M3 (ordinal 10) - emulated as float on OpenCL
                 "float", // Float8E5M2 (ordinal 11) - emulated as float on OpenCL
-                "float"); // Float4E2M1 (ordinal 12) - emulated as float on OpenCL
+                "float", // Float4E2M1 (ordinal 12) - emulated as float on OpenCL
+                "int"); // Int4 (ordinal 13) - 4-bit int held in an i32 register; packed nibble
+                        // load/store does the addressing (signedness via ArithmeticBasicValueType)
 
         /// <summary>
         /// Maps arithmetic-basic value types to OpenCL language types.
@@ -100,7 +102,9 @@ namespace ILGPU.Backends.OpenCL
                 "float", // BFloat16 (ordinal 13) - emulated as float on OpenCL
                 "float", // Float8E4M3 (ordinal 14) - emulated as float on OpenCL
                 "float", // Float8E5M2 (ordinal 15) - emulated as float on OpenCL
-                "float"); // Float4E2M1 (ordinal 16) - emulated as float on OpenCL
+                "float", // Float4E2M1 (ordinal 16) - emulated as float on OpenCL
+                "int", // Int4 (ordinal 17) - signed 4-bit in an i32 register
+                "uint"); // UInt4 (ordinal 18) - unsigned 4-bit in a u32 register
 
         /// <summary>
         /// Maps arithmetic-basic value types to atomic OpenCL language types.
@@ -123,7 +127,9 @@ namespace ILGPU.Backends.OpenCL
                 null, // BFloat16 (ordinal 13) - no bf16 atomics
                 null, // Float8E4M3 (ordinal 14) - no fp8 atomics
                 null, // Float8E5M2 (ordinal 15) - no fp8 atomics
-                null); // Float4E2M1 (ordinal 16) - no fp4 atomics
+                null, // Float4E2M1 (ordinal 16) - no fp4 atomics
+                null, // Int4 (ordinal 17) - no 4-bit atomics
+                null); // UInt4 (ordinal 18) - no 4-bit atomics
 
         /// <summary>
         /// Resolves the given basic-value type to an OpenCL type name.
@@ -360,6 +366,11 @@ namespace ILGPU.Backends.OpenCL
                         // low nibble), helpers _e2m1_bits_to_f32 / _f32_to_e2m1_bits.
                         else if (pointerType.ElementType is PrimitiveType fp4Elem
                             && fp4Elem.BasicValueType == BasicValueType.Float4E2M1)
+                            builder.Append("uchar");
+                        // Int4/UInt4 PACKED: 1-byte uchar storage with 2 nibbles per byte. The
+                        // load/store handlers nibble-address (byte=index>>1) + sign/zero-extend.
+                        else if (pointerType.ElementType is PrimitiveType int4Elem
+                            && int4Elem.BasicValueType == BasicValueType.QInt4)
                             builder.Append("uchar");
                         else
                             builder.Append(mapping[pointerType.ElementType]);

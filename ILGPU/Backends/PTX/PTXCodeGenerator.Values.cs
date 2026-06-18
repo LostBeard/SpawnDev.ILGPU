@@ -262,6 +262,28 @@ namespace ILGPU.Backends.PTX
                 }
             }
 
+            // QInt4/QUInt4 are decoded to a sign/zero-extended i32 in-register at the packed nibble
+            // load, so they behave as Int32/UInt32 for conversions: QInt4<->Int32 (same) is a register
+            // no-op; QInt4->Float32 etc. falls through as the normal Int32->Float32 convert.
+            bool srcQ4 = sourceType == ArithmeticBasicValueType.QInt4
+                || sourceType == ArithmeticBasicValueType.QUInt4;
+            bool dstQ4 = targetType == ArithmeticBasicValueType.QInt4
+                || targetType == ArithmeticBasicValueType.QUInt4;
+            if (srcQ4 || dstQ4)
+            {
+                if (srcQ4)
+                    sourceType = sourceType == ArithmeticBasicValueType.QUInt4
+                        ? ArithmeticBasicValueType.UInt32 : ArithmeticBasicValueType.Int32;
+                if (dstQ4)
+                    targetType = targetType == ArithmeticBasicValueType.QUInt4
+                        ? ArithmeticBasicValueType.UInt32 : ArithmeticBasicValueType.Int32;
+                if (sourceType == targetType)
+                {
+                    Alias(value, value.Value);
+                    return;
+                }
+            }
+
             var sourceValue = LoadPrimitive(value.Value);
 
             var convertOperation = PTXInstructions.GetConvertOperation(
@@ -1230,6 +1252,36 @@ namespace ILGPU.Backends.PTX
                 return;
             }
 
+            if (load.Type.BasicValueType == BasicValueType.QInt4)
+            {
+                // Packed 4-bit signed: the keep-index LEA made `address` the byte ptr (base+index>>1)
+                // and recorded the nibble shift (0 or 4). Load the byte, shift to the nibble, mask to
+                // 4 bits, and sign-extend ((nib ^ 0x8) - 0x8) into the i32 value register.
+                var qTarget = AllocateHardware(load);
+                var rawReg = AllocateRegister(BasicValueType.Int16, PTXRegisterKind.Int16);
+                using (var cmd = BeginCommand(PTXInstructions.LoadOperation))
+                {
+                    cmd.AppendAddressSpace(sourceType.AddressSpace);
+                    cmd.AppendSuffix("u8");
+                    cmd.AppendArgument(rawReg);
+                    cmd.AppendArgumentValue(address, 0);
+                }
+                var bits = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+                using (var c = BeginCommand("cvt.u32.u16")) { c.AppendArgument(bits); c.AppendArgument(rawReg); }
+                if (_qint4LEAShift.TryGetValue(load.Source, out var keptShift))
+                {
+                    using var c = BeginCommand("shr.u32");
+                    c.AppendArgument(bits); c.AppendArgument(bits); c.AppendArgument(keptShift);
+                }
+                using (var c = BeginCommand("and.b32")) { c.AppendArgument(bits); c.AppendArgument(bits); c.AppendConstant(0xF); }
+                // sign-extend a 4-bit two's-complement value: (bits ^ 0x8) - 0x8
+                using (var c = BeginCommand("xor.b32")) { c.AppendArgument(bits); c.AppendArgument(bits); c.AppendConstant(0x8); }
+                using (var c = BeginCommand("sub.s32")) { c.AppendArgument(qTarget); c.AppendArgument(bits); c.AppendConstant(0x8); }
+                FreeRegister(rawReg);
+                FreeRegister(bits);
+                return;
+            }
+
             var targetRegister = Allocate(load);
 
             EmitVectorizedCommand(
@@ -1417,7 +1469,12 @@ namespace ILGPU.Backends.PTX
                 (lowpValue.BasicValueType == BasicValueType.BFloat16 ||
                  lowpValue.BasicValueType == BasicValueType.Float8E4M3 ||
                  lowpValue.BasicValueType == BasicValueType.Float8E5M2 ||
-                 lowpValue.BasicValueType == BasicValueType.Float4E2M1))
+                 lowpValue.BasicValueType == BasicValueType.Float4E2M1 ||
+                 // QInt4: the widening (int)qint4 Convert is a no-op alias that preserves the QInt4
+                 // IR type, but the i32 register already holds the FULL sign-extended value. Falling
+                 // through would re-narrow it (ResolveIOType(QInt4)=Int8 -> st.b8) into the wider int
+                 // slot, truncating negatives to their low byte (-8 -> 248). Store the i32 directly.
+                 lowpValue.BasicValueType == BasicValueType.QInt4))
             {
                 var f32Reg = EnsureHardwareRegister(lowpValue);
                 using var cmd = BeginCommand(PTXInstructions.StoreOperation);
