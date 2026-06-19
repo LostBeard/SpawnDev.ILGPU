@@ -13,6 +13,14 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
     public abstract partial class BackendTestBase
     {
         static void QUInt4LoadKernel(Index1D i, ArrayView<QUInt4> x, ArrayView<int> y) => y[i] = x[i];
+        // A QUInt4 CONSTANT (13, a high code) converted to int + float in-kernel - exercises the IR
+        // const-fold/convert path (Convert.cs). Zero-extend gives 13/13.0; a sign-extend bug gives -3.
+        static void QUInt4ConstKernel(Index1D i, ArrayView<int> outI, ArrayView<float> outF)
+        {
+            QUInt4 c = (QUInt4)13;
+            outI[i.X] = c;
+            outF[i.X] = c;
+        }
         static void QUInt4StoreKernel(Index1D i, ArrayView<int> src, ArrayView<QUInt4> dst) => dst[i] = (QUInt4)src[i];
         // The dequant shape: read an unsigned 4-bit code and widen to float (QUInt4 -> Float32 convert).
         static void QUInt4ToFloatKernel(Index1D i, ArrayView<QUInt4> x, ArrayView<float> y) => y[i] = x[i];
@@ -77,6 +85,30 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 if (got[i] != expected[i])
                     throw new Exception($"QUInt4 -> float mismatch at [{i}]: got {got[i]} expected {expected[i]} " +
                         $"(should ZERO-extend then widen).");
+        });
+
+        /// <summary>
+        /// A QUInt4 constant (13) converted to int + float in-kernel must zero-extend (13 / 13.0), not
+        /// sign-extend (-3). Covers the IR const-fold/convert path on every backend.
+        /// </summary>
+        [TestMethod]
+        public async Task PackedQUInt4_ConstConvert_ZeroExtends() => await RunTest(async accelerator =>
+        {
+            const int n = 4;
+            using var iBuf = accelerator.Allocate1D<int>(n);
+            using var fBuf = accelerator.Allocate1D<float>(n);
+            accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<float>>(QUInt4ConstKernel)(
+                n, iBuf.View, fBuf.View);
+            await accelerator.SynchronizeAsync();
+            var gotI = await iBuf.CopyToHostAsync<int>();
+            var gotF = await fBuf.CopyToHostAsync<float>();
+            for (int i = 0; i < n; i++)
+            {
+                if (gotI[i] != 13)
+                    throw new Exception($"QUInt4 const (int) wrong at [{i}]: got {gotI[i]} expected 13 (sign-extend bug gives -3).");
+                if (gotF[i] != 13f)
+                    throw new Exception($"QUInt4 const (float) wrong at [{i}]: got {gotF[i]} expected 13.");
+            }
         });
 
         /// <summary>

@@ -14,6 +14,7 @@
 using System;
 using System.Runtime.CompilerServices;
 using ILGPU.Frontend.Intrinsic;
+using ILGPU.IR.Values;
 
 namespace ILGPU
 {
@@ -88,14 +89,17 @@ namespace ILGPU
         public static bool operator !=(QUInt4 first, QUInt4 second) => first.RawValue != second.RawValue;
 
         /// <summary>Zero-extends the 4-bit value to a 32-bit int (0..15).</summary>
-        // [ConvertIntrinisc]: in a kernel this is a ConvertValue node (identity - the QUInt4 value is
-        // already zero-extended in an i32 register by the packed nibble LOAD), not an inlined body.
-        [ConvertIntrinisc]
+        // [ConvertIntrinisc(SourceUnsigned)]: in a kernel this is a ConvertValue node that ZERO-extends
+        // the 4-bit source (the QUInt4-vs-QInt4 distinction - both share BasicValueType.QInt4, so the
+        // convert must carry SourceUnsigned to widen unsigned). It is identity when the value already
+        // came zero-extended from the packed nibble LOAD, but for a CONSTANT (or any non-load source)
+        // the flag is what makes the const-fold + backend codegen zero-extend instead of sign-extend.
+        [ConvertIntrinisc(ConvertFlags.SourceUnsigned)]
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static implicit operator int(QUInt4 value) => value.RawValue & 0x0F;
 
         /// <summary>Zero-extends the 4-bit value to a 32-bit uint (0..15).</summary>
-        [ConvertIntrinisc]
+        [ConvertIntrinisc(ConvertFlags.SourceUnsigned)]
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static implicit operator uint(QUInt4 value) => (uint)(value.RawValue & 0x0F);
 
@@ -105,7 +109,7 @@ namespace ILGPU
         public static explicit operator QUInt4(int value) => new QUInt4((byte)(value & 0x0F));
 
         /// <summary>Widens the 4-bit value to float (0..15).</summary>
-        [ConvertIntrinisc]
+        [ConvertIntrinisc(ConvertFlags.SourceUnsigned)]
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static implicit operator float(QUInt4 value) => value.RawValue & 0x0F;
 

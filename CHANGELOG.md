@@ -2,6 +2,14 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.14.0-local.11 (2026-06-19) - `QUInt4` radix-sort + const-fold fix: full parity with `QInt4`
+
+Completes the unsigned packed 4-bit type to full `QInt4` parity. Continues `local.10` (which fixed the `QUInt4` load): `QUInt4` was shipped at `local.7` untested, so closing the gaps means auditing every path - this round adds radix-sort and fixes a second silent-wrong (const/convert). Forks bump to `2.0.38`. The signed `QInt4` paths are unchanged.
+
+- **`Ascending/DescendingQUInt4` radix-sort operations** (keys-only + key/value pairs, ascending + descending). Simpler than `QInt4`: an unsigned 4-bit value is already magnitude-monotonic, so the key transform has NO sign-bit flip and NO ones-complement - `ExtractRadixBits` is just `(int)value & 0xF`. Runs on the packed-store backends (CUDA/OpenCL/WebGPU/Wasm); CPU + WebGL skip (the scatter writes packed nibbles needing an atomic word RMW). The shared `BasicValueType.QInt4` body-struct codegen + the `& 0xF` key mask handle it with no new backend work.
+- **Fixed a silent-wrong `QUInt4` const/convert sign-extend.** A `QUInt4` constant `13` (code `0xD`) read back as `-3` on every GPU backend: the widening operators (`QUInt4 -> int/uint/float`) were plain `[ConvertIntrinisc]`, so the IR const-fold (and the convert's `ArithmeticBasicValueType`) defaulted to signed and SIGN-extended the nibble. The `local.10` load test masked this (the load already zero-extended the value, making the convert a no-op identity); a *constant* has no load, so the bug surfaced. Fix: mark the three widening operators `[ConvertIntrinisc(ConvertFlags.SourceUnsigned)]` (the same pattern `BFloat16`/`Half` use) so the convert zero-extends. Now correct on all 6 backends.
+- Gates: new `BackendTestBase.QUInt4.RadixSort` (ExtractBits GPU-vs-CPU on all 6 + keys/pairs ascending on the packed-store backends) green; `PackedQUInt4` const-convert test green on all 6; full `PMT_FILTER=Radix` **472 pass / 0 fail** (455 baseline + the new QUInt4 radix); `PackedQInt4` unchanged (19 pass / 4 skip - the QUInt4-only operator change doesn't touch signed QInt4).
+
 ## 4.14.0-local.10 (2026-06-19) - Packed `QUInt4` zero-extending load on all 6 backends (the unsigned 4-bit type was silently sign-extending on GPU)
 
 Fixes a silent-wrong bug: `ArrayView<QUInt4>` (unsigned packed 4-bit, 0..15) was **sign-extending** on every GPU backend - code `0xF` read back as `-1`, `0x8` as `-8` - because the unsigned type shared the signed `QInt4` packed-nibble load path and signedness is erased at the IR primitive level (`QInt4` and `QUInt4` both lower to `BasicValueType.QInt4`; only `ArithmeticBasicValueType` distinguishes them). The type was shipped (`local.7`) but untested, so the gap was never caught. Forks bump to `2.0.37`. The signed `QInt4` path is byte-for-byte unchanged.
