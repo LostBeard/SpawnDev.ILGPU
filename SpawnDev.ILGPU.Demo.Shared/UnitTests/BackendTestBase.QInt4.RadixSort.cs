@@ -105,9 +105,59 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     throw new Exception($"QInt4 keys-asc mismatch at [{i}]: expected={expected[i]} got={got[i]}");
         }
 
+        // Pairs (QInt4 key + int value) ascending: DISTINCT keys -8..7 in descending input order with
+        // value=index, so sorted keys must be ascending and each value follows its key's permutation.
+        // Exercises the key-bundle struct-field path (the FP4 PTX EmitIO all-zero-keys bug class).
+        async Task QInt4RadixPairsAscendingImpl(Accelerator accelerator)
+        {
+            int n = 16;
+            var keysInt = new int[n];
+            var values = new int[n];
+            for (int i = 0; i < n; i++)
+            {
+                keysInt[i] = 7 - i;   // descending input -8..7 -> keysInt = 7,6,...,-8
+                values[i] = i;
+            }
+            var packed = PackQInt4(keysInt);
+
+            using var keysBuf = accelerator.Allocate1D<QInt4>(n);
+            ((IContiguousArrayView)keysBuf.View.BaseView).AsRawArrayView().CopyFromCPU(packed);
+            using var valsBuf = accelerator.Allocate1D(values);
+            using var tempBuf = accelerator.Allocate1D<int>(
+                accelerator.ComputeRadixSortPairsTempStorageSize<QInt4, int, AscendingQInt4>(n));
+            accelerator.CreateRadixSortPairs<QInt4, Stride1D.Dense, int, Stride1D.Dense, AscendingQInt4>()(
+                accelerator.DefaultStream, keysBuf.View, valsBuf.View, tempBuf.View.AsContiguous());
+            await accelerator.SynchronizeAsync();
+
+            var sortedPacked = new byte[packed.Length];
+            ((IContiguousArrayView)keysBuf.View.BaseView).AsRawArrayView().CopyToCPU(sortedPacked);
+            var sv = await valsBuf.CopyToHostAsync<int>();
+            for (int i = 0; i < n; i++)
+            {
+                int nib = (sortedPacked[i >> 1] >> ((i & 1) * 4)) & 0xF;
+                int gotKey = ((nib ^ 0x8) - 0x8);
+                int expectedKey = -8 + i; // ascending
+                if (gotKey != expectedKey)
+                    throw new Exception($"QInt4 pairs key mismatch at [{i}]: expected={expectedKey} got={gotKey}");
+                // key -8+i was input index (7-(-8+i))=(15-i) -> value 15-i.
+                if (sv[i] != 15 - i)
+                    throw new Exception($"QInt4 pairs value mismatch at [{i}]: expected={15 - i} got={sv[i]}");
+            }
+        }
+
         [TestMethod]
         public async Task QInt4Radix_ExtractBits_GpuMatchesCpu() => await RunTest(async acc =>
             await QInt4RadixExtractBitsImpl<AscendingQInt4>(acc, "asc"));
+
+        [TestMethod]
+        public async Task QInt4Radix_PairsAscending() => await RunTest(async acc =>
+        {
+            var t = acc.AcceleratorType;
+            if (t == AcceleratorType.CPU || t == AcceleratorType.WebGL)
+                throw new UnsupportedTestException(
+                    $"QInt4 radix scatter writes packed nibbles (atomic-RMW store), unsupported on {t}.");
+            await QInt4RadixPairsAscendingImpl(acc);
+        });
 
         [TestMethod]
         public async Task QInt4Radix_KeysAscending() => await RunTest(async acc =>
