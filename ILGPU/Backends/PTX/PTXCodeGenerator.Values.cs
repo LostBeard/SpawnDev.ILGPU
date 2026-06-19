@@ -1235,9 +1235,10 @@ namespace ILGPU.Backends.PTX
 
             if (load.Type.BasicValueType == BasicValueType.Float4E2M1)
             {
-                // FP4 storage is a packed 1-byte value (4-bit E2M1 in the low nibble); load the byte
-                // into a temp .b16 register, then widen to the f32 value register via portable bit-manip
-                // (EmitFP4BitsToF32 - every CUDA arch). f32-register model like bf16/FP8.
+                // FP4 is TRUE packed 4-bit (2 nibbles/byte): the keep-index LEA made `address` the byte
+                // ptr (base+index>>1) and recorded the nibble shift (0 or 4). Load the byte, bring the
+                // target nibble down to bits 0..3 (EmitFP4BitsToF32 then masks the low nibble), and
+                // widen the E2M1 nibble to the f32 value register via portable bit-manip (every arch).
                 var fp4Target = AllocateHardware(load);
                 var rawReg = AllocateRegister(BasicValueType.Int16, PTXRegisterKind.Int16);
                 using (var cmd = BeginCommand(PTXInstructions.LoadOperation))
@@ -1246,6 +1247,11 @@ namespace ILGPU.Backends.PTX
                     cmd.AppendSuffix("u8");
                     cmd.AppendArgument(rawReg);
                     cmd.AppendArgumentValue(address, 0);
+                }
+                if (_qint4LEAShift.TryGetValue(load.Source, out var fp4Shift))
+                {
+                    using var c = BeginCommand("shr.u16");
+                    c.AppendArgument(rawReg); c.AppendArgument(rawReg); c.AppendArgument(fp4Shift);
                 }
                 EmitFP4BitsToF32(rawReg, fp4Target);
                 FreeRegister(rawReg);
@@ -1450,20 +1456,75 @@ namespace ILGPU.Backends.PTX
 
             if (targetType.ElementType.BasicValueType == BasicValueType.Float4E2M1)
             {
-                // FP4 store: round the f32 value register to the 1-byte E2M1 pattern (low nibble) via
-                // portable bit-manip (EmitF32ToFP4Bits - every CUDA arch) into a temp .b16 register, then
-                // write the low byte. Keyed off the TARGET BUFFER element type (same as bf16/FP8).
+                // FP4 packed STORE: round the f32 value to the 4-bit E2M1 nibble (EmitF32ToFP4Bits), then
+                // write ONLY that nibble of byte (index>>1) via an ATOMIC word RMW - adjacent threads
+                // write the two nibbles of the SAME 32-bit word, so a plain st.u8 races. Same nibble-RMW
+                // contract as the QInt4 store; only the value transform differs (E2M1 encode vs int mask).
+                // `address` is the byte ptr (keep-index LEA); _qint4LEAShift holds the in-byte nibble shift.
                 var valueReg = EnsureHardwareRegister(value.AsNotNullCast<PrimitiveRegister>());
-                var rawReg = AllocateRegister(BasicValueType.Int16, PTXRegisterKind.Int16);
-                EmitF32ToFP4Bits(valueReg, rawReg);
-                using (var cmd = BeginCommand(PTXInstructions.StoreOperation))
+                var encReg = AllocateRegister(BasicValueType.Int16, PTXRegisterKind.Int16);
+                EmitF32ToFP4Bits(valueReg, encReg);   // encReg low nibble = E2M1 code
+                bool ptr64 = Backend.PointerBasicValueType == BasicValueType.Int64;
+                string addrSuffix = ptr64 ? "b64" : "b32";
+
+                // wordAddr = byteAddr & ~3
+                var wordAddr = AllocatePlatformRegister(out var _);
+                using (var c = BeginCommand("and." + addrSuffix))
+                { c.AppendArgument(wordAddr); c.AppendArgument(address); c.AppendConstant(~3L); }
+
+                // byteInWord = (u32)(byteAddr & 3)
+                var lowBits = AllocatePlatformRegister(out var _);
+                using (var c = BeginCommand("and." + addrSuffix))
+                { c.AppendArgument(lowBits); c.AppendArgument(address); c.AppendConstant(3L); }
+                var byteInWord = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+                if (ptr64)
+                    using (var c = BeginCommand("cvt.u32.u64")) { c.AppendArgument(byteInWord); c.AppendArgument(lowBits); }
+                else
+                    using (var c = BeginCommand("mov.u32")) { c.AppendArgument(byteInWord); c.AppendArgument(lowBits); }
+
+                // shift = byteInWord*8 + nibbleShift
+                var shift = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+                using (var c = BeginCommand("shl.b32")) { c.AppendArgument(shift); c.AppendArgument(byteInWord); c.AppendConstant(3); }
+                if (_qint4LEAShift.TryGetValue(store.Target, out var keptShift))
+                    using (var c = BeginCommand("add.u32")) { c.AppendArgument(shift); c.AppendArgument(shift); c.AppendArgument(keptShift); }
+
+                // mask = 0xF << shift ; clearMask = ~mask
+                var mask = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+                using (var c = BeginCommand("mov.u32")) { c.AppendArgument(mask); c.AppendConstant(0xF); }
+                using (var c = BeginCommand("shl.b32")) { c.AppendArgument(mask); c.AppendArgument(mask); c.AppendArgument(shift); }
+                var clearMask = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+                using (var c = BeginCommand("not.b32")) { c.AppendArgument(clearMask); c.AppendArgument(mask); }
+
+                // setBits = (encNibble & 0xF) << shift
+                var vnib = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+                using (var c = BeginCommand("cvt.u32.u16")) { c.AppendArgument(vnib); c.AppendArgument(encReg); }
+                using (var c = BeginCommand("and.b32")) { c.AppendArgument(vnib); c.AppendArgument(vnib); c.AppendConstant(0xF); }
+                using (var c = BeginCommand("shl.b32")) { c.AppendArgument(vnib); c.AppendArgument(vnib); c.AppendArgument(shift); }
+
+                var asp = targetType.AddressSpace;
+                using (var c = BeginCommand(PTXInstructions.GetAtomicOperation(AtomicKind.And, false)))
                 {
-                    cmd.AppendAddressSpace(targetType.AddressSpace);
-                    cmd.AppendSuffix("u8");
-                    cmd.AppendArgumentValue(address, 0);
-                    cmd.AppendArgument(rawReg);
+                    c.AppendNonLocalAddressSpace(asp);
+                    c.AppendSuffix(PTXInstructions.GetAtomicOperationSuffix(AtomicKind.And, ArithmeticBasicValueType.UInt32));
+                    c.AppendArgumentValue(wordAddr);
+                    c.AppendArgument(clearMask);
                 }
-                FreeRegister(rawReg);
+                using (var c = BeginCommand(PTXInstructions.GetAtomicOperation(AtomicKind.Or, false)))
+                {
+                    c.AppendNonLocalAddressSpace(asp);
+                    c.AppendSuffix(PTXInstructions.GetAtomicOperationSuffix(AtomicKind.Or, ArithmeticBasicValueType.UInt32));
+                    c.AppendArgumentValue(wordAddr);
+                    c.AppendArgument(vnib);
+                }
+
+                FreeRegister(encReg);
+                FreeRegister(wordAddr);
+                FreeRegister(lowBits);
+                FreeRegister(byteInWord);
+                FreeRegister(shift);
+                FreeRegister(mask);
+                FreeRegister(clearMask);
+                FreeRegister(vnib);
                 return;
             }
 

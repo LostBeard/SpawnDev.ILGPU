@@ -83,13 +83,16 @@ namespace ILGPU.Backends.PTX
             var sourceType = value.Source.Type.AsNotNullCast<AddressSpaceType>();
             var elementSize = sourceType.ElementType.Size;
 
-            // Packed 4-bit (QInt4): 2 nibbles per byte. Address by the BYTE (index >> 1) and keep the
-            // nibble shift (index & 1) << 2 for the Load. effIndex/effSize feed the normal address
-            // math below with a stride of 1 byte over the packed buffer.
+            // Packed 4-bit (QInt4/QUInt4 AND Float4E2M1): 2 nibbles per byte. Address by the BYTE
+            // (index >> 1) and keep the nibble shift (index & 1) << 2 for the Load. effIndex/effSize
+            // feed the normal address math below with a stride of 1 byte over the packed buffer.
+            // (FP4 reuses the same nibble addressing as the packed ints; only the at-nibble value
+            // transform differs - E2M1 decode vs int sign/zero-extend.)
             var effIndex = elementIndex;
             var effSize = elementSize;
             if (sourceType.ElementType is PrimitiveType qpt
-                && qpt.BasicValueType == BasicValueType.QInt4)
+                && (qpt.BasicValueType == BasicValueType.QInt4
+                    || qpt.BasicValueType == BasicValueType.Float4E2M1))
             {
                 bool is32 = value.Is32BitAccess;
                 // byteIndex = index >> 1

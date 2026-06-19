@@ -42,6 +42,24 @@ internal static class PackedAllocVerify
             }
             Console.WriteLine($"    QInt4 packed (2/byte): {sizes.Length - 0} sizes checked, {fails} fail");
 
+            // Float4E2M1 (FP4) is now [PackedBits(4)] too - same ceil(N/2) packing.
+            int f4fails = 0;
+            foreach (int n in sizes)
+            {
+                using var buf = acc.Allocate1D<global::ILGPU.Float4E2M1>(n);
+                long expectedBytes = (n + 1) / 2;
+                if (buf.LengthInBytes != expectedBytes || buf.Length != n)
+                {
+                    Console.WriteLine($"    Float4E2M1 N={n}: bytes={buf.LengthInBytes} (want {expectedBytes}), elems={buf.Length} (want {n})  FAIL");
+                    f4fails++;
+                }
+            }
+            int f4Bits = ArrayView<global::ILGPU.Float4E2M1>.BitsPerElement;
+            if (f4Bits != 4)
+            { Console.WriteLine("    ArrayView<Float4E2M1>.BitsPerElement=" + f4Bits + " != 4  FAIL"); f4fails++; }
+            Console.WriteLine($"    Float4E2M1 packed (2/byte): {sizes.Length} sizes checked, {f4fails} fail");
+            fails += f4fails;
+
             // Whole-byte regression: byte = N bytes, int = 4N bytes, double = 8N bytes (unchanged).
             int rfails = 0;
             using (var b = acc.Allocate1D<byte>(100)) if (b.LengthInBytes != 100) { rfails++; Console.WriteLine($"    byte: {b.LengthInBytes} != 100"); }

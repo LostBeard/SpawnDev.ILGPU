@@ -161,5 +161,40 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             GateQUInt4Radix(acc);
             await QUInt4RadixPairsAscendingImpl(acc);
         });
+
+        // QUInt4 keys DESCENDING, multi-rep (duplicates) - exercises the 8/word nibble DESCENDING radix
+        // path with duplicate keys (0..15 each x12 = 192 elements), the unsigned companion to the FP4
+        // descending coverage. Packed-store backends only (scatter writes packed nibbles).
+        [TestMethod]
+        public async Task QUInt4Radix_KeysDescending_MultiRep() => await RunTest(async accelerator =>
+        {
+            GateQUInt4Radix(accelerator);
+            const int reps = 12;
+            int n = 16 * reps; // 192
+            var inV = new int[n];
+            for (int i = 0; i < n; i++) inV[i] = i % 16;
+            var packed = new byte[(n + 1) / 2];
+            for (int k = 0; k < packed.Length; k++)
+                packed[k] = (byte)((inV[2 * k] & 0xF) | ((inV[2 * k + 1] & 0xF) << 4));
+            var expected = (int[])inV.Clone();
+            Array.Sort(expected);
+            Array.Reverse(expected);
+
+            using var keysBuf = accelerator.Allocate1D<QUInt4>(n);
+            ((IContiguousArrayView)keysBuf.View.BaseView).AsRawArrayView().CopyFromCPU(packed);
+            using var tempBuf = accelerator.Allocate1D<int>(
+                accelerator.ComputeRadixSortTempStorageSize<QUInt4, DescendingQUInt4>(n));
+            accelerator.CreateRadixSort<QUInt4, Stride1D.Dense, DescendingQUInt4>()(
+                accelerator.DefaultStream, keysBuf.View, tempBuf.View.AsContiguous());
+
+            using var decBuf = accelerator.Allocate1D<int>(n);
+            accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<QUInt4>, ArrayView<int>>(QUInt4LoadKernel)(
+                n, keysBuf.View, decBuf.View);
+            await accelerator.SynchronizeAsync();
+            var got = await decBuf.CopyToHostAsync<int>();
+            for (int i = 0; i < n; i++)
+                if (got[i] != expected[i])
+                    throw new Exception($"QUInt4 keys-desc mismatch at [{i}]: expected={expected[i]} got={got[i]}");
+        });
     }
 }

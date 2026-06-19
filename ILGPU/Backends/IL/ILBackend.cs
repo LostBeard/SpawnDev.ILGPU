@@ -239,15 +239,16 @@ namespace ILGPU.Backends.IL
                 {
                     if (valueEntry.Value is Store store &&
                         store.Target.Type is PointerType pt &&
-                        pt.ElementType.BasicValueType == BasicValueType.QInt4)
+                        (pt.ElementType.BasicValueType == BasicValueType.QInt4
+                         || pt.ElementType.BasicValueType == BasicValueType.Float4E2M1))
                     {
                         throw new NotSupportedException(
-                            "Packed sub-byte views (QInt4/QUInt4) do not support in-kernel " +
+                            "Packed sub-byte views (QInt4/QUInt4/Float4E2M1) do not support in-kernel " +
                             "element stores on the CPU backend: the managed array-view indexer " +
                             "cannot address a single nibble in place. Use a GPU backend for " +
                             "packed in-kernel writes, or build the packed buffer via an " +
                             "ArrayView<byte>/<uint> with explicit nibble packing. Reading a " +
-                            "packed view (e.g. (int)packed[i]) IS supported on the CPU backend.");
+                            "packed view (e.g. (float)packed[i]) IS supported on the CPU backend.");
                     }
                 }
             }

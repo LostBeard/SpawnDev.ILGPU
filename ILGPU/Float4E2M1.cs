@@ -14,9 +14,12 @@
 //   encode is round-to-nearest-even among the 16 values; finite overflow AND +-Inf SATURATE
 //   to +-6; NaN -> 0x8 (the format has no NaN encoding; ml_dtypes maps NaN -> -0, matched here).
 //
-// STORAGE = 1 byte (the 4-bit value in the low nibble), exactly like Float8E4M3/E5M2 - it reuses
-// the existing 1-byte sub-word machinery on every backend. (The IR type-size model is byte-
-// granular; true 4-bit nibble packing belongs in the MXFP4/NF4 block-dequant layer, not here.)
+// STORAGE = TRUE packed 4-bit ([PackedBits(4)]): an ArrayView<Float4E2M1> of N elements allocates
+// ceil(N/2) bytes (2 nibbles per byte, 8 per 32-bit word) - the real NVFP4/MXFP4 memory footprint,
+// like QInt4/QUInt4. The value lives in the low nibble of a 1-byte HOST struct; device buffers pack
+// 2/byte and decode the E2M1 nibble to f32 in-register at the load (the data stays packed - no
+// unpack-on-load). (Originally 1-byte-per-value, reusing the FP8 byte machinery; packed once the
+// QInt4 nibble infra proved type-level 4-bit packing on every backend.)
 //
 // Modeled on ILGPU.Float8E4M3: FP32-based [MathIntrinsic]/[CompareIntrinisc]/[ConvertIntrinisc]
 // operators (transpiled on every backend).
@@ -39,6 +42,7 @@ namespace ILGPU
     /// NVFP4/MXFP4 element format. 1-byte storage (value in the low nibble).
     /// </summary>
     [Serializable]
+    [PackedBits(4)]
     public readonly partial struct Float4E2M1 :
         IEquatable<Float4E2M1>, IComparable<Float4E2M1>
     {

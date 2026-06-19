@@ -3076,6 +3076,16 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         ? $"({rawNib})"                                            // QUInt4: zero-extend (0..15)
                         : $"(({rawNib}) >= 8 ? ({rawNib}) - 16 : ({rawNib}))";     // QInt4: sign-extend (-8..7)
                 }
+                else if (_subWordFloat4Params.Contains(subWordParamIdx))
+                {
+                    // FP4 packed nibble extraction: 8 nibbles per R32I texel (same nibble addressing as
+                    // QInt4), then decode the 4-bit E2M1 code to float.
+                    var texelIdx = $"(({idx}) / 8 + {swBn}_offset)";
+                    var shift = $"(({idx}) % 8) * 4";
+                    var fetch = $"texelFetch({swBn}, ivec2({texelIdx} % {swBn}_tileW, {texelIdx} / {swBn}_tileW), 0).r";
+                    var rawNib = $"(({fetch}) >> ({shift})) & 0xF";
+                    extractExpr = $"_e2m1_to_f32(uint({rawNib}))";
+                }
                 else if (elemSize == 1)
                 {
                     // Byte extraction: 4 bytes per texel
@@ -3086,9 +3096,6 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     if (_subWordFloat8Params.TryGetValue(subWordParamIdx, out bool fp8IsE4M3))
                         // FP8: same 1-byte storage, convert the raw byte to float (value computes as float).
                         extractExpr = $"{(fp8IsE4M3 ? "_e4m3_to_f32" : "_e5m2_to_f32")}(uint({rawByte}))";
-                    else if (_subWordFloat4Params.Contains(subWordParamIdx))
-                        // FP4: same 1-byte storage, convert the raw byte (4-bit value in low nibble) to float.
-                        extractExpr = $"_e2m1_to_f32(uint({rawByte}))";
                     else if (_subWordUnsignedParams.Contains(subWordParamIdx))
                         extractExpr = rawByte; // byte: zero-extend (0-255)
                     else
@@ -3321,14 +3328,19 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     }
                     if (_subWordFloat4Params.Contains(leaParamIdx))
                     {
-                        // FP4 sub-word store: convert f32 -> 4-bit pattern (low nibble), write to the TF
-                        // varying; host readback packs 4 bytes per texel (the byte sub-word layout).
-                        // This branch fires ONLY when the TARGET element is FP4. A widening store to a
-                        // wider buffer (floatBuf[i] = (float)fp4Buf[i]) has a Float32 target param so it
-                        // is NOT in _subWordFloat4Params and falls through to the f32 single-element
-                        // store below with the already-widened val - no re-narrowing.
-                        AppendLine($"{output.VaryingName} = int(_f32_to_e2m1({val}));");
-                        return;
+                        // Packed 4-bit (FP4) store: FP4 is now TRUE packed (8 nibbles/texel, [PackedBits(4)]),
+                        // so a Transform-Feedback own-slot store would need the host to repack at 8/texel -
+                        // the same density QInt4 needs and which is NOT wired on WebGL (no atomics for the
+                        // nibble RMW). Fail loud (no silent garbage - WebGL rule), exactly like the QInt4
+                        // store. Reading a packed FP4 view on WebGL IS supported (nibble texelFetch+decode).
+                        // (A widening store floatBuf[i]=(float)fp4Buf[i] has a Float32 target param, is NOT
+                        // in _subWordFloat4Params, and falls through to the f32 store below - unaffected.)
+                        throw new SpawnDev.ILGPU.UnsupportedKernelFeatureException(
+                            feature: "packed FP4 (Float4E2M1) in-kernel store",
+                            backend: global::ILGPU.Runtime.AcceleratorType.WebGL,
+                            remediation: "Packed 4-bit (Float4E2M1) stores need host-side 8-nibbles-per-texel " +
+                                "repacking not yet wired on WebGL. Use WebGPU/CUDA/OpenCL/Wasm for packed writes; " +
+                                "reading a packed FP4 view on WebGL is supported.");
                     }
                     if (_subWordQInt4Params.Contains(leaParamIdx))
                     {
