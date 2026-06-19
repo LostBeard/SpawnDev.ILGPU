@@ -14,6 +14,10 @@ try
     if (args.Length > 0 && args[0] == "qint4-radix-wgsl")
         return await QInt4RadixWgslDump.Run();
 
+    // Offline WGSL/GLSL dump of the FromRawBits sub-word decode (browser construction gap). No browser.
+    if (args.Length > 0 && args[0] == "fromrawbits-dump")
+        return await FromRawBitsDump.Run();
+
     // Offline Wasm compile dump (H8 shared-alloca audit). No browser, no dispatch.
     if (args.Length > 0 && args[0] == "wasm-dump")
         return await WasmCompileDump.Run();

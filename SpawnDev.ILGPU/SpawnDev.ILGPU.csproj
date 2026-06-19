@@ -4,7 +4,7 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.14.0-local.8</Version>
+		<Version>4.14.0-local.9</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
 		<PackageReleaseNotes>4.14.0 brings the four low-precision float types (Half, BFloat16, Float8E4M3, Float8E5M2) to feature-complete parity. A selectable saturating cast (FromSingle(x, saturate) / FromSingleSaturating) is available on every type for the NVIDIA-TE/OCP clamp-instead-of-overflow mode, and radix-sort is complete for all four (keys + key/value pairs, ascending + descending) on all 6 backends. It also fixes low-precision CONVERSION CORRECTNESS against the references. (1) Half (float-&gt;half) is now IEEE round-to-nearest-even on every backend (CPU + WebGPU + WebGL + Wasm), bit-exact to numpy.float16 / PyTorch / CUDA / OpenCL - it previously truncated toward zero and flushed subnormals to zero (diverging from numpy AND from CUDA/OpenCL). (2) Float8E4M3 is now bit-exact to PyTorch/JAX/ml_dtypes float8_e4m3fn: the cast + IR convert use the fn convention (finite overflow AND +-Inf -&gt; NaN; was saturate to +-448); saturating is opt-in via Float8E4M3.FromSingleSaturating. BFloat16 was already bit-exact to ml_dtypes.bfloat16 (verified). All validated exhaustively against ml_dtypes/numpy oracles + cross-backend PMT gates. 4.13.2 is a packaging fix over 4.13.1: removes stray Wasm/repro JSON files that the Razor SDK swept into the package, and bundles the precompiled-shaders precompiler tool (tools/) that 4.13.0/4.13.1 were missing. The 4.13.x line brings full low-precision floating-point support across ALL 6 backends (CPU, OpenCL, WebGPU, WebGL, Wasm, CUDA): Half, BFloat16, and FP8 (Float8E4M3 + Float8E5M2) - including FP8 radix-sort keys (4.13.1) - plus generic INumber&lt;T&gt; mixed-precision kernels, PrecisionConvert, and bf16/FP8 portability to pre-Ampere CUDA cards (GTX 1080 / RTX 2060). Full per-version history with code samples: CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
@@ -65,8 +65,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.35" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.35" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.36" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.36" />
 	</ItemGroup>
 
 	<ItemGroup>

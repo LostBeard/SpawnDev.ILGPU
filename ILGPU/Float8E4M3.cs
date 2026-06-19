@@ -131,15 +131,28 @@ namespace ILGPU
             RawValue = rawValue;
         }
 
+        /// <summary>
+        /// Constructs an E4M3 value directly from its raw 8-bit code. The inverse of
+        /// <see cref="RawValue"/>. HOST-side / desktop factory for round-tripping packed storage; it
+        /// does NOT round a float (pass a raw 0x00..0xFF code, not a numeric value). To decode a
+        /// packed byte to float INSIDE a kernel, call
+        /// <see cref="Float8E4M3Extensions.RawBitsToFloat(int)"/> instead - building a sub-word value
+        /// from raw bits does not lower on the browser backends, whereas RawBitsToFloat is pure
+        /// arithmetic that transpiles everywhere.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static Float8E4M3 FromRawBits(byte rawBits) => new Float8E4M3(rawBits);
+
         #endregion
 
         #region Properties
 
-        /// <summary>Represents the raw 8-bit value.</summary>
+        /// <summary>The raw 8-bit code. Round-trips with <see cref="FromRawBits"/>; use to re-encode
+        /// a decoded value back into packed storage.</summary>
 #if !DEBUG
         [DebuggerBrowsable(DebuggerBrowsableState.Never)]
 #endif
-        internal byte RawValue { get; }
+        public byte RawValue { get; }
 
         #endregion
 
@@ -275,9 +288,21 @@ namespace ILGPU
 
         /// <summary>Converts an E4M3 value to a float (rebias 7 -&gt; 127; 3 mantissa bits; no Inf).</summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static float ConvertFloat8E4M3ToFloat(Float8E4M3 value)
+        public static float ConvertFloat8E4M3ToFloat(Float8E4M3 value) =>
+            RawBitsToFloat(value.RawValue);
+
+        /// <summary>
+        /// Decodes a raw 8-bit E4M3 code (the low byte of <paramref name="rawBits"/>) directly to a
+        /// float. THIS is the kernel-safe primitive for decoding packed FP8 storage: read the byte
+        /// from your packed buffer, then call this - it does the verified decode as pure int/float
+        /// arithmetic and transpiles on EVERY backend. Unlike <c>(float)FromRawBits(code)</c>, it
+        /// never constructs the sub-word struct, so it avoids the browser backends' decoded-in-
+        /// register model. On host it is identical to <c>(float)FromRawBits(code)</c>.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static float RawBitsToFloat(int rawBits)
         {
-            uint bits = value.RawValue;
+            uint bits = (uint)(rawBits & 0xFF);
             uint sign = (bits & 0x80u) << 24;
             uint exp = (bits >> 3) & 0x0Fu;
             uint mant = bits & 0x07u;

@@ -121,17 +121,29 @@ namespace ILGPU
             RawValue = rawValue;
         }
 
+        /// <summary>
+        /// Constructs a half value directly from its raw 16-bit IEEE-754 code. The inverse of
+        /// <see cref="RawValue"/>. HOST-side / desktop factory for round-tripping packed storage; it
+        /// does NOT round a float (pass a raw bit pattern, not a numeric value). To decode packed
+        /// fp16 INSIDE a kernel, bind the storage as <c>ArrayView&lt;Half&gt;</c> and read it - the
+        /// typed sub-word load lowers to the native <c>f16</c> / <c>_f16_to_f32</c> path on every
+        /// backend; building a Half from raw bits does not lower on the browser backends.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static Half FromRawBits(ushort rawBits) => new Half(rawBits);
+
         #endregion
 
         #region Properties
 
         /// <summary>
-        /// Represents the raw value.
+        /// The raw 16-bit code. Round-trips with <see cref="FromRawBits"/>; use to re-encode a
+        /// decoded value back into packed storage.
         /// </summary>
 #if !DEBUG
         [DebuggerBrowsable(DebuggerBrowsableState.Never)]
 #endif
-        internal ushort RawValue { get; }
+        public ushort RawValue { get; }
 
         #endregion
 

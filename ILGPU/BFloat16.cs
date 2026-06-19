@@ -133,17 +133,30 @@ namespace ILGPU
             RawValue = rawValue;
         }
 
+        /// <summary>
+        /// Constructs a bfloat16 value directly from its raw 16-bit code. The inverse of
+        /// <see cref="RawValue"/>. HOST-side / desktop factory for round-tripping packed storage; it
+        /// does NOT round a float (pass a raw bit pattern, not a numeric value). To decode a packed
+        /// ushort to float INSIDE a kernel, call
+        /// <see cref="BFloat16Extensions.RawBitsToFloat(int)"/> instead - building a sub-word value
+        /// from raw bits does not lower on the browser backends, whereas RawBitsToFloat is pure
+        /// arithmetic that transpiles everywhere.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static BFloat16 FromRawBits(ushort rawBits) => new BFloat16(rawBits);
+
         #endregion
 
         #region Properties
 
         /// <summary>
-        /// Represents the raw value.
+        /// The raw 16-bit code. Round-trips with <see cref="FromRawBits"/>; use to re-encode a
+        /// decoded value back into packed storage.
         /// </summary>
 #if !DEBUG
         [DebuggerBrowsable(DebuggerBrowsableState.Never)]
 #endif
-        internal ushort RawValue { get; }
+        public ushort RawValue { get; }
 
         #endregion
 
@@ -389,7 +402,20 @@ namespace ILGPU
         /// <returns>The converted float value.</returns>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static float ConvertBFloat16ToFloat(BFloat16 value) =>
-            Interop.IntAsFloat((uint)value.RawValue << 16);
+            RawBitsToFloat(value.RawValue);
+
+        /// <summary>
+        /// Decodes a raw 16-bit bfloat16 code (the low 16 bits of <paramref name="rawBits"/>) directly
+        /// to a float. THIS is the kernel-safe primitive for decoding packed bf16 storage: read the
+        /// ushort from your packed buffer, then call this - it does the verified decode (bf16 is the
+        /// top 16 bits of an f32) as pure int/float arithmetic and transpiles on EVERY backend. Unlike
+        /// <c>(float)FromRawBits(code)</c>, it never constructs the sub-word struct, so it avoids the
+        /// browser backends' decoded-in-register model. On host it is identical to
+        /// <c>(float)FromRawBits(code)</c>.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static float RawBitsToFloat(int rawBits) =>
+            Interop.IntAsFloat((uint)(rawBits & 0xFFFF) << 16);
 
         /// <summary>
         /// Converts a float value to a bfloat16 value using round-to-nearest-even.

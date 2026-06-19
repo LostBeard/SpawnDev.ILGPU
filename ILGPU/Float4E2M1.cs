@@ -65,6 +65,18 @@ namespace ILGPU
         public static Float4E2M1 FromSingle(float value) =>
             Float4E2M1Extensions.ConvertFloatToFloat4E2M1(value);
 
+        /// <summary>
+        /// Constructs an E2M1 value directly from its raw 4-bit code (only the low nibble is used;
+        /// the high nibble is ignored). The inverse of <see cref="RawValue"/>. HOST-side / desktop
+        /// factory for round-tripping packed storage; it does NOT round a float (pass a raw code
+        /// 0x0..0xF, not a numeric value). To decode a packed nibble to float INSIDE a kernel, call
+        /// <see cref="Float4E2M1Extensions.RawBitsToFloat(int)"/> instead - building a sub-word value
+        /// from raw bits does not lower on the browser backends (they hold sub-word floats decoded in
+        /// registers), whereas RawBitsToFloat is pure arithmetic that transpiles everywhere.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static Float4E2M1 FromRawBits(byte rawBits) => new Float4E2M1(rawBits);
+
         #endregion
 
         #region Constants
@@ -98,11 +110,12 @@ namespace ILGPU
 
         #region Properties
 
-        /// <summary>The raw 4-bit value (stored in the low nibble of a byte).</summary>
+        /// <summary>The raw 4-bit code (stored in the low nibble of a byte). Round-trips with
+        /// <see cref="FromRawBits"/>; use to re-encode a decoded value back into packed storage.</summary>
 #if !DEBUG
         [DebuggerBrowsable(DebuggerBrowsableState.Never)]
 #endif
-        internal byte RawValue { get; }
+        public byte RawValue { get; }
 
         #endregion
 
@@ -237,9 +250,22 @@ namespace ILGPU
 
         /// <summary>Converts an E2M1 value to a float (rebias 1 -&gt; 127; 1 mantissa bit; no Inf/NaN).</summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static float ConvertFloat4E2M1ToFloat(Float4E2M1 value)
+        public static float ConvertFloat4E2M1ToFloat(Float4E2M1 value) =>
+            RawBitsToFloat(value.RawValue);
+
+        /// <summary>
+        /// Decodes a raw 4-bit E2M1 code (the low nibble of <paramref name="rawBits"/>; the rest is
+        /// ignored) directly to a float. THIS is the kernel-safe primitive for decoding packed FP4
+        /// storage: extract the nibble from your packed block with your own bit-math, then call this -
+        /// it does the verified decode as pure int/float arithmetic and transpiles on EVERY backend.
+        /// Unlike <c>(float)FromRawBits(code)</c>, it never constructs the sub-word struct, so it
+        /// avoids the browser backends' decoded-in-register model (where building a sub-word value
+        /// from raw bits does not lower). On host it is identical to <c>(float)FromRawBits(code)</c>.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public static float RawBitsToFloat(int rawBits)
         {
-            uint code = value.RawValue;
+            uint code = (uint)(rawBits & 0xF);
             uint sign = (code & 0x8u) << 28;        // f32 sign bit (bit 31)
             uint e = (code >> 1) & 0x3u;            // exponent field (2 bits)
             uint m = code & 0x1u;                   // mantissa (1 bit)

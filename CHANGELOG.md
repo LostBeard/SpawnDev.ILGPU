@@ -2,6 +2,15 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.14.0-local.9 (2026-06-19) - Public kernel-safe raw-bits decode for the sub-word types (`RawBitsToFloat`), plus host `FromRawBits`/`RawValue`
+
+Exposes a public, kernel-safe path to decode packed low-precision storage to float, so a consumer holding a raw nibble/byte/ushort (pulled by its own bit-math out of a still-packed quant buffer) can compose the library's verified decode instead of re-deriving the value table by hand. Surfaced by ML's MXFP4 lane (a hand-rolled E2M1 decode duplicated the shipped one because it couldn't be reached). Forks bump to `2.0.36`. Purely additive - no behavior change to existing paths.
+
+- **`<Type>Extensions.RawBitsToFloat(int rawBits)` on `Float4E2M1`, `Float8E4M3`, `Float8E5M2`, `BFloat16`** - the in-kernel primitive. Pure int/float bit-math (no struct construction), so it transpiles on **all 6 backends** and decodes one element to f32 in-register while the buffer stays packed (native form preserved - the Rule-4 no-unpack-on-load path: unpack in the shader for math, leave the data narrow in the buffer). The existing `ConvertXToFloat(value)` host fallbacks now route through it (one source of bit-math; the float-cast operator is unchanged - it still lowers to each backend's hardcoded decode in kernels).
+- **`<Type>.FromRawBits(rawBits)` factory + public `RawValue` getter on `Float4E2M1`/`Float8E4M3`/`Float8E5M2`/`BFloat16`/`Half`** - HOST-side construction + round-trip of packed storage (the inverse of `RawValue`). These work on host and on the desktop kernel backends, but `(float)FromRawBits(code)` does NOT lower on the browser backends (WebGPU/WebGL hold sub-word floats decoded-in-register, so building one from raw bits has no valid lowering) - the XML docs direct in-kernel callers to `RawBitsToFloat` instead (and `Half` to a typed `ArrayView<Half>` load, since its decode is table-based).
+- Gates: new `RawBitsToFloat` decode (FP4 vs a hardcoded oracle table; FP8 E4M3/E5M2 all-256 + bf16 sweep vs the managed decode) **green on all 6 backends** (CPU/CUDA/OpenCL/WebGPU/WebGL/Wasm), plus a host-only `FromRawBits`/`RawValue` round-trip. Regression: Float4E2M1 30/0, Float8 37/0, BFloat16 128/0, Fp4Radix 23/0, Fp8Radix 44/0 - no change from the decode refactor. New offline probe `DemoConsole -- fromrawbits-dump` dumps the WGSL/GLSL for the construction path (documents the browser gap).
+- Known latent (tracked): constructing a sub-word value from raw bits in-kernel emits a broken `ptrCast` store (undeclared var + no decode) on WebGPU/WebGL - the codegen gap behind why `FromRawBits` is host-side only. `RawBitsToFloat` sidesteps it; a proper fix to the construction codegen is deferred.
+
 ## 4.14.0-local.8 (2026-06-19) - QInt4 radix-sort keys + pairs on the packed-store backends, fixing a WebGPU-only mis-sort
 
 Adds radix-sort for the packed 4-bit `QInt4` type and fixes a WebGPU codegen bug that was silently corrupting it. Forks bump to `2.0.35`.
