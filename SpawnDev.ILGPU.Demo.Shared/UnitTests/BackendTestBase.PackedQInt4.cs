@@ -16,6 +16,9 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
     {
         static void QInt4LoadKernel(Index1D i, ArrayView<QInt4> x, ArrayView<int> y) => y[i] = x[i];
         static void QInt4StoreKernel(Index1D i, ArrayView<int> src, ArrayView<QInt4> dst) => dst[i] = (QInt4)src[i];
+        // The radix-scatter pattern in isolation: write into an ARBITRARY position read from a buffer.
+        static void QInt4ScatterKernel(Index1D i, ArrayView<int> src, ArrayView<int> dest, ArrayView<QInt4> dst)
+            => dst[dest[i.X]] = (QInt4)src[i.X];
 
         /// <summary>
         /// Uploads pre-packed nibble bytes into an ArrayView&lt;QInt4&gt; and verifies the kernel reads
@@ -52,6 +55,41 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         /// the two nibbles of one byte), reads them back, and verifies the round-trip. CPU is fail-loud on
         /// packed in-kernel writes (the managed ref indexer can't address a nibble); WebGL has no atomics.
         /// </summary>
+        /// <summary>
+        /// Isolates the radix-scatter store: writes each element to an arbitrary position read from a
+        /// `dest` buffer (here a reversal permutation) and verifies the result. Same atomic-nibble-RMW
+        /// path as the simple store but with an arbitrary index - reproduces (or rules out) the radix's
+        /// packed-scatter mismatch independent of the radix's count/scan logic.
+        /// </summary>
+        [TestMethod]
+        public async Task PackedQInt4_StoreScatter() => await RunTest(async accelerator =>
+        {
+            var type = accelerator.AcceleratorType;
+            if (type == AcceleratorType.CPU)
+                throw new UnsupportedTestException("Packed QInt4 in-kernel store is fail-loud on the CPU backend.");
+            if (type == AcceleratorType.WebGL)
+                throw new UnsupportedTestException("Packed QInt4 store needs atomic word RMW; WebGL has no atomics.");
+
+            int n = 256;
+            var input = new int[n];
+            var dest = new int[n];
+            for (int i = 0; i < n; i++) { input[i] = (i % 16) - 8; dest[i] = n - 1 - i; } // reversal perm
+
+            using var sBuf = accelerator.Allocate1D(input);
+            using var dstIdxBuf = accelerator.Allocate1D(dest);
+            using var dBuf = accelerator.Allocate1D<QInt4>(n);
+            using var oBuf = accelerator.Allocate1D<int>(n);
+            accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>, ArrayView<QInt4>>(QInt4ScatterKernel)(
+                n, sBuf.View, dstIdxBuf.View, dBuf.View);
+            accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<QInt4>, ArrayView<int>>(QInt4LoadKernel)(
+                n, dBuf.View, oBuf.View);
+            await accelerator.SynchronizeAsync();
+            var got = await oBuf.CopyToHostAsync<int>();
+            for (int i = 0; i < n; i++)
+                if (got[i] != input[n - 1 - i]) // dst[n-1-i] = input[i] -> got[i] = input[n-1-i]
+                    throw new Exception($"QInt4 scatter mismatch at [{i}]: got {got[i]} expected {input[n - 1 - i]}");
+        });
+
         [TestMethod]
         public async Task PackedQInt4_StoreRoundTrip() => await RunTest(async accelerator =>
         {
