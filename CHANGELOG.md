@@ -2,6 +2,15 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.14.0-local.8 (2026-06-19) - QInt4 radix-sort keys + pairs on the packed-store backends, fixing a WebGPU-only mis-sort
+
+Adds radix-sort for the packed 4-bit `QInt4` type and fixes a WebGPU codegen bug that was silently corrupting it. Forks bump to `2.0.35`.
+
+- **`Ascending/DescendingQInt4` radix operations** (keys-only + key/value pairs, ascending + descending). A signed 4-bit integer sorts as unsigned by flipping ONLY the sign bit (two's complement is already magnitude-monotonic within each sign) - NO ones-complement step (unlike the Half/bf16/FP8/FP4 float ops). Runs on **CUDA, OpenCL, WebGPU, and Wasm** (the packed-store backends); CPU and WebGL skip (the scatter writes packed nibbles, needing an atomic word RMW neither has).
+- **Fixed a WebGPU-only QInt4 radix mis-sort (the headline fix).** `ArrayView1D<QInt4>` is a body-struct view, and the WGSL body-struct sub-word classification had no `QInt4` case (FP4/FP8/bf16/Half all did), so the radix's key views bound as a plain `array<i32>` (one i32 per element) over a buffer that is actually 8 nibbles per 32-bit word - the shader sorted the packed WORDS, not the elements (output `[-8..-1,-8..-1,0..7,0..7]` for input `[-8..7,-8..7]` = a stable sort of the 4 packed words by their low nibble). Added the `QInt4` case at the body-struct binding + LEA sites (routing to the 8-per-word nibble path: `word=idx>>3`, `shift=(idx&7)*4`, `atomicAnd`+`atomicOr` RMW), plus deriving `view.Length`'s elements-per-word straight from the element type at both length sites (it was the bare word count - half - for QInt4). CUDA/OpenCL/Wasm were already correct.
+- Gates: PMT `QInt4Radix` (ExtractBits GPU-vs-CPU + keys/pairs ascending) green on CUDA/OpenCL/WebGPU/WebGPU-NoSubgroups/Wasm (CPU/WebGL skip); full `PMT_FILTER=Radix` regression across every key type x 7 backends **455 passed / 0 failed**; `PackedQInt4` load/store/scatter unchanged. New offline regression probe `DemoConsole -- qint4-radix-wgsl` dumps the QInt4 vs FP4 radix kernel WGSL.
+- Known latent (tracked, no kernel hits it today): the WGSL binding-coalesce path still maps QInt4 → i32, so ≥2 QInt4 views over the 10-binding coalesce threshold would merge into one `array<i32>` (same class as the body-struct bug). Needs nibble-coalesce support + a test. A nested/struct-stored QInt4 view (not the radix's body-struct key view) remains fail-loud on Wasm.
+
 ## 4.14.0-local.7 (2026-06-18) - TRUE packed 4-bit `QInt4` storage (2 nibbles/byte) - load + store on 5 of 6 backends
 
 Introduces `ILGPU.QInt4` (signed -8..7) / `ILGPU.QUInt4` (unsigned 0..15), TRUE packed 4-bit integers: an `ArrayView<QInt4>` of N elements allocates **ceil(N/2) bytes** (2 nibbles per byte, 8 per 32-bit word) - the real 4-bit memory win for INT4 quantization, not a 1-byte-per-element placeholder. Forks bump to `2.0.34`. The host representation is RAW PACKED bytes (consumers upload pre-packed `byte`/`uint` words and decode in-register - the zero-copy fused-dequant path); there is no transparent typed pack/unpack.
