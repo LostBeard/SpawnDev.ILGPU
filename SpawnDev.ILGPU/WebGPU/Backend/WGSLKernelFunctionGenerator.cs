@@ -895,8 +895,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 _viewOffsetScalarSlots[syntheticIdx] = globalScalarSlotOffset;
                                 globalScalarSlotOffset++;
 
-                                // Packed-struct view fields also get a count slot (must match GenerateHeader order)
-                                if (_packedStructBSFieldLayouts.ContainsKey((param.Index, fieldInfo.FieldIndex)))
+                                // Packed-struct view fields AND single-view packed-4-bit (QInt4/QUInt4/FP4)
+                                // views get a count slot (must match the GenerateHeader/2299 order). For
+                                // packed-4-bit, arrayLength()*8 rounds UP to the word boundary, which is
+                                // wrong for any N not a multiple of 8 (the FP4/QInt4 radix mis-sort at
+                                // N=180: 23 words*8=184 -> 4 phantom zero padding nibbles sorted as real
+                                // elements). Send the TRUE element count from the host instead.
+                                bool isPacked4Res = GetBufferElementType(fieldInfo.FieldType) is PrimitiveType p4ResPt
+                                    && (p4ResPt.BasicValueType == BasicValueType.QInt4
+                                        || p4ResPt.BasicValueType == BasicValueType.Float4E2M1);
+                                if (_packedStructBSFieldLayouts.ContainsKey((param.Index, fieldInfo.FieldIndex))
+                                    || isPacked4Res)
                                 {
                                     fieldInfo.ViewCountSlot = globalScalarSlotOffset;
                                     // Propagate to associated metadata fields (length field, etc.)
@@ -2296,7 +2305,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     int realParamIndex2 = (viewParamIndex / 1000) - 1;
                     int fieldIndex2 = viewParamIndex % 1000;
-                    if (_packedStructBSFieldLayouts.ContainsKey((realParamIndex2, fieldIndex2)))
+                    // Same condition as the slot RESERVATION (~899): packed-struct view fields OR
+                    // single-view packed-4-bit (QInt4/QUInt4/FP4) views get a true-element-count slot.
+                    // Both passes MUST agree or the scalar layout desyncs from the host.
+                    var f4Ent = (_bodyStructParams.TryGetValue(realParamIndex2, out var bsf2Ent)
+                        && fieldIndex2 < bsf2Ent.Count) ? bsf2Ent[fieldIndex2] : null;
+                    bool isPacked4Ent = f4Ent != null
+                        && GetBufferElementType(f4Ent.FieldType) is PrimitiveType p4EntPt
+                        && (p4EntPt.BasicValueType == BasicValueType.QInt4
+                            || p4EntPt.BasicValueType == BasicValueType.Float4E2M1);
+                    if (_packedStructBSFieldLayouts.ContainsKey((realParamIndex2, fieldIndex2))
+                        || isPacked4Ent)
                     {
                         var countEntry = new ScalarPackingEntry
                         {
@@ -4792,13 +4811,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                     // registration is path/order-dependent and had QInt4 gaps, so some
                                     // radix kernels emitted bare arrayLength() (HALF the count).
                                     if (bsViewElemTypes.TryGetValue(fieldInfo.AssociatedViewBindingName, out var bsLenElem)
-                                        && bsLenElem == BasicValueType.QInt4)
+                                        && (bsLenElem == BasicValueType.QInt4
+                                            || bsLenElem == BasicValueType.Float4E2M1))
                                     {
+                                        // Packed 4-bit (QInt4/QUInt4 AND FP4): TRUE 8 nibbles per word.
                                         lengthExpr = $"({lengthExpr} * 8)";
                                     }
                                     else if (_subWordParams.TryGetValue(param.Index, out var swMetaElemSize))
                                     {
-                                        int swElemsPerWord = 4 / swMetaElemSize; // 4 Int8/FP8/FP4, 2 Int16/F16/bf16
+                                        int swElemsPerWord = 4 / swMetaElemSize; // 4 Int8/FP8, 2 Int16/F16/bf16
                                         if (swElemsPerWord > 1)
                                             lengthExpr = $"({lengthExpr} * {swElemsPerWord})";
                                     }
@@ -5508,10 +5529,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             }
                             else if (_subWordFloat4Params.Contains(param.Index))
                             {
-                                // FP4 (4 per word): cross-block inline use is the loaded VALUE - convert
-                                // the extracted byte (low nibble carries the E2M1 code) to f32, mirroring
-                                // the FP8 branch above and the Load path below.
-                                var cbRaw = $"((u32(atomicLoad(&{swBindRef}[(u32({target.Name}) / 4u)])) >> ((u32({target.Name}) % 4u) * 8u)) & 0xFFu)";
+                                // FP4 (TRUE packed, 8 NIBBLES per word): cross-block inline use is the loaded
+                                // VALUE - extract the nibble (word=idx>>3, shift=(idx&7)*4) and decode the
+                                // E2M1 code to f32, matching the packed Load path below. (Was 4/word byte
+                                // addressing from the old 1-byte FP4 storage - corrupted cross-block radix reads.)
+                                var cbRaw = $"((u32(atomicLoad(&{swBindRef}[(u32({target.Name}) >> 3u)])) >> ((u32({target.Name}) & 7u) * 4u)) & 0xFu)";
                                 _crossBlockPointerExprs[target.Name] = $"_e2m1_to_f32({cbRaw})";
                             }
                             else if (elemSize == 1) // byte
@@ -7722,13 +7744,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // QInt4 is registered -> bare arrayLength() (HALF the count) -> the sort processed
                 // half its keys (the WebGPU QInt4 radix mis-sort). The element type is always known.
                 if (GetBufferElementType(param.ParameterType) is PrimitiveType qiLenPt
-                    && qiLenPt.BasicValueType == BasicValueType.QInt4)
+                    && (qiLenPt.BasicValueType == BasicValueType.QInt4
+                        || qiLenPt.BasicValueType == BasicValueType.Float4E2M1))
                 {
+                    // Packed 4-bit (QInt4/QUInt4 AND FP4): TRUE 8 nibbles per word.
                     lengthExpr = $"({lengthExpr} * 8)";
                 }
                 else if (_subWordParams.TryGetValue(param.Index, out var swElemSize))
                 {
-                    int elemsPerWord = 4 / swElemSize; // 4 for Int8/FP8/FP4, 2 for Int16/Float16/bf16
+                    int elemsPerWord = 4 / swElemSize; // 4 for Int8/FP8, 2 for Int16/Float16/bf16
                     lengthExpr = $"({lengthExpr} * {elemsPerWord})";
                 }
 

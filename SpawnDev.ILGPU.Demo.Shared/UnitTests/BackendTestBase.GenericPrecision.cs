@@ -86,11 +86,48 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 
         // FP4 (Float4E2M1) round-trip on all 6 backends (1-byte storage, value in the low nibble,
         // f32-register compute, portable conversion incl. CUDA). Bit-exact vs the concrete (T)(float)x.
+        // FP4 is TRUE packed 4-bit ([PackedBits(4)]): raw-packed I/O + the FP4 OUTPUT store is an atomic
+        // nibble RMW (fail-loud on CPU + WebGL), so this round-trip runs on the packed-store backends.
+        // The round-trip (T)(float)x of an FP4 VALUE is identity, so the output decodes back to the input.
         [TestMethod]
-        public async Task PrecisionConvert_Float4E2M1_RoundTripBitExact() =>
-            await RunTest(async accelerator =>
-                await RunPrecisionRoundTripCore<global::ILGPU.Float4E2M1>(accelerator,
-                    v => (global::ILGPU.Float4E2M1)v, v => (float)v));
+        public async Task PrecisionConvert_Float4E2M1_RoundTripBitExact() => await RunTest(async accelerator =>
+        {
+            var t = accelerator.AcceleratorType;
+            if (t == AcceleratorType.CPU || t == AcceleratorType.WebGL)
+                throw new UnsupportedTestException($"Packed FP4 in-kernel store is fail-loud on {t}.");
+
+            const int n = 251;
+            var rng = new Random(13);
+            var codes = new byte[n];
+            var expected = new float[n];
+            for (int i = 0; i < n; i++)
+            {
+                var fp4 = (global::ILGPU.Float4E2M1)(float)(rng.NextDouble() * 4 - 2);
+                codes[i] = fp4.RawValue;
+                expected[i] = (float)fp4; // round-trip of an FP4 value is identity
+            }
+            var packed = new byte[(n + 1) / 2];
+            for (int kk = 0; kk < packed.Length; kk++)
+                packed[kk] = (byte)((codes[2 * kk] & 0xF) | ((2 * kk + 1 < n ? codes[2 * kk + 1] & 0xF : 0) << 4));
+
+            using var inBuf = accelerator.Allocate1D<global::ILGPU.Float4E2M1>(n);
+            ((IContiguousArrayView)inBuf.View.BaseView).AsRawArrayView().CopyFromCPU(packed);
+            using var outBuf = accelerator.Allocate1D<global::ILGPU.Float4E2M1>(n);
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D,
+                ArrayView1D<global::ILGPU.Float4E2M1, Stride1D.Dense>, ArrayView1D<global::ILGPU.Float4E2M1, Stride1D.Dense>>(
+                PrecisionRoundTripGeneric<global::ILGPU.Float4E2M1>);
+            k(n, inBuf.View, outBuf.View);
+
+            using var decBuf = accelerator.Allocate1D<float>(n);
+            accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<global::ILGPU.Float4E2M1>, ArrayView<float>>(
+                Float4LoadKernel)(n, outBuf.View, decBuf.View);
+            await accelerator.SynchronizeAsync();
+            var got = await decBuf.CopyToHostAsync<float>();
+            for (int i = 0; i < n; i++)
+                if (got[i] != expected[i] && !(float.IsNaN(got[i]) && float.IsNaN(expected[i])))
+                    throw new Exception(
+                        $"PrecisionConvert Float4E2M1 round-trip @{i} ({BackendName}): got {got[i]}, want {expected[i]}.");
+        });
 
         private async Task RunPrecisionRoundTrip<T>(Func<float, T> toT, Func<T, float> toF)
             where T : unmanaged, INumber<T>
@@ -426,38 +463,53 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task GenericPrecision_Float4E2M1_RunsAndMatchesCpu() => await RunTest(async accelerator =>
         {
+            // FP4 is now TRUE packed 4-bit ([PackedBits(4)]): the FP4 OUTPUT store is an atomic nibble
+            // RMW (fail-loud on CPU + WebGL), so this kernel (which writes FP4) runs on the packed-store
+            // backends. FP4 in-kernel arith/load/scalar-params on CPU+WebGL is covered by the all-backend
+            // RawBitsToFloat / FromRawBits load tests. Input + output use raw-packed nibble I/O.
+            var t = accelerator.AcceleratorType;
+            if (t == AcceleratorType.CPU || t == AcceleratorType.WebGL)
+                throw new UnsupportedTestException($"Packed FP4 in-kernel store is fail-loud on {t}.");
+
             const int n = 256;
             var st = (global::ILGPU.Float4E2M1)1.5f;
             var bt = (global::ILGPU.Float4E2M1)0.5f;
             float sf = (float)st, bf = (float)bt;
-            var x = new global::ILGPU.Float4E2M1[n];
+            var xCodes = new byte[n];
             var expected = new float[n];
             for (int i = 0; i < n; i++)
             {
                 // Cover all 16 input codes repeatedly (low nibble), so every representable FP4 input is hit.
-                byte raw = (byte)(i & 0x0F);
-                x[i] = System.Runtime.CompilerServices.Unsafe.As<byte, global::ILGPU.Float4E2M1>(ref raw);
-                float vf = (float)x[i] * sf + bf;
+                xCodes[i] = (byte)(i & 0x0F);
+                float xv = (float)global::ILGPU.Float4E2M1.FromRawBits(xCodes[i]);
+                float vf = xv * sf + bf;
                 expected[i] = vf > 0f ? vf : 0f;
             }
+            var packed = new byte[(n + 1) / 2];
+            for (int kk = 0; kk < packed.Length; kk++)
+                packed[kk] = (byte)((xCodes[2 * kk] & 0xF) | ((xCodes[2 * kk + 1] & 0xF) << 4));
 
-            using var inBuf = accelerator.Allocate1D(x);
+            using var inBuf = accelerator.Allocate1D<global::ILGPU.Float4E2M1>(n);
+            ((IContiguousArrayView)inBuf.View.BaseView).AsRawArrayView().CopyFromCPU(packed);
             using var outBuf = accelerator.Allocate1D<global::ILGPU.Float4E2M1>(n);
             var k = accelerator.LoadAutoGroupedStreamKernel<Index1D,
                 ArrayView1D<global::ILGPU.Float4E2M1, Stride1D.Dense>,
                 ArrayView1D<global::ILGPU.Float4E2M1, Stride1D.Dense>,
                 global::ILGPU.Float4E2M1, global::ILGPU.Float4E2M1>(FusedReluGeneric<global::ILGPU.Float4E2M1>);
             k(n, inBuf.View, outBuf.View, st, bt);
+
+            using var decBuf = accelerator.Allocate1D<float>(n);
+            accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<global::ILGPU.Float4E2M1>, ArrayView<float>>(
+                Float4LoadKernel)(n, outBuf.View, decBuf.View);
             await accelerator.SynchronizeAsync();
-            var got = await outBuf.CopyToHostAsync<global::ILGPU.Float4E2M1>();
+            var got = await decBuf.CopyToHostAsync<float>();
 
             for (int i = 0; i < n; i++)
             {
-                float g = (float)got[i];
                 float tol = MathF.Max(MathF.Abs(expected[i]), 1f) * 0.55f;
-                if (MathF.Abs(g - expected[i]) > tol)
+                if (MathF.Abs(got[i] - expected[i]) > tol)
                     throw new Exception(
-                        $"Generic Float4E2M1 kernel @{i} ({BackendName}): in {(float)x[i]} -> got {g}, want " +
+                        $"Generic Float4E2M1 kernel @{i} ({BackendName}): in code 0x{xCodes[i]:X} -> got {got[i]}, want " +
                         $"{expected[i]} (tol {tol}) - FP4 by-value sub-word scalar params + arith must transpile.");
             }
         });
@@ -489,17 +541,26 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 expected[i] = (byte)(System.Runtime.CompilerServices.Unsafe.As<global::ILGPU.Float4E2M1, byte>(ref v) & 0x0F);
             }
 
+            // FP4 is TRUE packed 4-bit: the float->FP4 store is an atomic nibble RMW (fail-loud on
+            // CPU + WebGL). The float->FP4 ENCODE (RNE/saturate/NaN) is verified on the packed-store
+            // backends here; the managed encode is the oracle (and CPU's _f32_to_e2m1 matches it).
+            var t = accelerator.AcceleratorType;
+            if (t == AcceleratorType.CPU || t == AcceleratorType.WebGL)
+                throw new UnsupportedTestException($"Packed FP4 in-kernel store is fail-loud on {t}.");
+
             using var inBuf = accelerator.Allocate1D(inputs);
             using var outBuf = accelerator.Allocate1D<global::ILGPU.Float4E2M1>(n);
             var k = accelerator.LoadAutoGroupedStreamKernel<Index1D,
                 ArrayView1D<float, Stride1D.Dense>, ArrayView1D<global::ILGPU.Float4E2M1, Stride1D.Dense>>(Float4ConvertKernel);
             k(n, inBuf.View, outBuf.View);
             await accelerator.SynchronizeAsync();
-            var got = await outBuf.CopyToHostAsync<global::ILGPU.Float4E2M1>();
+            // Read back the raw packed nibble bytes and unpack the (i&1) nibble of byte (i>>1).
+            var rawOut = ((IContiguousArrayView)outBuf.View.BaseView).AsRawArrayView();
+            var packedGot = await rawOut.CopyToHostAsync<byte>();
 
             for (int i = 0; i < n; i++)
             {
-                byte g = (byte)(System.Runtime.CompilerServices.Unsafe.As<global::ILGPU.Float4E2M1, byte>(ref got[i]) & 0x0F);
+                byte g = (byte)((packedGot[i >> 1] >> ((i & 1) * 4)) & 0xF);
                 if (g != expected[i])
                     throw new Exception(
                         $"float->Float4E2M1 kernel @{i} ({BackendName}): input {inputs[i]} -> got 0x{g:X1}, " +

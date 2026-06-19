@@ -1900,6 +1900,35 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 return;
             }
 
+            if (isFloat4E2M1Ld)
+            {
+                // Packed FP4: the address local holds the NIBBLE ADDRESS 2*base+index. byte = addr>>1;
+                // load the byte; nibble = (byte >> ((addr&1)*4)) & 0xF; then decode the E2M1 code to f32.
+                // Same nibble addressing as the QInt4 load above; only the transform differs (E2M1 decode).
+                EmitGetLocal(source2);
+                WasmModuleBuilder.EmitI32Const(Code, 1);
+                Code.Add(WasmOpCodes.I32ShrU);                  // addr>>1 = byte address
+                if (_hasBarriers)
+                {
+                    Code.Add(WasmOpCodes.AtomicPrefix);
+                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad8U);
+                    Code.Add(0x00); Code.Add(0x00);             // align=0 (1 byte), offset=0
+                }
+                else
+                    WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load8U, 0, 0);  // byte on stack
+                EmitGetLocal(source2);
+                WasmModuleBuilder.EmitI32Const(Code, 1);
+                Code.Add(WasmOpCodes.I32And);                   // addr & 1
+                WasmModuleBuilder.EmitI32Const(Code, 2);
+                Code.Add(WasmOpCodes.I32Shl);                   // (addr&1) << 2
+                Code.Add(WasmOpCodes.I32ShrU);                  // byte >> shift
+                WasmModuleBuilder.EmitI32Const(Code, 0xF);
+                Code.Add(WasmOpCodes.I32And);                   // & 0xF -> E2M1 nibble 0..15
+                EmitFP4ToF32();                                  // decode the E2M1 code -> f32
+                WasmModuleBuilder.EmitLocalSet(Code, target2);
+                return;
+            }
+
             // Push the address (byte offset in linear memory)
             EmitGetLocal(source2);
 
@@ -1942,19 +1971,6 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 else
                     WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load8U, 0, 0);
                 EmitFP8ToF32(isFloat8E4M3Ld);
-            }
-            else if (isFloat4E2M1Ld)
-            {
-                // FP4: load 1 byte (zero-extend), convert the raw 4-bit E2M1 nibble to f32 inline.
-                if (_hasBarriers)
-                {
-                    Code.Add(WasmOpCodes.AtomicPrefix);
-                    WasmModuleBuilder.EmitU32Leb128(Code, WasmOpCodes.I32AtomicLoad8U);
-                    Code.Add(0x00); Code.Add(0x00); // align=0 (1 byte), offset=0
-                }
-                else
-                    WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load8U, 0, 0);
-                EmitFP4ToF32();
             }
             else if (isInt16)
             {
@@ -2125,6 +2141,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             bool isQInt4View = value.Type is global::ILGPU.IR.Types.AddressSpaceType q4Ast
                 && q4Ast.ElementType is PrimitiveType q4Pt
                 && q4Pt.BasicValueType == BasicValueType.QInt4;
+            // FP4 (Float4E2M1) is ALSO TRUE packed 4-bit ([PackedBits(4)]) - it uses the IDENTICAL
+            // nibble addressing as QInt4 (only the at-nibble transform differs: E2M1 decode/encode vs
+            // int extend). So route it through the same 2*base+index direct-param encoding and the same
+            // body-struct fail-loud.
+            bool isFloat4View = value.Type is global::ILGPU.IR.Types.AddressSpaceType f4Ast
+                && f4Ast.ElementType is PrimitiveType f4Pt
+                && f4Pt.BasicValueType == BasicValueType.Float4E2M1;
+            bool isPacked4View = isQInt4View || isFloat4View;
 
             var target = AllocateLocal(value);
             var source = value.Source.Resolve();
@@ -2139,7 +2163,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         && bsInfoLea.IsView
                         && _bodyStructViewLocals.TryGetValue((bsParamLea.Index, bsInfoLea.FieldIndex), out var bsViewLocalsLea))
                     {
-                        if (isQInt4View) ThrowWasmQInt4BodyStructUnsupported();
+                        if (isPacked4View) ThrowWasmQInt4BodyStructUnsupported();
                         WasmModuleBuilder.EmitLocalGet(Code, bsViewLocalsLea[0]);
                         EmitGetLocal(index.Resolve());
                         if (GetWasmTypeFromIR(index.Type) == WasmOpCodes.I64)
@@ -2188,7 +2212,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     if (viewFi >= 0
                         && _bodyStructViewLocals.TryGetValue((bsParamIdx, viewFi), out var bsViewLocalsTraced))
                     {
-                        if (isQInt4View) ThrowWasmQInt4BodyStructUnsupported();
+                        if (isPacked4View) ThrowWasmQInt4BodyStructUnsupported();
                         WasmModuleBuilder.EmitLocalGet(Code, bsViewLocalsTraced[0]);
                         EmitGetLocal(index.Resolve());
                         if (GetWasmTypeFromIR(index.Type) == WasmOpCodes.I64)
@@ -2216,7 +2240,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             // Packed 4-bit (QInt4): emit the NIBBLE ADDRESS = 2*source + index. The Load/Store recover
             // byte = addr>>1 and nibble parity = addr&1 (2*source is even, so the low bit is index&1).
-            if (isQInt4View)
+            if (isPacked4View)
             {
                 EmitGetLocal(source);
                 if (GetWasmTypeFromIR(source.Type) == WasmOpCodes.I64)
@@ -2905,19 +2929,35 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 return;
             }
 
-            // Global FP4 store (ArrayView1D<Float4E2M1>[idx] = …): value is f32 on the stack,
-            // convert to the 1-byte E2M1 pattern (4-bit value in low nibble) inline, 1-byte store.
+            // Packed FP4 store (ArrayView<Float4E2M1>[idx] = …): target is the NIBBLE ADDRESS 2*base+idx;
+            // the value is f32 - encode it to the E2M1 nibble (EmitF32ToFP4) and write ONLY that nibble
+            // via an ATOMIC word RMW (byte=target>>1, word=byte&~3, shift=(byte&3)*8 + (target&1)*4).
+            // SAME nibble-RMW as the QInt4 store below (EmitQInt4WordAddr/NibbleShift work off any nibble
+            // address); only the value transform differs (E2M1 encode vs int mask). Adjacent workers write
+            // the two nibbles of one byte, so the and/or RMW MUST be atomic (disjoint masks compose).
             if (target.Type is AddressSpaceType addrFp4Global
                 && addrFp4Global.ElementType is PrimitiveType ptFp4Global
                 && ptFp4Global.BasicValueType == BasicValueType.Float4E2M1)
             {
-                EmitGetLocal(target);
+                // atomic.rmw.and(wordAddr, ~(0xF << shift))
+                EmitQInt4WordAddr(target);
+                WasmModuleBuilder.EmitI32Const(Code, 0xF);
+                EmitQInt4NibbleShift(target);
+                Code.Add(WasmOpCodes.I32Shl);                 // 0xF << shift
+                WasmModuleBuilder.EmitI32Const(Code, -1);
+                Code.Add(WasmOpCodes.I32Xor);                 // ~(0xF << shift)
+                WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicRmwAnd, 2, 0);
+                Code.Add(WasmOpCodes.Drop);
+                // atomic.rmw.or(wordAddr, (e2m1(val) & 0xF) << shift)
+                EmitQInt4WordAddr(target);
                 EmitGetLocal(storeValue);
-                EmitF32ToFP4();
-                if (_hasBarriers)
-                    EmitVerifiedAtomicStore(8);
-                else
-                    WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store8, 0, 0);
+                EmitF32ToFP4();                               // f32 -> E2M1 nibble (low 4 bits)
+                WasmModuleBuilder.EmitI32Const(Code, 0xF);
+                Code.Add(WasmOpCodes.I32And);                 // & 0xF
+                EmitQInt4NibbleShift(target);
+                Code.Add(WasmOpCodes.I32Shl);                 // (e2m1 & 0xF) << shift
+                WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicRmwOr, 2, 0);
+                Code.Add(WasmOpCodes.Drop);
                 return;
             }
 
