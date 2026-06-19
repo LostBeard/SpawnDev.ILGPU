@@ -387,6 +387,10 @@ namespace ILGPU.Backends.OpenCL
                         // FP4 computes as float on OpenCL; emit the f32 magnitude.
                         AppendConstant((float)value.Float4E2M1Value);
                         break;
+                    case BasicValueType.QInt4:
+                        // QInt4 computes as a sign-extended int on OpenCL; emit the signed value.
+                        AppendConstant((long)(int)value.QInt4Value);
+                        break;
                     case BasicValueType.Float32:
                         AppendConstant(value.Float32Value);
                         break;

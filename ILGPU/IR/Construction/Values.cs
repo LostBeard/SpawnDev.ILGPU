@@ -101,6 +101,10 @@ namespace ILGPU.IR.Construction
                     CreatePrimitiveValue(location, (Float8E5M2)value),
                 ArithmeticBasicValueType.Float4E2M1 =>
                     CreatePrimitiveValue(location, (Float4E2M1)value),
+                ArithmeticBasicValueType.QInt4 =>
+                    CreatePrimitiveValue(location, (QInt4)value),
+                ArithmeticBasicValueType.QUInt4 =>
+                    CreatePrimitiveValue(location, (QUInt4)value),
                 ArithmeticBasicValueType.Float32 =>
                     CreatePrimitiveValue(location, (float)value),
                 ArithmeticBasicValueType.Float64 =>
@@ -297,6 +301,32 @@ namespace ILGPU.IR.Construction
                 value.RawValue));
 
         /// <summary>
+        /// Creates a primitive <see cref="QInt4"/> value (packed signed 4-bit; the raw nibble is
+        /// stored, the BasicValueType carries the signedness convention).
+        /// </summary>
+        /// <param name="location">The current location.</param>
+        /// <param name="value">The value.</param>
+        /// <returns>The created primitive value.</returns>
+        public PrimitiveValue CreatePrimitiveValue(Location location, QInt4 value) =>
+            Append(new PrimitiveValue(
+                GetInitializer(location),
+                BasicValueType.QInt4,
+                value.RawValue));
+
+        /// <summary>
+        /// Creates a primitive <see cref="QUInt4"/> value (packed unsigned 4-bit; shares the QInt4
+        /// BasicValueType - signedness is carried by the arithmetic type at use sites).
+        /// </summary>
+        /// <param name="location">The current location.</param>
+        /// <param name="value">The value.</param>
+        /// <returns>The created primitive value.</returns>
+        public PrimitiveValue CreatePrimitiveValue(Location location, QUInt4 value) =>
+            Append(new PrimitiveValue(
+                GetInitializer(location),
+                BasicValueType.QInt4,
+                value.RawValue));
+
+        /// <summary>
         /// Creates a primitive <see cref="float"/> value.
         /// </summary>
         /// <param name="location">The current location.</param>
@@ -399,6 +429,16 @@ namespace ILGPU.IR.Construction
                         value == null
                         ? Float4E2M1.Zero
                         : (Float4E2M1)value),
+                ArithmeticBasicValueType.QInt4 =>
+                    CreatePrimitiveValue(location,
+                        value == null
+                        ? QInt4.Zero
+                        : (QInt4)value),
+                ArithmeticBasicValueType.QUInt4 =>
+                    CreatePrimitiveValue(location,
+                        value == null
+                        ? QUInt4.Zero
+                        : (QUInt4)value),
                 ArithmeticBasicValueType.Float32 =>
                     CreatePrimitiveValue(location, Convert.ToSingle(value)),
                 ArithmeticBasicValueType.Float64 =>

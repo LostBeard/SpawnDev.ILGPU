@@ -193,6 +193,11 @@ namespace ILGPU.Backends.PTX
                         // bf16/FP8); emit the f32 magnitude as the immediate.
                         AppendConstant((float)value.Float4E2M1Value);
                         break;
+                    case BasicValueType.QInt4:
+                        // QInt4 is held in a SIGN-EXTENDED i32 register; emit the signed value's
+                        // 32-bit pattern (the packed nibble is only a storage detail).
+                        AppendConstant((uint)(int)value.QInt4Value);
+                        break;
                     case BasicValueType.Float32:
                         AppendConstant(value.Float32Value);
                         break;

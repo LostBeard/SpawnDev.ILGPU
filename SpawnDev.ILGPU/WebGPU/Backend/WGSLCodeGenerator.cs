@@ -2110,6 +2110,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 BasicValueType.Float8E4M3 => FormatFloat((float)value.Float8E4M3Value),
                 BasicValueType.Float8E5M2 => FormatFloat((float)value.Float8E5M2Value),
                 BasicValueType.Float4E2M1 => FormatFloat((float)value.Float4E2M1Value),
+                BasicValueType.QInt4 => ((int)value.QInt4Value).ToString(), // packed 4-bit -> sign-extended i32
                 BasicValueType.Float32 => FormatFloat(value.Float32Value),
                 BasicValueType.Float64 => FormatFloat((float)value.Float64Value),
                 _ => "0"

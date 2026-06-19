@@ -214,6 +214,22 @@ namespace ILGPU.IR.Construction
             {
                 var targetBasicValueType = targetType.BasicValueType;
 
+                // Packed 4-bit (QInt4/QUInt4) constant: its raw value is the unextended nibble, so it
+                // can't share the Int8/16/32/64 source cases (those read the raw bits). Sign-/zero-
+                // extend to an Int32 constant and re-convert from there - the Int32 source case then
+                // produces any target. (int)QInt4 sign-extends; (int)QUInt4 zero-extends.
+                if (value.BasicValueType == BasicValueType.QInt4)
+                {
+                    int extended = isSourceUnsigned
+                        ? (int)value.QUInt4Value
+                        : (int)value.QInt4Value;
+                    return CreateConvert(
+                        location,
+                        CreatePrimitiveValue(location, extended),
+                        targetType,
+                        flags & ~ConvertFlags.SourceUnsigned);
+                }
+
                 switch (value.BasicValueType)
                 {
                     case BasicValueType.Int1:

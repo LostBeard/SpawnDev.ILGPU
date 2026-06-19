@@ -212,6 +212,16 @@ namespace ILGPU.IR.Values
         public Float4E2M1 Float4E2M1Value => Unsafe.As<long, Float4E2M1>(ref rawValue);
 
         /// <summary>
+        /// Returns the value as a packed signed 4-bit integer (low nibble of the byte).
+        /// </summary>
+        public QInt4 QInt4Value => Unsafe.As<long, QInt4>(ref rawValue);
+
+        /// <summary>
+        /// Returns the value as a packed unsigned 4-bit integer (low nibble of the byte).
+        /// </summary>
+        public QUInt4 QUInt4Value => Unsafe.As<long, QUInt4>(ref rawValue);
+
+        /// <summary>
         /// Returns the value as f32.
         /// </summary>
         public float Float32Value => Unsafe.As<long, float>(ref rawValue);

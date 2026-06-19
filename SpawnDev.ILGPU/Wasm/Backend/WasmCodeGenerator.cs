@@ -1329,7 +1329,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             switch (wasmType)
             {
                 case WasmOpCodes.I32:
-                    WasmModuleBuilder.EmitI32Const(Code, value.Int32Value);
+                    // QInt4 stores the raw nibble in rawValue; the i32 register holds the SIGN-EXTENDED
+                    // value, so emit (int)QInt4Value (Int32Value would emit the raw 0..15 nibble - wrong
+                    // for negatives, e.g. -8 stored as 8).
+                    WasmModuleBuilder.EmitI32Const(Code,
+                        value.BasicValueType == BasicValueType.QInt4
+                            ? (int)value.QInt4Value
+                            : value.Int32Value);
                     break;
                 case WasmOpCodes.I64:
                     WasmModuleBuilder.EmitI64Const(Code, value.Int64Value);
