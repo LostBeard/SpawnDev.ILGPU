@@ -317,8 +317,11 @@ public static class AcceleratorRequirementsExtensions
     // f32-register compute, portable conversion on every backend incl. CUDA). Always true.
     private static bool HasFloat8(Device device) => true;
 
-    // Every backend supports FP4 (Float4E2M1) - always emulated (1-byte storage, value in the low
-    // nibble, f32-register compute, portable conversion on every backend incl. CUDA). Always true.
+    // Every backend can LOAD FP4 (Float4E2M1) - always emulated, TRUE packed 4-bit storage (2 nibbles/
+    // byte, [PackedBits(4)], v4.14.0+), f32-register compute, portable conversion on every backend incl.
+    // CUDA. Always true for the type itself. NOTE: this gates the type, not the packed STORE - in-kernel
+    // packed stores are fail-loud on CPU + WebGL (no atomics / managed nibble write); there is no
+    // RequiresPacked4Store flag yet, callers rely on the fail-loud throw (tracked follow-up).
     private static bool HasFloat4(Device device) => true;
 
     private static bool HasFloat16Native(Device device)

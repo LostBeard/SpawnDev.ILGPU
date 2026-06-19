@@ -2,7 +2,19 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
-## 4.14.0-local.12 (2026-06-19) - `Float4E2M1` (FP4) is now TRUE packed 4-bit storage (2 nibbles/byte) on all 6 backends
+## 4.14.0 (2026-06-19) - The 4-bit / low-precision data-type tier: packed FP4 (`Float4E2M1`) + INT4 (`QInt4`/`QUInt4`), FP8/Half conversion correctness, and `RawBitsToFloat`
+
+> 4.14.0 was developed across the local.2 -> local.12 series; the dated headline above is the stable cut. Per-milestone detail follows.
+
+The headline is the **4-bit data-type tier**, all on the f32-register model and bit-exact to the authoritative references:
+
+- **`Float4E2M1` (FP4)** - the OCP E2M1FN / NVFP4 / MXFP4 element format (16 codes, no Inf/NaN, bit-exact to `ml_dtypes.float4_e2m1fn`), and **`QInt4`** (signed -8..7) / **`QUInt4`** (unsigned 0..15) packed integers. All three are **TRUE packed 4-bit storage** (`[PackedBits(4)]`, 2 nibbles/byte, `ceil(N/2)` device bytes - the real NVFP4/INT4 memory density). Load on all 6 backends; in-kernel store on CUDA/OpenCL/WebGPU/Wasm (CPU + WebGL stores are fail-loud - no atomics for the nibble RMW); radix-sort (keys + pairs, ascending + descending) for all three.
+- **`<Type>Extensions.RawBitsToFloat(int)`** - a kernel-safe, all-6-backend in-register decode of a raw nibble/byte/ushort from packed quant storage (`Float4E2M1` / `Float8E4M3` / `Float8E5M2` / `BFloat16`), plus host-side `FromRawBits` / public `RawValue` for the float types.
+- **Two low-precision conversion-correctness fixes:** `Float8E4M3` is now bit-exact to `float8_e4m3fn` (finite overflow / ±Inf → NaN, with a saturating clamp opt-in via `FromSingleSaturating`), and `Half` float→half is now IEEE round-to-nearest-even on every backend (it previously truncated and flushed subnormals, diverging from numpy / CUDA / OpenCL). The complete low-precision float set (`Half` / `BFloat16` / `Float8E4M3` / `Float8E5M2`) reaches feature-complete parity (selectable saturating cast + full radix grid on all 6 backends).
+
+Per-backend matrix + the raw-packed host I/O pattern: [Docs/data-type-support.md](https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/Docs/data-type-support.md).
+
+### local.12 - `Float4E2M1` (FP4) is now TRUE packed 4-bit storage (2 nibbles/byte) on all 6 backends
 
 `Float4E2M1` (the NVFP4/MXFP4 element format) moves from 1-byte-per-value to TRUE packed 4-bit: an `ArrayView<Float4E2M1>` of N elements now allocates **ceil(N/2) bytes** (2 nibbles/byte, 8 per 32-bit word), like `QInt4`/`QUInt4` - half the footprint, the real NVFP4 memory density. The E2M1 nibble decodes to f32 in-register at the load (data stays packed; no unpack-on-load). Forks bump to `2.0.39`. **Breaking** (local-only, contained): the host representation is now RAW PACKED nibble bytes - upload pre-packed via `((IContiguousArrayView)view.BaseView).AsRawArrayView().CopyFromCPU(packed)` and decode in-register, exactly like `QInt4` (there is no transparent typed pack/unpack). The original 1-byte storage was a placeholder; the rationale ("the IR type-size model is byte-granular") was obsoleted by the QInt4 packed-4-bit work.
 
@@ -13,7 +25,7 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
 - Gates: new `BackendTestBase.PackedFloat4` (load all 6 + store round-trip 4/6) green; `Fp4Radix` (ExtractBits + keys + pairs, asc + desc) **green on all packed-store backends incl WebGPU descending**; reworked FP4 convert/relu tests (raw-packed I/O, gated to packed-store backends) green; full `PMT_FILTER=Radix` **473 pass / 0 fail** (no regression to QInt4/QUInt4/bf16/FP8/Half from the shared length + scalar-layout changes).
 - Known follow-ups (latent, not exercised by any test): the direct-param `GetViewLength` still uses `arrayLength*8` for packed-4-bit (no `ViewCountSlot` for direct params - the radix uses the body-struct path); the WGSL helper-function generator's FP4 path is still 4/word (no kernel passes an FP4 view into a helper).
 
-## 4.14.0-local.11 (2026-06-19) - `QUInt4` radix-sort + const-fold fix: full parity with `QInt4`
+### local.11 (2026-06-19) - `QUInt4` radix-sort + const-fold fix: full parity with `QInt4`
 
 Completes the unsigned packed 4-bit type to full `QInt4` parity. Continues `local.10` (which fixed the `QUInt4` load): `QUInt4` was shipped at `local.7` untested, so closing the gaps means auditing every path - this round adds radix-sort and fixes a second silent-wrong (const/convert). Forks bump to `2.0.38`. The signed `QInt4` paths are unchanged.
 
@@ -21,7 +33,7 @@ Completes the unsigned packed 4-bit type to full `QInt4` parity. Continues `loca
 - **Fixed a silent-wrong `QUInt4` const/convert sign-extend.** A `QUInt4` constant `13` (code `0xD`) read back as `-3` on every GPU backend: the widening operators (`QUInt4 -> int/uint/float`) were plain `[ConvertIntrinisc]`, so the IR const-fold (and the convert's `ArithmeticBasicValueType`) defaulted to signed and SIGN-extended the nibble. The `local.10` load test masked this (the load already zero-extended the value, making the convert a no-op identity); a *constant* has no load, so the bug surfaced. Fix: mark the three widening operators `[ConvertIntrinisc(ConvertFlags.SourceUnsigned)]` (the same pattern `BFloat16`/`Half` use) so the convert zero-extends. Now correct on all 6 backends.
 - Gates: new `BackendTestBase.QUInt4.RadixSort` (ExtractBits GPU-vs-CPU on all 6 + keys/pairs ascending on the packed-store backends) green; `PackedQUInt4` const-convert test green on all 6; full `PMT_FILTER=Radix` **472 pass / 0 fail** (455 baseline + the new QUInt4 radix); `PackedQInt4` unchanged (19 pass / 4 skip - the QUInt4-only operator change doesn't touch signed QInt4).
 
-## 4.14.0-local.10 (2026-06-19) - Packed `QUInt4` zero-extending load on all 6 backends (the unsigned 4-bit type was silently sign-extending on GPU)
+### local.10 (2026-06-19) - Packed `QUInt4` zero-extending load on all 6 backends (the unsigned 4-bit type was silently sign-extending on GPU)
 
 Fixes a silent-wrong bug: `ArrayView<QUInt4>` (unsigned packed 4-bit, 0..15) was **sign-extending** on every GPU backend - code `0xF` read back as `-1`, `0x8` as `-8` - because the unsigned type shared the signed `QInt4` packed-nibble load path and signedness is erased at the IR primitive level (`QInt4` and `QUInt4` both lower to `BasicValueType.QInt4`; only `ArithmeticBasicValueType` distinguishes them). The type was shipped (`local.7`) but untested, so the gap was never caught. Forks bump to `2.0.37`. The signed `QInt4` path is byte-for-byte unchanged.
 
@@ -29,7 +41,7 @@ Fixes a silent-wrong bug: `ArrayView<QUInt4>` (unsigned packed 4-bit, 0..15) was
 - **Coverage now matches `QInt4`:** load (all 6), `QUInt4 -> float` widening decode (all 6, the dequant path), store (CUDA/OpenCL/WebGPU/Wasm; CPU + WebGL stores stay fail-loud - no atomics / managed ref can't write a nibble). Enables INT4 / NF4 unsigned-codebook dequant where weights are unsigned 4-bit codes.
 - Gates: new cross-backend PMT `BackendTestBase.PackedQUInt4` (zero-extend load + `->float` + store round-trip) **green** (load/float on all 6, store on 5/6); `PackedQInt4` unchanged (19 pass / 4 skip); full `PMT_FILTER=Radix` regression **455 pass / 0 fail** (the QInt4 load path the desktop trace touches is shared by radix - no regression).
 
-## 4.14.0-local.9 (2026-06-19) - Public kernel-safe raw-bits decode for the sub-word types (`RawBitsToFloat`), plus host `FromRawBits`/`RawValue`
+### local.9 (2026-06-19) - Public kernel-safe raw-bits decode for the sub-word types (`RawBitsToFloat`), plus host `FromRawBits`/`RawValue`
 
 Exposes a public, kernel-safe path to decode packed low-precision storage to float, so a consumer holding a raw nibble/byte/ushort (pulled by its own bit-math out of a still-packed quant buffer) can compose the library's verified decode instead of re-deriving the value table by hand. Surfaced by ML's MXFP4 lane (a hand-rolled E2M1 decode duplicated the shipped one because it couldn't be reached). Forks bump to `2.0.36`. Purely additive - no behavior change to existing paths.
 
@@ -38,7 +50,7 @@ Exposes a public, kernel-safe path to decode packed low-precision storage to flo
 - Gates: new `RawBitsToFloat` decode (FP4 vs a hardcoded oracle table; FP8 E4M3/E5M2 all-256 + bf16 sweep vs the managed decode) **green on all 6 backends** (CPU/CUDA/OpenCL/WebGPU/WebGL/Wasm), plus a host-only `FromRawBits`/`RawValue` round-trip. Regression: Float4E2M1 30/0, Float8 37/0, BFloat16 128/0, Fp4Radix 23/0, Fp8Radix 44/0 - no change from the decode refactor. New offline probe `DemoConsole -- fromrawbits-dump` dumps the WGSL/GLSL for the construction path (documents the browser gap).
 - Known latent (tracked): constructing a sub-word value from raw bits in-kernel emits a broken `ptrCast` store (undeclared var + no decode) on WebGPU/WebGL - the codegen gap behind why `FromRawBits` is host-side only. `RawBitsToFloat` sidesteps it; a proper fix to the construction codegen is deferred.
 
-## 4.14.0-local.8 (2026-06-19) - QInt4 radix-sort keys + pairs on the packed-store backends, fixing a WebGPU-only mis-sort
+### local.8 (2026-06-19) - QInt4 radix-sort keys + pairs on the packed-store backends, fixing a WebGPU-only mis-sort
 
 Adds radix-sort for the packed 4-bit `QInt4` type and fixes a WebGPU codegen bug that was silently corrupting it. Forks bump to `2.0.35`.
 
@@ -47,7 +59,7 @@ Adds radix-sort for the packed 4-bit `QInt4` type and fixes a WebGPU codegen bug
 - Gates: PMT `QInt4Radix` (ExtractBits GPU-vs-CPU + keys/pairs ascending) green on CUDA/OpenCL/WebGPU/WebGPU-NoSubgroups/Wasm (CPU/WebGL skip); full `PMT_FILTER=Radix` regression across every key type x 7 backends **455 passed / 0 failed**; `PackedQInt4` load/store/scatter unchanged. New offline regression probe `DemoConsole -- qint4-radix-wgsl` dumps the QInt4 vs FP4 radix kernel WGSL.
 - Known latent (tracked, no kernel hits it today): the WGSL binding-coalesce path still maps QInt4 → i32, so ≥2 QInt4 views over the 10-binding coalesce threshold would merge into one `array<i32>` (same class as the body-struct bug). Needs nibble-coalesce support + a test. A nested/struct-stored QInt4 view (not the radix's body-struct key view) remains fail-loud on Wasm.
 
-## 4.14.0-local.7 (2026-06-18) - TRUE packed 4-bit `QInt4` storage (2 nibbles/byte) - load + store on 5 of 6 backends
+### local.7 (2026-06-18) - TRUE packed 4-bit `QInt4` storage (2 nibbles/byte) - load + store on 5 of 6 backends
 
 Introduces `ILGPU.QInt4` (signed -8..7) / `ILGPU.QUInt4` (unsigned 0..15), TRUE packed 4-bit integers: an `ArrayView<QInt4>` of N elements allocates **ceil(N/2) bytes** (2 nibbles per byte, 8 per 32-bit word) - the real 4-bit memory win for INT4 quantization, not a 1-byte-per-element placeholder. Forks bump to `2.0.34`. The host representation is RAW PACKED bytes (consumers upload pre-packed `byte`/`uint` words and decode in-register - the zero-copy fused-dequant path); there is no transparent typed pack/unpack.
 
@@ -57,7 +69,7 @@ Introduces `ILGPU.QInt4` (signed -8..7) / `ILGPU.QUInt4` (unsigned 0..15), TRUE 
 - **`[PackedBits(4)]`** attribute → `ArrayView<T>.BitsPerElement` (4 for QInt4, else ElementSize*8) drives `LengthInBytes = ceil(N*bits/8)` through all 8 backend allocators (collapses to `N*ElementSize` for whole-byte types - zero effect on existing types).
 - Gates: new cross-backend PMT test `BackendTestBase.PackedQInt4` (load decodes sign-extended nibbles; store round-trips int -8..7 through a packed buffer) **0 failed** on the wired backends; desktop `packed-qint4-verify` / `packed-qint4-store-verify` / `packed-alloc-verify` green; no regression (`Fp4Radix`, `BFloat16` round-trip, whole-byte allocation all unchanged). Wasm full support + QInt4 radix + the `RequiresQInt4` capability follow in a later release.
 
-## 4.14.0-local.6 (2026-06-17) - `Float4E2M1` radix-sort keys on all 6 backends + a latent PTX struct-field IO bug fix
+### local.6 (2026-06-17) - `Float4E2M1` radix-sort keys on all 6 backends + a latent PTX struct-field IO bug fix
 
 Closes the FP4 follow-up from local.5: `Float4E2M1` arrays can now be radix-sorted (keys-only + pairs, ascending + descending) on CPU/CUDA/OpenCL/WebGPU/WebGL/Wasm. Forks bump to `2.0.33`.
 
@@ -66,7 +78,7 @@ Closes the FP4 follow-up from local.5: `Float4E2M1` arrays can now be radix-sort
 - **Fixed a real latent PTX struct-field IO bug (Rule 2a).** The PTX `EmitIOLoad`/`EmitIOStore` (the path the `RadixSortPairs` kernel uses to bundle the 1-byte key with the value) handled bf16 + FP8 but not FP4, so an FP4 key field was stored as the f32 register's raw low byte (= 0 for most values) → CUDA FP4 pairs returned **all-zero keys**. Added FP4 to both (round f32 → the 4-bit pattern via `EmitF32ToFP4Bits` on store, widen via `EmitFP4BitsToF32` on load). Root-caused with a desktop repro printing the actual CUDA sorted output (keys-only worked; only the key-bundle pairs path was wrong).
 - Gates: PMT `Fp4Radix` (ExtractBits GPU-vs-CPU + KeysDescending + PairsAscending) **23/0 all 6 backends**; no regression (`Fp8Radix` 44/0, `Float4E2M1` convert 23/0).
 
-## 4.14.0-local.5 (2026-06-17) - New 4-bit float type `Float4E2M1` (NVFP4/MXFP4 element format) on all 6 backends + a latent low-precision store-widening bug fix
+### local.5 (2026-06-17) - New 4-bit float type `Float4E2M1` (NVFP4/MXFP4 element format) on all 6 backends + a latent low-precision store-widening bug fix
 
 Adds `ILGPU.Float4E2M1`, the OCP **E2M1FN** 4-bit float (the element format of NVFP4 / MXFP4): 1 sign / 2 exp / 1 mantissa, bias 1, **16 finite codes (no Inf, no NaN)**, magnitudes `{0,.5,1,1.5,2,3,4,6}`, max 6, finite overflow + ±Inf saturate to ±6, NaN→-0. 1-byte storage (value in the low nibble), f32-register compute. Forks bump to `2.0.32`. Bit-exact to `ml_dtypes.float4_e2m1fn` (PyTorch/JAX share it).
 
@@ -75,7 +87,7 @@ Adds `ILGPU.Float4E2M1`, the OCP **E2M1FN** 4-bit float (the element format of N
 - **Fixed FP8/FP4 by-value sub-word SCALAR params on Wasm + WebGL.** A by-value 1-byte float scalar (e.g. `scale`/`bias` in a generic relu kernel) fell through the host scalar-marshaling switch (no FP8/FP4 case) → struct-serialized (Wasm: garbage) / uniform never sent (WebGL: arrived as 0). Added FP8 + FP4 to the host widen-to-f32 path next to Half/bf16 (the f32-register model). This was a latent FP8 gap too - FP8 only had buffer round-trip tests, never a scalar-param test.
 - Gates: PMT `Float4E2M1` (round-trip + generic relu with FP4 scalar params + float→FP4 RNE/saturate/NaN) **23/0 all 6 backends**; `GenericPrecision` (Half/bf16/FP4 scalar relu) 30/0; `AcceleratorRequirements` 19/0/1; no regression (`PrecisionConvert_Float8` 16/0, desktop `fp8-verify` 257/257, `bf16-f16-oracle` 65536/65536). New harness `DemoConsole -- fp4-verify` (CPU/OpenCL/CUDA bit-exact: convert 24/24, decode 16/16, relu 256/256). Radix-sort keys for `Float4E2M1` follow in a later release.
 
-## 4.14.0-local.4 (2026-06-17) - Low-precision data-type parity to 100% (selectable saturating cast + complete radix grid; fixes a WebGL FP8-struct-field bug)
+### local.4 (2026-06-17) - Low-precision data-type parity to 100% (selectable saturating cast + complete radix grid; fixes a WebGL FP8-struct-field bug)
 
 Closes the last parity gaps across the four low-precision float types (`Half`, `BFloat16`, `Float8E4M3`, `Float8E5M2`) so data-type support is feature-complete with no lingering items. Forks bump to `2.0.31`.
 
@@ -85,14 +97,14 @@ Closes the last parity gaps across the four low-precision float types (`Half`, `
 - Docs corrected: `Docs/data-type-support.md` (validated-against-references table, selectable saturating cast, radix 100%); the bf16 plan's stale "naga miscompiles WebGPU bf16 descending radix" claim (disproven in local.4 - the real cause was `arrayLength()` word-vs-element count, fixed, f32-widen workaround removed).
 - Gates: PMT `RadixGrid_*` 86/0 all backends (incl. the WebGL FP8 fix); `LowPrecision_FromSingleSaturating_ClampsOverflow` + `LowPrecision_ConversionPinnedToExternalReference` 17/0; full PMT sweep green; no regression (`PMT_FILTER=Radix` 333/0/9 pre-change baseline held).
 
-## 4.14.0-local.3 (2026-06-17) - Half float→half is now IEEE round-to-nearest-even on every backend (was truncating)
+### local.3 (2026-06-17) - Half float→half is now IEEE round-to-nearest-even on every backend (was truncating)
 
 Fixes a real conversion-correctness + cross-backend-consistency bug in the most-used low-precision type, found by validating against the authoritative references (numpy.float16 / ml_dtypes.bfloat16). Forks bump to `2.0.30`.
 
 - **`ILGPU.Half` `float→half` now uses IEEE round-to-nearest-even (incl. proper subnormal rounding + overflow→Inf) on CPU + WebGPU + WebGL + Wasm** - bit-exact to `numpy.float16` / PyTorch / CUDA (`cvt.rn.f16.f32`) / OpenCL (`vstore_half`). **Before:** the managed conversion used the von der Zijp TABLE method which **truncates toward zero** (`HalfConversion.tt`: shift with no round bit), and the WebGPU/WebGL/Wasm emitters **truncated AND flushed every subnormal to signed zero**. That diverged from numpy/PyTorch in ~half of all values (every non-exact conversion lost up to ½ ULP) AND from ILGPU's own CUDA/OpenCL backends (which were already round-to-nearest) - so a Half model produced different results on WebGPU vs CUDA. Replaced the managed conversion with a direct RNE bit-manip (mirrors the bf16/FP8 conversions) and rewrote the WGSL/GLSL `_f32_to_f16` + the Wasm `EmitF32ToF16` inline bytecode to match. CUDA/OpenCL unchanged (already correct). The "f16 emulation is lossless / matches numpy byte-for-byte" doc claims (which were false for encode) are corrected.
 - **Validated exhaustively:** new `DemoConsole -- bf16-f16-oracle` checks managed BFloat16 + Half vs `ml_dtypes.bfloat16` / `numpy.float16` over **all 65536 patterns** (decode + round-trip identity) + RNE/overflow/subnormal probes. `BFloat16`: bit-exact (decode 65536/65536, round-trip 65536/65536, probes 67503/67503) - was already correct. `Half`: now decode 65536/65536, round-trip 65536/65536, probes 64060/64060 (was ~32294/64060 - the subnormal region + RNE midpoints). Cross-backend gate: new PMT `Half_FloatToHalf_RoundToNearestEven` (kernel `(Half)x` over subnormals/midpoints/overflow/specials, bit-exact vs the managed=numpy reference) **9/0 all backend lanes**; existing Half suite `PMT_FILTER=Half` **204/0/8** (no regression).
 
-## 4.14.0-local.2 (2026-06-17) - Float8E4M3 is now bit-exact to float8_e4m3fn (overflow → NaN), saturating opt-in
+### local.2 (2026-06-17) - Float8E4M3 is now bit-exact to float8_e4m3fn (overflow → NaN), saturating opt-in
 
 `Float8E4M3` float→fp8 conversion changed from saturating to the `fn` (`float8_e4m3fn`) convention as the DEFAULT, matching the dtype it is named after. Forks bump to `2.0.29`.
 

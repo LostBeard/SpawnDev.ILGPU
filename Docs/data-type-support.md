@@ -1,7 +1,9 @@
 # Data Type Support by Backend
 
-Tracks verified support for all data types across all 7 backends.
-Updated: 2026-06-16
+Tracks verified support for all data types across the 6 backends.
+Updated: 2026-06-19
+
+> **6 backends, 7 test columns.** SpawnDev.ILGPU has **6 backends** - WebGPU, WebGL, Wasm (browser) and CUDA, OpenCL, CPU (desktop). The tables below carry a 7th column, **WebGPU NoSub**, which is not a separate backend: it is WebGPU run with the `subgroups` extension forced off, a distinct test lane that verifies the no-subgroups codegen path. So "all 6 backends" and "7 columns / 7 test lanes" both refer to the same surface.
 
 **Legend:**
 - [x] PASS - verified with unit tests (real data, real kernels, real verification)
@@ -28,8 +30,13 @@ Updated: 2026-06-16
 | BFloat16 | BFloat16 | 2B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float8E4M3 | Float8E4M3 | 1B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float8E5M2 | Float8E5M2 | 1B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| Float4E2M1 | Float4E2M1 | 4b¹ | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| QInt4 | QInt4 | 4b¹ | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| QUInt4 | QUInt4 | 4b¹ | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float32 | float | 4B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float64 | double | 8B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+
+¹ **Packed 4-bit:** `[PackedBits(4)]` - 2 nibbles/byte, 8 per 32-bit word, so an `ArrayView<T>` of N elements is **`ceil(N/2)` device bytes** (not N). The nibble decodes to f32 (or sign/zero-extends to int) in-register at the load; the data stays packed in the buffer. See the packed-4-bit section below.
 
 ## Buffer Write (Store to ArrayView)
 
@@ -47,8 +54,13 @@ Updated: 2026-06-16
 | BFloat16 | BFloat16 | 2B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float8E4M3 | Float8E4M3 | 1B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float8E5M2 | Float8E5M2 | 1B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| Float4E2M1 | Float4E2M1 | 4b¹ | [x] | [x] | [x] | [!]² | [x] | [x] | [!]² |
+| QInt4 | QInt4 | 4b¹ | [x] | [x] | [x] | [!]² | [x] | [x] | [!]² |
+| QUInt4 | QUInt4 | 4b¹ | [x] | [x] | [x] | [!]² | [x] | [x] | [!]² |
 | Float32 | float | 4B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float64 | double | 8B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+
+² **Packed 4-bit store is fail-loud on CPU + WebGL.** Writing one nibble means a read-modify-write of the enclosing 32-bit word; on the GPU backends that is an atomic word RMW (`atomicAnd` clear + `atomicOr` set). **WebGL** has no atomics, and the **CPU** managed-reference indexer cannot address a sub-byte element, so a packed-4-bit store on those two throws `UnsupportedKernelFeatureException` / `UnsupportedTestException` rather than silently corrupting the word. Store runs on **CUDA / OpenCL / WebGPU / Wasm**. (Load works on all 6 - decode is read-only.)
 
 ## End-to-End (Read + Kernel Process + Write)
 
@@ -66,8 +78,13 @@ Updated: 2026-06-16
 | BFloat16 | BFloat16 | 2B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float8E4M3 | Float8E4M3 | 1B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float8E5M2 | Float8E5M2 | 1B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+| Float4E2M1 | Float4E2M1 | 4b¹ | [x] | [x] | [x] | [!]² | [x] | [x] | [!]² |
+| QInt4 | QInt4 | 4b¹ | [x] | [x] | [x] | [!]² | [x] | [x] | [!]² |
+| QUInt4 | QUInt4 | 4b¹ | [x] | [x] | [x] | [!]² | [x] | [x] | [!]² |
 | Float32 | float | 4B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float64 | double | 8B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
+
+(End-to-end needs the store, so the 4-bit types inherit the CPU + WebGL store limitation ². The read + the in-register compute work on all 6.)
 
 ## Buffer RoundTrip (CopyFromCPU -> CopyToHostAsync, no kernel)
 
@@ -129,7 +146,7 @@ See **[Docs/atomic-operations.md](atomic-operations.md)** for the complete per-o
 
 ### Sub-word buffer access (Int8, UInt8, Int16, UInt16, Float16)
 
-All sub-word types now have **complete Read/Write/EndToEnd support on ALL 7 backends**.
+All sub-word types now have **complete Read/Write/EndToEnd support on all 6 backends** (7 test columns).
 
 | Backend | Mechanism | Signed/Unsigned Detection |
 |---------|-----------|--------------------------|
@@ -144,7 +161,7 @@ All sub-word types now have **complete Read/Write/EndToEnd support on ALL 7 back
 `ILGPU.BFloat16` + the `BasicValueType.BFloat16` IR primitive add a second 16-bit float that, unlike
 `Half`, keeps **fp32's full dynamic range** (it is literally the top 16 bits of an fp32) - the right
 trade for ML weights/activations where fp16's tiny range overflows/underflows. **Complete
-Read/Write/EndToEnd support on ALL 7 backends.** The bf16<->f32 conversion is byte-identical across every
+Read/Write/EndToEnd support on all 6 backends.** The bf16<->f32 conversion is byte-identical across every
 backend: `bf16->f32` is an exact zero-extend `<<16`; `f32->bf16` is round-to-nearest-even truncate with a
 NaN-preservation guard. Values compute as f32 everywhere; only the storage is 2-byte.
 
@@ -209,6 +226,46 @@ backend** (CPU-verified idempotence 0/256 for all representable values).
 > `Float8E5M2` is IEEE-754-style (has ±Inf): overflow → ±Inf, bit-exact to `float8_e5m2` (decode 0/256,
 > encode 723/723); its canonical NaN byte is `0x7F` (ml_dtypes uses `0x7E` - both are valid NaN patterns).
 
+### Packed 4-bit types (`Float4E2M1` / `QInt4` / `QUInt4`)
+
+Three **TRUE packed 4-bit** types - the real NVFP4 / INT4 memory layout, not a 1-byte placeholder. Each is marked `[PackedBits(4)]`, so an `ArrayView<T>` of N elements allocates **`ceil(N/2)` device bytes** (2 nibbles/byte, 8 per 32-bit word) - half the footprint of a 1-byte-per-value layout.
+
+- **`Float4E2M1`** - the OCP **E2M1FN** 4-bit float (the NVFP4 / MXFP4 element format): 1 sign / 2 exponent / 1 mantissa, 16 codes with magnitudes `{0, 0.5, 1, 1.5, 2, 3, 4, 6}`, **no Inf, no NaN**. `float`→FP4 is round-to-nearest-even among the 16 codes; finite overflow and ±Inf **saturate to ±6**; NaN encodes to `-0` (code `0x8`). Bit-exact to `ml_dtypes.float4_e2m1fn`.
+- **`QInt4`** - signed packed 4-bit integer, range **-8..7**, sign-extends to `int` on read.
+- **`QUInt4`** - unsigned packed 4-bit integer, range **0..15**, zero-extends to `int` on read.
+
+Like the other low-precision types, values compute in a wider register (f32 for FP4, i32 for the ints) and the nibble is decoded on load / encoded on store; the buffer stays packed.
+
+| Backend | Load (all 6) | Store (CUDA/OpenCL/WebGPU/Wasm) |
+|---------|--------------|----------------------------------|
+| **WebGPU** | `array<atomic<u32>>`; `atomicLoad` the word, shift by `(i&7)*4`, mask `0xF`, then the E2M1 decode (`_e2m1_to_f32`) or int sign/zero-extend. | Atomic word RMW: `atomicAnd` clears the target nibble, `atomicOr` writes the new one (disjoint masks compose - thread-safe). |
+| **Wasm** | Load the byte at `addr>>1`, shift `(addr&1)*4`, mask `0xF`, decode (`EmitFP4ToF32`). | Atomic nibble RMW (mirrors the QInt4 word-RMW path). |
+| **CUDA** | `ld.global.u8` the byte, `shr` by the nibble shift, mask, inline-PTX decode (`EmitFP4BitsToF32`). | Atomic word RMW (`red.and` clear + `red.or` set). |
+| **OpenCL** | `(b[i>>1] >> ((i&1)<<2)) & 0xF`, then `_e2m1_bits_to_f32`. | `_qint4_store(base, i, nibble)` word RMW. |
+| **WebGL** | `texelFetch` the R32I word, shift/mask the nibble, decode. **Load only.** | **Fail-loud** - no atomics (`UnsupportedKernelFeatureException`). |
+| **CPU** | The managed struct's packed indexer decodes the nibble directly (`DefaultILBackend`). **Load only.** | **Fail-loud** - the managed reference indexer cannot address a sub-byte element. |
+
+**Working with packed buffers from the host.** There is **no transparent typed host pack/unpack** for packed types (the host element is still a 1-byte struct, value in the low nibble). To upload, pack two nibbles per byte yourself and write the raw bytes:
+
+```csharp
+// Pack N FP4 codes (each a Float4E2M1.RawValue, 0..15) into ceil(N/2) bytes
+var packed = new byte[(n + 1) / 2];
+for (int k = 0; k < packed.Length; k++)
+    packed[k] = (byte)((codes[2*k] & 0xF) | ((2*k+1 < n ? codes[2*k+1] & 0xF : 0) << 4));
+
+using var buf = accelerator.Allocate1D<Float4E2M1>(n);                 // ceil(N/2) device bytes
+((IContiguousArrayView)buf.View.BaseView).AsRawArrayView().CopyFromCPU(packed);
+// ... dispatch a kernel that reads buf as ArrayView<Float4E2M1> (decodes in-register) ...
+// read back the raw packed bytes and unpack:
+var got = await ((IContiguousArrayView)buf.View.BaseView).AsRawArrayView().CopyToHostAsync<byte>();
+```
+
+**`RawBitsToFloat` - kernel-safe in-register decode of raw quant bits.** When you hold packed quant data as raw integer words (e.g. a GGUF/MXFP4 block of `u32`s) and want to decode an element inside a kernel without an `ArrayView<Float4E2M1>`, call `<Type>Extensions.RawBitsToFloat(int rawBits)`. It transpiles on **all 6 backends** and returns the f32 value for a raw nibble/byte/ushort pattern. Available for the float types whose storage is sub-word: **`Float4E2M1`, `Float8E4M3`, `Float8E5M2`, `BFloat16`** (`Half` has `FromRawBits`/`RawValue` but no `RawBitsToFloat`; the integer `QInt4`/`QUInt4` use the ordinary `(int)`/`(float)` convert). Host-side, the float types also expose `FromRawBits(...)` + a public `RawValue` for raw round-trips; **`QInt4`/`QUInt4` keep `RawValue` internal and have no `FromRawBits`** (pack via the nibble arithmetic above).
+
+**Radix-sort** (keys + key/value pairs, ascending + descending) works for all three 4-bit types on **CUDA / OpenCL / WebGPU / Wasm** (the packed scatter needs the store path, so CPU + WebGL are gated, like the store). `RadixSortOperations.{Float4E2M1,QInt4,QUInt4}` provide the key transforms; the FP4 key is the E2M1 bit pattern with the float sign-flip, the int keys are the nibble with the signed/unsigned bias.
+
+**Capability flag.** `AcceleratorRequirements.RequiresFloat4E2M1` gates selection to backends that support the FP4 type. There is **no** `RequiresQInt4`/`RequiresQUInt4` and **no** packed-store capability flag yet - a kernel that *stores* a packed-4-bit view on CPU/WebGL relies on the fail-loud throw, not a selection-time gate (tracked follow-up).
+
 ### All low-precision conversions are validated against the authoritative references
 
 Every `float`→low-precision conversion is **bit-exact** to its reference, verified exhaustively and pinned
@@ -221,6 +278,8 @@ gate, which pins each backend's on-device convert to hardcoded numpy/ml_dtypes v
 | **BFloat16** | `ml_dtypes.bfloat16` | round-to-nearest-even (NaN-preserving) |
 | **Float8E4M3** | PyTorch/JAX/ml_dtypes `float8_e4m3fn` | RNE; overflow→NaN (fn, default) |
 | **Float8E5M2** | `float8_e5m2` | RNE; overflow→±Inf |
+| **Float4E2M1** | `ml_dtypes.float4_e2m1fn` | RNE among 16 codes; overflow + ±Inf saturate to ±6; NaN → -0 (`0x8`). No `saturate` overload (always saturates). |
+| **QInt4 / QUInt4** | n/a (integer) | integer convert: `float`→int truncates toward zero, keeps the low 4 bits; read sign-extends (QInt4) / zero-extends (QUInt4) to `int`. |
 
 **Selectable saturating cast (all four types).** Each type exposes `FromSingle(float, bool saturate)` and
 `FromSingleSaturating(float)` (E4M3 additionally has `FromSingleFn`, its non-saturating name). The saturating
@@ -229,12 +288,14 @@ IEEE types) - the NVIDIA Transformer Engine / OCP mode for activations you don't
 is composed only of existing intrinsics (a bit-level finite check + the default cast + a max-finite-constant
 cast), so it transpiles with no per-backend codegen and is bit-exact on all 6 backends.
 
-**Radix-sort: complete for all four types on all 6 backends.** Keys-only and key/value pairs, ascending and
+**Radix-sort: complete for all four byte/2-byte low-precision floats on all 6 backends.** Keys-only and key/value pairs, ascending and
 descending, plus body-struct key fields - every `type × {keys, pairs} × {asc, desc}` cell is covered
 (`Interop.FloatAsInt(T)` + `Ascending/Descending{Half,BFloat16,Float8E4M3,Float8E5M2}` + per-backend
 `FloatAsIntCast`; PMT `RadixGrid_*` + `Fp8Radix_*` + `BFloat16_RadixSort*`). On WebGL the FP8/Half/bf16 keys
 route through the unpacked-f32 working representation (the whole-texel scatter can't move a sub-word value);
-on the other 5 backends they sort as native packed sub-word keys.
+on the other 5 backends they sort as native packed sub-word keys. The **packed 4-bit types
+(`Float4E2M1`/`QInt4`/`QUInt4`) also sort** (keys + pairs, asc + desc) on CUDA/OpenCL/WebGPU/Wasm - see the
+packed-4-bit section above (CPU + WebGL gated with the packed store).
 
 ### Sub-Word Usage Notes
 
@@ -250,25 +311,26 @@ These apply to any kernel using `ArrayView<byte>`, `ArrayView<sbyte>`, `ArrayVie
 
 ### Test Coverage
 
-**175 tests total** across the sub-word test methods + Half intrinsics + BFloat16, all x 7 backends:
-- Int8: 28 tests (RoundTrip + Read + Write + EndToEnd x 7 backends)
-- UInt8: 28 tests
-- Int16: 35 tests (+ existing CopyFromJS tests)
-- UInt16: 28 tests
-- Float16: 21 tests (Read + Write + EndToEnd x 7 backends)
-- Half Abs: 7 tests
-- Half MinMax: 7 tests
-- BFloat16: 28 tests (BufferRoundTrip + Arithmetic + MinMax + RangeAndSpecials x 7 backends)
+Every data type is exercised across all 6 backends (7 test columns) through PlaywrightMultiTest. Coverage by family:
+- **Sub-word ints + Half** (`Int8`/`UInt8`/`Int16`/`UInt16`/`Float16`): RoundTrip + Read + Write + EndToEnd, plus `Half.Abs/Min/Max`.
+- **BFloat16**: BufferRoundTrip + Arithmetic + MinMax + RangeAndSpecials.
+- **FP8** (`Float8E4M3`/`Float8E5M2`): `PrecisionConvert_*_RoundTripBitExact`, `Fp8Radix_*`, the `relu(x*scale+bias)` generic `INumber<T>` kernel, and the `fp8-oracle` external-reference pin.
+- **Packed 4-bit** (`Float4E2M1`/`QInt4`/`QUInt4`): `PackedFloat4`/`PackedQInt4`/`PackedQUInt4` (allocation = `ceil(N/2)` bytes, load all 6, store round-trip on the 4 store backends), `Fp4Radix`/`QInt4Radix`/`QUInt4Radix` (keys + pairs, asc + desc), `Float4E2M1_FloatToFP4_RneSaturateNaN`, `GenericPrecision_Float4E2M1_*`, and `RawBitsToFloat_*`/`FromRawBits_*` (in-register + host raw decode).
+- **Conversion correctness** pinned to numpy / `ml_dtypes` (`LowPrecision_ConversionPinnedToExternalReference`, `Half_FloatToHalf_RoundToNearestEven`).
+
+Latest full cross-backend sweep (the entire suite, all 6 backends / 7 lanes): **3886 pass / 0 fail / 252 skip** (the skips are the genuinely-impossible cells - in-kernel scatter/atomics/packed-store on WebGL, packed-store on CPU).
 
 ### Test Files
-- `SpawnDev.ILGPU.Demo.Shared/UnitTests/BackendTestBase.Tests17.BrowserBuffer.cs` (sub-word + Half)
-- `SpawnDev.ILGPU.Demo.Shared/UnitTests/BackendTestBase.BFloat16.cs` (bf16)
+- `BackendTestBase.Tests17.BrowserBuffer.cs` (sub-word + Half), `BackendTestBase.BFloat16.cs` (bf16)
+- `BackendTestBase.PackedFloat4.cs` / `BackendTestBase.PackedQInt4.cs` / `BackendTestBase.PackedQUInt4.cs` (packed 4-bit load/store)
+- `BackendTestBase.Float4.RadixSort.cs` / `BackendTestBase.QInt4.RadixSort.cs` / `BackendTestBase.QUInt4.RadixSort.cs` (4-bit radix)
+- `BackendTestBase.GenericPrecision.cs` (FP8 + FP4 convert/relu), `BackendTestBase.FromRawBits.cs` (`RawBitsToFloat`/`FromRawBits`)
 
 ### How to Run
 ```bash
-# All sub-word + Half tests
-dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj --filter "FullyQualifiedName~Int8|FullyQualifiedName~UInt8|FullyQualifiedName~Int16|FullyQualifiedName~UInt16|FullyQualifiedName~Float16|FullyQualifiedName~Half_"
+# Packed 4-bit (load/store/radix/convert)
+dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj --filter "FullyQualifiedName~PackedFloat4|FullyQualifiedName~PackedQInt4|FullyQualifiedName~PackedQUInt4|FullyQualifiedName~Radix|FullyQualifiedName~Float4E2M1|FullyQualifiedName~RawBitsToFloat"
 
-# All BFloat16 tests
-dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj --filter "FullyQualifiedName~BFloat16"
+# Sub-word + Half + BFloat16
+dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj --filter "FullyQualifiedName~Int8|FullyQualifiedName~Int16|FullyQualifiedName~Float16|FullyQualifiedName~Half_|FullyQualifiedName~BFloat16"
 ```

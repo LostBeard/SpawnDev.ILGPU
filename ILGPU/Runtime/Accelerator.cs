@@ -264,13 +264,12 @@ namespace ILGPU.Runtime
         /// </summary>
         /// <remarks>
         /// On desktop backends (CPU, CUDA, OpenCL) this BLOCKS until all submitted work has
-        /// finished. On the single-threaded browser backends (WebGPU, WebGL, Wasm) it instead
-        /// FLUSHES/submits the queued work to the GPU - it starts the work - and returns
-        /// immediately WITHOUT waiting for it to complete. So on those backends it is neither a
-        /// no-op (it submits a real command batch) nor a blocking wait. When you need the work to
-        /// have actually FINISHED on a browser backend (before a host readback, or before
-        /// disposing buffers a pending dispatch still references), <c>await</c>
-        /// <see cref="SynchronizeAsync"/> instead.
+        /// finished. On the single-threaded browser backends (WebGPU, WebGL, Wasm) a synchronous
+        /// wait is impossible (blocking the single Blazor thread would deadlock the very work it
+        /// waits on), so this THROWS <see cref="System.NotSupportedException"/> - <c>await</c>
+        /// <see cref="SynchronizeAsync"/> to wait, or call <see cref="Flush"/> to fire-and-forget
+        /// submit the queued work without waiting. (Before 4.12.0 the browser form was a silent
+        /// non-blocking flush, which let callers read stale data; it is now loud.)
         /// </remarks>
         public void Synchronize()
         {
@@ -291,13 +290,12 @@ namespace ILGPU.Runtime
         /// <see cref="Synchronize"/> and returns a completed task, which is correct
         /// for backends whose <see cref="Synchronize"/> blocks until the queue drains
         /// (CUDA, OpenCL, CPU). Single-threaded browser backends (Wasm, WebGPU,
-        /// WebGL) cannot block-wait — their synchronous <see cref="Synchronize"/> is a
-        /// non-blocking flush that submits the queued work without waiting (it is NOT a no-op) — so they MUST override this to await their real
-        /// drain (worker dispatch completion, queue.OnSubmittedWorkDone, GL fence).
-        /// Algorithm and consumer code that needs a host-visible result after an
-        /// unawaited dispatch must <c>await</c> this rather than calling the
-        /// synchronous <see cref="Synchronize"/>, which silently does nothing on those
-        /// backends.
+        /// WebGL) cannot block-wait — their synchronous <see cref="Synchronize"/>
+        /// throws — so they MUST override this to await their real drain (worker
+        /// dispatch completion, queue.OnSubmittedWorkDone, GL fence). Algorithm and
+        /// consumer code that needs a host-visible result after an unawaited dispatch
+        /// must <c>await</c> this rather than calling the synchronous
+        /// <see cref="Synchronize"/>, which throws on those backends.
         /// </remarks>
         public virtual Task SynchronizeAsync()
         {
