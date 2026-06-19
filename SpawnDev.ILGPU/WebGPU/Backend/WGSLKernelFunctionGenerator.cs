@@ -5734,6 +5734,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         ? $"i32({rawNib})"                                                  // QUInt4: zero-extend (0..15)
                         : $"select(i32({rawNib}), (i32({rawNib}) - 16), ({rawNib}) >= 8u)"; // QInt4: sign-extend (-8..7)
                 }
+                else if (_subWordFloat4Params.Contains(subWordParamIdx))
+                {
+                    // FP4 packed nibble extraction: 8 nibbles per atomic<u32> word (same nibble
+                    // addressing as QInt4), then decode the 4-bit E2M1 code to f32.
+                    var wordIdx = $"(u32({idx}) >> 3u)";
+                    var shift = $"((u32({idx}) & 7u) * 4u)";
+                    var rawNib = $"((u32(atomicLoad(&{subWordBinding}[{wordIdx}])) >> {shift}) & 0xFu)";
+                    extractExpr = $"_e2m1_to_f32({rawNib})";
+                }
                 else if (elemSize == 1)
                 {
                     // Byte extraction: 4 bytes per atomic<u32> word
@@ -5743,9 +5752,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (_subWordFloat8Params.TryGetValue(subWordParamIdx, out bool fp8IsE4M3))
                         // FP8: same 1-byte storage, but convert the raw byte to f32 (value computes as f32).
                         extractExpr = $"{(fp8IsE4M3 ? "_e4m3_to_f32" : "_e5m2_to_f32")}({rawByte})";
-                    else if (_subWordFloat4Params.Contains(subWordParamIdx))
-                        // FP4: same 1-byte storage (E2M1 code in the low nibble); convert to f32.
-                        extractExpr = $"_e2m1_to_f32({rawByte})";
                     else if (_subWordUnsignedParams.Contains(subWordParamIdx))
                         extractExpr = $"i32({rawByte})"; // byte: zero-extend (0-255)
                     else
@@ -5963,6 +5969,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     var shift = $"((u32({idx}) & 7u) * 4u)";
                     AppendLine($"atomicAnd(&{subWordBinding}[{wordIdx}], ~(0xFu << {shift}));");
                     AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], ((u32({val}) & 0xFu) << {shift}));");
+                    return;
+                }
+                if (_subWordFloat4Params.Contains(storeParamIdx))
+                {
+                    // FP4 packed nibble store: 8 nibbles per atomic<u32> word, E2M1 encode (RNE) of the
+                    // f32 value. Same nibble RMW as QInt4 (clear+set only this thread's nibble);
+                    // _f32_to_e2m1 is what re-narrows a widened f32 to the FP4 storage type.
+                    var wordIdx = $"(u32({idx}) >> 3u)";
+                    var shift = $"((u32({idx}) & 7u) * 4u)";
+                    AppendLine($"atomicAnd(&{subWordBinding}[{wordIdx}], ~(0xFu << {shift}));");
+                    AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], ((u32(_f32_to_e2m1({val})) & 0xFu) << {shift}));");
                     return;
                 }
                 if (elemSize == 1)

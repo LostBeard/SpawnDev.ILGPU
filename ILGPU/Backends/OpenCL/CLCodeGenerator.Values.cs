@@ -576,14 +576,16 @@ namespace ILGPU.Backends.OpenCL
                 return;
             }
 
-            // FP4 emulation: read the raw uchar (low nibble) and convert to f32 via the E2M1 helper.
+            // FP4 PACKED emulation: read the byte at (index>>1), extract the (index&1) nibble, and decode
+            // the 4-bit E2M1 code to f32. Same nibble addressing as the QInt4 load below; only the
+            // at-nibble transform differs (E2M1 decode vs int sign/zero-extend).
             if (_fp4EmulatedLEAs.TryGetValue(address.ToString(), out var fp4Lea))
             {
+                string b = fp4Lea.BasePtr.ToString();
+                string i = fp4Lea.Index.ToString();
+                string nib = $"(({b}[({i}) >> 1] >> ((({i}) & 1) << 2)) & 0xF)";
                 using var statement = BeginStatement(target);
-                statement.AppendCommand("_e2m1_bits_to_f32(");
-                statement.AppendArgument(fp4Lea.BasePtr);
-                statement.AppendIndexer(fp4Lea.Index);
-                statement.AppendCommand(")");
+                statement.AppendCommand($"_e2m1_bits_to_f32({nib})");
                 return;
             }
 
@@ -688,13 +690,19 @@ namespace ILGPU.Backends.OpenCL
                 return;
             }
 
-            // FP4 emulation: convert f32 -> e2m1 bits (RNE) and store as raw uchar (low nibble).
+            // FP4 PACKED emulation: round f32 -> e2m1 nibble (RNE) and write ONLY that nibble of byte
+            // (index>>1) via the SAME atomic word RMW helper the QInt4 store uses (adjacent threads write
+            // the two nibbles of one byte). The helper writes the low 4 bits of its value arg, so pass
+            // the encoded E2M1 code.
             if (_fp4EmulatedLEAs.TryGetValue(address.ToString(), out var fp4StoreLea))
             {
-                using var statement = BeginStatement(fp4StoreLea.BasePtr, fp4StoreLea.Index);
-                statement.AppendCommand("_f32_to_e2m1_bits(");
+                using var statement = BeginStatement("_qint4_store(");
+                statement.AppendArgument(fp4StoreLea.BasePtr);
+                statement.AppendCommand(", ");
+                statement.AppendArgument(fp4StoreLea.Index);
+                statement.AppendCommand(", _f32_to_e2m1_bits(");
                 statement.AppendArgument(value);
-                statement.AppendCommand(")");
+                statement.AppendCommand("))");
                 return;
             }
             if (IsFloat4PointerEmulated(store.Target.Type))

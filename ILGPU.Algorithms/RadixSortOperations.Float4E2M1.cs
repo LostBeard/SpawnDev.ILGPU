@@ -23,8 +23,9 @@ namespace ILGPU.Algorithms.RadixSortOperations
     // the mantissa, so the magnitude is monotonic in the bit pattern for every finite value
     // (16 finite codes, NO Inf, NO NaN). The same sign-flip + ones-complement key transform that
     // Half / bf16 / FP8 use therefore applies, scaled DOWN to 4 bits: the value lives in the low
-    // nibble of the 1-byte storage (FloatAsInt(Float4E2M1) returns it masked to 0..15), the sign is
-    // bit 3, and the ones-complement mask spans the low 3 magnitude bits.
+    // nibble of the PACKED 4-bit storage (FloatAsInt(Float4E2M1) returns it masked to 0..15), the
+    // sign is bit 3, and the ones-complement mask spans the low 3 magnitude bits. NumBits=4 (FP4 is
+    // [PackedBits(4)], like QInt4) - the body-struct key view reads 8 nibbles per word.
 
     /// <summary>
     /// Represents an ascending radix sort operation of type Float4E2M1.
@@ -33,13 +34,11 @@ namespace ILGPU.Algorithms.RadixSortOperations
         IRadixSortOperation<Float4E2M1>
     {
         /// <summary>
-        /// Returns the number of bits to sort. FP4 is stored as a 1-byte element (the 4-bit value in
-        /// the low nibble, high nibble always 0), so we sort the full BYTE (8 bits) - the same proven
-        /// 1-byte radix path the FP8 types use. The transform below produces a key in 0..15, so the
-        /// upper 4 radix passes are trivially zero and the lower 4 do the real ordering; the
-        /// high-nibble-zero key stays monotonic over all 8 bits.
+        /// Returns the number of bits to sort. FP4 is TRUE packed 4-bit ([PackedBits(4)], 8 nibbles
+        /// per word), and the key transform below produces a 0..15 key, so 4 radix passes fully order
+        /// it - the same as QInt4 (and half the passes of the old 1-byte storage).
         /// </summary>
-        public int NumBits => sizeof(byte) * 8;
+        public int NumBits => 4;
 
         /// <summary>
         /// The default element value.
@@ -60,8 +59,7 @@ namespace ILGPU.Algorithms.RadixSortOperations
             // nibble (independent of NumBits): flip the sign-bit (bit 3, 0x8) so negatives order
             // before positives, and ones-complement the exponent+mantissa of negatives (the low 3
             // magnitude bits, 0x7) so larger negatives order before smaller negatives. The produced
-            // key is in 0..15, so sorting it over the full 8-bit byte (NumBits) is monotonic - the
-            // high nibble is always 0.
+            // key is in 0..15, monotonic over the 4 radix passes (NumBits=4).
             var raw = Interop.FloatAsInt(value) & 0xFu;       // 4-bit pattern (low nibble)
             const uint signMask = 0x8U;                        // FP4 sign bit (bit 3)
             var sign = (raw >> 3) & 1U;
@@ -78,10 +76,10 @@ namespace ILGPU.Algorithms.RadixSortOperations
         IRadixSortOperation<Float4E2M1>
     {
         /// <summary>
-        /// Returns the number of bits to sort (8 - the full 1-byte FP4 storage element; see
+        /// Returns the number of bits to sort (4 - FP4 is packed 4-bit; see
         /// <see cref="AscendingFloat4E2M1.NumBits"/>).
         /// </summary>
-        public int NumBits => sizeof(byte) * 8;
+        public int NumBits => 4;
 
         /// <summary>
         /// The default element value.
