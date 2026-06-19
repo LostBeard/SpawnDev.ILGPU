@@ -1222,6 +1222,19 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                             _subWordParams[param.Index] = 1; // registers as sub-word; the QInt4 tag routes Load to the 8-per-texel nibble path
                             _subWordQInt4Params.Add(param.Index);
                             glslType = "int"; // Force R32I texture for packed sub-word bit data
+                            // Detect unsigned (QUInt4) via CLR param type - QInt4/QUInt4 share
+                            // BasicValueType.QInt4; QUInt4 must zero-extend (0..15), not sign-extend.
+                            int userIdxQ4 = param.Index - KernelParamOffset;
+                            if (userIdxQ4 >= 0 && userIdxQ4 < EntryPoint.Parameters.Count)
+                            {
+                                var clrTypeQ4 = EntryPoint.Parameters[userIdxQ4];
+                                if (clrTypeQ4.IsGenericType)
+                                {
+                                    var genArgsQ4 = clrTypeQ4.GetGenericArguments();
+                                    if (genArgsQ4.Length > 0 && genArgsQ4[0] == typeof(QUInt4))
+                                        _subWordUnsignedParams.Add(param.Index);
+                                }
+                            }
                         }
                     }
 
@@ -3059,7 +3072,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     var shift = $"(({idx}) % 8) * 4";
                     var fetch = $"texelFetch({swBn}, ivec2({texelIdx} % {swBn}_tileW, {texelIdx} / {swBn}_tileW), 0).r";
                     var rawNib = $"(({fetch}) >> ({shift})) & 0xF";
-                    extractExpr = $"(({rawNib}) >= 8 ? ({rawNib}) - 16 : ({rawNib}))"; // sign-extend signed 4-bit
+                    extractExpr = _subWordUnsignedParams.Contains(subWordParamIdx)
+                        ? $"({rawNib})"                                            // QUInt4: zero-extend (0..15)
+                        : $"(({rawNib}) >= 8 ? ({rawNib}) - 16 : ({rawNib}))";     // QInt4: sign-extend (-8..7)
                 }
                 else if (elemSize == 1)
                 {

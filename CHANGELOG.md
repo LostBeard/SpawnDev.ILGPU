@@ -2,6 +2,14 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.14.0-local.10 (2026-06-19) - Packed `QUInt4` zero-extending load on all 6 backends (the unsigned 4-bit type was silently sign-extending on GPU)
+
+Fixes a silent-wrong bug: `ArrayView<QUInt4>` (unsigned packed 4-bit, 0..15) was **sign-extending** on every GPU backend - code `0xF` read back as `-1`, `0x8` as `-8` - because the unsigned type shared the signed `QInt4` packed-nibble load path and signedness is erased at the IR primitive level (`QInt4` and `QUInt4` both lower to `BasicValueType.QInt4`; only `ArithmeticBasicValueType` distinguishes them). The type was shipped (`local.7`) but untested, so the gap was never caught. Forks bump to `2.0.37`. The signed `QInt4` path is byte-for-byte unchanged.
+
+- **`QUInt4` packed load now ZERO-extends (0..15) on all 6 backends**, where `QInt4` sign-extends (-8..7). Each backend recovers the signedness from the source view's CLR param type (the same mechanism the `byte`/`sbyte` and `ushort`/`short` sub-word loads already use): the browser backends (WGSL/GLSL) + Wasm extend their existing param-walk to tag `QUInt4` params unsigned; PTX/OpenCL trace the load's source view back to its kernel parameter (through GetField/LoadFieldAddress/NewView/cast indirection) and consult `EntryPoint.Parameters`, guarded to the entry method so a helper can never mis-map.
+- **Coverage now matches `QInt4`:** load (all 6), `QUInt4 -> float` widening decode (all 6, the dequant path), store (CUDA/OpenCL/WebGPU/Wasm; CPU + WebGL stores stay fail-loud - no atomics / managed ref can't write a nibble). Enables INT4 / NF4 unsigned-codebook dequant where weights are unsigned 4-bit codes.
+- Gates: new cross-backend PMT `BackendTestBase.PackedQUInt4` (zero-extend load + `->float` + store round-trip) **green** (load/float on all 6, store on 5/6); `PackedQInt4` unchanged (19 pass / 4 skip); full `PMT_FILTER=Radix` regression **455 pass / 0 fail** (the QInt4 load path the desktop trace touches is shared by radix - no regression).
+
 ## 4.14.0-local.9 (2026-06-19) - Public kernel-safe raw-bits decode for the sub-word types (`RawBitsToFloat`), plus host `FromRawBits`/`RawValue`
 
 Exposes a public, kernel-safe path to decode packed low-precision storage to float, so a consumer holding a raw nibble/byte/ushort (pulled by its own bit-math out of a still-packed quant buffer) can compose the library's verified decode instead of re-deriving the value table by hand. Surfaced by ML's MXFP4 lane (a hand-rolled E2M1 decode duplicated the shipped one because it couldn't be reached). Forks bump to `2.0.36`. Purely additive - no behavior change to existing paths.

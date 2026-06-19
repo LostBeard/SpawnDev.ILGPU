@@ -9,6 +9,7 @@
 // Source License. See LICENSE.txt for details.
 // ---------------------------------------------------------------------------------------
 
+using ILGPU.IR;
 using ILGPU.IR.Types;
 using ILGPU.IR.Values;
 using ILGPU.Util;
@@ -17,6 +18,50 @@ namespace ILGPU.Backends.OpenCL
 {
     partial class CLCodeGenerator
     {
+        /// <summary>
+        /// Traces a packed-4-bit LEA source view back to its kernel parameter and reports whether
+        /// that parameter's CLR element type is the UNSIGNED <see cref="QUInt4"/> (vs signed
+        /// <see cref="QInt4"/>). BasicValueType.QInt4 is shared by both, so the packed nibble load
+        /// must consult the CLR param type to choose zero-extend (QUInt4) vs sign-extend (QInt4).
+        /// Only valid on the entry method (where Method.Parameters map to EntryPoint.Parameters);
+        /// returns false (→ signed) for helper methods or any source it cannot trace to a view param.
+        /// </summary>
+        private bool PackedViewSourceIsQUInt4(Value source)
+        {
+            if (!Method.HasFlags(MethodFlags.EntryPoint))
+                return false;
+            var cur = source.Resolve();
+            for (int depth = 0; cur != null && depth < 20; depth++)
+            {
+                if (cur is Parameter p)
+                {
+                    int mi = -1;
+                    for (int i = 0; i < Method.Parameters.Count; i++)
+                        if (Method.Parameters[i] == p) { mi = i; break; }
+                    if (mi < 0) return false;
+                    int userIdx = mi - EntryPoint.KernelIndexParameterOffset;
+                    if (userIdx < 0 || userIdx >= EntryPoint.Parameters.Count) return false;
+                    var t = EntryPoint.Parameters[userIdx];
+                    return t.IsGenericType
+                        && t.GetGenericArguments() is var g && g.Length > 0 && g[0] == typeof(QUInt4);
+                }
+                cur = cur switch
+                {
+                    GetField gf => gf.ObjectValue.Resolve(),
+                    LoadFieldAddress lfa => lfa.Source.Resolve(),
+                    Load ld => ld.Source.Resolve(),
+                    ConvertValue cv => cv.Value.Resolve(),
+                    NewView nv => nv.Pointer.Resolve(),
+                    AddressSpaceCast asc => asc.Value.Resolve(),
+                    PointerCast pc => pc.Value.Resolve(),
+                    SubViewValue sv => sv.Source.Resolve(),
+                    LoadElementAddress lea => lea.Source.Resolve(),
+                    _ => null
+                };
+            }
+            return false;
+        }
+
         /// <summary cref="IBackendCodeGenerator.GenerateCode(LoadElementAddress)"/>
         public void GenerateCode(LoadElementAddress value)
         {
@@ -118,11 +163,11 @@ namespace ILGPU.Backends.OpenCL
                     statement.AppendIndexer(elementIndex);
                 }
                 Bind(value, targetInt4);
-                // NOTE: BasicValueType.QInt4 does not carry signedness (Int4 and UInt4 both lower to
-                // it), so the packed LOAD sign-extends (signed Int4 semantics). UInt4 (zero-extend)
-                // is a follow-up: it needs the sign threaded via the ArithmeticBasicValueType at the
-                // load or a separate BasicValueType. Signed Int4 is the prioritized path here.
-                _qint4EmulatedLEAs[targetInt4.ToString()] = (source, elementIndex, true);
+                // BasicValueType.QInt4 does not carry signedness (QInt4 and QUInt4 both lower to it),
+                // so the packed LOAD sign-extends for signed QInt4 and zero-extends for unsigned QUInt4.
+                // Recover the signedness from the source view's CLR param type (EntryPoint.Parameters).
+                bool isSignedQ4 = !PackedViewSourceIsQUInt4(value.Source);
+                _qint4EmulatedLEAs[targetInt4.ToString()] = (source, elementIndex, isSignedQ4);
                 return;
             }
 

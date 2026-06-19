@@ -319,6 +319,7 @@ namespace ILGPU.Backends.PTX
             : base(args.Backend)
         {
             Method = method;
+            EntryPoint = args.EntryPoint;
             DebugInfoGenerator = args.DebugInfoGenerator.BeginScope();
             ImplementationProvider = Backend.IntrinsicProvider;
             Allocas = allocas;
@@ -359,6 +360,12 @@ namespace ILGPU.Backends.PTX
         /// Returns the associated method.
         /// </summary>
         public Method Method { get; }
+
+        /// <summary>
+        /// Returns the kernel entry point (used to recover CLR-param signedness at packed sub-word
+        /// loads, e.g. QInt4 vs QUInt4 - only valid when generating the entry method itself).
+        /// </summary>
+        public EntryPoint EntryPoint { get; }
 
         /// <summary>
         /// Returns all local allocas.

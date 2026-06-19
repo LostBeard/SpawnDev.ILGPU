@@ -28,6 +28,50 @@ namespace ILGPU.Backends.PTX
         /// </summary>
         private readonly Dictionary<Value, HardwareRegister> _qint4LEAShift = new();
 
+        /// <summary>
+        /// Traces a packed-4-bit Load/LEA source view back to its kernel parameter and reports
+        /// whether that parameter's CLR element type is the UNSIGNED <see cref="QUInt4"/> (vs signed
+        /// <see cref="QInt4"/>). BasicValueType.QInt4 is shared by both, so the packed nibble load
+        /// must consult the CLR param type to choose zero-extend (QUInt4) vs sign-extend (QInt4).
+        /// Only valid on the entry method (where Method.Parameters map to EntryPoint.Parameters);
+        /// returns false (→ signed) for helper methods or any source it cannot trace to a view param.
+        /// </summary>
+        private bool PackedViewSourceIsQUInt4(Value source)
+        {
+            if (!Method.HasFlags(MethodFlags.EntryPoint))
+                return false;
+            var cur = source.Resolve();
+            for (int depth = 0; cur != null && depth < 20; depth++)
+            {
+                if (cur is Parameter p)
+                {
+                    int mi = -1;
+                    for (int i = 0; i < Method.Parameters.Count; i++)
+                        if (Method.Parameters[i] == p) { mi = i; break; }
+                    if (mi < 0) return false;
+                    int userIdx = mi - EntryPoint.KernelIndexParameterOffset;
+                    if (userIdx < 0 || userIdx >= EntryPoint.Parameters.Count) return false;
+                    var t = EntryPoint.Parameters[userIdx];
+                    return t.IsGenericType
+                        && t.GetGenericArguments() is var g && g.Length > 0 && g[0] == typeof(QUInt4);
+                }
+                cur = cur switch
+                {
+                    GetField gf => gf.ObjectValue.Resolve(),
+                    LoadFieldAddress lfa => lfa.Source.Resolve(),
+                    Load ld => ld.Source.Resolve(),
+                    ConvertValue cv => cv.Value.Resolve(),
+                    NewView nv => nv.Pointer.Resolve(),
+                    AddressSpaceCast asc => asc.Value.Resolve(),
+                    PointerCast pc => pc.Value.Resolve(),
+                    SubViewValue sv => sv.Source.Resolve(),
+                    LoadElementAddress lea => lea.Source.Resolve(),
+                    _ => null
+                };
+            }
+            return false;
+        }
+
         /// <summary cref="IBackendCodeGenerator.GenerateCode(LoadElementAddress)"/>
         public void GenerateCode(LoadElementAddress value)
         {

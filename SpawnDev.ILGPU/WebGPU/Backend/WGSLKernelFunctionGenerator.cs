@@ -4444,6 +4444,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         case BasicValueType.QInt4:
                             _subWordParams[param.Index] = 1; // packed 4-bit (2 nibbles/byte, 8/word)
                             _subWordQInt4Params.Add(param.Index);
+                            // Detect unsigned (QUInt4) via CLR param type - BasicValueType.QInt4 is
+                            // shared by signed QInt4 and unsigned QUInt4, so the packed load must
+                            // zero-extend (0..15) instead of sign-extend (-8..7) for QUInt4.
+                            {
+                                int userIdxQ4 = param.Index - KernelParamOffset;
+                                if (userIdxQ4 >= 0 && userIdxQ4 < EntryPoint.Parameters.Count)
+                                {
+                                    var clrTypeQ4 = EntryPoint.Parameters[userIdxQ4];
+                                    if (clrTypeQ4.IsGenericType)
+                                    {
+                                        var genArgsQ4 = clrTypeQ4.GetGenericArguments();
+                                        if (genArgsQ4.Length > 0 && genArgsQ4[0] == typeof(QUInt4))
+                                            _subWordUnsignedParams.Add(param.Index);
+                                    }
+                                }
+                            }
                             break;
                     }
                 }
@@ -5714,7 +5730,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     var wordIdx = $"(u32({idx}) >> 3u)";
                     var shift = $"((u32({idx}) & 7u) * 4u)";
                     var rawNib = $"((u32(atomicLoad(&{subWordBinding}[{wordIdx}])) >> {shift}) & 0xFu)";
-                    extractExpr = $"select(i32({rawNib}), (i32({rawNib}) - 16), ({rawNib}) >= 8u)";
+                    extractExpr = _subWordUnsignedParams.Contains(subWordParamIdx)
+                        ? $"i32({rawNib})"                                                  // QUInt4: zero-extend (0..15)
+                        : $"select(i32({rawNib}), (i32({rawNib}) - 16), ({rawNib}) >= 8u)"; // QInt4: sign-extend (-8..7)
                 }
                 else if (elemSize == 1)
                 {

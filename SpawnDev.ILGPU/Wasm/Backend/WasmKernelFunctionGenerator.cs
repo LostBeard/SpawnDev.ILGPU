@@ -1843,9 +1843,32 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             if (isQInt4Ld)
             {
-                // byte = addr>>1; load the byte; nibble = (byte >> ((addr&1)*4)) & 0xF; sign-extend
-                // signed 4-bit via (n ^ 8) - 8. Plain i32.load8_u (a read of packed input - no atomicity
-                // needed; matches the FP4 read shape, atomic only under barriers for consistency).
+                // QInt4 (signed) sign-extends the nibble; QUInt4 (unsigned) zero-extends. BasicValueType.QInt4
+                // is shared by both, so recover signedness from the source view's CLR param type (same
+                // mechanism as the byte/sbyte + ushort/short loads below).
+                bool isUnsignedQ4 = false;
+                {
+                    var resolvedQ4 = value.Source.Resolve();
+                    if (resolvedQ4 is global::ILGPU.IR.Values.LoadElementAddress leaQ4
+                        && leaQ4.Source.Resolve() is global::ILGPU.IR.Values.Parameter srcParamQ4)
+                    {
+                        int userIdxQ4 = srcParamQ4.Index - 1; // KernelParamOffset is 1
+                        var epQ4 = _generatorArgs.EntryPoint;
+                        if (userIdxQ4 >= 0 && userIdxQ4 < epQ4.Parameters.Count)
+                        {
+                            var clrTypeQ4 = epQ4.Parameters[userIdxQ4];
+                            if (clrTypeQ4.IsGenericType)
+                            {
+                                var genArgsQ4 = clrTypeQ4.GetGenericArguments();
+                                if (genArgsQ4.Length > 0 && genArgsQ4[0] == typeof(global::ILGPU.QUInt4))
+                                    isUnsignedQ4 = true;
+                            }
+                        }
+                    }
+                }
+                // byte = addr>>1; load the byte; nibble = (byte >> ((addr&1)*4)) & 0xF; then sign-extend
+                // signed 4-bit via (n ^ 8) - 8 (skipped for unsigned QUInt4). Plain i32.load8_u (a read of
+                // packed input - no atomicity needed; matches the FP4 read shape, atomic only under barriers).
                 EmitGetLocal(source2);
                 WasmModuleBuilder.EmitI32Const(Code, 1);
                 Code.Add(WasmOpCodes.I32ShrU);                  // addr>>1 = byte address
@@ -1866,10 +1889,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 Code.Add(WasmOpCodes.I32ShrU);                  // byte >> shift
                 WasmModuleBuilder.EmitI32Const(Code, 0xF);
                 Code.Add(WasmOpCodes.I32And);                   // & 0xF -> nibble 0..15
-                WasmModuleBuilder.EmitI32Const(Code, 8);
-                Code.Add(WasmOpCodes.I32Xor);                   // n ^ 8
-                WasmModuleBuilder.EmitI32Const(Code, 8);
-                Code.Add(WasmOpCodes.I32Sub);                   // (n^8) - 8  (sign-extend)
+                if (!isUnsignedQ4)
+                {
+                    WasmModuleBuilder.EmitI32Const(Code, 8);
+                    Code.Add(WasmOpCodes.I32Xor);               // n ^ 8
+                    WasmModuleBuilder.EmitI32Const(Code, 8);
+                    Code.Add(WasmOpCodes.I32Sub);               // (n^8) - 8  (sign-extend signed QInt4)
+                }
                 WasmModuleBuilder.EmitLocalSet(Code, target2);
                 return;
             }

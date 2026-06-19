@@ -236,6 +236,7 @@ namespace ILGPU.Backends.OpenCL
         {
             Backend = args.Backend;
             Method = method;
+            EntryPoint = args.EntryPoint;
             ImplementationProvider = Backend.IntrinsicProvider;
             Allocas = allocas;
 
@@ -257,6 +258,12 @@ namespace ILGPU.Backends.OpenCL
         /// Returns the associated method.
         /// </summary>
         public Method Method { get; }
+
+        /// <summary>
+        /// Returns the kernel entry point (used to recover CLR-param signedness at packed sub-word
+        /// loads, e.g. QInt4 vs QUInt4 - only valid when generating the entry method itself).
+        /// </summary>
+        public SeparateViewEntryPoint EntryPoint { get; }
 
         /// <summary>
         /// Returns all local allocas.

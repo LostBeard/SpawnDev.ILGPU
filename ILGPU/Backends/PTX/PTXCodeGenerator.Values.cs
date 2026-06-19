@@ -1254,9 +1254,12 @@ namespace ILGPU.Backends.PTX
 
             if (load.Type.BasicValueType == BasicValueType.QInt4)
             {
-                // Packed 4-bit signed: the keep-index LEA made `address` the byte ptr (base+index>>1)
-                // and recorded the nibble shift (0 or 4). Load the byte, shift to the nibble, mask to
-                // 4 bits, and sign-extend ((nib ^ 0x8) - 0x8) into the i32 value register.
+                // Packed 4-bit: the keep-index LEA made `address` the byte ptr (base+index>>1) and
+                // recorded the nibble shift (0 or 4). Load the byte, shift to the nibble, mask to 4
+                // bits, then SIGN-extend ((nib ^ 0x8) - 0x8) for signed QInt4, or ZERO-extend (mask
+                // only) for unsigned QUInt4. BasicValueType.QInt4 is shared by both, so recover the
+                // signedness from the source view's CLR param type (EntryPoint.Parameters).
+                bool isUnsignedQ4 = PackedViewSourceIsQUInt4(load.Source);
                 var qTarget = AllocateHardware(load);
                 var rawReg = AllocateRegister(BasicValueType.Int16, PTXRegisterKind.Int16);
                 using (var cmd = BeginCommand(PTXInstructions.LoadOperation))
@@ -1274,9 +1277,17 @@ namespace ILGPU.Backends.PTX
                     c.AppendArgument(bits); c.AppendArgument(bits); c.AppendArgument(keptShift);
                 }
                 using (var c = BeginCommand("and.b32")) { c.AppendArgument(bits); c.AppendArgument(bits); c.AppendConstant(0xF); }
-                // sign-extend a 4-bit two's-complement value: (bits ^ 0x8) - 0x8
-                using (var c = BeginCommand("xor.b32")) { c.AppendArgument(bits); c.AppendArgument(bits); c.AppendConstant(0x8); }
-                using (var c = BeginCommand("sub.s32")) { c.AppendArgument(qTarget); c.AppendArgument(bits); c.AppendConstant(0x8); }
+                if (isUnsignedQ4)
+                {
+                    // QUInt4: zero-extend - the masked nibble (0..15) is the final value.
+                    using var c = BeginCommand("mov.u32"); c.AppendArgument(qTarget); c.AppendArgument(bits);
+                }
+                else
+                {
+                    // QInt4: sign-extend a 4-bit two's-complement value: (bits ^ 0x8) - 0x8
+                    using (var c = BeginCommand("xor.b32")) { c.AppendArgument(bits); c.AppendArgument(bits); c.AppendConstant(0x8); }
+                    using (var c = BeginCommand("sub.s32")) { c.AppendArgument(qTarget); c.AppendArgument(bits); c.AppendConstant(0x8); }
+                }
                 FreeRegister(rawReg);
                 FreeRegister(bits);
                 return;
