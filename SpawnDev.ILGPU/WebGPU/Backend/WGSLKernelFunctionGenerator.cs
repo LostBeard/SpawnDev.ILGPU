@@ -1856,6 +1856,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                     bsElemSize = 1; // FP8 always emulated (1-byte packed, 4 per atomic<u32>)
                                 else if (bsPt.BasicValueType == BasicValueType.Float4E2M1)
                                     bsElemSize = 1; // FP4 always emulated (1-byte packed, 4 per atomic<u32>, nibble)
+                                else if (bsPt.BasicValueType == BasicValueType.QInt4)
+                                    // Packed signed 4-bit (TRUE 2-nibbles-per-byte, 8 per atomic<u32>).
+                                    // elemSize=1 only marks it sub-word here; the _subWordQInt4Params tag
+                                    // below routes Load/Store to the 8-per-word NIBBLE path (word=idx>>3),
+                                    // NOT the 4-per-word byte path. Without this case a body-struct QInt4
+                                    // view field (the radix sort's param0_f0/param1_f0 keys, since
+                                    // ArrayView1D<QInt4> is itself a body struct) stayed elemSize=0 ->
+                                    // bound array<i32> with plain element load/store instead of the packed
+                                    // atomic<u32> nibble RMW. That is the WebGPU-only QInt4 radix mis-sort:
+                                    // the shader indexed the 8/word-packed buffer as one i32 per element.
+                                    bsElemSize = 1;
                                 if (bsElemSize > 0)
                                 {
                                     // Use syntheticViewParamIdx as key since body struct fields
@@ -1884,6 +1895,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                         // array<atomic<u32>> (4 per word) so the packed atomicLoad +
                                         // _e2m1_to_f32 the FP4 load path emits has a matching binding.
                                         _subWordFloat4Params.Add(synthIdx);
+                                    else if (bsPt.BasicValueType == BasicValueType.QInt4)
+                                        // QInt4 body-struct view field: declare array<atomic<u32>> so the
+                                        // 8-per-word nibble atomicLoad/atomicAnd+atomicOr RMW the QInt4
+                                        // Load/Store path emits has a matching binding (was array<i32> ->
+                                        // plain element load/store, the WebGPU QInt4 radix mis-sort).
+                                        _subWordQInt4Params.Add(synthIdx);
                                     isSubWordField = true;
                                 }
                             }
@@ -4424,6 +4441,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             _subWordParams[param.Index] = 1; // FP4 always emulated = 1 byte (nibble in low 4 bits)
                             _subWordFloat4Params.Add(param.Index);
                             break;
+                        case BasicValueType.QInt4:
+                            _subWordParams[param.Index] = 1; // packed 4-bit (2 nibbles/byte, 8/word)
+                            _subWordQInt4Params.Add(param.Index);
+                            break;
                     }
                 }
             }
@@ -4693,6 +4714,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     // The param variable itself is allocated but not used directly.
                     // Instead, create individual variables for each field.
+                    // Record each view field's element BasicValueType keyed by its binding name, so the
+                    // length field (processed later in this same loop) can derive elements-per-word from
+                    // the ELEMENT TYPE directly - robust against the scattered, order-dependent
+                    // _subWordParams registration (QInt4 was missing from several sites -> view.Length
+                    // was the bare WORD count -> the radix sort processed half its packed keys).
+                    var bsViewElemTypes = new Dictionary<string, BasicValueType>();
                     for (int fi = 0; fi < fieldInfos.Count; fi++)
                     {
                         var fieldInfo = fieldInfos[fi];
@@ -4706,6 +4733,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             // Track the var name as a pointer alias so the post-processor won't
                             // convert 'let v_28 = v_27_f0;' to 'v_28 = v_27_f0;' (pointer→i32 error).
                             _viewPointerVarNames.Add(fieldVarName);
+                            if (GetBufferElementType(fieldInfo.FieldType) is PrimitiveType bsViewPt)
+                                bsViewElemTypes[fieldInfo.BindingName] = bsViewPt.BasicValueType;
                             AppendLine($"let {fieldVarName} = &{fieldInfo.BindingName};");
                         }
                         else if (fieldInfo.IsViewMetadata)
@@ -4742,9 +4771,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                     // Int8), so e.g. the native bf16 radix sort only processed half its keys
                                     // and sorted wrong. _subWordParams holds bf16/Int8/Int16 always and Half
                                     // only when emulated (native shader-f16 = array<f16>, length is exact).
-                                    if (_subWordParams.TryGetValue(param.Index, out var swMetaElemSize))
+                                    // Packed QInt4 (8/word) is derived straight from the view field's
+                                    // ELEMENT TYPE (recorded above), NOT _subWordParams - that
+                                    // registration is path/order-dependent and had QInt4 gaps, so some
+                                    // radix kernels emitted bare arrayLength() (HALF the count).
+                                    if (bsViewElemTypes.TryGetValue(fieldInfo.AssociatedViewBindingName, out var bsLenElem)
+                                        && bsLenElem == BasicValueType.QInt4)
                                     {
-                                        int swElemsPerWord = 4 / swMetaElemSize; // 4 for Int8, 2 for Int16/Float16/bf16
+                                        lengthExpr = $"({lengthExpr} * 8)";
+                                    }
+                                    else if (_subWordParams.TryGetValue(param.Index, out var swMetaElemSize))
+                                    {
+                                        int swElemsPerWord = 4 / swMetaElemSize; // 4 Int8/FP8/FP4, 2 Int16/F16/bf16
                                         if (swElemsPerWord > 1)
                                             lengthExpr = $"({lengthExpr} * {swElemsPerWord})";
                                     }
@@ -5156,6 +5194,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         bool bsLeaIsFloat8 = false;
                         bool bsLeaFloat8IsE4M3 = false;
                         bool bsLeaIsFloat4 = false;
+                        bool bsLeaIsQInt4 = false;
                         switch (bsLeaPt.BasicValueType)
                         {
                             case BasicValueType.Int8: bsLeaElemSize = 1; break;
@@ -5182,6 +5221,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 // raw word deref instead of the 4-per-word byte extract + _e2m1_to_f32.
                                 bsLeaElemSize = 1; bsLeaIsFloat4 = true;
                                 break;
+                            case BasicValueType.QInt4:
+                                // Packed signed 4-bit (8 nibbles per atomic<u32>). Without this case a
+                                // body-struct QInt4 view field (the radix sort's key views - ArrayView1D
+                                // <QInt4> is itself a body struct) stayed elemSize=0 -> a plain
+                                // &array<i32>[idx] LEA + element load/store instead of the 8-per-word
+                                // nibble path (word=idx>>3, shift=(idx&7)*4, atomicAnd+atomicOr RMW). That
+                                // is the WebGPU-only QInt4 radix mis-sort. elemSize=1 only marks sub-word;
+                                // the _subWordQInt4Params tag below selects the nibble (not byte) path.
+                                bsLeaElemSize = 1; bsLeaIsQInt4 = true;
+                                break;
                         }
                         if (bsLeaElemSize > 0)
                         {
@@ -5198,6 +5247,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 _subWordFloat8Params[synthIdx] = bsLeaFloat8IsE4M3;
                             if (bsLeaIsFloat4)
                                 _subWordFloat4Params.Add(synthIdx);
+                            if (bsLeaIsQInt4)
+                                _subWordQInt4Params.Add(synthIdx);
                             _subWordBodyStructBindingNames[synthIdx] = bindingName;
                             _subWordLEAVars[target.Name] = synthIdx;
                             // Sub-word LEA stores the i32 element index, not a pointer (matches
@@ -7628,11 +7679,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     lengthExpr = $"({lengthExpr} / {psStridelen})";
                 }
 
-                // For sub-word params, arrayLength() returns atomic<u32> count.
-                // Logical element count = physical * (4 / elementByteSize).
-                if (_subWordParams.TryGetValue(param.Index, out var swElemSize))
+                // For sub-word params, arrayLength() returns atomic<u32> count; logical element
+                // count = physical * elements-per-word. Packed QInt4 (8/word) is derived straight
+                // from the ELEMENT TYPE here, NOT _subWordParams: the sub-word registration is
+                // path/order-dependent (pre-body block, LEA, body-struct synthetic index) and has
+                // gaps for length-before-index reads, so some radix kernels read view.Length before
+                // QInt4 is registered -> bare arrayLength() (HALF the count) -> the sort processed
+                // half its keys (the WebGPU QInt4 radix mis-sort). The element type is always known.
+                if (GetBufferElementType(param.ParameterType) is PrimitiveType qiLenPt
+                    && qiLenPt.BasicValueType == BasicValueType.QInt4)
                 {
-                    int elemsPerWord = 4 / swElemSize; // 4 for Int8, 2 for Int16/Float16
+                    lengthExpr = $"({lengthExpr} * 8)";
+                }
+                else if (_subWordParams.TryGetValue(param.Index, out var swElemSize))
+                {
+                    int elemsPerWord = 4 / swElemSize; // 4 for Int8/FP8/FP4, 2 for Int16/Float16/bf16
                     lengthExpr = $"({lengthExpr} * {elemsPerWord})";
                 }
 

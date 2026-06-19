@@ -10,6 +10,10 @@ try
     if (args.Length > 0 && args[0] == "cpu-launch-lat")
         return await CpuLaunchLatencyProbe.Run(args);
 
+    // Offline WGSL dump of QInt4 vs FP4 radix kernels (WebGPU-only QInt4 mis-sort). No browser.
+    if (args.Length > 0 && args[0] == "qint4-radix-wgsl")
+        return await QInt4RadixWgslDump.Run();
+
     // Offline Wasm compile dump (H8 shared-alloca audit). No browser, no dispatch.
     if (args.Length > 0 && args[0] == "wasm-dump")
         return await WasmCompileDump.Run();

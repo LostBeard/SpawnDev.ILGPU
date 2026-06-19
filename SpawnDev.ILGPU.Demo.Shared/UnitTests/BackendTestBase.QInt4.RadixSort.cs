@@ -155,19 +155,19 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             await QInt4RadixPairsAscendingImpl(acc);
         });
 
-        // QInt4 radix gating. CPU/WebGL have no packed store (scatter writes packed nibbles).
-        // WebGPU: the simple i->i packed store works (verified N=8192), but the radix's ARBITRARY-
-        // position packed scatter mis-sorts ONLY on WebGPU (CUDA/OpenCL/Wasm pass) - a tracked WGSL
-        // packed-scatter bug under investigation. Skip until fixed.
+        // QInt4 radix gating. The scatter writes packed nibbles (atomic-RMW store), so this needs a
+        // packed-store backend: CUDA, OpenCL, Wasm, and WebGPU all run it. CPU (managed ref indexer
+        // can't address a nibble) and WebGL (no atomics / whole-texel scatter) skip.
+        // WebGPU was fixed by adding the BasicValueType.QInt4 case to the body-struct sub-word
+        // classification (binding + LEA) in WGSLKernelFunctionGenerator - ArrayView1D<QInt4> is a body
+        // struct, and without the case the key views bound as plain array<i32> (one word per element)
+        // instead of the 8-nibbles-per-word atomic<u32> path, so the radix sorted whole words.
         static void GateQInt4Radix(Accelerator acc)
         {
             var t = acc.AcceleratorType;
             if (t == AcceleratorType.CPU || t == AcceleratorType.WebGL)
                 throw new UnsupportedTestException(
                     $"QInt4 radix scatter writes packed nibbles (atomic-RMW store), unsupported on {t}.");
-            if (t == AcceleratorType.WebGPU)
-                throw new UnsupportedTestException(
-                    "QInt4 radix mis-sorts on WebGPU (packed arbitrary-position scatter; CUDA/OpenCL/Wasm pass) - tracked.");
         }
 
         [TestMethod]
