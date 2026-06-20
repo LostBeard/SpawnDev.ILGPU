@@ -291,6 +291,13 @@ namespace PlaywrightMultiTest
 
                         // go to the app's unit tests page.
                         var testPageUrl = new Uri(new Uri(baseUrl), testableProject.TestPage).ToString();
+                        // Stage-3d dual-mode CI: PMT_WASM_SIMD=off appends ?wasmsimd=off so the app forces
+                        // the Wasm SCALAR path for the whole sweep (scalar-mode cross-mode oracle on SIMD HW).
+                        if (string.Equals(Environment.GetEnvironmentVariable("PMT_WASM_SIMD"), "off", StringComparison.OrdinalIgnoreCase))
+                        {
+                            testPageUrl += (testPageUrl.Contains('?') ? "&" : "?") + "wasmsimd=off";
+                            LogStatus("PMT_WASM_SIMD=off -> forcing scalar Wasm path for this sweep");
+                        }
                         LogStatus($"Navigating to {testPageUrl}...");
                         await testableProject.Page.GotoAsync(testPageUrl).ConfigureAwait(false);
                         LogStatus("Page loaded, waiting for test table...");

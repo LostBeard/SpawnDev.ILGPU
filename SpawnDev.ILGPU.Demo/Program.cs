@@ -60,4 +60,21 @@ builder.Services.AddSingleton<SpawnDev.ILGPU.Services.ShaderDebugService>();
 builder.RootComponents.Add<App>("#app");
 builder.RootComponents.Add<HeadOutlet>("head::after");
 
-await builder.Build().BlazorJSRunAsync();
+var host = builder.Build();
+
+// Stage-3d dual-mode CI: when PMT launches the test page with ?wasmsimd=off (set by
+// PMT_WASM_SIMD=off), force the Wasm SCALAR path for the whole sweep so the suite runs in
+// scalar mode on SIMD hardware — the cross-mode oracle for every in-class kernel. Read BEFORE
+// any kernel compiles. (The Wasm SIMD gate tests toggle Force* themselves and are unaffected.)
+{
+    var nav = host.Services.GetRequiredService<Microsoft.AspNetCore.Components.NavigationManager>();
+    if (nav.Uri.Contains("wasmsimd=off", StringComparison.OrdinalIgnoreCase))
+    {
+        SpawnDev.ILGPU.Wasm.Backend.WasmBackend.ForceScalar = true;
+        // Prefix "[Wasm" so PMT's console hook captures this marker to the run's console log (proof the
+        // scalar-mode sweep actually engaged, vs the query being lost across the COI service-worker reload).
+        Console.WriteLine("[Wasm-SIMD-Mode] PMT_WASM_SIMD=off -> WasmBackend.ForceScalar=true (scalar-mode sweep engaged)");
+    }
+}
+
+await host.BlazorJSRunAsync();
