@@ -128,6 +128,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         // where the element offset for that buffer binding is stored.
         // Used by GetField to read ArrayView Field 1 (Index) from _scalar_params instead of hardcoding 0.
         private Dictionary<int, int> _viewOffsetScalarSlots = new Dictionary<int, int>();
+        // Parallel to _viewOffsetScalarSlots, but for the TRUE element count of a packed-4-bit DIRECT
+        // view param. GetViewLength on a packed-4-bit buffer cannot use arrayLength()*8 (it rounds UP to
+        // the 32-bit-word boundary - wrong for N not a multiple of 8), so the host sends the exact count
+        // here (filled from viewElementCounts, like the body-struct ViewCountSlot). Reserved + the manifest
+        // entry created in lockstep with the offset slot (passes at ~930 and ~2284); read in GetViewLength.
+        private Dictionary<int, int> _viewCountScalarSlots = new Dictionary<int, int>();
         // Tracked during body generation: set true when any _scalar_params[ reference is emitted.
         // Avoids expensive Builder.ToString().Contains() call in GenerateHeader().
         private bool _bodyReferencesScalarParams = false;
@@ -929,6 +935,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     _viewOffsetScalarSlots[param.Index] = globalScalarSlotOffset;
                     globalScalarSlotOffset++;
 
+                    // Packed-4-bit (QInt4/QUInt4/FP4) DIRECT view params ALSO reserve a count slot right
+                    // after the offset slot - GetViewLength can't use arrayLength*8 for them (rounds up to
+                    // the word boundary). MUST match the manifest pass (~2284) in slot order.
+                    if (GetBufferElementType(param.ParameterType) is PrimitiveType dpCntPt
+                        && (dpCntPt.BasicValueType == BasicValueType.QInt4
+                            || dpCntPt.BasicValueType == BasicValueType.Float4E2M1))
+                    {
+                        _viewCountScalarSlots[param.Index] = globalScalarSlotOffset;
+                        globalScalarSlotOffset++;
+                    }
+
                     // Detect packed struct: view element type is a struct with emu-field(s)
                     var psElemType = GetBufferElementType(param.ParameterType);
                     if (psElemType is StructureType psStructType)
@@ -1623,6 +1640,27 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // kernels that handle RadixSortPair<Half, int> - the Half lives in a struct field,
             // not a direct parameter, so _subWordFloat16Params stays empty. Track that case
             // via _kernelReferencesF16Helpers set at emit time.
+            // Packed-float emulation used INSIDE a NoInlining helper: scan helper params HERE (in
+            // GenerateHeader, AFTER body codegen, so NonInlineMethods are populated - they are empty at
+            // SetEmulationFlags time) for FP4/FP8/bf16 view params and flip the matching flag. A helper that
+            // only LOADS such a view never trips the FloatAsInt/IntAsFloat emit path that otherwise sets
+            // these, and the KERNEL's _subWord*Params is empty (it just passes the view through) - so the
+            // conversion fn (_e2m1_to_f32 / _e4m3_to_f32 / _bf16_to_f32 ...) would be called but never
+            // emitted ("unresolved call target"). QInt4/QUInt4 decode to int with no conversion fn.
+            // Scan the KERNEL's own params (a kernel that passes its FP4/FP8/bf16 view to a helper has that
+            // view as a parameter, even when it never loads it itself so _subWord*Params stays empty) AND
+            // any enumerable helper methods' params.
+            foreach (var hm in EnumerateAllHelperMethods().Prepend(Method))
+                foreach (var hp in hm.Parameters)
+                    if (hp.ParameterType is ViewType hvt && hvt.ElementType is PrimitiveType hept)
+                        switch (hept.BasicValueType)
+                        {
+                            case BasicValueType.Float4E2M1: _kernelReferencesFP4Helpers = true; break;
+                            case BasicValueType.Float8E4M3:
+                            case BasicValueType.Float8E5M2: _kernelReferencesFP8Helpers = true; break;
+                            case BasicValueType.BFloat16: _kernelReferencesBF16Helpers = true; break;
+                        }
+
             bool needsF16Emulation = _subWordFloat16Params.Count > 0 || _kernelReferencesF16Helpers;
             bool needsBF16Emulation = _subWordBFloat16Params.Count > 0 || _kernelReferencesBF16Helpers;
             bool needsFP8Emulation = _subWordFloat8Params.Count > 0 || _kernelReferencesFP8Helpers;
@@ -1631,13 +1669,25 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Emit minimal emulation library: only functions actually used by the kernel body
             if (needsF64Emulation || needsI64Emulation || needsF16Emulation || needsBF16Emulation || needsFP8Emulation || needsFP4Emulation)
             {
+                // The minimal-trim greps THIS body string for each emulation fn name. Helper (NoInlining)
+                // fns are generated in PARALLEL by a separate WGSLFunctionGenerator, so their bodies are NOT
+                // in Builder - a packed-float conversion used ONLY inside a helper (e.g. _e2m1_to_f32) would
+                // be trimmed out -> "unresolved call target". When a _kernelReferences*Helpers flag is set
+                // (a helper has an FP4/FP8/bf16 view param), append the conversion fn names so they survive
+                // the trim. (Idempotent for the radix path, which already has them in the kernel body.)
+                // AppendUsedFunctions matches `name + "("`, so the forced refs MUST include the open paren.
+                string emulScanBody = Builder.ToString();
+                if (_kernelReferencesBF16Helpers) emulScanBody += "\n_bf16_to_f32( _f32_to_bf16(\n";
+                if (_kernelReferencesFP8Helpers) emulScanBody += "\n_e4m3_to_f32( _e5m2_to_f32( _f32_to_e4m3( _f32_to_e5m2(\n";
+                if (_kernelReferencesFP4Helpers) emulScanBody += "\n_e2m1_to_f32( _f32_to_e2m1(\n";
+
                 builder.AppendLine("// ============ Emulation Library ============");
                 builder.AppendLine(WGSLEmulationLibrary.GetMinimalEmulationLibrary(
                     needsF64Emulation,
                     Backend.UseOzakiF64Emulation,
                     needsI64Emulation,
                     needsF16Emulation,
-                    Builder.ToString(),
+                    emulScanBody,
                     includeBF16: needsBF16Emulation,
                     includeFP8: needsFP8Emulation,
                     includeFP4: needsFP4Emulation));
@@ -2296,6 +2346,27 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     }
                 }
                 scalarSlotOffset++;
+
+                // Packed-4-bit DIRECT view params (viewParamIndex < 1000) get a true-element-count slot
+                // right after the offset slot - reserved in the header pass (~930), which keys this dict.
+                // GetViewLength reads it instead of arrayLength*8 (the word-boundary round-up). Body-struct
+                // packed views use the ViewCountSlot path below (>= 1000). MUST match the reservation order.
+                if (viewParamIndex < 1000 && _viewCountScalarSlots.ContainsKey(viewParamIndex))
+                {
+                    var dpCountEntry = new ScalarPackingEntry
+                    {
+                        ParamIndex = viewParamIndex,
+                        ByteOffset = scalarSlotOffset * 4,
+                        ByteSize = 4,
+                        WgslType = "u32",
+                        IsViewCount = true,
+                        ViewCountBindingIndex = viewBindIdx,
+                    };
+                    scalarManifest.Add(dpCountEntry);
+                    _viewCountScalarSlots[viewParamIndex] = scalarSlotOffset;
+                    builder.AppendLine($"// View element count for direct packed-4-bit param{viewParamIndex} at scalar slot {scalarSlotOffset}");
+                    scalarSlotOffset++;
+                }
 
                 // For packed-struct body-struct view fields, also add an element COUNT slot.
                 // arrayLength() returns CPU-allocation-size/4 u32s, not the logical element count,
@@ -7747,8 +7818,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     && (qiLenPt.BasicValueType == BasicValueType.QInt4
                         || qiLenPt.BasicValueType == BasicValueType.Float4E2M1))
                 {
-                    // Packed 4-bit (QInt4/QUInt4 AND FP4): TRUE 8 nibbles per word.
-                    lengthExpr = $"({lengthExpr} * 8)";
+                    // Packed 4-bit (QInt4/QUInt4 AND FP4). arrayLength*8 ROUNDS UP to the 32-bit-word
+                    // boundary - wrong for N not a multiple of 8. Prefer the host's TRUE element count
+                    // sent in the count slot (reserved for direct packed-4-bit params); fall back to the
+                    // round-up only if no slot was allocated.
+                    if (_viewCountScalarSlots.TryGetValue(param.Index, out int dpCntSlot))
+                        lengthExpr = $"i32(_scalar_params[{dpCntSlot}])";
+                    else
+                        lengthExpr = $"({lengthExpr} * 8)";
                 }
                 else if (_subWordParams.TryGetValue(param.Index, out var swElemSize))
                 {

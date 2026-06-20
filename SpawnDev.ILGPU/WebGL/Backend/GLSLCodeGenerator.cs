@@ -50,6 +50,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 ParameterBindings = new List<KernelParameterBinding>();
                 BodyStructTypeIdsToSkip = new HashSet<long>();
                 BodyStructManifest = new List<BodyStructBindingEntry>();
+                HelperPackedViewParams = new Dictionary<(long, int), PackedViewParamInfo>();
             }
 
             /// <summary>The parent backend.</summary>
@@ -74,6 +75,33 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             /// at dispatch time by WebGLAccelerator to decompose body-struct args into
             /// per-field buffer_ref entries.</summary>
             public List<BodyStructBindingEntry> BodyStructManifest { get; }
+            /// <summary>Packed-4-bit (FP4/QInt4/QUInt4) view params passed BY VALUE into a
+            /// [NoInlining] helper, keyed by (helper Method.Id, helper param Index). GLSL ES 3.0
+            /// has no pointer types, so a packed-4-bit ArrayView fn-param is passed as a sampler
+            /// TRIPLE (isampler2D + _tileW + _offset). The kernel generator populates this during
+            /// its MethodCall scan (it knows the SOURCE kernel param's CLR type, hence QUInt4 vs
+            /// QInt4 signedness); the helper generator (GLSLFunctionGenerator) reads it to emit the
+            /// sampler-triple signature + the 8-nibbles/word texelFetch load. Without it the view
+            /// param collapsed to a scalar `float`/`int` and the load produced an undeclared-var /
+            /// garbage decode (the helper-gen packed-4-bit gap).</summary>
+            public Dictionary<(long MethodId, int ParamIndex), PackedViewParamInfo> HelperPackedViewParams { get; }
+        }
+
+        /// <summary>
+        /// Describes a packed-4-bit view param passed into a helper fn (see
+        /// <see cref="GeneratorArgs.HelperPackedViewParams"/>).
+        /// </summary>
+        public readonly struct PackedViewParamInfo
+        {
+            public PackedViewParamInfo(bool isFloat4, bool isUnsigned)
+            {
+                IsFloat4 = isFloat4;
+                IsUnsigned = isUnsigned;
+            }
+            /// <summary>FP4 (Float4E2M1): decode each nibble with _e2m1_to_f32. Otherwise QInt4/QUInt4.</summary>
+            public bool IsFloat4 { get; }
+            /// <summary>QUInt4 (zero-extend 0..15). Ignored when <see cref="IsFloat4"/>.</summary>
+            public bool IsUnsigned { get; }
         }
 
         /// <summary>

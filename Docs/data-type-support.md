@@ -226,6 +226,17 @@ backend** (CPU-verified idempotence 0/256 for all representable values).
 > `Float8E5M2` is IEEE-754-style (has ±Inf): overflow → ±Inf, bit-exact to `float8_e5m2` (decode 0/256,
 > encode 723/723); its canonical NaN byte is `0x7F` (ml_dtypes uses `0x7E` - both are valid NaN patterns).
 
+### `Float8E8M0` - the OCP MX scale format (v4.14.1+)
+
+`ILGPU.Float8E8M0` (OCP `float8_e8m0fnu`) is the third member of the OCP Float8 family: 8 exponent bits, **no sign, no mantissa**, bias 127. It is not an element format - it is the shared per-block **scale** for every OCP microscaling layout (MXFP4 / MXFP8 / MXINT8 / NVFP4): a pure power-of-two `2^(e-127)`. Stored byte `e` in `0..254` decodes to `2^(e-127)` (smallest is `2^-127`, `e==0`); `e==0xFF` is the only special and decodes to **NaN** (no zero, no Inf).
+
+Because E8M0 and IEEE-754 binary32 share exponent bias 127, the decode is exactly the f32 whose biased-exponent field is `e` and whose mantissa is zero - i.e. `IntAsFloat(e << 23)`, with the two specials handled. It is **not** a kernel-arithmetic value type (you never add two scales in a kernel - you decode a scale and multiply the dequantized elements by it), so it is intentionally minimal:
+
+- **In-kernel:** `Float8E8M0Extensions.RawBitsToFloat(int scaleByte)` decodes a raw MX scale byte to f32 in-register on **all 6 backends** (pure bit-math, no struct ctor) - decode the block's scale while the block stays packed, exactly like the `RawBitsToFloat` decoders for FP4/FP8/bf16.
+- **Host:** `Float8E8M0.FromSingle(f)` (round-to-nearest-even on the exponent; NaN/≤0/±Inf → `0xFF`), `FromRawBits(byte)`, `RawValue`, `(float)`.
+
+Decode is verified on every backend against an independent `2^(e-127)` spec oracle. (WebGL flushes the single subnormal value `2^-127` at `e==0` to `0` - IEEE flush-to-zero, accepted; every other code is a normal float.)
+
 ### Packed 4-bit types (`Float4E2M1` / `QInt4` / `QUInt4`)
 
 Three **TRUE packed 4-bit** types - the real NVFP4 / INT4 memory layout, not a 1-byte placeholder. Each is marked `[PackedBits(4)]`, so an `ArrayView<T>` of N elements allocates **`ceil(N/2)` device bytes** (2 nibbles/byte, 8 per 32-bit word) - half the footprint of a 1-byte-per-value layout.

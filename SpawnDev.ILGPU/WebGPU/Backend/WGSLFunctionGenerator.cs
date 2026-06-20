@@ -49,6 +49,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private readonly HashSet<int> _subWordBFloat16Params = new();           // emulated bf16 (always - no native WGSL bf16)
         private readonly Dictionary<int, bool> _subWordFloat8Params = new();    // emulated FP8 (always); value = isE4M3 (false = E5M2)
         private readonly HashSet<int> _subWordFloat4Params = new();             // emulated FP4 (always, E2M1; single type, value in low nibble)
+        private readonly HashSet<int> _subWordPacked4IntParams = new();         // packed 4-bit ints QInt4/QUInt4 (8/word nibble; signedness via _subWordUnsignedParams)
         private readonly Dictionary<string, int> _subWordLEAVars = new();       // LEA target Variable name -> paramIdx
         private readonly Dictionary<int, string> _paramIndexToLocalVar = new(); // paramIdx -> "v_X" (the helper's `let v_X : ptr<...> = p_Y;` local name)
 
@@ -137,8 +138,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 switch (prim.BasicValueType)
                 {
-                    case BasicValueType.Int8:
-                    case BasicValueType.Int16:
+                    case BasicValueType.Int8:    // + UInt8 (shared BasicValueType)
+                    case BasicValueType.Int16:   // + UInt16
+                    case BasicValueType.BFloat16:
+                    case BasicValueType.Float8E4M3:
+                    case BasicValueType.Float8E5M2:
+                    case BasicValueType.Float4E2M1: // FP4 - packed 4-bit (8/word)
+                    case BasicValueType.QInt4:      // QInt4 + QUInt4 - packed 4-bit (8/word)
+                        // All emulated-storage sub-word types pack into array<atomic<u32>> (the host
+                        // packs N-per-word; WGSL load/store via atomicLoad/atomicAnd/atomicOr). The
+                        // elements-per-word differ (4-bit:8, 1-byte:4, 2-byte:2) but the BINDING type is
+                        // the same - the Load/Store overrides compute the per-type word index + shift.
+                        // Missing these here typed an FP4/bf16/FP8 helper view param as array<f32>,
+                        // mismatching the kernel's array<atomic<u32>> binding -> wrong decode.
                         isSubWord = true;
                         break;
                     case BasicValueType.Float16:
@@ -543,10 +555,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         _subWordFloat8Params[param.Index] = false;
                         break;
                     case BasicValueType.Float4E2M1:
-                        // FP4 is always emulated (no native WGSL fp4) - 1-byte sub-word, 4 per word,
-                        // E2M1 code in the low nibble.
+                        // FP4 is always emulated (no native WGSL fp4) - packed 4-bit, 8 nibbles/word,
+                        // E2M1 code in the low nibble. elemSize=1 is the byte-rounded marker; the Load
+                        // routes FP4 to the 8/word nibble path via _subWordFloat4Params, not elemSize.
                         _subWordParams[param.Index] = 1;
                         _subWordFloat4Params.Add(param.Index);
+                        break;
+                    case BasicValueType.QInt4:
+                        // QInt4 (signed) + QUInt4 (unsigned) share BasicValueType.QInt4 - packed 4-bit,
+                        // 8 nibbles/word. Signedness comes from the CLR element type (QUInt4 zero-extends).
+                        _subWordParams[param.Index] = 1;
+                        _subWordPacked4IntParams.Add(param.Index);
+                        if (clrElement == typeof(global::ILGPU.QUInt4))
+                            _subWordUnsignedParams.Add(param.Index);
                         break;
                 }
             }
@@ -804,7 +825,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     : $"param{subWordParamIdx}"; // defensive fallback (shouldn't happen)
 
                 string extractExpr;
-                if (elemSize == 1)
+                if (_subWordFloat4Params.Contains(subWordParamIdx) || _subWordPacked4IntParams.Contains(subWordParamIdx))
+                {
+                    // Packed 4-bit (FP4 / QInt4 / QUInt4): 8 nibbles per 32-bit word (NOT the 1-byte / 4-per-
+                    // word layout). Extract the (idx%8) nibble of word (idx/8). MUST match the kernel
+                    // generator's packed addressing, or a packed-4-bit view read inside a NoInlining helper
+                    // decodes the wrong nibble (the helper-fn-gen packed-4-bit gap).
+                    var wordIdx = $"(u32({idx}) / 8u)";
+                    var shift = $"((u32({idx}) % 8u) * 4u)";
+                    var rawNib = $"((u32(atomicLoad(&{subWordBinding}[{wordIdx}])) >> {shift}) & 0xFu)";
+                    if (_subWordFloat4Params.Contains(subWordParamIdx))
+                        extractExpr = $"_e2m1_to_f32({rawNib})";                            // FP4: E2M1 decode
+                    else if (_subWordUnsignedParams.Contains(subWordParamIdx))
+                        extractExpr = $"i32({rawNib})";                                     // QUInt4: zero-extend
+                    else
+                        extractExpr = $"select(i32({rawNib}), (i32({rawNib}) - 16), ({rawNib}) >= 8u)"; // QInt4: 4-bit sign-extend
+                }
+                else if (elemSize == 1)
                 {
                     var wordIdx = $"(u32({idx}) / 4u)";
                     var shift = $"((u32({idx}) % 4u) * 8u)";
@@ -816,10 +853,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         // garbage - the WebGPU-only FP8 radix corruption (the direct-param key load uses
                         // the kernel generator's correct FP8 path, which is why ExtractBits passed).
                         extractExpr = isE4M3Ld ? $"_e4m3_to_f32({rawByte})" : $"_e5m2_to_f32({rawByte})";
-                    else if (_subWordFloat4Params.Contains(subWordParamIdx))
-                        // FP4 (4 per word): convert the byte (E2M1 code in low nibble) to f32, same
-                        // f32-register model as FP8 - the helper-side LEA key load path.
-                        extractExpr = $"_e2m1_to_f32({rawByte})";
                     else if (_subWordUnsignedParams.Contains(subWordParamIdx))
                         extractExpr = $"i32({rawByte})";                                    // byte: zero-extend
                     else

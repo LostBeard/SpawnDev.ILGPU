@@ -38,8 +38,6 @@ namespace ILGPU.Backends.PTX
         /// </summary>
         private bool PackedViewSourceIsQUInt4(Value source)
         {
-            if (!Method.HasFlags(MethodFlags.EntryPoint))
-                return false;
             var cur = source.Resolve();
             for (int depth = 0; cur != null && depth < 20; depth++)
             {
@@ -49,11 +47,24 @@ namespace ILGPU.Backends.PTX
                     for (int i = 0; i < Method.Parameters.Count; i++)
                         if (Method.Parameters[i] == p) { mi = i; break; }
                     if (mi < 0) return false;
-                    int userIdx = mi - EntryPoint.KernelIndexParameterOffset;
-                    if (userIdx < 0 || userIdx >= EntryPoint.Parameters.Count) return false;
-                    var t = EntryPoint.Parameters[userIdx];
-                    return t.IsGenericType
-                        && t.GetGenericArguments() is var g && g.Length > 0 && g[0] == typeof(QUInt4);
+                    if (Method.HasFlags(MethodFlags.EntryPoint))
+                    {
+                        int userIdx = mi - EntryPoint.KernelIndexParameterOffset;
+                        if (userIdx < 0 || userIdx >= EntryPoint.Parameters.Count) return false;
+                        var t = EntryPoint.Parameters[userIdx];
+                        return t.IsGenericType
+                            && t.GetGenericArguments() is var g && g.Length > 0 && g[0] == typeof(QUInt4);
+                    }
+                    // Helper (non-entry) method: the IR param maps 1:1 to the managed method's CLR
+                    // parameter via Method.Source - a QUInt4 view loaded inside a NoInlining helper must
+                    // still zero-extend (the entry-only path above returned false -> wrong sign-extend).
+                    if (!Method.HasSource) return false;
+                    var clr = Method.Source.GetParameters();
+                    if (mi < 0 || mi >= clr.Length) return false;
+                    var ct = clr[mi].ParameterType;
+                    if (ct.IsByRef) ct = ct.GetElementType()!;
+                    return ct.IsGenericType
+                        && ct.GetGenericArguments() is var cg && cg.Length > 0 && cg[0] == typeof(QUInt4);
                 }
                 cur = cur switch
                 {

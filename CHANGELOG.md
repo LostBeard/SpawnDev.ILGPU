@@ -2,6 +2,15 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.14.1 (2026-06-20) - Harden the 4-bit tier (packed views in `[NoInlining]` helpers, all 6 backends) + `Float8E8M0` (the OCP MX scale)
+
+A hardening + completion pass over 4.14.0. Forks bump to `2.0.40`.
+
+- **Packed 4-bit views now decode correctly inside a `[NoInlining]` helper on ALL 6 backends.** A kernel that passes an `ArrayView<Float4E2M1>`/`<QInt4>`/`<QUInt4>` into a non-inlined helper and loads it there was silently wrong before - the per-backend **helper-function** generators (separate codegen from the kernel generators) were never wired for packed sub-word storage. Now wired on WGSL/WebGPU, GLSL/WebGL (sampler-triple signature - GLSL ES has no pointers), PTX/CUDA, OpenCL, Wasm, and CPU. Found + fixed several real latent bugs in the process: a PTX FP4/FP8→f32 convert that left the result tagged as the packed type (return marshaling re-encoded it), PTX+OpenCL `QUInt4`-in-helper sign-extending (off-entry-point param→CLR-type mapping), and a Wasm `QUInt4`-in-helper signedness miss (the inliner reorders kernel params and emits a view-as-offset LEA → now mapped by order among packed-4-bit views). `PackedFloat4`/`PackedQInt4`/`PackedQUInt4_LoadViaNoInliningHelper` green on all backends.
+- **Capability flags `RequiresQInt4` / `RequiresQUInt4` / `RequiresPacked4Store`** added to `AcceleratorRequirements` (`Packed4Store` rules out WebGL + CPU, which are fail-loud on the nibble store), plus a direct-parameter `view.Length` over-count fix for packed sub-word views (the `arrayLength()*elementsPerWord` round-up to the word boundary).
+- **NEW `Float8E8M0`** (OCP `float8_e8m0fnu`) - the shared power-of-two **scale** format for OCP microscaling blocks (MXFP4 / MXFP8 / MXINT8 / NVFP4), completing the Float8 family next to `Float8E4M3` / `Float8E5M2`. Intentionally minimal: a host struct (`FromSingle` / `FromRawBits` / `RawValue` / `(float)`) plus the kernel-safe in-register decode `Float8E8M0Extensions.RawBitsToFloat(int)` = `2^(e-127)`, `e==0xFF → NaN` (E8M0 and f32 share exponent bias 127, so it is `IntAsFloat(e<<23)` with the two specials). Decode verified on all 6 backends vs an independent `2^(e-127)` spec oracle (WebGL flushes the `e==0` subnormal `2^-127` to 0 - accepted, IEEE FTZ); host round-trip verified on CPU.
+- Gates: full PMT suite **3926 pass / 0 fail / 252 skip** across all 6 backends; `ViaNoInliningHelper` 11/0; `Float8E8M0` decode + round-trip green.
+
 ## 4.14.0 (2026-06-19) - The 4-bit / low-precision data-type tier: packed FP4 (`Float4E2M1`) + INT4 (`QInt4`/`QUInt4`), FP8/Half conversion correctness, and `RawBitsToFloat`
 
 > 4.14.0 was developed across the local.2 -> local.12 series; the dated headline above is the stable cut. Per-milestone detail follows.
