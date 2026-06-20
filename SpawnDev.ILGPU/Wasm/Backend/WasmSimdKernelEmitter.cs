@@ -227,18 +227,18 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         else if (ReferenceEquals(phi.Sources[j], body)) hasBody = true;
                     }
                     if (!hasEntry || !hasBody) return false;
-                    if (laneVariant.Contains(phi) && (ClassOf(phi.Type) == LaneClass.None || Is2Lane(ClassOf(phi.Type)))) return false; // 2-lane (f64) phi unsupported
+                    if (laneVariant.Contains(phi) && ClassOf(phi.Type) == LaneClass.None) return false; // unclassifiable phi
                     headerPhis.Add(phi);
                 }
 
             // Class-gate every non-phi value in every block (phis handled above; terminators handled
             // structurally). A lane-variant CompareValue would be a data compare (selects) → out of class.
+            // (2-lane f64/i64 values ARE allowed here — the loop path double-pumps them, incl. the phi.)
             foreach (var b in new[] { entry, header, body, exit })
                 foreach (var ve in b)
                 {
                     var v = ve.Value;
                     if (v is PhiValue) continue;
-                    if (laneVariant.Contains(v) && Is2Lane(ClassOf(v.Type))) return false; // 2-lane (f64) only in single-block
                     if (!IsStage3aEmittable(v, laneVariant)) return false;
                 }
 
@@ -267,13 +267,16 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 _simdHiLocal.Clear();
                 _isStateMachine = false; // straight-line value emission within blocks
 
-                // Pre-allocate header phi locals (v128 for lane-variant, scalar otherwise).
+                // Pre-allocate header phi locals (v128 for lane-variant, scalar otherwise; 2-lane f64/i64
+                // phis get a SECOND v128 for the hi half so the accumulator double-pumps like any 2-lane value).
                 foreach (var phi in headerPhis)
                 {
                     if (laneVariant.Contains(phi))
                     {
                         AllocateLocal(phi, WasmOpCodes.V128);
                         _simdV128Values.Add(phi);
+                        if (Is2Lane(ClassOf(phi.Type)))
+                            _simdHiLocal[phi] = AllocateNewLocal(WasmOpCodes.V128);
                     }
                     else
                     {
@@ -342,6 +345,16 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 if (j < 0) return false;
                 var src = phi[j].Resolve();
                 var phiLocal = GetLocal(phi);
+                if (laneVariant.Contains(phi) && Is2Lane(ClassOf(phi.Type)))
+                {
+                    // 2-lane (f64/i64) accumulator: write BOTH halves (lo + hi).
+                    if (!_simdHiLocal.TryGetValue(phi, out var phiHi)) return false;
+                    if (!Push2Lane(src, false, laneVariant)) return false;
+                    WasmModuleBuilder.EmitLocalSet(Code, phiLocal);
+                    if (!Push2Lane(src, true, laneVariant)) return false;
+                    WasmModuleBuilder.EmitLocalSet(Code, phiHi);
+                    continue;
+                }
                 if (laneVariant.Contains(phi))
                 {
                     if (!PushAsV128(src, laneVariant)) return false; // v128 source, or splat of a uniform init

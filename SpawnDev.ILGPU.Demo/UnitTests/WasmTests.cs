@@ -2982,6 +2982,53 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
         }
 
+        // Wasm SIMD128 f64 LOOP gate (2026-06-20) — a counted loop with an f64 (2-lane) ACCUMULATOR phi,
+        // the common numeric reduction shape (dot product / sum of doubles). Exercises the loop path's
+        // 2-lane phi: the accumulator double-pumps (lo+hi v128) carried across the back-edge. IEEE f64 is
+        // exact, so SIMD == scalar == reference. Asserts kernel_simd emitted. N=1003 hits the scalar tail.
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_LoopFloat64MatchesScalarAndReference()
+        {
+            const int N = 1003, reps = 23;
+            var a = new double[N]; var b = new double[N];
+            for (int i = 0; i < N; i++) { a[i] = (i * 0.011) - 5.0; b[i] = Math.Cos(i * 0.017) * 1.25; }
+            var reference = new double[N];
+            for (int i = 0; i < N; i++) { double acc = 0.0; for (int k = 0; k < reps; k++) acc += a[i] * b[i]; reference[i] = acc; }
+
+            var scalar = await RunSimdLoopF64(a, b, N, reps, false, false);
+            var simd = await RunSimdLoopF64(a, b, N, reps, true, true);
+            int mismV = 0, firstV = -1, mismS = 0;
+            for (int i = 0; i < N; i++) { if (BitConverter.DoubleToInt64Bits(simd[i]) != BitConverter.DoubleToInt64Bits(reference[i])) { if (mismV == 0) firstV = i; mismV++; } if (BitConverter.DoubleToInt64Bits(scalar[i]) != BitConverter.DoubleToInt64Bits(reference[i])) mismS++; }
+            if (mismS > 0) throw new Exception($"Wasm SCALAR f64-loop != reference: {mismS}/{N} (baseline scalar wrong).");
+            if (mismV > 0) throw new Exception($"Wasm SIMD f64-loop (2-lane accumulator phi) != reference: {mismV}/{N}, first@{firstV} got={simd[firstV]} exp={reference[firstV]}.");
+        }
+
+        private static void Wasm_Simd_LoopF64Kernel(Index1D i, ArrayView<double> a, ArrayView<double> b, ArrayView<double> o, int reps)
+        {
+            double acc = 0.0;
+            for (int k = 0; k < reps; k++) acc += a[i] * b[i];
+            o[i] = acc;
+        }
+
+        private static async Task<double[]> RunSimdLoopF64(double[] a, double[] b, int N, int reps, bool forceSimd, bool requireSimdEmit)
+        {
+            bool ss = WasmBackend.ForceScalar, sm = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd; WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                using var ctx = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm().ToContext();
+                WasmBackend.VerboseLogging = false; WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<double>, ArrayView<double>, ArrayView<double>, int>(Wasm_Simd_LoopF64Kernel);
+                if (requireSimdEmit && (WasmBackend.LastWasmBinary == null || !ContainsExportName(WasmBackend.LastWasmBinary, "kernel_simd")))
+                    throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for the f64 loop.");
+                using var aB = acc.Allocate1D(a); using var bB = acc.Allocate1D(b); using var oB = acc.Allocate1D<double>(N);
+                k((Index1D)N, aB.View, bB.View, oB.View, reps); await acc.SynchronizeAsync();
+                return await oB.CopyToHostAsync<double>();
+            }
+            finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
+        }
+
         // Scans a wasm binary for an exact length-prefixed export-name token (the export section encodes
         // each name as len-byte + UTF-8 bytes). The length prefix (6 for "kernel", 11 for "kernel_simd")
         // separates the two so "kernel" never matches the "kernel_simd" slice.
