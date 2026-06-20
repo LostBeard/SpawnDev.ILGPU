@@ -2927,6 +2927,61 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             }
         }
 
+        // Wasm SIMD128 Stage-3a i64x2 (64-bit integer, 2-lane double-pumped) numerical gate (2026-06-20).
+        // Completes the numeric 2-lane tier (reuses the f64 double-pump infra). i64x2 add/sub/mul + v128
+        // and/or/xor + i64x2.neg (no SIMD i64 min/max/div). Two's-complement is exact, so SIMD == scalar ==
+        // reference EXACTLY. Asserts kernel_simd emitted. N=1003 hits the scalar tail.
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_Int64MatchesScalarAndReference()
+        {
+            const int N = 1003;
+            var a = new long[N];
+            for (int i = 0; i < N; i++) a[i] = unchecked((long)((ulong)i * 0x9E3779B97F4A7C15UL)) - 13L;
+            var reference = new long[N];
+            for (int i = 0; i < N; i++) reference[i] = I64RefBody(a[i]);
+
+            var scalar = await RunSimdI64(a, N, forceSimd: false, requireSimdEmit: false);
+            var simd = await RunSimdI64(a, N, forceSimd: true, requireSimdEmit: true);
+            int mismV = 0, firstV = -1, mismS = 0;
+            for (int i = 0; i < N; i++) { if (simd[i] != reference[i]) { if (mismV == 0) firstV = i; mismV++; } if (scalar[i] != reference[i]) mismS++; }
+            if (mismS > 0) throw new Exception($"Wasm SCALAR i64 != reference: {mismS}/{N} (baseline scalar wrong).");
+            if (mismV > 0) throw new Exception($"Wasm SIMD i64x2 (double-pumped) != reference: {mismV}/{N}, first@{firstV} got={simd[firstV]} exp={reference[firstV]}.");
+        }
+
+        private static long I64RefBody(long x)
+        {
+            long r = x + 5L; r = r * 3L; r = r - x;
+            r = r & 0x0000FFFFFFFFFFFFL; r = r | 0x100L; r = r ^ x;
+            return -r;
+        }
+
+        private static void Wasm_Simd_I64Kernel(Index1D i, ArrayView<long> a, ArrayView<long> o)
+        {
+            long x = a[i];
+            long r = x + 5L; r = r * 3L; r = r - x;
+            r = r & 0x0000FFFFFFFFFFFFL; r = r | 0x100L; r = r ^ x;
+            o[i] = -r;
+        }
+
+        private static async Task<long[]> RunSimdI64(long[] a, int N, bool forceSimd, bool requireSimdEmit)
+        {
+            bool ss = WasmBackend.ForceScalar, sm = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd; WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                using var ctx = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm().ToContext();
+                WasmBackend.VerboseLogging = false; WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<long>, ArrayView<long>>(Wasm_Simd_I64Kernel);
+                if (requireSimdEmit && (WasmBackend.LastWasmBinary == null || !ContainsExportName(WasmBackend.LastWasmBinary, "kernel_simd")))
+                    throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for the i64 kernel.");
+                using var aB = acc.Allocate1D(a); using var oB = acc.Allocate1D<long>(N);
+                k((Index1D)N, aB.View, oB.View); await acc.SynchronizeAsync();
+                return await oB.CopyToHostAsync<long>();
+            }
+            finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
+        }
+
         // Scans a wasm binary for an exact length-prefixed export-name token (the export section encodes
         // each name as len-byte + UTF-8 bytes). The length prefix (6 for "kernel", 11 for "kernel_simd")
         // separates the two so "kernel" never matches the "kernel_simd" slice.
