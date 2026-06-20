@@ -2301,6 +2301,117 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             o[i] = global::ILGPU.Algorithms.XMath.Sqrt(r * r + 4.0f); // f32x4 mul/add + f32x4.sqrt
         }
 
+        // Wasm SIMD128 Stage-3a MULTI-BLOCK LOOP numerical gate (2026-06-20). The canonical counted
+        // while-loop path: a real for-loop (NOT hand-unrolled) is vectorized as a structured wasm loop
+        // with the accumulator carried in a v128 phi. Covers BOTH lane classes: a float loop with body
+        // v128 loads + accumulate, and an int loop accumulator. Asserts kernel_simd is emitted AND the
+        // v128 loop dispatch is BIT-EXACT to scalar and a CPU reference (f32 mul-then-add no FMA; int exact).
+        // N=1003 hits the scalar tail; reps is a runtime (lane-uniform) bound so it is a genuine loop.
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_LoopFloatMatchesScalarAndReference()
+        {
+            const int N = 1003, reps = 37;
+            var a = new float[N]; var b = new float[N];
+            for (int i = 0; i < N; i++) { a[i] = (i * 0.013f) - 6f; b[i] = MathF.Cos(i * 0.021f) * 1.5f; }
+            var reference = new float[N];
+            for (int i = 0; i < N; i++) { float acc = 0f; for (int k = 0; k < reps; k++) acc = acc + a[i] * b[i]; reference[i] = acc; }
+
+            var scalar = await RunSimdLoopFloat(a, b, N, reps, forceSimd: false, requireSimdEmit: false);
+            var simd = await RunSimdLoopFloat(a, b, N, reps, forceSimd: true, requireSimdEmit: true);
+            AssertExactF(scalar, reference, simd, "loop-float");
+        }
+
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_LoopIntMatchesScalarAndReference()
+        {
+            const int N = 1003, reps = 29;
+            var a = new int[N];
+            for (int i = 0; i < N; i++) a[i] = (i % 100) - 40;
+            var reference = new int[N];
+            for (int i = 0; i < N; i++) { int s = a[i]; for (int k = 0; k < reps; k++) s = s * 3 - 1; reference[i] = s; }
+
+            var scalar = await RunSimdLoopInt(a, N, reps, forceSimd: false, requireSimdEmit: false);
+            var simd = await RunSimdLoopInt(a, N, reps, forceSimd: true, requireSimdEmit: true);
+            int mismV = 0, firstV = -1, mismS = 0;
+            for (int i = 0; i < N; i++) { if (simd[i] != reference[i]) { if (mismV == 0) firstV = i; mismV++; } if (scalar[i] != reference[i]) mismS++; }
+            if (mismS > 0) throw new Exception($"Wasm SCALAR loop-int != reference: {mismS}/{N} (baseline scalar wrong).");
+            if (mismV > 0) throw new Exception($"Wasm SIMD loop-int (v128 loop) != reference: {mismV}/{N}, first@{firstV} got={simd[firstV]} exp={reference[firstV]}.");
+        }
+
+        private static void AssertExactF(float[] scalar, float[] reference, float[] simd, string label)
+        {
+            int mismS = 0, mismV = 0, firstV = -1;
+            for (int i = 0; i < scalar.Length; i++)
+            {
+                if (BitConverter.SingleToInt32Bits(scalar[i]) != BitConverter.SingleToInt32Bits(reference[i])) mismS++;
+                if (BitConverter.SingleToInt32Bits(simd[i]) != BitConverter.SingleToInt32Bits(reference[i])) { if (mismV == 0) firstV = i; mismV++; }
+            }
+            if (mismS > 0) throw new Exception($"Wasm SCALAR {label} != reference: {mismS}/{scalar.Length} (baseline scalar wrong).");
+            if (mismV > 0) throw new Exception($"Wasm SIMD {label} (v128) != reference: {mismV}/{scalar.Length}, first@{firstV} got={simd[firstV]} exp={reference[firstV]}.");
+        }
+
+        private static void Wasm_Simd_LoopFloatKernel(Index1D i, ArrayView<float> a, ArrayView<float> b, ArrayView<float> o, int reps)
+        {
+            float acc = 0f;
+            for (int k = 0; k < reps; k++) acc = acc + a[i] * b[i];
+            o[i] = acc;
+        }
+
+        private static void Wasm_Simd_LoopIntKernel(Index1D i, ArrayView<int> a, ArrayView<int> o, int reps)
+        {
+            int s = a[i];
+            for (int k = 0; k < reps; k++) s = s * 3 - 1;
+            o[i] = s;
+        }
+
+        private static async Task<float[]> RunSimdLoopFloat(float[] a, float[] b, int N, int reps, bool forceSimd, bool requireSimdEmit)
+        {
+            bool savedScalar = WasmBackend.ForceScalar, savedSimd = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd; WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                using var ctx = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm().ToContext();
+                WasmBackend.VerboseLogging = false; WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>, int>(Wasm_Simd_LoopFloatKernel);
+                if (requireSimdEmit)
+                {
+                    var bin = WasmBackend.LastWasmBinary;
+                    if (bin == null || !ContainsExportName(bin, "kernel_simd"))
+                        throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for the float loop — the loop SIMD path is not under test.");
+                }
+                using var aBuf = acc.Allocate1D(a); using var bBuf = acc.Allocate1D(b); using var oBuf = acc.Allocate1D<float>(N);
+                k((Index1D)N, aBuf.View, bBuf.View, oBuf.View, reps);
+                await acc.SynchronizeAsync();
+                return await oBuf.CopyToHostAsync<float>();
+            }
+            finally { WasmBackend.ForceScalar = savedScalar; WasmBackend.ForceSimd = savedSimd; }
+        }
+
+        private static async Task<int[]> RunSimdLoopInt(int[] a, int N, int reps, bool forceSimd, bool requireSimdEmit)
+        {
+            bool savedScalar = WasmBackend.ForceScalar, savedSimd = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd; WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                using var ctx = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm().ToContext();
+                WasmBackend.VerboseLogging = false; WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>, int>(Wasm_Simd_LoopIntKernel);
+                if (requireSimdEmit)
+                {
+                    var bin = WasmBackend.LastWasmBinary;
+                    if (bin == null || !ContainsExportName(bin, "kernel_simd"))
+                        throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for the int loop — the loop SIMD path is not under test.");
+                }
+                using var aBuf = acc.Allocate1D(a); using var oBuf = acc.Allocate1D<int>(N);
+                k((Index1D)N, aBuf.View, oBuf.View, reps);
+                await acc.SynchronizeAsync();
+                return await oBuf.CopyToHostAsync<int>();
+            }
+            finally { WasmBackend.ForceScalar = savedScalar; WasmBackend.ForceSimd = savedSimd; }
+        }
+
         // Scans a wasm binary for an exact length-prefixed export-name token (the export section encodes
         // each name as len-byte + UTF-8 bytes). The length prefix (6 for "kernel", 11 for "kernel_simd")
         // separates the two so "kernel" never matches the "kernel_simd" slice.

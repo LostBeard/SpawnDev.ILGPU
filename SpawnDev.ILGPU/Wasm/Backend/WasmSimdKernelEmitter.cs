@@ -34,6 +34,7 @@
 using System.Collections.Generic;
 using System.Linq;
 using global::ILGPU.IR;
+using global::ILGPU.IR.Analyses;
 using global::ILGPU.IR.Types;
 using global::ILGPU.IR.Values;
 
@@ -77,8 +78,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             SimdKernelCode = null;
             SimdKernelLocals = null;
 
-            if (_indexParam == null || _blockCount != 1)
+            if (_indexParam == null)
                 return false;
+            if (_blockCount != 1)
+                return TryGenerateSimdLoopKernel();  // canonical counted-loop path (bails → scalar otherwise)
 
             var analysis = WasmSimdAnalysis.Analyze(Method, _indexParam, out var laneVariant);
             if (!analysis.Vectorizable)
@@ -154,6 +157,197 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
         }
 
+        /// <summary>
+        /// Stage-3a MULTI-BLOCK path: vectorizes the CANONICAL counted while-loop shape
+        /// (entry → header[cond] → body → header back-edge, exit after) — e.g. an un-unrolled
+        /// <c>for(k=0;k&lt;reps;k++) acc = f(acc, a[i]…)</c>. Control flow is lane-UNIFORM (the
+        /// induction variable + bound + condition are all lane-invariant → emitted SCALAR), so the
+        /// loop structure is identical across the 4 lanes; only the lane-VARIANT data (loads,
+        /// arithmetic, the accumulator phi) becomes v128. Emitted as structured wasm
+        /// <c>block $exit { loop $hdr { &lt;cond→br_if exit&gt; &lt;body v128&gt; &lt;phi updates&gt; br $hdr } }</c>.
+        /// Detection uses ILGPU's <see cref="LoopInfo{TOrder,TDirection}"/> (single entry/header/exit/
+        /// back-edge); ANYTHING outside this exact shape returns false ⇒ the proven scalar state-machine
+        /// path runs (zero regression). Saves/restores the generator context like the single-block path,
+        /// so the scalar kernel stays byte-identical.
+        /// </summary>
+        private bool TryGenerateSimdLoopKernel()
+        {
+            // ── Detect the canonical single counted while-loop (var avoids naming LoopInfo<,>) ──
+            if (_blockCount != 4) return false;          // entry, header, body, exit
+            var cfg = Method.Blocks.CreateCFG();
+            var loops = cfg.CreateLoops();
+            if (loops.Count != 1) return false;          // exactly one loop ⇒ not nested
+            BasicBlock? entryB = null, headerB = null, bodyB = null, exitB = null, backEdgeB = null;
+            bool isDoWhile = true, gotInfo = false;
+            foreach (var loop in loops)
+            {
+                if (!loop.TryGetLoopInfo(out var info) || info == null) return false;
+                entryB = info.Entry; headerB = info.Header; bodyB = info.Body; exitB = info.Exit;
+                backEdgeB = info.BackEdge; isDoWhile = info.IsDoWhileLoop; gotInfo = true;
+            }
+            if (!gotInfo || isDoWhile) return false;     // while-loop only (top-tested); do-while later
+            if (entryB == null || headerB == null || bodyB == null || exitB == null) return false;
+
+            BasicBlock entry = entryB, header = headerB, body = bodyB, exit = exitB;
+            if (!ReferenceEquals(backEdgeB, body)) return false;         // single body block is the back-edge
+            // Terminator shapes: entry/body → unconditional to header; header → IfBranch; exit → return.
+            if (entry.Terminator is not UnconditionalBranch eub || !ReferenceEquals(eub.Target, header)) return false;
+            if (body.Terminator is not UnconditionalBranch bub || !ReferenceEquals(bub.Target, header)) return false;
+            if (header.Terminator is not IfBranch hib) return false;
+            if (exit.Terminator is not ReturnTerminator) return false;
+            // The IfBranch must go header→{body, exit} in some order.
+            bool condTrueIsBody = ReferenceEquals(hib.TrueTarget, body) && ReferenceEquals(hib.FalseTarget, exit);
+            bool condTrueIsExit = ReferenceEquals(hib.TrueTarget, exit) && ReferenceEquals(hib.FalseTarget, body);
+            if (!condTrueIsBody && !condTrueIsExit) return false;
+
+            var analysis = WasmSimdAnalysis.Analyze(Method, _indexParam, out var laneVariant);
+            if (!analysis.Vectorizable) return false;
+
+            // Collect header phis; classify each (variant→v128, invariant→scalar). Each must have
+            // exactly the two predecessors {entry, body}. A variant phi must be a 4-lane class (f32/i32).
+            var headerPhis = new List<PhiValue>();
+            foreach (var ve in header)
+                if (ve.Value is PhiValue phi)
+                {
+                    if (phi.Count != 2) return false;
+                    bool hasEntry = false, hasBody = false;
+                    for (int j = 0; j < phi.Count; j++)
+                    {
+                        if (ReferenceEquals(phi.Sources[j], entry)) hasEntry = true;
+                        else if (ReferenceEquals(phi.Sources[j], body)) hasBody = true;
+                    }
+                    if (!hasEntry || !hasBody) return false;
+                    if (laneVariant.Contains(phi) && ClassOf(phi.Type) == LaneClass.None) return false;
+                    headerPhis.Add(phi);
+                }
+
+            // Class-gate every non-phi value in every block (phis handled above; terminators handled
+            // structurally). A lane-variant CompareValue would be a data compare (selects) → out of class.
+            foreach (var b in new[] { entry, header, body, exit })
+                foreach (var ve in b)
+                {
+                    var v = ve.Value;
+                    if (v is PhiValue) continue;
+                    if (v is CompareValue && laneVariant.Contains(v)) return false;
+                    if (!IsStage3aEmittable(v, laneVariant)) return false;
+                }
+
+            // ── Save the scalar context (mirror the single-block path) ──
+            var savedCode = Code.ToArray();
+            var savedLocals = new List<WasmLocal>(_locals);
+            var savedMap = new Dictionary<string, uint>(_localMap);
+            var savedNext = _nextLocalIndex;
+            var savedFirstState = new Dictionary<uint, int>(_localFirstState);
+            var savedCrosses = new HashSet<uint>(_localCrossesState);
+            bool savedStateMachine = _isStateMachine;
+
+            bool ok = false;
+            try
+            {
+                Code.Clear();
+                _locals.Clear();
+                var paramMap = savedMap.Where(kv => kv.Value < _paramCount).ToDictionary(kv => kv.Key, kv => kv.Value);
+                _localMap.Clear();
+                foreach (var kv in paramMap) _localMap[kv.Key] = kv.Value;
+                _nextLocalIndex = (uint)_paramCount;
+                _localFirstState.Clear();
+                _localCrossesState.Clear();
+                _simdV128StoreCount = 0;
+                _simdV128Values.Clear();
+                _isStateMachine = false; // straight-line value emission within blocks
+
+                // Pre-allocate header phi locals (v128 for lane-variant, scalar otherwise).
+                foreach (var phi in headerPhis)
+                {
+                    if (laneVariant.Contains(phi))
+                    {
+                        AllocateLocal(phi, WasmOpCodes.V128);
+                        _simdV128Values.Add(phi);
+                    }
+                    else
+                    {
+                        AllocateLocal(phi, GetWasmType(phi));
+                    }
+                }
+
+                // entry block values, then init the header phis from the entry predecessor.
+                foreach (var ve in entry) { var v = ve.Value; if (v is PhiValue) continue; if (!EmitSimdValue(v, laneVariant)) return false; }
+                if (!WriteHeaderPhis(headerPhis, entry, laneVariant)) return false;
+
+                // block $exit { loop $hdr {   (void block types, like the scalar state machine)
+                Code.Add(WasmOpCodes.Block); Code.Add(WasmOpCodes.Void);
+                Code.Add(WasmOpCodes.Loop); Code.Add(WasmOpCodes.Void);
+
+                // header non-phi values (the loop condition compare etc.)
+                foreach (var ve in header) { var v = ve.Value; if (v is PhiValue) continue; if (!EmitSimdValue(v, laneVariant)) return false; }
+                // conditional exit: continue into body while staying in the loop; br_if 1 ($exit) to leave.
+                EmitGetLocal(hib.Condition.Resolve());
+                if (condTrueIsBody) Code.Add(WasmOpCodes.I32Eqz); // exit when !(cond)
+                Code.Add(WasmOpCodes.BrIf); WasmModuleBuilder.EmitU32Leb128(Code, 1); // → $exit
+
+                // body values, then update the header phis from the body (back-edge) predecessor.
+                foreach (var ve in body) { var v = ve.Value; if (v is PhiValue) continue; if (!EmitSimdValue(v, laneVariant)) return false; }
+                if (!WriteHeaderPhis(headerPhis, body, laneVariant)) return false;
+
+                Code.Add(WasmOpCodes.Br); WasmModuleBuilder.EmitU32Leb128(Code, 0); // br $hdr
+                Code.Add(WasmOpCodes.End); // end loop
+                Code.Add(WasmOpCodes.End); // end block
+
+                // exit block values + return 0 (matches scalar).
+                foreach (var ve in exit) { var v = ve.Value; if (v is PhiValue) continue; if (!EmitSimdValue(v, laneVariant)) return false; }
+                if (_simdV128StoreCount == 0) return false; // must do real per-lane vector work (the o[i] store)
+                if (exit.Terminator != null) GenerateCodeFor(exit.Terminator);
+                WasmModuleBuilder.EmitI32Const(Code, 0);
+
+                SimdKernelCode = Code.ToArray();
+                SimdKernelLocals = new List<WasmLocal>(_locals);
+                HasSimdKernel = true;
+                ok = true;
+                return true;
+            }
+            finally
+            {
+                Code.Clear(); Code.AddRange(savedCode);
+                _locals.Clear(); _locals.AddRange(savedLocals);
+                _localMap.Clear(); foreach (var kv in savedMap) _localMap[kv.Key] = kv.Value;
+                _nextLocalIndex = savedNext;
+                _localFirstState.Clear(); foreach (var kv in savedFirstState) _localFirstState[kv.Key] = kv.Value;
+                _localCrossesState.Clear(); foreach (var x in savedCrosses) _localCrossesState.Add(x);
+                _isStateMachine = savedStateMachine;
+                if (!ok) { HasSimdKernel = false; SimdKernelCode = null; SimdKernelLocals = null; }
+            }
+        }
+
+        /// <summary>Writes each header phi's local from the operand contributed by <paramref name="pred"/>
+        /// (entry = the loop-entry init; body = the back-edge update). Lane-variant phis are written as a
+        /// v128 (the source v128 local, or a splat of a uniform init); lane-invariant (induction) phis are
+        /// written scalar with i32/i64 width coercion, mirroring the scalar <c>PushPhiValues</c>.</summary>
+        private bool WriteHeaderPhis(List<PhiValue> headerPhis, BasicBlock pred, HashSet<Value> laneVariant)
+        {
+            foreach (var phi in headerPhis)
+            {
+                int j = -1;
+                for (int s = 0; s < phi.Count; s++) if (ReferenceEquals(phi.Sources[s], pred)) { j = s; break; }
+                if (j < 0) return false;
+                var src = phi[j].Resolve();
+                var phiLocal = GetLocal(phi);
+                if (laneVariant.Contains(phi))
+                {
+                    if (!PushAsV128(src, laneVariant)) return false; // v128 source, or splat of a uniform init
+                }
+                else
+                {
+                    EmitGetLocal(src);
+                    var srcType = GetWasmTypeFromIR(src.Type);
+                    var phiType = GetLocalType(phiLocal);
+                    if (srcType == WasmOpCodes.I64 && phiType == WasmOpCodes.I32) Code.Add(WasmOpCodes.I32WrapI64);
+                    else if (srcType == WasmOpCodes.I32 && phiType == WasmOpCodes.I64) Code.Add(WasmOpCodes.I64ExtendI32S);
+                }
+                WasmModuleBuilder.EmitLocalSet(Code, phiLocal);
+            }
+            return true;
+        }
+
         /// <summary>The 4-lane SIMD class of a primitive type: f32 → f32x4, i32 → i32x4, else none.
         /// Both pack 4 elements per v128 (matching the by-4 dispatch). Sub-word ints (byte/short) and
         /// 2-lane (i64/f64) are deliberately NOT in this set yet — they need a different lane count.</summary>
@@ -226,6 +420,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         break;
                     case ConvertValue cv when MapConvert(cv) != 0:
                         break; // mapped lane conversion consumes its source as a vector lane
+                    case PhiValue:
+                        break; // feeds a loop-carried phi (the v128 accumulator update) — see the loop path
                     case Store st when ReferenceEquals(st.Value.Resolve(), v):
                         break; // used as the stored value (vector store)
                     default:
