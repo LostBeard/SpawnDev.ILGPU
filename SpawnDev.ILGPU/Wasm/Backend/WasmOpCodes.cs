@@ -420,6 +420,20 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public const uint I32x4TruncSatF32x4U = 249; // i32x4.trunc_sat_f32x4_u (saturating; deferred)
         public const uint F32x4ConvertI32x4S = 250;  // f32x4.convert_i32x4_s
         public const uint F32x4ConvertI32x4U = 251;  // f32x4.convert_i32x4_u
+        // i64x2 comparisons (signed only in core SIMD; per-64-bit-lane all-ones/all-zeros mask)
+        public const uint I64x2Eq = 214;         // i64x2.eq
+        public const uint I64x2Ne = 215;         // i64x2.ne
+        public const uint I64x2LtS = 216;        // i64x2.lt_s
+        public const uint I64x2GtS = 217;        // i64x2.gt_s
+        public const uint I64x2LeS = 218;        // i64x2.le_s
+        public const uint I64x2GeS = 219;        // i64x2.ge_s
+        // f64x2 comparisons
+        public const uint F64x2Eq = 71;          // f64x2.eq
+        public const uint F64x2Ne = 72;          // f64x2.ne
+        public const uint F64x2Lt = 73;          // f64x2.lt
+        public const uint F64x2Gt = 74;          // f64x2.gt
+        public const uint F64x2Le = 75;          // f64x2.le
+        public const uint F64x2Ge = 76;          // f64x2.ge
         // i64x2 arithmetic (2-lane, double-pumped; no SIMD i64 min/max/div)
         public const uint I64x2Neg = 193;        // i64x2.neg
         public const uint I64x2Add = 206;        // i64x2.add

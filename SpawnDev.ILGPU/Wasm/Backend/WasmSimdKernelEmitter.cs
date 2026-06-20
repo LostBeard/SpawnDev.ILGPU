@@ -431,18 +431,18 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         else if (ReferenceEquals(phi.Sources[j], fTarget)) hasF = true;
                     }
                     if (!hasT || !hasF) return false;
-                    if (ClassOf(phi.Type) == LaneClass.None || Is2Lane(ClassOf(phi.Type))) return false; // must be a 4-lane v128 (bitselect) result
+                    if (ClassOf(phi.Type) == LaneClass.None) return false; // must be a v128 (bitselect) result (4-lane or 2-lane)
                     mergePhis.Add(phi);
                 }
             if (mergePhis.Count == 0) return false;
 
             // Class-gate every non-phi value (phis handled; terminators structural).
+            // (2-lane f64/i64 values ARE allowed — the diamond double-pumps them, incl. the mask + bitselect.)
             foreach (var b in new[] { entry, tTarget, fTarget, merge })
                 foreach (var ve in b)
                 {
                     var v = ve.Value;
                     if (v is PhiValue) continue;
-                    if (laneVariant.Contains(v) && Is2Lane(ClassOf(v.Type))) return false; // 2-lane (f64) only in single-block
                     if (!IsStage3aEmittable(v, laneVariant)) return false;
                 }
 
@@ -471,8 +471,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 _simdHiLocal.Clear();
                 _isStateMachine = false;
 
-                // Pre-allocate the merge result phi locals (all v128).
-                foreach (var phi in mergePhis) { AllocateLocal(phi, WasmOpCodes.V128); _simdV128Values.Add(phi); }
+                // Pre-allocate the merge result phi locals (v128; 2-lane f64/i64 phis get a hi half too).
+                foreach (var phi in mergePhis)
+                {
+                    AllocateLocal(phi, WasmOpCodes.V128); _simdV128Values.Add(phi);
+                    if (Is2Lane(ClassOf(phi.Type))) _simdHiLocal[phi] = AllocateNewLocal(WasmOpCodes.V128);
+                }
 
                 // entry values (incl. the lane-variant compare → v128 mask), then BOTH sides unconditionally.
                 foreach (var ve in entry) { var v = ve.Value; if (v is PhiValue) continue; if (!EmitSimdValue(v, laneVariant)) return false; }
@@ -489,6 +493,23 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         else if (ReferenceEquals(phi.Sources[j], fTarget)) falseOp = phi[j].Resolve();
                     }
                     if (trueOp == null || falseOp == null) return false;
+                    if (Is2Lane(ClassOf(phi.Type)))
+                    {
+                        // 2-lane (f64/i64) diamond: bitselect each half with the matching mask half.
+                        if (!_simdHiLocal.TryGetValue(cmp, out var cmpHi)) return false;
+                        if (!_simdHiLocal.TryGetValue(phi, out var phiHi)) return false;
+                        if (!Push2Lane(trueOp, false, laneVariant)) return false;
+                        if (!Push2Lane(falseOp, false, laneVariant)) return false;
+                        EmitGetLocal(cmp);                                // mask lo
+                        WasmModuleBuilder.EmitSimd(Code, WasmOpCodes.V128Bitselect);
+                        WasmModuleBuilder.EmitLocalSet(Code, GetLocal(phi));
+                        if (!Push2Lane(trueOp, true, laneVariant)) return false;
+                        if (!Push2Lane(falseOp, true, laneVariant)) return false;
+                        WasmModuleBuilder.EmitLocalGet(Code, cmpHi);      // mask hi
+                        WasmModuleBuilder.EmitSimd(Code, WasmOpCodes.V128Bitselect);
+                        WasmModuleBuilder.EmitLocalSet(Code, phiHi);
+                        continue;
+                    }
                     if (!PushAsV128(trueOp, laneVariant)) return false;   // selected where cond (mask) = 1
                     if (!PushAsV128(falseOp, laneVariant)) return false;  // selected where cond = 0
                     EmitGetLocal(cmp);                                    // the v128 mask
@@ -780,7 +801,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // proven 4-lane path below untouched. A Store is void-typed, so route it by its VALUE's class
             // (else an f64 store falls through to the 4-lane Store case and writes only the lo v128 — the
             // hi lanes [2,3] would never be stored).
-            if (Is2Lane(ClassOf(v.Type)) || (v is Store st2l && Is2Lane(ClassOf(st2l.Value.Resolve().Type))))
+            if (Is2Lane(ClassOf(v.Type))
+                || (v is Store st2l && Is2Lane(ClassOf(st2l.Value.Resolve().Type)))
+                || (v is CompareValue cc2l && Is2Lane(ClassOf(cc2l.Left.Resolve().Type)))) // 2-lane mask (f64/i64 diamond cond)
                 return Emit2LaneValue(v, laneVariant);
 
             switch (v)
@@ -1059,6 +1082,26 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     _simdHiLocal[ua] = hi; _simdV128Values.Add(ua);
                     return true;
                 }
+                case CompareValue cmp:
+                {
+                    // 2-lane compare → a per-64-bit-lane MASK (lo+hi v128), consumed by a 2-lane diamond's
+                    // bitselect. The result's IR type is i32 (bool), but the operands are f64/i64 (2-lane).
+                    uint op = MapCompare(cmp);
+                    if (op == 0) return false;
+                    var cl = cmp.Left.Resolve(); var cr = cmp.Right.Resolve();
+                    var lo = AllocateLocal(cmp, WasmOpCodes.V128);
+                    if (!Push2Lane(cl, false, laneVariant)) return false;
+                    if (!Push2Lane(cr, false, laneVariant)) return false;
+                    WasmModuleBuilder.EmitSimd(Code, op);
+                    WasmModuleBuilder.EmitLocalSet(Code, lo);
+                    var hi = AllocateNewLocal(WasmOpCodes.V128);
+                    if (!Push2Lane(cl, true, laneVariant)) return false;
+                    if (!Push2Lane(cr, true, laneVariant)) return false;
+                    WasmModuleBuilder.EmitSimd(Code, op);
+                    WasmModuleBuilder.EmitLocalSet(Code, hi);
+                    _simdHiLocal[cmp] = hi; _simdV128Values.Add(cmp);
+                    return true;
+                }
                 case Store st:
                 {
                     var sv = st.Value.Resolve();
@@ -1276,6 +1319,28 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     _ => 0u,
                 };
             }
+            if (cls == LaneClass.F64x2) // 2-lane mask (used by 2-lane diamonds)
+                return cv.Kind switch
+                {
+                    CompareKind.Equal => WasmOpCodes.F64x2Eq,
+                    CompareKind.NotEqual => WasmOpCodes.F64x2Ne,
+                    CompareKind.LessThan => WasmOpCodes.F64x2Lt,
+                    CompareKind.LessEqual => WasmOpCodes.F64x2Le,
+                    CompareKind.GreaterThan => WasmOpCodes.F64x2Gt,
+                    CompareKind.GreaterEqual => WasmOpCodes.F64x2Ge,
+                    _ => 0u,
+                };
+            if (cls == LaneClass.I64x2) // core SIMD has only SIGNED i64x2 compares
+                return cv.IsUnsignedOrUnordered ? 0u : cv.Kind switch
+                {
+                    CompareKind.Equal => WasmOpCodes.I64x2Eq,
+                    CompareKind.NotEqual => WasmOpCodes.I64x2Ne,
+                    CompareKind.LessThan => WasmOpCodes.I64x2LtS,
+                    CompareKind.LessEqual => WasmOpCodes.I64x2LeS,
+                    CompareKind.GreaterThan => WasmOpCodes.I64x2GtS,
+                    CompareKind.GreaterEqual => WasmOpCodes.I64x2GeS,
+                    _ => 0u,
+                };
             return 0u;
         }
 
