@@ -765,7 +765,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 case BinaryArithmeticValue ba:
                     return MapBinary(ba) != 0 && AllUsesVectorizable(ba);
                 case UnaryArithmeticValue ua:
-                    return MapUnary(ua) != 0 && AllUsesVectorizable(ua);
+                    return (MapUnary(ua) != 0 || (ClassOf(ua.Type) == LaneClass.F32x4 && PerLaneMathImport(ua.Kind) != null))
+                        && AllUsesVectorizable(ua);
                 case ConvertValue cv:
                     return MapConvert(cv) != 0 && AllUsesVectorizable(cv);
                 case CompareValue cmp:
@@ -797,8 +798,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 {
                     case BinaryArithmeticValue ba when MapBinary(ba) != 0:
                         break; // mapped binary: both operand positions are v128 (we don't map scalar-count shifts)
-                    case UnaryArithmeticValue ua when MapUnary(ua) != 0:
-                        break;
+                    case UnaryArithmeticValue ua when MapUnary(ua) != 0
+                        || (ClassOf(ua.Type) == LaneClass.F32x4 && PerLaneMathImport(ua.Kind) != null):
+                        break; // mapped unary, or a per-lane transcendental fallback (sin/exp/log/...)
                     case ConvertValue cv when MapConvert(cv) != 0:
                         break; // mapped lane conversion consumes its source as a vector lane
                     case CompareValue cmp when MapCompare(cmp) != 0:
@@ -918,7 +920,35 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 case UnaryArithmeticValue ua:
                 {
                     uint op = MapUnary(ua);
-                    if (op == 0) return false;
+                    if (op == 0)
+                    {
+                        // Transcendental/trig (sin/cos/exp/log/tanh/...): wasm SIMD has no such op, so fall
+                        // back to PER-LANE scalar (extract f32 lane -> the SAME Math import the scalar path
+                        // uses -> replace into the result v128). f32x4 only. Cross-mode EXACT (per-lane scalar
+                        // op == scalar op). Lets a kernel with a transcendental still vectorize its other ALU.
+                        string mathName = ClassOf(ua.Type) == LaneClass.F32x4 ? PerLaneMathImport(ua.Kind) : null;
+                        if (mathName == null || !MathImports.TryGetValue(mathName, out var funcIdx)) return false;
+                        var t = AllocateLocal(ua, WasmOpCodes.V128);
+                        var srcLocal = AllocateNewLocal(WasmOpCodes.V128);
+                        if (!PushAsV128(ua.Value.Resolve(), laneVariant)) return false;
+                        WasmModuleBuilder.EmitLocalSet(Code, srcLocal);
+                        WasmModuleBuilder.EmitLocalGet(Code, srcLocal);
+                        WasmModuleBuilder.EmitLocalSet(Code, t); // seed result (lanes overwritten below)
+                        for (byte lane = 0; lane < 4; lane++)
+                        {
+                            WasmModuleBuilder.EmitLocalGet(Code, t);                                  // [v128]
+                            WasmModuleBuilder.EmitLocalGet(Code, srcLocal);
+                            WasmModuleBuilder.EmitSimdLane(Code, WasmOpCodes.F32x4ExtractLane, lane);  // [v128, f32]
+                            Code.Add(WasmOpCodes.F64PromoteF32);                                       // import is f64->f64
+                            WasmModuleBuilder.EmitCall(Code, funcIdx);
+                            if (ua.Kind == UnaryArithmeticKind.Log10F) { WasmModuleBuilder.EmitF64Const(Code, 2.302585092994046); Code.Add(WasmOpCodes.F64Div); }
+                            Code.Add(WasmOpCodes.F32DemoteF64);                                        // [v128, f32 result]
+                            WasmModuleBuilder.EmitSimdLane(Code, WasmOpCodes.F32x4ReplaceLane, lane);  // [v128']
+                            WasmModuleBuilder.EmitLocalSet(Code, t);
+                        }
+                        _simdV128Values.Add(ua);
+                        return true;
+                    }
                     var target = AllocateLocal(ua, WasmOpCodes.V128);
                     if (!PushAsV128(ua.Value.Resolve(), laneVariant)) return false;
                     WasmModuleBuilder.EmitSimd(Code, op);
@@ -1271,6 +1301,28 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
         /// <summary>Maps a unary arithmetic value to its f32x4/i32x4 opcode, or 0 if unsupported in 3a.</summary>
+        /// <summary>The JS Math import name for a transcendental/trig unary kind (matches the scalar
+        /// WasmCodeGenerator mapping), or null if the kind is not an import-based math op. Used by the SIMD
+        /// per-lane fallback (wasm SIMD has no transcendentals). Log10F reuses "log" with a /ln(10) adjust.</summary>
+        private static string PerLaneMathImport(UnaryArithmeticKind kind) => kind switch
+        {
+            UnaryArithmeticKind.SinF => "sin",
+            UnaryArithmeticKind.CosF => "cos",
+            UnaryArithmeticKind.TanF => "tan",
+            UnaryArithmeticKind.AsinF => "asin",
+            UnaryArithmeticKind.AcosF => "acos",
+            UnaryArithmeticKind.AtanF => "atan",
+            UnaryArithmeticKind.SinhF => "sinh",
+            UnaryArithmeticKind.CoshF => "cosh",
+            UnaryArithmeticKind.TanhF => "tanh",
+            UnaryArithmeticKind.ExpF => "exp",
+            UnaryArithmeticKind.Exp2F => "exp2",
+            UnaryArithmeticKind.LogF => "log",
+            UnaryArithmeticKind.Log2F => "log2",
+            UnaryArithmeticKind.Log10F => "log",
+            _ => null,
+        };
+
         private static uint MapUnary(UnaryArithmeticValue v)
         {
             var cls = ClassOf(v.Type);

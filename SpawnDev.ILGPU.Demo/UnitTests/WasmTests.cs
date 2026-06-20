@@ -3223,6 +3223,56 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
         }
 
+        // Wasm SIMD128 per-lane TRANSCENDENTAL fallback gate (2026-06-20). wasm SIMD has no sin/exp/log/tanh,
+        // so an activation/trig kernel previously BAILED to scalar entirely. Now the transcendental runs PER
+        // LANE (extract f32 lane -> the SAME JS Math import the scalar path uses -> replace) while the
+        // surrounding f32x4 arithmetic vectorizes. The cross-mode invariant: SIMD == SCALAR **bit-exact**
+        // (both call the identical import - this is what the gate proves). vs host MathF only within a small
+        // tolerance (browser libm differs from .NET by ULPs - so NOT bit-exact there, expected).
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_TranscendentalActivationMatchesScalar()
+        {
+            const int N = 1003;
+            var a = new float[N]; var b = new float[N];
+            for (int i = 0; i < N; i++) { a[i] = (i % 41) * 0.05f - 1f; b[i] = MathF.Cos(i * 0.03f); } // a in [-1,1]
+            var scalar = await RunActivation(a, b, N, forceSimd: false, requireSimdEmit: false);
+            var simd = await RunActivation(a, b, N, forceSimd: true, requireSimdEmit: true);
+            int mismV = 0, firstV = -1;
+            for (int i = 0; i < N; i++)
+                if (BitConverter.SingleToInt32Bits(simd[i]) != BitConverter.SingleToInt32Bits(scalar[i])) { if (mismV == 0) firstV = i; mismV++; }
+            if (mismV > 0) throw new Exception($"Wasm SIMD transcendental != SCALAR bit-exact: {mismV}/{N}, first@{firstV} simd={simd[firstV]} scalar={scalar[firstV]} (per-lane import must match the scalar import).");
+            // sanity vs host MathF (tolerance - browser libm differs by ULPs)
+            int bad = 0;
+            for (int i = 0; i < N; i++)
+            {
+                float exp = MathF.Exp(a[i]) * 0.5f + MathF.Tanh(b[i]);
+                if (MathF.Abs(simd[i] - exp) > MathF.Abs(exp) * 1e-4f + 1e-4f) bad++;
+            }
+            if (bad > 0) throw new Exception($"Wasm SIMD transcendental vs host MathF tolerance: {bad}/{N} exceed 1e-4 (values wrong, not just libm ULP).");
+        }
+
+        private static void Wasm_Simd_ActivationKernel(Index1D i, ArrayView<float> a, ArrayView<float> b, ArrayView<float> o)
+            => o[i] = XMath.Exp(a[i]) * 0.5f + XMath.Tanh(b[i]);
+
+        private static async Task<float[]> RunActivation(float[] a, float[] b, int N, bool forceSimd, bool requireSimdEmit)
+        {
+            bool ss = WasmBackend.ForceScalar, sm = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd; WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                using var ctx = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm().ToContext();
+                WasmBackend.VerboseLogging = false; WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>>(Wasm_Simd_ActivationKernel);
+                if (requireSimdEmit && (WasmBackend.LastWasmBinary == null || !ContainsExportName(WasmBackend.LastWasmBinary, "kernel_simd")))
+                    throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for the transcendental activation kernel.");
+                using var aB = acc.Allocate1D(a); using var bB = acc.Allocate1D(b); using var oB = acc.Allocate1D<float>(N);
+                k((Index1D)N, aB.View, bB.View, oB.View); await acc.SynchronizeAsync();
+                return await oB.CopyToHostAsync<float>();
+            }
+            finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
+        }
+
         // Wasm SIMD128 2-lane (f64) MASKED STORE gate (2026-06-20). `if (a[i] > 0.0) o[i] = a[i]*2` for
         // doubles - the double-pumped form of the conditional store, completing the masked-store family for
         // the numeric tier. The f64 condition yields a 2-LANE mask (lo+hi i64x2 lanes); per global lane the
