@@ -56,6 +56,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         // Input buffer detection: params with Load sources get sampler uniforms
         private readonly HashSet<int> _inputParamIndices = new();
 
+        // Kernel-param packed-4-bit views passed BY VALUE into a [NoInlining] helper (the view is
+        // never loaded in the kernel body, only forwarded). The call site expands each into the
+        // sampler triple (u_param{N}, u_param{N}_tileW, u_param{N}_offset); see AnalyzeHelperPackedViewParams.
+        private readonly HashSet<int> _helperPackedViewKernelParams = new();
+        // True when any helper-forwarded packed view is FP4 (forces the _e2m1_to_f32 emulation lib).
+        private bool _kernelReferencesFP4ViaHelper = false;
+
         // Hoisting
         private readonly HashSet<Value> _hoistedPrimitives = new();
         private readonly HashSet<Value> _hoistedIndexFields = new();
@@ -188,6 +195,79 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             _loops = _cfg.CreateLoops();
 
             AnalyzeCrossBlockPointers();
+            AnalyzeHelperPackedViewParams();
+        }
+
+        /// <summary>
+        /// Pre-pass (runs in the kernel-gen CONSTRUCTOR, which is sequential and completes BEFORE
+        /// the parallel <c>GenerateCode()</c> of all generators in CodeGeneratorBackend) that records,
+        /// for every kernel-param packed-4-bit ArrayView (FP4/QInt4/QUInt4) passed BY VALUE into a
+        /// [NoInlining] helper, the corresponding (helper Method.Id, helper param Index) -> packed info.
+        /// The helper generator (GLSLFunctionGenerator) reads this map to emit a sampler-TRIPLE param
+        /// signature + the 8-nibbles/word texelFetch load. Only the kernel-gen can derive QUInt4 vs
+        /// QInt4 signedness (it has the CLR <see cref="EntryPoint"/> parameter types); the helper IR
+        /// only carries the shared <c>BasicValueType.QInt4</c>. FP4 is unambiguous from the IR.
+        /// Must be populated here (not during GenerateCode) because GenerateCode runs in parallel with
+        /// the helper-gen, which would otherwise race on the shared dictionary.
+        /// </summary>
+        private void AnalyzeHelperPackedViewParams()
+        {
+            int paramOffset = KernelParamOffset;
+            foreach (var block in Method.Blocks)
+            {
+                foreach (var value in block)
+                {
+                    if (value.Value is not MethodCall call) continue;
+                    var callee = call.Target;
+                    if (callee is null || !callee.HasImplementation) continue;
+
+                    for (int i = 0; i < call.Count && i < callee.Parameters.Count; i++)
+                    {
+                        var arg = call[i].Resolve();
+                        if (ResolveToParameterStatic(arg) is not global::ILGPU.IR.Values.Parameter kp)
+                            continue;
+                        if (kp.Index < paramOffset) continue;
+                        if (kp.ParameterType is not ViewType vt) continue;
+                        if (vt.ElementType is not PrimitiveType pet) continue;
+
+                        bool isFloat4 = pet.BasicValueType == BasicValueType.Float4E2M1;
+                        bool isQInt4 = pet.BasicValueType == BasicValueType.QInt4;
+                        if (!isFloat4 && !isQInt4) continue;
+
+                        // QInt4/QUInt4 share BasicValueType.QInt4 - recover unsignedness from the CLR
+                        // kernel parameter type (QUInt4 element => zero-extend the nibble 0..15).
+                        bool isUnsigned = false;
+                        if (isQInt4)
+                        {
+                            int userIdx = kp.Index - paramOffset;
+                            if (userIdx >= 0 && userIdx < EntryPoint.Parameters.Count)
+                            {
+                                var clrType = EntryPoint.Parameters[userIdx];
+                                if (clrType.IsGenericType)
+                                {
+                                    var genArgs = clrType.GetGenericArguments();
+                                    if (genArgs.Length > 0 && genArgs[0] == typeof(QUInt4))
+                                        isUnsigned = true;
+                                }
+                            }
+                        }
+
+                        var helperParam = callee.Parameters[i];
+                        _generatorArgs.HelperPackedViewParams[(callee.Id, helperParam.Index)] =
+                            new PackedViewParamInfo(isFloat4, isUnsigned);
+
+                        // The kernel must expose this view as an INPUT sampler (u_param{N} +
+                        // _tileW/_offset) so the call site can pass the triple into the helper - even
+                        // though the kernel body never LOADs it itself (AnalyzeInputBuffers only finds
+                        // in-kernel Loads). Also force the matching emulation library (FP4 needs
+                        // _e2m1_to_f32) since KernelUsesEmulatedTypes' IR scan won't see the type - it
+                        // only lives in the helper body.
+                        _inputParamIndices.Add(kp.Index);
+                        _helperPackedViewKernelParams.Add(kp.Index);
+                        if (isFloat4) _kernelReferencesFP4ViaHelper = true;
+                    }
+                }
+            }
         }
 
         /// <summary>Stored args for accessing shared OutputVaryings collection.</summary>
@@ -582,6 +662,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             //    Including the library unconditionally produces a massive vertex shader
             //    that ANGLE's D3D11 backend cannot compile with Transform Feedback.
             var (kernelNeedsF64, kernelNeedsI64, kernelNeedsF16, kernelNeedsBF16, kernelNeedsFP8, kernelNeedsFP4) = KernelUsesEmulatedTypes();
+            // A packed FP4 view forwarded to a [NoInlining] helper has no Float4E2M1 IR value in the
+            // KERNEL body (the kernel just passes the view through), so the IR scan above misses it.
+            // The helper body calls _e2m1_to_f32, which must be emitted in the (shared) kernel-level
+            // emulation library or the helper fails to link. AnalyzeHelperPackedViewParams set the flag.
+            kernelNeedsFP4 = kernelNeedsFP4 || _kernelReferencesFP4ViaHelper;
             // Float16 emulation is always active on WebGL when the kernel uses Half
             // types - GLSL ES 3.0 has no hardware f16 path. Detected via IR scan above,
             // not just _subWordFloat16Params (which is populated AFTER library emission).
@@ -2823,7 +2908,71 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 }
             }
 
+            // Packed-4-bit view forwarded to a [NoInlining] helper: GLSL ES 3.0 has no pointer
+            // types, so the view param is passed as a sampler TRIPLE (isampler2D + tileW + offset).
+            // Expand each such arg at the call site to the kernel's global uniforms; the matching
+            // helper signature (GLSLFunctionGenerator.GenerateHeaderStub) accepts the triple.
+            if (TryEmitPackedViewHelperCall(methodCall, targetMethod))
+                return;
+
             base.GenerateCode(methodCall);
+        }
+
+        /// <summary>
+        /// Emits a call to a helper fn that takes one or more packed-4-bit view params, expanding
+        /// each packed-view arg into the sampler triple (u_param{N}, u_param{N}_tileW,
+        /// u_param{N}_offset). Returns false (no emission) when the target has no packed-view params,
+        /// so the caller falls through to the standard path.
+        /// </summary>
+        private bool TryEmitPackedViewHelperCall(MethodCall methodCall, Method targetMethod)
+        {
+            // Fast reject: does this target have ANY packed-view param recorded?
+            bool any = false;
+            for (int i = 0; i < targetMethod.Parameters.Count; i++)
+            {
+                if (_generatorArgs.HelperPackedViewParams.ContainsKey((targetMethod.Id, targetMethod.Parameters[i].Index)))
+                { any = true; break; }
+            }
+            if (!any) return false;
+
+            Variable? target = null;
+            if (!methodCall.Type.IsVoidType)
+            {
+                target = Load(methodCall);
+                Declare(target);
+            }
+
+            var args = new StringBuilder();
+            bool first = true;
+            for (int i = 0; i < methodCall.Count && i < targetMethod.Parameters.Count; i++)
+            {
+                var calleeParam = targetMethod.Parameters[i];
+                if (_generatorArgs.HelperPackedViewParams.ContainsKey((targetMethod.Id, calleeParam.Index)))
+                {
+                    // Resolve the kernel param backing this view arg to get its binding name.
+                    var arg = methodCall[i].Resolve();
+                    var kp = ResolveToParameter(arg) as global::ILGPU.IR.Values.Parameter;
+                    if (kp == null)
+                        return false; // can't resolve - bail to standard path (would be wrong anyway)
+                    string bn = GetParamBindingName(kp.Index);
+                    if (!first) args.Append(", ");
+                    first = false;
+                    args.Append($"{bn}, {bn}_tileW, {bn}_offset");
+                }
+                else
+                {
+                    if (!first) args.Append(", ");
+                    first = false;
+                    args.Append(Load(methodCall[i]));
+                }
+            }
+
+            string fn = GLSLFunctionGenerator.GetMethodName(targetMethod);
+            if (methodCall.Type.IsVoidType)
+                AppendLine($"{fn}({args});");
+            else
+                AppendLine($"{target} = {fn}({args});");
+            return true;
         }
 
         private void InlineCrossAssemblyMethodCall(

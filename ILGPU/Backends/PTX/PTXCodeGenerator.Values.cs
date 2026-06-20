@@ -253,10 +253,30 @@ namespace ILGPU.Backends.PTX
                 || targetType == ArithmeticBasicValueType.Float4E2M1;
             if (srcFp8 || dstFp8)
             {
+                bool srcWasLowP = srcFp8;
+                bool dstWasLowP = dstFp8;
                 if (srcFp8) sourceType = ArithmeticBasicValueType.Float32;
                 if (dstFp8) targetType = ArithmeticBasicValueType.Float32;
                 if (sourceType == targetType)
                 {
+                    if (srcWasLowP && !dstWasLowP)
+                    {
+                        // FP4/FP8 -> f32 (DECODE direction): in the f32-register model the source register
+                        // already HOLDS the decoded f32 value, but it is TAGGED Float4E2M1/Float8. A bare
+                        // Alias would leave that tag, so a downstream struct-field / value-param / function
+                        // RETURN marshaling (EmitStoreParam honors register.BasicValueType) would RE-ENCODE
+                        // it back to the packed bits - e.g. a [NoInlining] helper `float f(ArrayView<FP4> v,
+                        // int i) => v[i]` returned the raw nibble reinterpreted as f32 ("1E-45"), because the
+                        // f32 return value register was still FP4-tagged. Copy into a genuine Float32 register
+                        // so the tag is f32 and no re-encode happens. (Kernel stores to an f32 array used
+                        // st.f32 which ignores the tag, which is why only the helper-return path was wrong.)
+                        var lowpSrc = EnsureHardwareRegister(LoadPrimitive(value.Value));
+                        var f32Tgt = AllocateHardware(value);
+                        Move(lowpSrc, f32Tgt);
+                        return;
+                    }
+                    // f32 -> FP4/FP8 (ENCODE direction) or same-low-precision: alias and let the eventual
+                    // STORE encode (the FP4/FP8-tagged register is what the store marshaling wants).
                     Alias(value, value.Value);
                     return;
                 }

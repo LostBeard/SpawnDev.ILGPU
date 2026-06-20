@@ -1848,20 +1848,60 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 // mechanism as the byte/sbyte + ushort/short loads below).
                 bool isUnsignedQ4 = false;
                 {
-                    var resolvedQ4 = value.Source.Resolve();
-                    if (resolvedQ4 is global::ILGPU.IR.Values.LoadElementAddress leaQ4
-                        && leaQ4.Source.Resolve() is global::ILGPU.IR.Values.Parameter srcParamQ4)
+                    // TRACE the load source back to the view PARAMETER through the full indirection chain
+                    // (not just one LEA hop). In the ENTRY kernel the LEA source IS the parameter directly,
+                    // but inside a [NoInlining] helper the view arrives through extra Load/GetField/cast
+                    // indirection - the old single-hop check failed there, so QUInt4 fell through to the
+                    // signed default (QInt4 happened to be correct). Mirrors PTX/OpenCL PackedViewSourceIsQUInt4.
+                    global::ILGPU.IR.Values.Parameter? srcParamQ4 = null;
                     {
-                        int userIdxQ4 = srcParamQ4.Index - 1; // KernelParamOffset is 1
-                        var epQ4 = _generatorArgs.EntryPoint;
-                        if (userIdxQ4 >= 0 && userIdxQ4 < epQ4.Parameters.Count)
+                        var cur = value.Source.Resolve();
+                        for (int depth = 0; cur != null && depth < 20; depth++)
                         {
-                            var clrTypeQ4 = epQ4.Parameters[userIdxQ4];
-                            if (clrTypeQ4.IsGenericType)
+                            if (cur is global::ILGPU.IR.Values.Parameter pp) { srcParamQ4 = pp; break; }
+                            cur = cur switch
                             {
-                                var genArgsQ4 = clrTypeQ4.GetGenericArguments();
-                                if (genArgsQ4.Length > 0 && genArgsQ4[0] == typeof(global::ILGPU.QUInt4))
-                                    isUnsignedQ4 = true;
+                                // Follow the VIEW operand, not the int index. The inliner can emit a LEA with
+                                // the view as the Offset and the index as the Source (observed for the packed-
+                                // 4-bit NoInlining-helper load), so pick the operand whose type is a view
+                                // (AddressSpaceType) - the index operand is a scalar PrimitiveType.
+                                global::ILGPU.IR.Values.LoadElementAddress lea =>
+                                    (lea.Source.Type is global::ILGPU.IR.Types.AddressSpaceType
+                                        ? lea.Source : lea.Offset).Resolve(),
+                                global::ILGPU.IR.Values.Load ld => ld.Source.Resolve(),
+                                global::ILGPU.IR.Values.GetField gf => gf.ObjectValue.Resolve(),
+                                global::ILGPU.IR.Values.LoadFieldAddress lfa => lfa.Source.Resolve(),
+                                global::ILGPU.IR.Values.NewView nv => nv.Pointer.Resolve(),
+                                global::ILGPU.IR.Values.AddressSpaceCast asc => asc.Value.Resolve(),
+                                global::ILGPU.IR.Values.PointerCast pc => pc.Value.Resolve(),
+                                global::ILGPU.IR.Values.SubViewValue sv => sv.Source.Resolve(),
+                                _ => null
+                            };
+                        }
+                    }
+                    if (srcParamQ4 != null && Method.HasSource)
+                    {
+                        // Map the IR view param to its managed ArrayView by ORDER AMONG PACKED-4-BIT VIEW
+                        // params - a positional index map is NOT reliable: the inliner can reorder the kernel
+                        // params (e.g. put the Index1D at IR Param#1, so clrPs[srcParamQ4.Index] was Index1D,
+                        // not the view). Counting only QInt4-element views skips the index + non-4-bit views,
+                        // so the Nth packed-4-bit IR view lines up with the Nth packed-4-bit CLR ArrayView.
+                        int packed4Order = 0;
+                        for (int k = 0; k < srcParamQ4.Index && k < Method.Parameters.Count; k++)
+                            if (Method.Parameters[k].Type is global::ILGPU.IR.Types.AddressSpaceType ast
+                                && ast.ElementType is PrimitiveType ep && ep.BasicValueType == BasicValueType.QInt4)
+                                packed4Order++;
+                        int seen = 0;
+                        foreach (var cp in Method.Source.GetParameters())
+                        {
+                            var ct = cp.ParameterType;
+                            if (ct.IsByRef) ct = ct.GetElementType();
+                            if (ct != null && ct.IsGenericType
+                                && ct.GetGenericArguments() is var ga && ga.Length > 0
+                                && (ga[0] == typeof(global::ILGPU.QInt4) || ga[0] == typeof(global::ILGPU.QUInt4)))
+                            {
+                                if (seen == packed4Order) { if (ga[0] == typeof(global::ILGPU.QUInt4)) isUnsignedQ4 = true; break; }
+                                seen++;
                             }
                         }
                     }
