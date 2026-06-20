@@ -2633,6 +2633,76 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             finally { WasmBackend.ForceScalar = savedScalar; WasmBackend.ForceSimd = savedSimd; }
         }
 
+        // Wasm SIMD128 Stage-3a i32x4 SHIFT gate (2026-06-20). Uniform shift counts map to i32x4.shl/
+        // shr_s/shr_u (count is a scalar i32, NOT a lane). Both wasm and scalar mask the count to & 31, so
+        // SIMD == scalar == reference exactly. Covers signed (shl + shr_s via int) and unsigned (shr_u via
+        // uint). Asserts kernel_simd is emitted. N=1003 hits the scalar tail.
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_ShiftMatchesScalarAndReference()
+        {
+            const int N = 1003;
+            var a = new int[N]; for (int i = 0; i < N; i++) a[i] = unchecked((int)((uint)i * 2654435761u)) - 11;
+            var reference = new int[N]; for (int i = 0; i < N; i++) reference[i] = (a[i] << 3) + (a[i] >> 2) - (a[i] << 1);
+            var scalar = await RunSimdShift(a, N, forceSimd: false, requireSimdEmit: false);
+            var simd = await RunSimdShift(a, N, forceSimd: true, requireSimdEmit: true);
+            int mismV = 0, firstV = -1, mismS = 0;
+            for (int i = 0; i < N; i++) { if (simd[i] != reference[i]) { if (mismV == 0) firstV = i; mismV++; } if (scalar[i] != reference[i]) mismS++; }
+            if (mismS > 0) throw new Exception($"Wasm SCALAR shift != reference: {mismS}/{N} (baseline scalar wrong).");
+            if (mismV > 0) throw new Exception($"Wasm SIMD shift (i32x4.shl/shr_s) != reference: {mismV}/{N}, first@{firstV} got={simd[firstV]} exp={reference[firstV]}.");
+
+            var ua = new uint[N]; for (int i = 0; i < N; i++) ua[i] = (uint)i * 2654435761u + 7u;
+            var uref = new uint[N]; for (int i = 0; i < N; i++) uref[i] = (ua[i] >> 3) | (ua[i] << 2);
+            var uscalar = await RunSimdShiftU(ua, N, forceSimd: false, requireSimdEmit: false);
+            var usimd = await RunSimdShiftU(ua, N, forceSimd: true, requireSimdEmit: true);
+            int umV = 0, ufirst = -1, umS = 0;
+            for (int i = 0; i < N; i++) { if (usimd[i] != uref[i]) { if (umV == 0) ufirst = i; umV++; } if (uscalar[i] != uref[i]) umS++; }
+            if (umS > 0) throw new Exception($"Wasm SCALAR shift_u != reference: {umS}/{N} (baseline scalar wrong).");
+            if (umV > 0) throw new Exception($"Wasm SIMD shift_u (i32x4.shr_u) != reference: {umV}/{N}, first@{ufirst} got={usimd[ufirst]} exp={uref[ufirst]}.");
+        }
+
+        private static void Wasm_Simd_ShiftKernel(Index1D i, ArrayView<int> a, ArrayView<int> o)
+            => o[i] = (a[i] << 3) + (a[i] >> 2) - (a[i] << 1);
+        private static void Wasm_Simd_ShiftUKernel(Index1D i, ArrayView<uint> a, ArrayView<uint> o)
+            => o[i] = (a[i] >> 3) | (a[i] << 2);
+
+        private static async Task<int[]> RunSimdShift(int[] a, int N, bool forceSimd, bool requireSimdEmit)
+        {
+            bool savedScalar = WasmBackend.ForceScalar, savedSimd = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd; WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                using var ctx = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm().ToContext();
+                WasmBackend.VerboseLogging = false; WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(Wasm_Simd_ShiftKernel);
+                if (requireSimdEmit && (WasmBackend.LastWasmBinary == null || !ContainsExportName(WasmBackend.LastWasmBinary, "kernel_simd")))
+                    throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for the signed shift.");
+                using var aBuf = acc.Allocate1D(a); using var oBuf = acc.Allocate1D<int>(N);
+                k((Index1D)N, aBuf.View, oBuf.View); await acc.SynchronizeAsync();
+                return await oBuf.CopyToHostAsync<int>();
+            }
+            finally { WasmBackend.ForceScalar = savedScalar; WasmBackend.ForceSimd = savedSimd; }
+        }
+
+        private static async Task<uint[]> RunSimdShiftU(uint[] a, int N, bool forceSimd, bool requireSimdEmit)
+        {
+            bool savedScalar = WasmBackend.ForceScalar, savedSimd = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd; WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                using var ctx = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm().ToContext();
+                WasmBackend.VerboseLogging = false; WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<uint>, ArrayView<uint>>(Wasm_Simd_ShiftUKernel);
+                if (requireSimdEmit && (WasmBackend.LastWasmBinary == null || !ContainsExportName(WasmBackend.LastWasmBinary, "kernel_simd")))
+                    throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for the unsigned shift.");
+                using var aBuf = acc.Allocate1D(a); using var oBuf = acc.Allocate1D<uint>(N);
+                k((Index1D)N, aBuf.View, oBuf.View); await acc.SynchronizeAsync();
+                return await oBuf.CopyToHostAsync<uint>();
+            }
+            finally { WasmBackend.ForceScalar = savedScalar; WasmBackend.ForceSimd = savedSimd; }
+        }
+
         // Scans a wasm binary for an exact length-prefixed export-name token (the export section encodes
         // each name as len-byte + UTF-8 bytes). The length prefix (6 for "kernel", 11 for "kernel_simd")
         // separates the two so "kernel" never matches the "kernel_simd" slice.

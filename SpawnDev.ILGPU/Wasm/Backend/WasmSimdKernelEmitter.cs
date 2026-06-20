@@ -646,6 +646,25 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     _simdV128Values.Add(ld);
                     return true;
                 }
+                case BinaryArithmeticValue ba when ba.Kind == BinaryArithmeticKind.Shl || ba.Kind == BinaryArithmeticKind.Shr:
+                {
+                    // i32x4 shift: (v128 value, SCALAR i32 count) -> v128. The count is a single i32 (NOT a
+                    // lane), so it MUST be lane-invariant (uniform) — core SIMD has no per-lane variable
+                    // shift. Both wasm i32x4.shl and scalar i32.shl mask the count to & 31, so cross-mode exact.
+                    if (ClassOf(ba.Type) != LaneClass.I32x4) return false;
+                    var count = ba.Right.Resolve();
+                    if (laneVariant.Contains(count)) return false;    // per-lane count ⇒ scalar fallback
+                    bool u = (ba.Flags & ArithmeticFlags.Unsigned) == ArithmeticFlags.Unsigned;
+                    uint sop = ba.Kind == BinaryArithmeticKind.Shl ? WasmOpCodes.I32x4Shl
+                        : u ? WasmOpCodes.I32x4ShrU : WasmOpCodes.I32x4ShrS;
+                    var starget = AllocateLocal(ba, WasmOpCodes.V128);
+                    if (!PushAsV128(ba.Left.Resolve(), laneVariant)) return false; // v128 value
+                    EmitGetLocal(count);                              // scalar i32 count (uniform)
+                    WasmModuleBuilder.EmitSimd(Code, sop);
+                    WasmModuleBuilder.EmitLocalSet(Code, starget);
+                    _simdV128Values.Add(ba);
+                    return true;
+                }
                 case BinaryArithmeticValue ba:
                 {
                     uint op = MapBinary(ba);
@@ -770,7 +789,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     BinaryArithmeticKind.Xor => WasmOpCodes.V128Xor,
                     BinaryArithmeticKind.Min => u ? WasmOpCodes.I32x4MinU : WasmOpCodes.I32x4MinS,
                     BinaryArithmeticKind.Max => u ? WasmOpCodes.I32x4MaxU : WasmOpCodes.I32x4MaxS,
-                    _ => 0u, // Div/Rem (no SIMD int divide), Shl/Shr (scalar count operand) ⇒ later
+                    // Shl/Shr recognized here (emittable) but EMITTED by the shift-intercept in EmitSimdValue
+                    // (their count is a scalar i32, not a v128 lane). Returned opcode is just for recognition.
+                    BinaryArithmeticKind.Shl => WasmOpCodes.I32x4Shl,
+                    BinaryArithmeticKind.Shr => u ? WasmOpCodes.I32x4ShrU : WasmOpCodes.I32x4ShrS,
+                    _ => 0u, // Div/Rem (no SIMD int divide) ⇒ scalar fallback
                 };
             return 0u;
         }
