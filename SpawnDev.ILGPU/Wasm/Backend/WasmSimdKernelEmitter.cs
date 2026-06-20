@@ -195,8 +195,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     return MapBinary(ba) != 0 && AllUsesVectorizable(ba);
                 case UnaryArithmeticValue ua:
                     return MapUnary(ua) != 0 && AllUsesVectorizable(ua);
+                case ConvertValue cv:
+                    return MapConvert(cv) != 0 && AllUsesVectorizable(cv);
                 default:
-                    // compares/selects, converts, gather LEAs, shifts, i64/f64 ⇒ later increments
+                    // compares/selects, gather LEAs, shifts, f32->i32 convert, i64/f64 ⇒ later increments
                     return false;
             }
         }
@@ -222,6 +224,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         break; // mapped binary: both operand positions are v128 (we don't map scalar-count shifts)
                     case UnaryArithmeticValue ua when MapUnary(ua) != 0:
                         break;
+                    case ConvertValue cv when MapConvert(cv) != 0:
+                        break; // mapped lane conversion consumes its source as a vector lane
                     case Store st when ReferenceEquals(st.Value.Resolve(), v):
                         break; // used as the stored value (vector store)
                     default:
@@ -275,6 +279,17 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     WasmModuleBuilder.EmitSimd(Code, op);
                     WasmModuleBuilder.EmitLocalSet(Code, target);
                     _simdV128Values.Add(ua);
+                    return true;
+                }
+                case ConvertValue cv:
+                {
+                    uint op = MapConvert(cv);
+                    if (op == 0) return false;
+                    var target = AllocateLocal(cv, WasmOpCodes.V128);
+                    if (!PushAsV128(cv.Value.Resolve(), laneVariant)) return false; // source v128 (i32x4)
+                    WasmModuleBuilder.EmitSimd(Code, op);                             // -> f32x4
+                    WasmModuleBuilder.EmitLocalSet(Code, target);
+                    _simdV128Values.Add(cv);
                     return true;
                 }
                 case Store st:
@@ -356,7 +371,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 {
                     UnaryArithmeticKind.Neg => WasmOpCodes.F32x4Neg,
                     UnaryArithmeticKind.Abs => WasmOpCodes.F32x4Abs,
-                    _ => 0u, // Sqrt/etc. are a later increment
+                    UnaryArithmeticKind.SqrtF => WasmOpCodes.F32x4Sqrt, // IEEE sqrt — bit-identical to scalar f32.sqrt
+                    _ => 0u, // Floor/Ceil/transcendentals are a later increment
                 };
             if (cls == LaneClass.I32x4)
                 return v.Kind switch
@@ -366,6 +382,23 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     UnaryArithmeticKind.Not => WasmOpCodes.V128Not, // whole-vector bitwise not
                     _ => 0u,
                 };
+            return 0u;
+        }
+
+        /// <summary>Maps a 4-lane lane conversion to its v128 opcode, or 0 if unsupported in 3a.
+        /// Only i32x4 → f32x4 (signed/unsigned) is supported: it rounds identically to the scalar
+        /// <c>f32.convert_i32_s/_u</c>, so it is cross-mode EXACT. The reverse (f32 → i32) is NOT
+        /// vectorized — wasm core SIMD only offers the SATURATING <c>trunc_sat</c>, but the scalar path
+        /// traps (non-saturating), so they diverge on overflow/NaN (cross-mode determinism). Same-width
+        /// only (4-lane↔4-lane); i32/f32 ↔ i64/f64 (4↔2 lane) is a later increment.</summary>
+        private static uint MapConvert(ConvertValue cv)
+        {
+            var srcCls = ClassOf(cv.Value.Resolve().Type);
+            var dstCls = ClassOf(cv.Type);
+            if (srcCls == LaneClass.I32x4 && dstCls == LaneClass.F32x4)
+                return (cv.Flags & ConvertFlags.SourceUnsigned) == ConvertFlags.SourceUnsigned
+                    ? WasmOpCodes.F32x4ConvertI32x4U
+                    : WasmOpCodes.F32x4ConvertI32x4S;
             return 0u;
         }
     }

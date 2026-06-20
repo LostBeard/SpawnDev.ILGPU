@@ -388,6 +388,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public const uint F32x4Div = 231;        // f32x4.div
         public const uint F32x4Min = 232;        // f32x4.min
         public const uint F32x4Max = 233;        // f32x4.max
+        // Lane conversions (4-lane <-> 4-lane). NOTE: f32x4 -> i32x4 is ONLY the SATURATING
+        // trunc_sat form (248/249); the scalar path uses non-saturating i32.trunc_f32_s (traps on
+        // overflow/NaN), so vectorizing f32->i32 would break cross-mode determinism — deferred.
+        // i32x4 -> f32x4 (250/251) rounds identically to the scalar f32.convert_i32_s/_u, so it is
+        // cross-mode exact and safe to vectorize.
+        public const uint I32x4TruncSatF32x4S = 248; // i32x4.trunc_sat_f32x4_s (saturating; deferred)
+        public const uint I32x4TruncSatF32x4U = 249; // i32x4.trunc_sat_f32x4_u (saturating; deferred)
+        public const uint F32x4ConvertI32x4S = 250;  // f32x4.convert_i32x4_s
+        public const uint F32x4ConvertI32x4U = 251;  // f32x4.convert_i32x4_u
         // f64x2 arithmetic
         public const uint F64x2Add = 240;        // f64x2.add
         public const uint F64x2Sub = 241;        // f64x2.sub

@@ -2226,6 +2226,81 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             o[i] = -r;
         }
 
+        // Wasm SIMD128 Stage-3a CONVERT (i32x4 -> f32x4) + SqrtF (f32x4.sqrt) numerical gate (2026-06-20).
+        // Exercises the lane conversion (signed int load -> float) feeding f32x4 mul/add and f32x4.sqrt.
+        // The PRIMARY assertion is SIMD == SCALAR BIT-EXACT (cross-mode determinism — the property the v128
+        // path must guarantee; int->float and IEEE sqrt are correctly-rounded so both modes agree exactly).
+        // A looser scalar-vs-host check is a sanity guard only. Asserts kernel_simd is actually emitted.
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_ConvertSqrtMatchesScalar()
+        {
+            const int N = 1003;
+            var a = new int[N];
+            var b = new float[N];
+            for (int i = 0; i < N; i++) { a[i] = (i % 2000) - 1000; b[i] = MathF.Sin(i * 0.017f) * 5f; }
+
+            var scalar = await RunSimdConvertSqrt(a, b, N, forceSimd: false, requireSimdEmit: false);
+            var simd = await RunSimdConvertSqrt(a, b, N, forceSimd: true, requireSimdEmit: true);
+
+            int mismV = 0, firstV = -1, mismRef = 0;
+            for (int i = 0; i < N; i++)
+            {
+                if (BitConverter.SingleToInt32Bits(simd[i]) != BitConverter.SingleToInt32Bits(scalar[i]))
+                { if (mismV == 0) firstV = i; mismV++; }
+                float expect = MathF.Sqrt((a[i] * 0.5f + b[i]) * (a[i] * 0.5f + b[i]) + 4.0f);
+                if (MathF.Abs(scalar[i] - expect) > 1e-3f * (1f + MathF.Abs(expect))) mismRef++;
+            }
+            if (mismV > 0)
+                throw new Exception($"Wasm SIMD convert+sqrt != SCALAR (cross-mode determinism broken): {mismV}/{N}, " +
+                    $"first@{firstV} simd={simd[firstV]} scalar={scalar[firstV]}.");
+            if (mismRef > 0)
+                throw new Exception($"Wasm convert+sqrt scalar diverged from host reference: {mismRef}/{N} (sanity).");
+        }
+
+        private static async Task<float[]> RunSimdConvertSqrt(int[] a, float[] b, int N, bool forceSimd, bool requireSimdEmit)
+        {
+            bool savedScalar = WasmBackend.ForceScalar, savedSimd = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd;
+            WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                using var ctx = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm().ToContext();
+                WasmBackend.VerboseLogging = false;
+                WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<float>, ArrayView<float>>(
+                    Wasm_Simd_ConvertSqrtKernel);
+
+                if (requireSimdEmit)
+                {
+                    var bin = WasmBackend.LastWasmBinary;
+                    if (bin == null || !ContainsExportName(bin, "kernel_simd"))
+                        throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for convert+sqrt — " +
+                            "the convert/sqrt SIMD path is not actually under test.");
+                }
+
+                using var aBuf = acc.Allocate1D(a);
+                using var bBuf = acc.Allocate1D(b);
+                using var oBuf = acc.Allocate1D<float>(N);
+                k((Index1D)N, aBuf.View, bBuf.View, oBuf.View);
+                await acc.SynchronizeAsync();
+                return await oBuf.CopyToHostAsync<float>();
+            }
+            finally
+            {
+                WasmBackend.ForceScalar = savedScalar;
+                WasmBackend.ForceSimd = savedSimd;
+            }
+        }
+
+        // Single-block: int load -> (float) convert (i32x4->f32x4), f32x4 mul/add, f32x4.sqrt, store.
+        private static void Wasm_Simd_ConvertSqrtKernel(Index1D i, ArrayView<int> a, ArrayView<float> b, ArrayView<float> o)
+        {
+            float fa = a[i];                 // ConvertValue i32 -> f32 (signed)
+            float r = fa * 0.5f + b[i];      // f32x4 mul + add
+            o[i] = global::ILGPU.Algorithms.XMath.Sqrt(r * r + 4.0f); // f32x4 mul/add + f32x4.sqrt
+        }
+
         // Scans a wasm binary for an exact length-prefixed export-name token (the export section encodes
         // each name as len-byte + UTF-8 bytes). The length prefix (6 for "kernel", 11 for "kernel_simd")
         // separates the two so "kernel" never matches the "kernel_simd" slice.
