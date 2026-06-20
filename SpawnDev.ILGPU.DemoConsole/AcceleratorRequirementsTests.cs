@@ -304,4 +304,78 @@ public class AcceleratorRequirementsTests
         }
         return Task.CompletedTask;
     }
+
+    // ── Packed 4-bit (Float4E2M1/QInt4/QUInt4): RequiresQInt4/QUInt4 are no-op TYPE filters (load works
+    //    on all 6); RequiresPacked4Store is the meaningful one - the nibble STORE needs an atomic word
+    //    RMW, so it rules out CPU (managed ref indexer can't write a sub-byte element) AND WebGL (no
+    //    atomics). The WebGL rule-out is also exercised by the browser packed-store fail-loud tests.
+
+    [TestMethod]
+    public Task Satisfies_QInt4_QUInt4_AreNoOpTypeFilters()
+    {
+        using var context = Context.CreateDefault();
+        var cpu = context.Devices.FirstOrDefault(d => d.AcceleratorType == AcceleratorType.CPU);
+        if (cpu == null) throw new UnsupportedTestException("No CPU device available - unexpected on desktop.");
+        var req = new AcceleratorRequirements { RequiresQInt4 = true, RequiresQUInt4 = true };
+        if (!cpu.Satisfies(req))
+            throw new Exception("CPU must satisfy RequiresQInt4/QUInt4 - the packed 4-bit TYPE loads on every backend (only the STORE is gated, via RequiresPacked4Store).");
+        return Task.CompletedTask;
+    }
+
+    [TestMethod]
+    public Task Satisfies_Packed4Store_DropsCpu()
+    {
+        using var context = Context.CreateDefault();
+        var cpu = context.Devices.FirstOrDefault(d => d.AcceleratorType == AcceleratorType.CPU);
+        if (cpu == null) throw new UnsupportedTestException("No CPU device available - unexpected on desktop.");
+        var req = new AcceleratorRequirements { RequiresPacked4Store = true };
+        if (cpu.Satisfies(req))
+            throw new Exception("CPU must NOT satisfy RequiresPacked4Store - the managed reference indexer cannot write a sub-byte (nibble) element, so a packed-4-bit store is fail-loud on CPU.");
+        return Task.CompletedTask;
+    }
+
+    [TestMethod]
+    public Task Satisfies_Packed4Store_PassesOnCudaOrOpenCL()
+    {
+        using var context = Context.CreateDefault();
+        var gpu = context.Devices.FirstOrDefault(d =>
+            d.AcceleratorType == AcceleratorType.Cuda || d.AcceleratorType == AcceleratorType.OpenCL);
+        if (gpu == null) throw new UnsupportedTestException("No CUDA/OpenCL device available.");
+        var req = new AcceleratorRequirements { RequiresPacked4Store = true };
+        if (!gpu.Satisfies(req))
+            throw new Exception($"{gpu.AcceleratorType} must satisfy RequiresPacked4Store - it does the atomic word RMW nibble store.");
+        return Task.CompletedTask;
+    }
+
+    [TestMethod]
+    public Task Describe_Packed4Store_ReturnsLabel()
+    {
+        var req = new AcceleratorRequirements { RequiresPacked4Store = true };
+        var description = req.Describe();
+        if (description != "Packed4Store")
+            throw new Exception($"Expected 'Packed4Store', got '{description}'");
+        return Task.CompletedTask;
+    }
+
+    [TestMethod]
+    public Task Enumerate_Packed4Store_ExcludesCpuAndWebGL()
+    {
+        // Unlike ScatterStores (WebGL-only drop), Packed4Store ALSO drops CPU. On desktop that means
+        // CPU is filtered out and the GPU desktop devices (CUDA/OpenCL) remain.
+        using var context = Context.CreateDefault();
+        var req = new AcceleratorRequirements { RequiresPacked4Store = true };
+        var compatible = context.EnumerateCompatibleDevices(req);
+        foreach (var device in compatible)
+        {
+            if (device.AcceleratorType == AcceleratorType.CPU)
+                throw new Exception("CPU present with Packed4Store requirement - capability gate broken (CPU packed-4-bit store is fail-loud).");
+            if (device.AcceleratorType == AcceleratorType.WebGL)
+                throw new Exception("WebGL present with Packed4Store requirement - capability gate broken (WebGL has no atomics).");
+        }
+        // If the desktop exposes a CUDA/OpenCL device, it must survive the gate.
+        if (context.Devices.Any(d => d.AcceleratorType is AcceleratorType.Cuda or AcceleratorType.OpenCL)
+            && compatible.Count == 0)
+            throw new Exception("Packed4Store dropped every device although a CUDA/OpenCL device exists - gate over-filtered.");
+        return Task.CompletedTask;
+    }
 }

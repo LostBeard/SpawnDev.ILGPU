@@ -98,12 +98,37 @@ public sealed class AcceleratorRequirements
 
     /// <summary>
     /// Kernel uses the 4-bit float <c>ILGPU.Float4E2M1</c> (E2M1FN: 1/2/1, bias 1, no Inf/NaN, 16 finite
-    /// codes {0,.5,1,1.5,2,3,4,6}, saturates to +-6 - the NVFP4/MXFP4 element format). Every backend
-    /// supports it - always emulated (1-byte storage with the value in the low nibble, f32-register
-    /// compute, portable conversion on every backend incl. CUDA). Like <see cref="RequiresBFloat16"/>
-    /// this is a no-op documentation filter - it never rules out a backend.
+    /// codes {0,.5,1,1.5,2,3,4,6}, saturates to +-6 - the NVFP4/MXFP4 element format). Every backend can
+    /// LOAD it - always emulated, TRUE packed 4-bit storage (<c>[PackedBits(4)]</c>, 2 nibbles/byte,
+    /// f32-register compute, portable conversion on every backend incl. CUDA). Like <see cref="RequiresBFloat16"/>
+    /// this is a no-op documentation filter for the TYPE - it never rules out a backend. To gate the
+    /// in-kernel packed STORE (fail-loud on CPU + WebGL), use <see cref="RequiresPacked4Store"/>.
     /// </summary>
     public bool RequiresFloat4E2M1 { get; init; }
+
+    /// <summary>
+    /// Kernel uses the packed 4-bit signed integer <c>ILGPU.QInt4</c> (-8..7, <c>[PackedBits(4)]</c>,
+    /// 2 nibbles/byte). Every backend can LOAD it; like <see cref="RequiresFloat4E2M1"/> this is a no-op
+    /// documentation filter for the TYPE. Gate the in-kernel packed STORE with <see cref="RequiresPacked4Store"/>.
+    /// </summary>
+    public bool RequiresQInt4 { get; init; }
+
+    /// <summary>
+    /// Kernel uses the packed 4-bit unsigned integer <c>ILGPU.QUInt4</c> (0..15, <c>[PackedBits(4)]</c>,
+    /// 2 nibbles/byte). Every backend can LOAD it; like <see cref="RequiresFloat4E2M1"/> this is a no-op
+    /// documentation filter for the TYPE. Gate the in-kernel packed STORE with <see cref="RequiresPacked4Store"/>.
+    /// </summary>
+    public bool RequiresQUInt4 { get; init; }
+
+    /// <summary>
+    /// Kernel STORES into a packed 4-bit view (<c>ArrayView&lt;Float4E2M1&gt;</c> / <c>QInt4</c> / <c>QUInt4</c>),
+    /// or radix-sorts one. Writing a 4-bit nibble is a read-modify-write of the enclosing 32-bit word, which
+    /// requires an atomic word RMW - so it is supported on CUDA, OpenCL, WebGPU, and Wasm, but is FAIL-LOUD on
+    /// WebGL (no atomics) and CPU (the managed reference indexer cannot address a sub-byte element). Set this
+    /// to filter CPU + WebGL out at selection time, instead of relying on the compile-time fail-loud throw.
+    /// (LOAD-only kernels do not need this - decode is read-only and works on all 6 backends.)
+    /// </summary>
+    public bool RequiresPacked4Store { get; init; }
 
     /// <summary>
     /// Kernel uses Float64 (<c>double</c>). True is compatible with every backend - WebGPU
@@ -262,6 +287,9 @@ public static class AcceleratorRequirementsExtensions
         if (requirements.RequiresFloat8E4M3 && !HasFloat8(device)) return false;
         if (requirements.RequiresFloat8E5M2 && !HasFloat8(device)) return false;
         if (requirements.RequiresFloat4E2M1 && !HasFloat4(device)) return false;
+        if (requirements.RequiresQInt4 && !HasFloat4(device)) return false;
+        if (requirements.RequiresQUInt4 && !HasFloat4(device)) return false;
+        if (requirements.RequiresPacked4Store && !HasPacked4Store(backend)) return false;
         if (requirements.RequiresFloat64 && !HasFloat64(device)) return false;
         if (requirements.RequiresFloat64Native && !HasFloat64Native(device)) return false;
         if (requirements.RequiresFloat64Strict && !HasFloat64Strict(device)) return false;
@@ -303,6 +331,18 @@ public static class AcceleratorRequirementsExtensions
     private static bool HasScatterStores(AcceleratorType backend) => backend switch
     {
         AcceleratorType.WebGL => false,
+        _ => true,
+    };
+
+    // In-kernel STORE into a packed 4-bit view (Float4E2M1/QInt4/QUInt4) or a packed-4-bit radix sort.
+    // Writing one nibble is a read-modify-write of the enclosing u32 word, needing an atomic word RMW.
+    // WebGL has no atomics; the CPU backend runs the literal managed reference indexer, which cannot
+    // address a sub-byte element. Both fail-loud at compile time - this gate filters them at selection.
+    // CUDA/OpenCL/WebGPU/Wasm do the atomic word RMW. (LOAD is read-only and works on all 6 backends.)
+    private static bool HasPacked4Store(AcceleratorType backend) => backend switch
+    {
+        AcceleratorType.WebGL => false,
+        AcceleratorType.CPU => false,
         _ => true,
     };
 
@@ -406,6 +446,9 @@ public static class AcceleratorRequirementsExtensions
         if (r.RequiresFloat8E4M3) flags.Add("Float8E4M3");
         if (r.RequiresFloat8E5M2) flags.Add("Float8E5M2");
         if (r.RequiresFloat4E2M1) flags.Add("Float4E2M1");
+        if (r.RequiresQInt4) flags.Add("QInt4");
+        if (r.RequiresQUInt4) flags.Add("QUInt4");
+        if (r.RequiresPacked4Store) flags.Add("Packed4Store");
         if (r.RequiresFloat64) flags.Add("Float64");
         if (r.RequiresFloat64Native) flags.Add("Float64Native");
         if (r.RequiresFloat64Strict) flags.Add("Float64Strict");
