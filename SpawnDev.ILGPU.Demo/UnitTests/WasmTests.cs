@@ -2901,6 +2901,32 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
         }
 
+        // Wasm SIMD128 EDGE-N robustness (2026-06-20). The by-4 + scalar-tail dispatch has distinct paths
+        // by N mod 4 and by whether any full group exists: N<4 (NO SIMD group, all scalar tail), N=4/8/16
+        // (exact groups, NO tail), N=5/7/17 (groups + tail). External consumers hit all of these, so the
+        // SIMD output must match scalar+reference at every N (not just the N=1003 the other gates use).
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_EdgeNMatchesScalarAndReference()
+        {
+            foreach (int N in new[] { 1, 2, 3, 4, 5, 7, 8, 15, 16, 17, 33 })
+            {
+                var a = new float[N]; var b = new float[N];
+                for (int i = 0; i < N; i++) { a[i] = (i * 1.5f) - 3f; b[i] = MathF.Cos(i * 0.3f) * 2f; }
+                var reference = new float[N];
+                for (int i = 0; i < N; i++) reference[i] = a[i] * 2f + b[i]; // == Wasm_Simd_ElementwiseKernel
+
+                var scalar = await RunSimdElementwise(a, b, N, forceSimd: false, requireSimdEmit: false);
+                var simd = await RunSimdElementwise(a, b, N, forceSimd: true, requireSimdEmit: true);
+                for (int i = 0; i < N; i++)
+                {
+                    if (BitConverter.SingleToInt32Bits(scalar[i]) != BitConverter.SingleToInt32Bits(reference[i]))
+                        throw new Exception($"Wasm SCALAR edge-N={N} != reference at {i}: got={scalar[i]} exp={reference[i]}.");
+                    if (BitConverter.SingleToInt32Bits(simd[i]) != BitConverter.SingleToInt32Bits(reference[i]))
+                        throw new Exception($"Wasm SIMD edge-N={N} != reference at {i}: got={simd[i]} exp={reference[i]} (by-4/tail dispatch boundary).");
+                }
+            }
+        }
+
         // Scans a wasm binary for an exact length-prefixed export-name token (the export section encodes
         // each name as len-byte + UTF-8 bytes). The length prefix (6 for "kernel", 11 for "kernel_simd")
         // separates the two so "kernel" never matches the "kernel_simd" slice.
