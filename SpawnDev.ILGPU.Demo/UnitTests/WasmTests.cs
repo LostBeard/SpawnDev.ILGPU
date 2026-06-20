@@ -2130,6 +2130,102 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             }
         }
 
+        // Wasm SIMD128 Stage-3a INTEGER (i32x4) numerical gate (2026-06-20, Geordi). Same shape as the
+        // f32 elementwise gate but for the i32x4 lane class: a single-block kernel that exercises i32x4
+        // add/sub/mul + v128.and/or/xor + i32x4.min_s/max_s + i32x4.neg, with uniform constants splatted.
+        // Asserts ForceSimd emits a kernel_simd export AND the v128 by-4 + scalar-tail dispatch is exactly
+        // equal (integers are exact) to the scalar path AND a CPU reference. N=1003 hits the scalar tail.
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_Int32ElementwiseMatchesScalarAndReference()
+        {
+            const int N = 1003;
+            var a = new int[N];
+            var b = new int[N];
+            for (int i = 0; i < N; i++) { a[i] = unchecked((int)((uint)i * 2654435761u)) - 7; b[i] = (i % 53) - 17; }
+
+            var reference = new int[N];
+            for (int i = 0; i < N; i++) reference[i] = Int32RefBody(a[i], b[i]);
+
+            var scalar = await RunSimdInt32(a, b, N, forceSimd: false, requireSimdEmit: false);
+            var simd = await RunSimdInt32(a, b, N, forceSimd: true, requireSimdEmit: true);
+
+            int mismS = 0, mismV = 0, firstS = -1, firstV = -1;
+            for (int i = 0; i < N; i++)
+            {
+                if (scalar[i] != reference[i]) { if (mismS == 0) firstS = i; mismS++; }
+                if (simd[i] != reference[i]) { if (mismV == 0) firstV = i; mismV++; }
+            }
+            if (mismS > 0)
+                throw new Exception($"Wasm SCALAR i32 elementwise != reference: {mismS}/{N}, first@{firstS} " +
+                    $"got={scalar[firstS]} exp={reference[firstS]} (baseline scalar path wrong).");
+            if (mismV > 0)
+                throw new Exception($"Wasm SIMD (v128 kernel_simd) i32 elementwise != reference: {mismV}/{N}, " +
+                    $"first@{firstV} got={simd[firstV]} exp={reference[firstV]} scalarHere={scalar[firstV]} " +
+                    $"(scalar matched reference, so the i32x4 by-4/tail dispatch diverges).");
+        }
+
+        // The exact op sequence in Wasm_Simd_Int32Kernel — reused as the CPU reference (C# int == wasm i32).
+        private static int Int32RefBody(int x, int y)
+        {
+            int r = x + y; r = r * 3; r = r - y;
+            r = r & 0x00FFFFFF; r = r | 0x100; r = r ^ y;
+            r = Math.Min(r, x); r = Math.Max(r, -5);
+            return -r;
+        }
+
+        private static async Task<int[]> RunSimdInt32(int[] a, int[] b, int N, bool forceSimd, bool requireSimdEmit)
+        {
+            bool savedScalar = WasmBackend.ForceScalar, savedSimd = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd;
+            WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                using var ctx = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm().ToContext();
+                WasmBackend.VerboseLogging = false;
+                WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>, ArrayView<int>>(
+                    Wasm_Simd_Int32Kernel);
+
+                if (requireSimdEmit)
+                {
+                    var bin = WasmBackend.LastWasmBinary;
+                    if (bin == null || !ContainsExportName(bin, "kernel_simd"))
+                        throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for the i32 kernel — " +
+                            "the integer SIMD path is not actually under test (would pass vacuously via scalar).");
+                }
+
+                using var aBuf = acc.Allocate1D(a);
+                using var bBuf = acc.Allocate1D(b);
+                using var oBuf = acc.Allocate1D<int>(N);
+                k((Index1D)N, aBuf.View, bBuf.View, oBuf.View);
+                await acc.SynchronizeAsync();
+                return await oBuf.CopyToHostAsync<int>();
+            }
+            finally
+            {
+                WasmBackend.ForceScalar = savedScalar;
+                WasmBackend.ForceSimd = savedSimd;
+            }
+        }
+
+        // Single straight-line block exercising the i32x4 lane class: add, mul (splat const), sub, and/or/xor
+        // (v128 bitwise, splat const), signed min/max, neg + store. Mirrors Int32RefBody exactly.
+        private static void Wasm_Simd_Int32Kernel(Index1D i, ArrayView<int> a, ArrayView<int> b, ArrayView<int> o)
+        {
+            int x = a[i];
+            int y = b[i];
+            int r = x + y;
+            r = r * 3;
+            r = r - y;
+            r = r & 0x00FFFFFF;
+            r = r | 0x100;
+            r = r ^ y;
+            r = Math.Min(r, x);
+            r = Math.Max(r, -5);
+            o[i] = -r;
+        }
+
         // Scans a wasm binary for an exact length-prefixed export-name token (the export section encodes
         // each name as len-byte + UTF-8 bytes). The length prefix (6 for "kernel", 11 for "kernel_simd")
         // separates the two so "kernel" never matches the "kernel_simd" slice.

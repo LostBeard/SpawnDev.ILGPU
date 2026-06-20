@@ -55,6 +55,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// (which runs every thread). Guards against any analysis under-detection of lane variance.</summary>
         private int _simdV128StoreCount;
 
+        /// <summary>The lane-VARIANT values that were actually emitted as a real v128 local (a Load
+        /// result or an f32x4/i32x4 arithmetic result). A lane-variant operand that is NOT in this set
+        /// is something the 4-lane model cannot broadcast correctly — most importantly the per-lane
+        /// thread INDEX used as DATA (e.g. <c>out[i] = i * 2</c>): it differs per lane as
+        /// <c>(base, base+1, base+2, base+3)</c>, NOT a splat of <c>base</c>. <see cref="PushAsV128"/>
+        /// bails when it sees such an operand, so index-as-data kernels fall back to scalar until the
+        /// index-vector increment lands. Reset per <see cref="TryGenerateSimdKernel"/> attempt.</summary>
+        private readonly HashSet<Value> _simdV128Values = new();
+
         /// <summary>
         /// Attempts to emit the additive v128 <c>kernel_simd</c> for the Stage-3a f32 unit-stride
         /// elementwise class. Saves/clears/restores the generator's local+Code context so the
@@ -106,6 +115,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 _localFirstState.Clear();
                 _localCrossesState.Clear();
                 _simdV128StoreCount = 0;
+                _simdV128Values.Clear();
 
                 foreach (var v in block)
                 {
@@ -144,9 +154,24 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
         }
 
-        /// <summary>True if <paramref name="v"/> is in the Stage-3a f32 unit-stride elementwise class.
+        /// <summary>The 4-lane SIMD class of a primitive type: f32 → f32x4, i32 → i32x4, else none.
+        /// Both pack 4 elements per v128 (matching the by-4 dispatch). Sub-word ints (byte/short) and
+        /// 2-lane (i64/f64) are deliberately NOT in this set yet — they need a different lane count.</summary>
+        private enum LaneClass { None, F32x4, I32x4 }
+
+        private static LaneClass ClassOf(TypeNode t) =>
+            t is PrimitiveType pt
+                ? pt.BasicValueType switch
+                {
+                    global::ILGPU.BasicValueType.Float32 => LaneClass.F32x4,
+                    global::ILGPU.BasicValueType.Int32 => LaneClass.I32x4,
+                    _ => LaneClass.None,
+                }
+                : LaneClass.None;
+
+        /// <summary>True if <paramref name="v"/> is in the Stage-3a unit-stride elementwise class.
         /// Address / lane-invariant / terminator values are always fine (emitted scalar); lane-variant
-        /// values must be f32 Load / f32x4 arithmetic / Store of an f32. Anything else ⇒ bail.</summary>
+        /// values must be a 4-lane (f32 or i32) Load / arithmetic / Store. Anything else ⇒ bail.</summary>
         private bool IsStage3aEmittable(Value v, HashSet<Value> laneVariant)
         {
             // Structs anywhere ⇒ out of class (struct snapshot path touches scratch; later increment).
@@ -158,26 +183,53 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // Lane-invariant primitives: emitted scalar + splatted on demand. OK.
             if (!laneVariant.Contains(v)) return true;
 
-            // Lane-variant data: must be f32 (4-lane), and one of Load / arith / Store / Parameter.
+            // Lane-variant data: must be a 4-lane (f32/i32) Load / arith / Store. (An index-as-data
+            // operand passes this gate but is rejected during emit by PushAsV128 — it has no v128 local.)
             switch (v)
             {
                 case Load ld:
-                    return IsF32(ld.Type);
+                    return ClassOf(ld.Type) != LaneClass.None && AllUsesVectorizable(ld);
                 case Store st:
-                    // store of a lane-variant f32 value to a (scalar) address
-                    return IsF32(st.Value.Resolve().Type);
+                    return ClassOf(st.Value.Resolve().Type) != LaneClass.None;
                 case BinaryArithmeticValue ba:
-                    return IsF32(ba.Type) && MapF32x4Binary(ba.Kind) != 0;
+                    return MapBinary(ba) != 0 && AllUsesVectorizable(ba);
                 case UnaryArithmeticValue ua:
-                    return IsF32(ua.Type) && MapF32x4Unary(ua.Kind) != 0;
+                    return MapUnary(ua) != 0 && AllUsesVectorizable(ua);
                 default:
-                    // index-as-data, compares/selects, converts, gather LEAs, i64/f64 ⇒ later increments
+                    // compares/selects, converts, gather LEAs, shifts, i64/f64 ⇒ later increments
                     return false;
             }
         }
 
-        private static bool IsF32(TypeNode t) =>
-            t is PrimitiveType pt && pt.BasicValueType == global::ILGPU.BasicValueType.Float32;
+        /// <summary>True iff EVERY consumer of the (about-to-be-vectorized) value <paramref name="v"/> is
+        /// a use we emit as a vector: a mapped f32x4/i32x4 arithmetic operand, or the stored VALUE of a
+        /// Store. Anything else — most importantly an address computation (a <c>LoadElementAddress</c>
+        /// using a loaded i32 as a GATHER index, or a store TARGET) — reads the operand as a scalar i32,
+        /// so vectorizing <paramref name="v"/> to a v128 would make the emitted module fail to validate
+        /// (<c>i32.mul expected i32, found v128</c>). When a use is outside the vector subgraph we bail
+        /// the whole kernel to the proven scalar path. This is what keeps the vectorized value-set CLOSED;
+        /// it is the guard that distinguishes a unit-stride elementwise kernel (safe) from a gather/scatter
+        /// kernel (an i32 index load feeding an address — Stage-3a-later). The f32-only emitter never
+        /// needed this because address indices are integers, never f32.</summary>
+        private bool AllUsesVectorizable(Value v)
+        {
+            foreach (var use in v.Uses)
+            {
+                var user = use.Resolve();
+                switch (user)
+                {
+                    case BinaryArithmeticValue ba when MapBinary(ba) != 0:
+                        break; // mapped binary: both operand positions are v128 (we don't map scalar-count shifts)
+                    case UnaryArithmeticValue ua when MapUnary(ua) != 0:
+                        break;
+                    case Store st when ReferenceEquals(st.Value.Resolve(), v):
+                        break; // used as the stored value (vector store)
+                    default:
+                        return false; // address/LEA index, store target, compare, convert, call, struct, terminator…
+                }
+            }
+            return true;
+        }
 
         /// <summary>Emits a single value in the v128 pass. Returns false to bail (unhandled).</summary>
         private bool EmitSimdValue(Value v, HashSet<Value> laneVariant)
@@ -194,38 +246,41 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             {
                 case Load ld:
                 {
-                    if (!IsF32(ld.Type)) return false;
+                    if (ClassOf(ld.Type) == LaneClass.None) return false;
                     var target = AllocateLocal(ld, WasmOpCodes.V128);
                     EmitGetLocal(ld.Source.Resolve());                 // scalar lane-base byte address
                     WasmModuleBuilder.EmitSimdMem(Code, WasmOpCodes.V128Load, 2, 0); // 4-byte align, unit-stride
                     WasmModuleBuilder.EmitLocalSet(Code, target);
+                    _simdV128Values.Add(ld);
                     return true;
                 }
                 case BinaryArithmeticValue ba:
                 {
-                    uint op = MapF32x4Binary(ba.Kind);
-                    if (op == 0 || !IsF32(ba.Type)) return false;
+                    uint op = MapBinary(ba);
+                    if (op == 0) return false;
                     var target = AllocateLocal(ba, WasmOpCodes.V128);
                     if (!PushAsV128(ba.Left.Resolve(), laneVariant)) return false;
                     if (!PushAsV128(ba.Right.Resolve(), laneVariant)) return false;
-                    WasmModuleBuilder.EmitSimd(Code, op);              // f32x4.<op> (mul+add, NO fused FMA)
+                    WasmModuleBuilder.EmitSimd(Code, op);              // f32x4/i32x4 op (NO fused FMA)
                     WasmModuleBuilder.EmitLocalSet(Code, target);
+                    _simdV128Values.Add(ba);
                     return true;
                 }
                 case UnaryArithmeticValue ua:
                 {
-                    uint op = MapF32x4Unary(ua.Kind);
-                    if (op == 0 || !IsF32(ua.Type)) return false;
+                    uint op = MapUnary(ua);
+                    if (op == 0) return false;
                     var target = AllocateLocal(ua, WasmOpCodes.V128);
                     if (!PushAsV128(ua.Value.Resolve(), laneVariant)) return false;
                     WasmModuleBuilder.EmitSimd(Code, op);
                     WasmModuleBuilder.EmitLocalSet(Code, target);
+                    _simdV128Values.Add(ua);
                     return true;
                 }
                 case Store st:
                 {
                     var storeVal = st.Value.Resolve();
-                    if (!IsF32(storeVal.Type)) return false;
+                    if (ClassOf(storeVal.Type) == LaneClass.None) return false;
                     EmitGetLocal(st.Target.Resolve());                 // scalar lane-base byte address
                     if (!PushAsV128(storeVal, laneVariant)) return false;
                     WasmModuleBuilder.EmitSimdMem(Code, WasmOpCodes.V128Store, 2, 0);
@@ -237,35 +292,81 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
         }
 
-        /// <summary>Pushes <paramref name="op"/> onto the stack as a v128: a lane-variant f32 value is
-        /// already a v128 local; a lane-invariant scalar f32 is loaded and <c>f32x4.splat</c>'d.</summary>
+        /// <summary>Pushes <paramref name="op"/> onto the stack as a v128. A lane-VARIANT value must
+        /// already be a real v128 local (a Load/arith result tracked in <see cref="_simdV128Values"/>) —
+        /// if it is lane-variant but NOT such a local (the per-lane index used as data), we cannot
+        /// broadcast it correctly in the 4-lane model, so bail. A lane-INVARIANT scalar is loaded and
+        /// splatted (f32x4.splat / i32x4.splat) to all four lanes.</summary>
         private bool PushAsV128(Value op, HashSet<Value> laneVariant)
         {
-            if (!IsF32(op.Type)) return false;
-            EmitGetLocal(op);
-            if (!laneVariant.Contains(op))
-                WasmModuleBuilder.EmitSimd(Code, WasmOpCodes.F32x4Splat); // broadcast the uniform scalar
+            var cls = ClassOf(op.Type);
+            if (cls == LaneClass.None) return false;
+            if (laneVariant.Contains(op))
+            {
+                if (!_simdV128Values.Contains(op)) return false;       // index-as-data etc. ⇒ scalar fallback
+                EmitGetLocal(op);                                      // already a v128 local
+                return true;
+            }
+            EmitGetLocal(op);                                          // uniform scalar
+            WasmModuleBuilder.EmitSimd(Code, cls == LaneClass.F32x4 ? WasmOpCodes.F32x4Splat : WasmOpCodes.I32x4Splat);
             return true;
         }
 
-        /// <summary>Maps an f32 binary arithmetic kind to its f32x4 opcode, or 0 if unsupported in 3a.</summary>
-        private static uint MapF32x4Binary(BinaryArithmeticKind kind) => kind switch
+        /// <summary>Maps a binary arithmetic value to its f32x4/i32x4 opcode, or 0 if unsupported in 3a.
+        /// Integer Min/Max pick the signed/unsigned variant from <see cref="ArithmeticFlags.Unsigned"/>;
+        /// And/Or/Xor are the whole-vector v128 bitwise ops. Div/Rem (no SIMD int divide) and shifts
+        /// (their count operand is a scalar i32, not a lane — a later increment) return 0 ⇒ scalar.</summary>
+        private static uint MapBinary(BinaryArithmeticValue v)
         {
-            BinaryArithmeticKind.Add => WasmOpCodes.F32x4Add,
-            BinaryArithmeticKind.Sub => WasmOpCodes.F32x4Sub,
-            BinaryArithmeticKind.Mul => WasmOpCodes.F32x4Mul,
-            BinaryArithmeticKind.Div => WasmOpCodes.F32x4Div,
-            BinaryArithmeticKind.Min => WasmOpCodes.F32x4Min,
-            BinaryArithmeticKind.Max => WasmOpCodes.F32x4Max,
-            _ => 0u,
-        };
+            var cls = ClassOf(v.Type);
+            bool u = (v.Flags & ArithmeticFlags.Unsigned) == ArithmeticFlags.Unsigned;
+            if (cls == LaneClass.F32x4)
+                return v.Kind switch
+                {
+                    BinaryArithmeticKind.Add => WasmOpCodes.F32x4Add,
+                    BinaryArithmeticKind.Sub => WasmOpCodes.F32x4Sub,
+                    BinaryArithmeticKind.Mul => WasmOpCodes.F32x4Mul,
+                    BinaryArithmeticKind.Div => WasmOpCodes.F32x4Div,
+                    BinaryArithmeticKind.Min => WasmOpCodes.F32x4Min,
+                    BinaryArithmeticKind.Max => WasmOpCodes.F32x4Max,
+                    _ => 0u,
+                };
+            if (cls == LaneClass.I32x4)
+                return v.Kind switch
+                {
+                    BinaryArithmeticKind.Add => WasmOpCodes.I32x4Add,
+                    BinaryArithmeticKind.Sub => WasmOpCodes.I32x4Sub,
+                    BinaryArithmeticKind.Mul => WasmOpCodes.I32x4Mul,
+                    BinaryArithmeticKind.And => WasmOpCodes.V128And,
+                    BinaryArithmeticKind.Or => WasmOpCodes.V128Or,
+                    BinaryArithmeticKind.Xor => WasmOpCodes.V128Xor,
+                    BinaryArithmeticKind.Min => u ? WasmOpCodes.I32x4MinU : WasmOpCodes.I32x4MinS,
+                    BinaryArithmeticKind.Max => u ? WasmOpCodes.I32x4MaxU : WasmOpCodes.I32x4MaxS,
+                    _ => 0u, // Div/Rem (no SIMD int divide), Shl/Shr (scalar count operand) ⇒ later
+                };
+            return 0u;
+        }
 
-        /// <summary>Maps an f32 unary arithmetic kind to its f32x4 opcode, or 0 if unsupported in 3a.</summary>
-        private static uint MapF32x4Unary(UnaryArithmeticKind kind) => kind switch
+        /// <summary>Maps a unary arithmetic value to its f32x4/i32x4 opcode, or 0 if unsupported in 3a.</summary>
+        private static uint MapUnary(UnaryArithmeticValue v)
         {
-            UnaryArithmeticKind.Neg => WasmOpCodes.F32x4Neg,
-            UnaryArithmeticKind.Abs => WasmOpCodes.F32x4Abs,
-            _ => 0u,  // Sqrt/etc. are later-increment (verify the kind name against the IR enum first)
-        };
+            var cls = ClassOf(v.Type);
+            if (cls == LaneClass.F32x4)
+                return v.Kind switch
+                {
+                    UnaryArithmeticKind.Neg => WasmOpCodes.F32x4Neg,
+                    UnaryArithmeticKind.Abs => WasmOpCodes.F32x4Abs,
+                    _ => 0u, // Sqrt/etc. are a later increment
+                };
+            if (cls == LaneClass.I32x4)
+                return v.Kind switch
+                {
+                    UnaryArithmeticKind.Neg => WasmOpCodes.I32x4Neg,
+                    UnaryArithmeticKind.Abs => WasmOpCodes.I32x4Abs,
+                    UnaryArithmeticKind.Not => WasmOpCodes.V128Not, // whole-vector bitwise not
+                    _ => 0u,
+                };
+            return 0u;
+        }
     }
 }

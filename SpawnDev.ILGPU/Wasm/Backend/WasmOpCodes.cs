@@ -366,10 +366,18 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public const uint V128Xor = 81;          // v128.xor
         public const uint V128Bitselect = 82;    // v128.bitselect (a, b, mask) -> per-bit select
         // i32x4 arithmetic
+        public const uint I32x4Abs = 160;        // i32x4.abs
         public const uint I32x4Neg = 161;        // i32x4.neg
+        public const uint I32x4Shl = 171;        // i32x4.shl   (v128, i32 count) -> v128
+        public const uint I32x4ShrS = 172;       // i32x4.shr_s (v128, i32 count) -> v128
+        public const uint I32x4ShrU = 173;       // i32x4.shr_u (v128, i32 count) -> v128
         public const uint I32x4Add = 174;        // i32x4.add
         public const uint I32x4Sub = 177;        // i32x4.sub
         public const uint I32x4Mul = 181;        // i32x4.mul
+        public const uint I32x4MinS = 182;       // i32x4.min_s
+        public const uint I32x4MinU = 183;       // i32x4.min_u
+        public const uint I32x4MaxS = 184;       // i32x4.max_s
+        public const uint I32x4MaxU = 185;       // i32x4.max_u
         // f32x4 arithmetic
         public const uint F32x4Abs = 224;        // f32x4.abs
         public const uint F32x4Neg = 225;        // f32x4.neg
