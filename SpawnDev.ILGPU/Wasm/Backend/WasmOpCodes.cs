@@ -396,6 +396,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public const uint I32x4MinU = 183;       // i32x4.min_u
         public const uint I32x4MaxS = 184;       // i32x4.max_s
         public const uint I32x4MaxU = 185;       // i32x4.max_u
+        // f32x4 rounding (IEEE round-to-integral — bit-identical to scalar f32.ceil/floor)
+        public const uint F32x4Ceil = 103;       // f32x4.ceil
+        public const uint F32x4Floor = 104;      // f32x4.floor
+        public const uint F32x4Trunc = 105;      // f32x4.trunc
+        public const uint F32x4Nearest = 106;    // f32x4.nearest
         // f32x4 arithmetic
         public const uint F32x4Abs = 224;        // f32x4.abs
         public const uint F32x4Neg = 225;        // f32x4.neg

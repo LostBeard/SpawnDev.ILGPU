@@ -2502,6 +2502,50 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             finally { WasmBackend.ForceScalar = savedScalar; WasmBackend.ForceSimd = savedSimd; }
         }
 
+        // Wasm SIMD128 Stage-3a f32x4 FLOOR/CEIL gate (2026-06-20). IEEE round-to-integral is bit-identical
+        // across scalar f32.floor/ceil, v128 f32x4.floor/ceil, and host MathF.Floor/Ceiling → SIMD == scalar
+        // == reference exactly. Asserts kernel_simd is emitted. N=1003 hits the scalar tail.
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_FloorCeilMatchesScalarAndReference()
+        {
+            const int N = 1003;
+            var a = new float[N]; var b = new float[N];
+            for (int i = 0; i < N; i++) { a[i] = (i * 0.37f) - 180f; b[i] = MathF.Sin(i * 0.05f) * 50f; }
+            var reference = new float[N];
+            for (int i = 0; i < N; i++) reference[i] = MathF.Floor(a[i] * 3f) + MathF.Ceiling(b[i]);
+
+            var scalar = await RunSimdFloorCeil(a, b, N, forceSimd: false, requireSimdEmit: false);
+            var simd = await RunSimdFloorCeil(a, b, N, forceSimd: true, requireSimdEmit: true);
+            AssertExactF(scalar, reference, simd, "floor-ceil");
+        }
+
+        private static void Wasm_Simd_FloorCeilKernel(Index1D i, ArrayView<float> a, ArrayView<float> b, ArrayView<float> o)
+            => o[i] = global::ILGPU.Algorithms.XMath.Floor(a[i] * 3f) + global::ILGPU.Algorithms.XMath.Ceiling(b[i]);
+
+        private static async Task<float[]> RunSimdFloorCeil(float[] a, float[] b, int N, bool forceSimd, bool requireSimdEmit)
+        {
+            bool savedScalar = WasmBackend.ForceScalar, savedSimd = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd; WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                using var ctx = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm().ToContext();
+                WasmBackend.VerboseLogging = false; WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>>(Wasm_Simd_FloorCeilKernel);
+                if (requireSimdEmit)
+                {
+                    var bin = WasmBackend.LastWasmBinary;
+                    if (bin == null || !ContainsExportName(bin, "kernel_simd"))
+                        throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for floor/ceil.");
+                }
+                using var aBuf = acc.Allocate1D(a); using var bBuf = acc.Allocate1D(b); using var oBuf = acc.Allocate1D<float>(N);
+                k((Index1D)N, aBuf.View, bBuf.View, oBuf.View);
+                await acc.SynchronizeAsync();
+                return await oBuf.CopyToHostAsync<float>();
+            }
+            finally { WasmBackend.ForceScalar = savedScalar; WasmBackend.ForceSimd = savedSimd; }
+        }
+
         // Scans a wasm binary for an exact length-prefixed export-name token (the export section encodes
         // each name as len-byte + UTF-8 bytes). The length prefix (6 for "kernel", 11 for "kernel_simd")
         // separates the two so "kernel" never matches the "kernel_simd" slice.

@@ -750,8 +750,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 {
                     UnaryArithmeticKind.Neg => WasmOpCodes.F32x4Neg,
                     UnaryArithmeticKind.Abs => WasmOpCodes.F32x4Abs,
-                    UnaryArithmeticKind.SqrtF => WasmOpCodes.F32x4Sqrt, // IEEE sqrt — bit-identical to scalar f32.sqrt
-                    _ => 0u, // Floor/Ceil/transcendentals are a later increment
+                    UnaryArithmeticKind.SqrtF => WasmOpCodes.F32x4Sqrt,   // IEEE sqrt — bit-identical to scalar f32.sqrt
+                    UnaryArithmeticKind.FloorF => WasmOpCodes.F32x4Floor, // IEEE round-to-integral (toward -inf)
+                    UnaryArithmeticKind.CeilingF => WasmOpCodes.F32x4Ceil,// IEEE round-to-integral (toward +inf)
+                    _ => 0u, // transcendentals (sin/exp/…) are a later increment (need lane-wise math calls)
                 };
             if (cls == LaneClass.I32x4)
                 return v.Kind switch
