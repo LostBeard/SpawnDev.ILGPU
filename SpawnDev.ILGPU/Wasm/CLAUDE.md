@@ -197,9 +197,28 @@ only — no production kernel emits v128 yet; the scalar path is byte-identical.
   `wasm-validate` (clean) + `wasm2wat` (decodes to the intended instructions). SIMD is default-on in
   wabt 1.0.39 (no `--enable-simd` flag; use `--enable-threads` for the shared-memory import).
 
-NEXT (Phase 2): vectorize ONE hot ALU-dense kernel behind `EffectiveWasmSimd`, CPU-oracle correct in
-BOTH modes, A/B on SIMD hardware. Phase-0 measured the ceiling at ~1.5-2× (not 4×) on ALU-dense kernels
-only — light/elementwise kernels are dispatch/host-bound, not ALU-bound.
+### SIMD128 codegen — SHIPPED coverage (Phase 3, 2026-06-20)
+The additive `kernel_simd` emitter (`WasmSimdKernelEmitter.cs`, generated AFTER the scalar kernel in a
+saved/restored context → scalar byte-identical; bails to scalar on anything out-of-class → zero
+regression) now vectorizes a broad class:
+- **Shapes:** single-block · canonical counted while-loops (v128 accumulator phi, via ILGPU `LoopInfo`) ·
+  divergent if-DIAMONDs (`cond?x:y` → compare-mask + `v128.bitselect`, sides must be pure).
+- **f32x4:** +/-/*/÷ min max neg abs sqrt floor ceil, all 6 compares.
+- **i32x4:** +/-/* neg abs min max, v128 and/or/xor/not, shifts (UNIFORM count only), all compares.
+- **i32→f32 convert** (cross-mode exact) · **GATHER** (`src[idx[i]]` → per-lane extract→scalar-load→
+  replace). Lane-variant→v128, lane-invariant→scalar+splat. By-4 dispatch + scalar tail.
+- **Gates:** `WasmTests.Wasm_Simd128_*` (15) each assert kernel_simd IS emitted + BIT-EXACT
+  scalar==simd==CPU-reference. **ALWAYS run the FULL WasmTests after any coverage change** — SIMD is
+  on-by-default in the browser, so a generalization can mis-vectorize an existing suite kernel.
+- **Dual-mode CI (Stage 3d):** `PMT_WASM_SIMD=off` appends `?wasmsimd=off`; the Demo's Program.cs forces
+  `WasmBackend.ForceScalar=true` for the whole sweep (scalar = cross-mode oracle). Marker
+  `[Wasm-SIMD-Mode] ... scalar-mode sweep engaged` lands in `browser_console.log` (proof it engaged).
+- **Cross-mode determinism is LAW:** never an op whose v128 form differs from scalar (no fused FMA; f32→i32
+  stays scalar — wasm SIMD only has saturating trunc_sat, scalar traps).
+
+NEXT (the hard tail): i64x2/f64x2 2-lane (double-pump the by-4 dispatch), scatter/masked stores + general
+3b divergence, real `Warp.Shuffle` via `i8x16.shuffle`. Honest ceiling: ~1.5-3× on ALU-dense kernels (the
+fixed dispatch/memory floor caps it; light/elementwise kernels are dispatch-bound, gain little).
 
 ## Offline compile dump (desktop, no browser) — `wasm-dump`
 
