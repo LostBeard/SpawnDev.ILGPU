@@ -573,7 +573,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             var analysis = WasmSimdAnalysis.Analyze(Method, _indexParam, out var laneVariant);
             if (laneVariant.Count == 0) return false; // barrier/atomic/warp early-reject
             if (ifb.Condition.Resolve() is not CompareValue cmp || !laneVariant.Contains(cmp) || MapCompare(cmp) == 0)
-                return false; // need a lane-variant 4-lane (f32/i32) compare → v128 mask
+                return false; // need a lane-variant compare → v128 mask (4-lane f32/i32, or 2-lane f64/i64)
+            bool cond2lane = Is2Lane(ClassOf(cmp.Left.Resolve().Type)); // f64/i64 compare → lo+hi 2-lane mask
 
             // then-block: collect the Store(s); everything else must be SPECULATION-SAFE pure compute.
             var stores = new List<Store>();
@@ -582,7 +583,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 var v = ve.Value;
                 if (v is Store st)
                 {
-                    if (ClassOf(st.Value.Resolve().Type) is not (LaneClass.F32x4 or LaneClass.I32x4)) return false; // 4-lane only
+                    var svc = ClassOf(st.Value.Resolve().Type);
+                    if (svc == LaneClass.None) return false;          // unhandled store-value class
+                    if (Is2Lane(svc) != cond2lane) return false;      // mask width must match value width (lane count)
                     if (st.Target.Resolve() is LoadElementAddress stl && IsGatherLEA(stl)) return false; // scatter-store: later
                     stores.Add(st);
                     continue;
@@ -619,40 +622,76 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 foreach (var ve in entry) { var v = ve.Value; if (v is PhiValue) continue; if (!EmitSimdValue(v, laneVariant)) return false; }
                 foreach (var ve in thenB) { var v = ve.Value; if (v is PhiValue || v is Store) continue; if (!EmitSimdValue(v, laneVariant)) return false; }
 
-                // Mask for the store: the compare's v128, inverted (v128.not) if the store is on the FALSE edge.
-                uint maskLocal;
-                if (storeOnTrue) { maskLocal = GetLocal(cmp); }
-                else
+                // Mask for the store: the compare's v128(s), inverted (v128.not) if the store is on the FALSE
+                // edge. 4-lane = one v128 (i32x4 lanes); 2-lane (f64/i64) = lo+hi v128s (i64x2 lanes).
+                Func<bool, uint> invertedMaskHalf = (hi) =>
                 {
-                    maskLocal = AllocateNewLocal(WasmOpCodes.V128);
-                    EmitGetLocal(cmp);
+                    uint src = hi ? _simdHiLocal[cmp] : GetLocal(cmp);
+                    if (storeOnTrue) return src;
+                    var inv = AllocateNewLocal(WasmOpCodes.V128);
+                    WasmModuleBuilder.EmitLocalGet(Code, src);
                     WasmModuleBuilder.EmitSimd(Code, WasmOpCodes.V128Not);
-                    WasmModuleBuilder.EmitLocalSet(Code, maskLocal);
-                }
+                    WasmModuleBuilder.EmitLocalSet(Code, inv);
+                    return inv;
+                };
+                uint maskLo = invertedMaskHalf(false);
+                uint maskHi = cond2lane ? invertedMaskHalf(true) : 0u;
 
                 // Per-store, per-lane: if (maskLane) o[i+lane] = value[lane].
                 foreach (var st in stores)
                 {
                     var sv = st.Value.Resolve();
-                    bool isF32 = ClassOf(sv.Type) == LaneClass.F32x4;
-                    byte storeOp = isF32 ? WasmOpCodes.F32Store : WasmOpCodes.I32Store;
-                    uint extractOp = isF32 ? WasmOpCodes.F32x4ExtractLane : WasmOpCodes.I32x4ExtractLane;
-                    // materialize the value v128 (lane-variant local, or splat of a uniform)
-                    var valLocal = AllocateNewLocal(WasmOpCodes.V128);
-                    if (!PushAsV128(sv, laneVariant)) return false;
-                    WasmModuleBuilder.EmitLocalSet(Code, valLocal);
+                    var svc = ClassOf(sv.Type);
                     var tgt = st.Target.Resolve(); // scalar lane-base byte address (unit-stride)
-                    for (byte lane = 0; lane < 4; lane++)
+                    if (!cond2lane)
                     {
-                        WasmModuleBuilder.EmitLocalGet(Code, maskLocal);
-                        WasmModuleBuilder.EmitSimdLane(Code, WasmOpCodes.I32x4ExtractLane, lane); // 0 / -1
-                        Code.Add(WasmOpCodes.If); Code.Add(WasmOpCodes.Void);
-                        EmitGetLocal(tgt);                                  // lane-base address
-                        if (lane > 0) { WasmModuleBuilder.EmitI32Const(Code, lane * 4); Code.Add(WasmOpCodes.I32Add); } // f32/i32 = 4 bytes
-                        WasmModuleBuilder.EmitLocalGet(Code, valLocal);
-                        WasmModuleBuilder.EmitSimdLane(Code, extractOp, lane); // scalar value of this lane
-                        WasmModuleBuilder.EmitStore(Code, storeOp, 2, 0);
-                        Code.Add(WasmOpCodes.End);
+                        // 4-lane (f32/i32): one v128 value + one i32x4 mask, 4-byte scalar stores.
+                        bool isF32 = svc == LaneClass.F32x4;
+                        byte storeOp = isF32 ? WasmOpCodes.F32Store : WasmOpCodes.I32Store;
+                        uint extractOp = isF32 ? WasmOpCodes.F32x4ExtractLane : WasmOpCodes.I32x4ExtractLane;
+                        var valLocal = AllocateNewLocal(WasmOpCodes.V128);
+                        if (!PushAsV128(sv, laneVariant)) return false;
+                        WasmModuleBuilder.EmitLocalSet(Code, valLocal);
+                        for (byte lane = 0; lane < 4; lane++)
+                        {
+                            WasmModuleBuilder.EmitLocalGet(Code, maskLo);
+                            WasmModuleBuilder.EmitSimdLane(Code, WasmOpCodes.I32x4ExtractLane, lane); // 0 / -1
+                            Code.Add(WasmOpCodes.If); Code.Add(WasmOpCodes.Void);
+                            EmitGetLocal(tgt);
+                            if (lane > 0) { WasmModuleBuilder.EmitI32Const(Code, lane * 4); Code.Add(WasmOpCodes.I32Add); }
+                            WasmModuleBuilder.EmitLocalGet(Code, valLocal);
+                            WasmModuleBuilder.EmitSimdLane(Code, extractOp, lane);
+                            WasmModuleBuilder.EmitStore(Code, storeOp, 2, 0);
+                            Code.Add(WasmOpCodes.End);
+                        }
+                    }
+                    else
+                    {
+                        // 2-lane (f64/i64): lo+hi value v128s + lo+hi i64x2 mask, 8-byte scalar stores. Global
+                        // lane g: half = g<2 ? lo : hi, lane-in-half = g&1.
+                        bool isF64 = svc == LaneClass.F64x2;
+                        byte storeOp = isF64 ? WasmOpCodes.F64Store : WasmOpCodes.I64Store;
+                        uint extractOp = isF64 ? WasmOpCodes.F64x2ExtractLane : WasmOpCodes.I64x2ExtractLane;
+                        var valLo = AllocateNewLocal(WasmOpCodes.V128);
+                        if (!Push2Lane(sv, false, laneVariant)) return false; WasmModuleBuilder.EmitLocalSet(Code, valLo);
+                        var valHi = AllocateNewLocal(WasmOpCodes.V128);
+                        if (!Push2Lane(sv, true, laneVariant)) return false; WasmModuleBuilder.EmitLocalSet(Code, valHi);
+                        for (byte g = 0; g < 4; g++)
+                        {
+                            uint maskHalf = g < 2 ? maskLo : maskHi;
+                            uint valHalf = g < 2 ? valLo : valHi;
+                            byte half = (byte)(g & 1);
+                            WasmModuleBuilder.EmitLocalGet(Code, maskHalf);
+                            WasmModuleBuilder.EmitSimdLane(Code, WasmOpCodes.I64x2ExtractLane, half); // 0 / -1 (i64)
+                            Code.Add(WasmOpCodes.I64Eqz); Code.Add(WasmOpCodes.I32Eqz);               // != 0 -> 1
+                            Code.Add(WasmOpCodes.If); Code.Add(WasmOpCodes.Void);
+                            EmitGetLocal(tgt);
+                            if (g > 0) { WasmModuleBuilder.EmitI32Const(Code, g * 8); Code.Add(WasmOpCodes.I32Add); } // f64/i64 = 8 bytes
+                            WasmModuleBuilder.EmitLocalGet(Code, valHalf);
+                            WasmModuleBuilder.EmitSimdLane(Code, extractOp, half);
+                            WasmModuleBuilder.EmitStore(Code, storeOp, 3, 0);
+                            Code.Add(WasmOpCodes.End);
+                        }
                     }
                     _simdV128StoreCount++;
                 }
