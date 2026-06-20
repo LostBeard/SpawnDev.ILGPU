@@ -365,6 +365,24 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public const uint V128Or = 80;           // v128.or
         public const uint V128Xor = 81;          // v128.xor
         public const uint V128Bitselect = 82;    // v128.bitselect (a, b, mask) -> per-bit select
+        // i32x4 comparisons (each lane → all-ones / all-zeros mask for v128.bitselect)
+        public const uint I32x4Eq = 55;          // i32x4.eq
+        public const uint I32x4Ne = 56;          // i32x4.ne
+        public const uint I32x4LtS = 57;         // i32x4.lt_s
+        public const uint I32x4LtU = 58;         // i32x4.lt_u
+        public const uint I32x4GtS = 59;         // i32x4.gt_s
+        public const uint I32x4GtU = 60;         // i32x4.gt_u
+        public const uint I32x4LeS = 61;         // i32x4.le_s
+        public const uint I32x4LeU = 62;         // i32x4.le_u
+        public const uint I32x4GeS = 63;         // i32x4.ge_s
+        public const uint I32x4GeU = 64;         // i32x4.ge_u
+        // f32x4 comparisons
+        public const uint F32x4Eq = 65;          // f32x4.eq
+        public const uint F32x4Ne = 66;          // f32x4.ne
+        public const uint F32x4Lt = 67;          // f32x4.lt
+        public const uint F32x4Gt = 68;          // f32x4.gt
+        public const uint F32x4Le = 69;          // f32x4.le
+        public const uint F32x4Ge = 70;          // f32x4.ge
         // i32x4 arithmetic
         public const uint I32x4Abs = 160;        // i32x4.abs
         public const uint I32x4Neg = 161;        // i32x4.neg

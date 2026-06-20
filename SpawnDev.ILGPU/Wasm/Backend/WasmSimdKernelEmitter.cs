@@ -81,7 +81,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             if (_indexParam == null)
                 return false;
             if (_blockCount != 1)
-                return TryGenerateSimdLoopKernel();  // canonical counted-loop path (bails → scalar otherwise)
+                // multi-block: canonical counted loop, else a divergent if-diamond (Stage 3b masks);
+                // each bails to the proven scalar path on anything outside its exact shape.
+                return TryGenerateSimdLoopKernel() || TryGenerateSimdDiamondKernel();
 
             var analysis = WasmSimdAnalysis.Analyze(Method, _indexParam, out var laneVariant);
             if (!analysis.Vectorizable)
@@ -228,7 +230,6 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 {
                     var v = ve.Value;
                     if (v is PhiValue) continue;
-                    if (v is CompareValue && laneVariant.Contains(v)) return false;
                     if (!IsStage3aEmittable(v, laneVariant)) return false;
                 }
 
@@ -348,6 +349,153 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             return true;
         }
 
+        /// <summary>
+        /// Stage-3b (lite) MULTI-BLOCK path: vectorizes a divergent if-DIAMOND
+        /// (entry[cond] → then → merge, entry → else → merge) — the shape a data-dependent ternary
+        /// <c>o[i] = cond ? x : y</c> lowers to — via MASK-based IF-CONVERSION: compute the per-lane
+        /// compare MASK, execute BOTH sides unconditionally (legal only because they are side-effect-free
+        /// — pure loads + arithmetic; the single store lives in the merge block), then merge each result
+        /// phi with <c>v128.bitselect(trueSideVal, falseSideVal, mask)</c>. No real per-lane branching.
+        /// Detection: 4 acyclic blocks, entry IfBranch on a lane-variant comparison, then/else each
+        /// unconditionally branch to the one merge block, merge returns. ANYTHING else ⇒ scalar fallback.
+        /// Same context save/restore as the other SIMD paths (scalar kernel stays byte-identical).
+        /// </summary>
+        private bool TryGenerateSimdDiamondKernel()
+        {
+            if (_blockCount != 4) return false;
+            var cfg = Method.Blocks.CreateCFG();
+            if (cfg.CreateLoops().Count != 0) return false;   // acyclic diamond only (no loops)
+
+            // entry = the block whose terminator is an IfBranch; it must be the method's first block.
+            BasicBlock? entryB = null;
+            foreach (var b in Method.Blocks) { if (b.Terminator is IfBranch) { entryB = b; break; } }
+            if (entryB == null || !ReferenceEquals(entryB, Method.Blocks.First())) return false;
+            var entry = entryB;
+            var ifb = (IfBranch)entry.Terminator;
+            var tTarget = ifb.TrueTarget; var fTarget = ifb.FalseTarget;
+            if (ReferenceEquals(tTarget, fTarget)) return false;
+            // then/else each unconditionally branch to the SAME merge block.
+            if (tTarget.Terminator is not UnconditionalBranch tub) return false;
+            if (fTarget.Terminator is not UnconditionalBranch fub) return false;
+            if (!ReferenceEquals(tub.Target, fub.Target)) return false;
+            var merge = tub.Target;
+            if (merge.Terminator is not ReturnTerminator) return false;
+            // 4 distinct blocks: entry, then, else, merge.
+            if (ReferenceEquals(merge, entry) || ReferenceEquals(merge, tTarget) || ReferenceEquals(merge, fTarget)) return false;
+
+            // The branch condition must be a lane-variant comparison we can emit as a v128 mask.
+            var cond = ifb.Condition.Resolve();
+            var analysis = WasmSimdAnalysis.Analyze(Method, _indexParam, out var laneVariant);
+            if (laneVariant.Count == 0) return false;          // Analyze early-rejected (barrier/atomic/warp)
+            if (cond is not CompareValue cmp || !laneVariant.Contains(cmp) || MapCompare(cmp) == 0) return false;
+
+            // then/else MUST be side-effect-free (both run for all lanes). The store is in the merge block.
+            foreach (var sideBlock in new[] { tTarget, fTarget })
+                foreach (var ve in sideBlock)
+                    if (ve.Value is Store or GenericAtomic or AtomicCAS or global::ILGPU.IR.Values.Barrier or MemoryBarrier or PredicateBarrier or MethodCall or Alloca)
+                        return false; // side effect ⇒ cannot if-convert (would run on inactive lanes)
+
+            // Merge phis (the diamond results) must select between the two sides and be a 4-lane class.
+            var mergePhis = new List<PhiValue>();
+            foreach (var ve in merge)
+                if (ve.Value is PhiValue phi)
+                {
+                    if (phi.Count != 2) return false;
+                    bool hasT = false, hasF = false;
+                    for (int j = 0; j < phi.Count; j++)
+                    {
+                        if (ReferenceEquals(phi.Sources[j], tTarget)) hasT = true;
+                        else if (ReferenceEquals(phi.Sources[j], fTarget)) hasF = true;
+                    }
+                    if (!hasT || !hasF) return false;
+                    if (ClassOf(phi.Type) == LaneClass.None) return false; // must be a v128 (bitselect) result
+                    mergePhis.Add(phi);
+                }
+            if (mergePhis.Count == 0) return false;
+
+            // Class-gate every non-phi value (phis handled; terminators structural).
+            foreach (var b in new[] { entry, tTarget, fTarget, merge })
+                foreach (var ve in b)
+                {
+                    var v = ve.Value;
+                    if (v is PhiValue) continue;
+                    if (!IsStage3aEmittable(v, laneVariant)) return false;
+                }
+
+            // ── Save the scalar context (mirror the loop path) ──
+            var savedCode = Code.ToArray();
+            var savedLocals = new List<WasmLocal>(_locals);
+            var savedMap = new Dictionary<string, uint>(_localMap);
+            var savedNext = _nextLocalIndex;
+            var savedFirstState = new Dictionary<uint, int>(_localFirstState);
+            var savedCrosses = new HashSet<uint>(_localCrossesState);
+            bool savedStateMachine = _isStateMachine;
+
+            bool ok = false;
+            try
+            {
+                Code.Clear();
+                _locals.Clear();
+                var paramMap = savedMap.Where(kv => kv.Value < _paramCount).ToDictionary(kv => kv.Key, kv => kv.Value);
+                _localMap.Clear();
+                foreach (var kv in paramMap) _localMap[kv.Key] = kv.Value;
+                _nextLocalIndex = (uint)_paramCount;
+                _localFirstState.Clear();
+                _localCrossesState.Clear();
+                _simdV128StoreCount = 0;
+                _simdV128Values.Clear();
+                _isStateMachine = false;
+
+                // Pre-allocate the merge result phi locals (all v128).
+                foreach (var phi in mergePhis) { AllocateLocal(phi, WasmOpCodes.V128); _simdV128Values.Add(phi); }
+
+                // entry values (incl. the lane-variant compare → v128 mask), then BOTH sides unconditionally.
+                foreach (var ve in entry) { var v = ve.Value; if (v is PhiValue) continue; if (!EmitSimdValue(v, laneVariant)) return false; }
+                foreach (var ve in tTarget) { var v = ve.Value; if (v is PhiValue) continue; if (!EmitSimdValue(v, laneVariant)) return false; }
+                foreach (var ve in fTarget) { var v = ve.Value; if (v is PhiValue) continue; if (!EmitSimdValue(v, laneVariant)) return false; }
+
+                // Merge each result phi: bitselect(trueTargetVal, falseTargetVal, mask).
+                foreach (var phi in mergePhis)
+                {
+                    Value trueOp = null!, falseOp = null!;
+                    for (int j = 0; j < phi.Count; j++)
+                    {
+                        if (ReferenceEquals(phi.Sources[j], tTarget)) trueOp = phi[j].Resolve();
+                        else if (ReferenceEquals(phi.Sources[j], fTarget)) falseOp = phi[j].Resolve();
+                    }
+                    if (trueOp == null || falseOp == null) return false;
+                    if (!PushAsV128(trueOp, laneVariant)) return false;   // selected where cond (mask) = 1
+                    if (!PushAsV128(falseOp, laneVariant)) return false;  // selected where cond = 0
+                    EmitGetLocal(cmp);                                    // the v128 mask
+                    WasmModuleBuilder.EmitSimd(Code, WasmOpCodes.V128Bitselect);
+                    WasmModuleBuilder.EmitLocalSet(Code, GetLocal(phi));
+                }
+
+                // merge non-phi values (the store) + return 0.
+                foreach (var ve in merge) { var v = ve.Value; if (v is PhiValue) continue; if (!EmitSimdValue(v, laneVariant)) return false; }
+                if (_simdV128StoreCount == 0) return false;
+                if (merge.Terminator != null) GenerateCodeFor(merge.Terminator);
+                WasmModuleBuilder.EmitI32Const(Code, 0);
+
+                SimdKernelCode = Code.ToArray();
+                SimdKernelLocals = new List<WasmLocal>(_locals);
+                HasSimdKernel = true;
+                ok = true;
+                return true;
+            }
+            finally
+            {
+                Code.Clear(); Code.AddRange(savedCode);
+                _locals.Clear(); _locals.AddRange(savedLocals);
+                _localMap.Clear(); foreach (var kv in savedMap) _localMap[kv.Key] = kv.Value;
+                _nextLocalIndex = savedNext;
+                _localFirstState.Clear(); foreach (var kv in savedFirstState) _localFirstState[kv.Key] = kv.Value;
+                _localCrossesState.Clear(); foreach (var x in savedCrosses) _localCrossesState.Add(x);
+                _isStateMachine = savedStateMachine;
+                if (!ok) { HasSimdKernel = false; SimdKernelCode = null; SimdKernelLocals = null; }
+            }
+        }
+
         /// <summary>The 4-lane SIMD class of a primitive type: f32 → f32x4, i32 → i32x4, else none.
         /// Both pack 4 elements per v128 (matching the by-4 dispatch). Sub-word ints (byte/short) and
         /// 2-lane (i64/f64) are deliberately NOT in this set yet — they need a different lane count.</summary>
@@ -391,8 +539,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     return MapUnary(ua) != 0 && AllUsesVectorizable(ua);
                 case ConvertValue cv:
                     return MapConvert(cv) != 0 && AllUsesVectorizable(cv);
+                case CompareValue cmp:
+                    return MapCompare(cmp) != 0 && AllUsesVectorizable(cmp);
+                case Predicate pred:
+                    return IsVectorizablePredicate(pred, laneVariant) && AllUsesVectorizable(pred);
                 default:
-                    // compares/selects, gather LEAs, shifts, f32->i32 convert, i64/f64 ⇒ later increments
+                    // gather LEAs, shifts, f32->i32 convert, i64/f64 ⇒ later increments
                     return false;
             }
         }
@@ -420,6 +572,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         break;
                     case ConvertValue cv when MapConvert(cv) != 0:
                         break; // mapped lane conversion consumes its source as a vector lane
+                    case CompareValue cmp when MapCompare(cmp) != 0:
+                        break; // feeds a vector compare (operand lane)
+                    case Predicate:
+                        break; // feeds a select (condition mask / true / false value)
+                    case IfBranch:
+                        break; // a (lane-variant) compare feeding the if-DIAMOND condition — handled by bitselect
                     case PhiValue:
                         break; // feeds a loop-carried phi (the v128 accumulator update) — see the loop path
                     case Store st when ReferenceEquals(st.Value.Resolve(), v):
@@ -486,6 +644,31 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     WasmModuleBuilder.EmitSimd(Code, op);                             // -> f32x4
                     WasmModuleBuilder.EmitLocalSet(Code, target);
                     _simdV128Values.Add(cv);
+                    return true;
+                }
+                case CompareValue cmp:
+                {
+                    uint op = MapCompare(cmp);
+                    if (op == 0) return false;
+                    var target = AllocateLocal(cmp, WasmOpCodes.V128);               // the per-lane mask
+                    if (!PushAsV128(cmp.Left.Resolve(), laneVariant)) return false;
+                    if (!PushAsV128(cmp.Right.Resolve(), laneVariant)) return false;
+                    WasmModuleBuilder.EmitSimd(Code, op);                             // f32x4/i32x4 compare -> mask
+                    WasmModuleBuilder.EmitLocalSet(Code, target);
+                    _simdV128Values.Add(cmp);
+                    return true;
+                }
+                case Predicate pred:
+                {
+                    if (!IsVectorizablePredicate(pred, laneVariant)) return false;
+                    var target = AllocateLocal(pred, WasmOpCodes.V128);
+                    // v128.bitselect(trueVal, falseVal, mask): selects trueVal lanes where mask bits are 1.
+                    if (!PushAsV128(pred.TrueValue.Resolve(), laneVariant)) return false;
+                    if (!PushAsV128(pred.FalseValue.Resolve(), laneVariant)) return false;
+                    EmitGetLocal(pred.Condition.Resolve());                           // the v128 mask (a vectorized compare)
+                    WasmModuleBuilder.EmitSimd(Code, WasmOpCodes.V128Bitselect);
+                    WasmModuleBuilder.EmitLocalSet(Code, target);
+                    _simdV128Values.Add(pred);
                     return true;
                 }
                 case Store st:
@@ -596,6 +779,50 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     ? WasmOpCodes.F32x4ConvertI32x4U
                     : WasmOpCodes.F32x4ConvertI32x4S;
             return 0u;
+        }
+
+        /// <summary>Maps a comparison to its f32x4/i32x4 lane-compare opcode (result = per-lane all-ones/
+        /// all-zeros MASK for <c>v128.bitselect</c>), or 0 if unsupported in 3a. Lane class is taken from
+        /// the OPERANDS (the result is a boolean). i32 picks signed/unsigned from IsUnsignedOrUnordered.</summary>
+        private static uint MapCompare(CompareValue cv)
+        {
+            var cls = ClassOf(cv.Left.Resolve().Type);
+            if (cls == LaneClass.F32x4)
+                return cv.Kind switch
+                {
+                    CompareKind.Equal => WasmOpCodes.F32x4Eq,
+                    CompareKind.NotEqual => WasmOpCodes.F32x4Ne,
+                    CompareKind.LessThan => WasmOpCodes.F32x4Lt,
+                    CompareKind.LessEqual => WasmOpCodes.F32x4Le,
+                    CompareKind.GreaterThan => WasmOpCodes.F32x4Gt,
+                    CompareKind.GreaterEqual => WasmOpCodes.F32x4Ge,
+                    _ => 0u,
+                };
+            if (cls == LaneClass.I32x4)
+            {
+                bool u = cv.IsUnsignedOrUnordered;
+                return cv.Kind switch
+                {
+                    CompareKind.Equal => WasmOpCodes.I32x4Eq,
+                    CompareKind.NotEqual => WasmOpCodes.I32x4Ne,
+                    CompareKind.LessThan => u ? WasmOpCodes.I32x4LtU : WasmOpCodes.I32x4LtS,
+                    CompareKind.LessEqual => u ? WasmOpCodes.I32x4LeU : WasmOpCodes.I32x4LeS,
+                    CompareKind.GreaterThan => u ? WasmOpCodes.I32x4GtU : WasmOpCodes.I32x4GtS,
+                    CompareKind.GreaterEqual => u ? WasmOpCodes.I32x4GeU : WasmOpCodes.I32x4GeS,
+                    _ => 0u,
+                };
+            }
+            return 0u;
+        }
+
+        /// <summary>A lane-variant Predicate (select) is vectorizable iff its CONDITION is a lane-variant
+        /// comparison we can emit as a v128 mask, and both selected values are a 4-lane class. (A uniform
+        /// condition would need a typed v128 select — deferred.)</summary>
+        private bool IsVectorizablePredicate(Predicate p, HashSet<Value> laneVariant)
+        {
+            if (ClassOf(p.Type) == LaneClass.None) return false;
+            var cond = p.Condition.Resolve();
+            return cond is CompareValue cc && laneVariant.Contains(cc) && MapCompare(cc) != 0;
         }
     }
 }
