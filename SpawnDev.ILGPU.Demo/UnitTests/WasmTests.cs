@@ -2045,6 +2045,91 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         private static void Wasm_Simd_ElementwiseKernel(Index1D i, ArrayView<float> a, ArrayView<float> b, ArrayView<float> o)
             => o[i] = a[i] * 2f + b[i];
 
+        // Wasm SIMD128 Stage-3a numerical gate for the ALU-DENSE benchmark kernel (2026-06-20, Geordi).
+        // The "Wasm SIMD128 — with vs without" benchmark card runs BenchmarkRunner.FmaHeavyKernel under
+        // ForceScalar vs ForceSimd to visualize the v128 speedup; this proves that path is CORRECT before
+        // TJ sees the chart. FmaHeavy is a single-block f32 unit-stride chain of FmaHeavyDepth (64) dependent
+        // mul-add steps — the Stage-3a vectorizable class — so ForceSimd MUST emit a kernel_simd export
+        // (asserted, fails loud) and the by-4 + scalar-tail v128 dispatch MUST be BIT-IDENTICAL to the scalar
+        // path AND to a CPU reference (f32 mul-then-add, no fused FMA → exact cross-mode determinism). N=1003
+        // is not a multiple of 4 so the scalar tail runs. If the hand-unroll in FmaHeavyKernel ever drifts from
+        // FmaHeavyDepth, this test fails (reference uses the const), keeping the two in sync.
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_FmaHeavyMatchesScalarAndReference()
+        {
+            const int N = 1003; // not a multiple of 4 -> exercises the scalar tail
+            var input = new float[N];
+            for (int i = 0; i < N; i++) input[i] = ((i % 1000) * 0.001f);
+
+            // CPU reference: the exact FmaHeavyDepth dependent f32 mul-then-add steps (no FMA).
+            var reference = new float[N];
+            for (int i = 0; i < N; i++)
+            {
+                float v = input[i];
+                for (int r = 0; r < Demo.Shared.Benchmarks.BenchmarkRunner.FmaHeavyDepth; r++)
+                    v = v * Demo.Shared.Benchmarks.BenchmarkRunner.FmaMul + Demo.Shared.Benchmarks.BenchmarkRunner.FmaAdd;
+                reference[i] = v;
+            }
+
+            var scalar = await RunSimdFmaHeavy(input, N, forceSimd: false, requireSimdEmit: false);
+            var simd = await RunSimdFmaHeavy(input, N, forceSimd: true, requireSimdEmit: true);
+
+            int mismS = 0, mismV = 0, firstS = -1, firstV = -1;
+            for (int i = 0; i < N; i++)
+            {
+                if (BitConverter.SingleToInt32Bits(scalar[i]) != BitConverter.SingleToInt32Bits(reference[i]))
+                { if (mismS == 0) firstS = i; mismS++; }
+                if (BitConverter.SingleToInt32Bits(simd[i]) != BitConverter.SingleToInt32Bits(reference[i]))
+                { if (mismV == 0) firstV = i; mismV++; }
+            }
+            if (mismS > 0)
+                throw new Exception($"Wasm SCALAR FmaHeavy != reference: {mismS}/{N} mismatch, first@{firstS} " +
+                    $"got={scalar[firstS]} exp={reference[firstS]} (the baseline scalar path is wrong).");
+            if (mismV > 0)
+                throw new Exception($"Wasm SIMD (v128 kernel_simd) FmaHeavy != reference: {mismV}/{N} mismatch, " +
+                    $"first@{firstV} got={simd[firstV]} exp={reference[firstV]} scalarHere={scalar[firstV]} " +
+                    $"(scalar matched reference, so the v128 by-4/tail dispatch diverges).");
+        }
+
+        // Compiles + dispatches FmaHeavyKernel under a forced SIMD mode and returns the output. Mirrors
+        // RunSimdElementwise (fresh Context+accelerator per call so the static Force* flags are read at this
+        // kernel's compile time). When requireSimdEmit, asserts the module actually exported kernel_simd.
+        private static async Task<float[]> RunSimdFmaHeavy(float[] input, int N, bool forceSimd, bool requireSimdEmit)
+        {
+            bool savedScalar = WasmBackend.ForceScalar, savedSimd = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd;
+            WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                var builder = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm();
+                using var ctx = builder.ToContext();
+                WasmBackend.VerboseLogging = false;
+                WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>>(
+                    Demo.Shared.Benchmarks.BenchmarkRunner.FmaHeavyKernel);
+
+                if (requireSimdEmit)
+                {
+                    var bin = WasmBackend.LastWasmBinary;
+                    if (bin == null || !ContainsExportName(bin, "kernel_simd"))
+                        throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for FmaHeavy — the " +
+                            "SIMD path is not actually under test (would pass vacuously via scalar fallback).");
+                }
+
+                using var inBuf = acc.Allocate1D(input);
+                using var outBuf = acc.Allocate1D<float>(N);
+                k((Index1D)N, inBuf.View, outBuf.View);
+                await acc.SynchronizeAsync();
+                return await outBuf.CopyToHostAsync<float>();
+            }
+            finally
+            {
+                WasmBackend.ForceScalar = savedScalar;
+                WasmBackend.ForceSimd = savedSimd;
+            }
+        }
+
         // Scans a wasm binary for an exact length-prefixed export-name token (the export section encodes
         // each name as len-byte + UTF-8 bytes). The length prefix (6 for "kernel", 11 for "kernel_simd")
         // separates the two so "kernel" never matches the "kernel_simd" slice.

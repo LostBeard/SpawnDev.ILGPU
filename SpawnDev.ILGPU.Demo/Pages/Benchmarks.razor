@@ -5,6 +5,7 @@
 @using SpawnDev.ILGPU.WebGL
 @using SpawnDev.ILGPU.WebGL.Backend
 @using SpawnDev.ILGPU.Wasm
+@using SpawnDev.ILGPU.Wasm.Backend
 @using SpawnDev.BlazorJS
 @using SpawnDev.BlazorJS.JSObjects
 @using SpawnDev.ILGPU.Demo.Shared.Benchmarks
@@ -163,6 +164,88 @@
         </div>
     }
 
+    @* ── Wasm SIMD128: with vs without ── *@
+    <div class="bench-card" style="border: 1px solid #a855f7;">
+        <div class="bench-card-header" style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px;">
+            <div>
+                <h2 style="color: #c084fc;">⚡ Wasm SIMD128 — with vs without</h2>
+                <span class="bench-card-desc">
+                    Same kernel compiled two ways on the Wasm backend: scalar (one element/op) vs v128
+                    <code>f32x4</code> (four elements/op). SIMD multiplies <em>ALU</em> throughput, not memory bandwidth —
+                    the ALU-bound kernel shows the win, the memory-bound one barely moves.
+                </span>
+                <div style="margin-top: 6px;">
+                    @if (_simdRuntimeSupported)
+                    {
+                        <span class="status-badge badge-ok" title="System.Runtime.Intrinsics.Wasm.PackedSimd.IsSupported">Runtime SIMD: supported ✓</span>
+                    }
+                    else
+                    {
+                        <span class="status-badge badge-fail" title="This .NET WASM build reports no SIMD; forced v128 emission may fail to instantiate.">Runtime SIMD: not detected ⚠</span>
+                    }
+                </div>
+            </div>
+            <button class="btn-run @((_simdRunning || _isRunning) ? "disabled" : "")" @onclick="RunWasmSimdComparison" disabled="@(_simdRunning || _isRunning)" style="background: linear-gradient(135deg, #a855f7, #ec4899);">
+                @if (_simdRunning)
+                {
+                    <span class="spinner"></span>
+                    <span>@(_simdProgress.Length > 0 ? _simdProgress : "Running…")</span>
+                }
+                else
+                {
+                    <span>▶ Run SIMD Comparison</span>
+                }
+            </button>
+        </div>
+
+        @if (_simdResults.Count > 0)
+        {
+            <div style="display: flex; flex-direction: column; gap: 16px; margin-top: 12px;">
+                @foreach (var s in _simdResults)
+                {
+                    <div style="background: rgba(255,255,255,0.03); border-radius: 8px; padding: 12px 14px;">
+                        <div style="display: flex; justify-content: space-between; align-items: baseline; flex-wrap: wrap; gap: 8px;">
+                            <div style="font-weight: 600; color: #f1f5f9;">@s.KernelName</div>
+                            @if (s.Failed)
+                            {
+                                <span class="status-badge badge-fail" title="@s.Error">✗ @TruncateError(s.Error)</span>
+                            }
+                            else
+                            {
+                                <span class="simd-speedup @(s.Speedup >= 1.05 ? "win" : "neutral")">
+                                    @s.Speedup.ToString("F2")× @(s.Speedup >= 1.05 ? "faster with SIMD" : "(≈ same — bandwidth-bound)")
+                                </span>
+                            }
+                        </div>
+                        <div style="font-size: 0.8rem; color: #94a3b8; margin: 2px 0 10px;">@s.Note</div>
+
+                        @if (!s.Failed)
+                        {
+                            <div class="simd-bar-row">
+                                <span class="simd-bar-label">Scalar</span>
+                                <div class="simd-bar-track">
+                                    <div class="simd-bar-fill" style="width: @(BarPct(s.ScalarTputRaw, s)); background: #64748b;"></div>
+                                </div>
+                                <span class="simd-bar-val">@s.ScalarMs.ToString("F2") ms · @s.ScalarTput</span>
+                            </div>
+                            <div class="simd-bar-row">
+                                <span class="simd-bar-label">SIMD v128</span>
+                                <div class="simd-bar-track">
+                                    <div class="simd-bar-fill" style="width: @(BarPct(s.SimdTputRaw, s)); background: linear-gradient(90deg, #a855f7, #ec4899);"></div>
+                                </div>
+                                <span class="simd-bar-val">@s.SimdMs.ToString("F2") ms · @s.SimdTput</span>
+                            </div>
+                        }
+                    </div>
+                }
+            </div>
+            <div style="font-size: 0.75rem; color: #64748b; margin-top: 10px;">
+                Each bar = throughput (higher is better), median of @BenchmarkRunner.MeasuredIterations trimmed runs at
+                @BenchmarkDefs.StandardProfile.DefaultN.ToString("N0") elements. Scalar and SIMD are bit-identical (f32 mul-then-add, no fused FMA).
+            </div>
+        }
+    </div>
+
     @* ── Results ── *@
     @foreach (var bench in BenchmarkDefs.All)
     {
@@ -287,6 +370,16 @@
     /* ── Chart ── */
     .bench-chart { width: 100%; max-width: 700px; height: 260px; display: block; margin: 0 auto; }
 
+    /* ── Wasm SIMD comparison ── */
+    .simd-speedup { font-size: 0.85rem; font-weight: 700; padding: 2px 10px; border-radius: 999px; }
+    .simd-speedup.win { background: rgba(168,85,247,0.18); color: #d8b4fe; }
+    .simd-speedup.neutral { background: rgba(148,163,184,0.15); color: #cbd5e1; }
+    .simd-bar-row { display: flex; align-items: center; gap: 10px; margin: 4px 0; }
+    .simd-bar-label { width: 72px; font-size: 0.78rem; color: #94a3b8; text-align: right; flex-shrink: 0; }
+    .simd-bar-track { flex: 1; height: 18px; background: rgba(255,255,255,0.05); border-radius: 4px; overflow: hidden; }
+    .simd-bar-fill { height: 100%; border-radius: 4px; transition: width 0.4s ease; min-width: 2px; }
+    .simd-bar-val { width: 170px; font-size: 0.76rem; color: #cbd5e1; font-family: monospace; flex-shrink: 0; }
+
     /* ── Summary ── */
     .summary-card h2 { font-size: 1.3rem; margin: 0 0 1rem; }
     .ranking-grid { display: flex; flex-direction: column; gap: 0.6rem; }
@@ -307,6 +400,35 @@
     private int _progressPercent;
     private string _currentBackend = "";
     private readonly List<BenchmarkResult> _results = new();
+
+    // ── Wasm SIMD comparison state ──
+    private bool _simdRunning;
+    private string _simdProgress = "";
+    private bool _simdRuntimeSupported = WasmBackend.RuntimeSupportsWasmSimd;
+    private readonly List<SimdComparison> _simdResults = new();
+
+    private record SimdComparison
+    {
+        public string KernelName { get; init; } = "";
+        public string Note { get; init; } = "";
+        public double ScalarMs { get; init; }
+        public double SimdMs { get; init; }
+        public string ScalarTput { get; init; } = "";
+        public string SimdTput { get; init; } = "";
+        public double ScalarTputRaw { get; init; }
+        public double SimdTputRaw { get; init; }
+        public bool Failed { get; init; }
+        public string? Error { get; init; }
+        public double Speedup => SimdMs > 0 ? ScalarMs / SimdMs : 0;
+    }
+
+    // Bar width as a percentage of the faster of the two throughputs in this pair.
+    private static string BarPct(double tput, SimdComparison s)
+    {
+        double max = Math.Max(s.ScalarTputRaw, s.SimdTputRaw);
+        double pct = max > 0 ? (tput / max) * 100.0 : 0;
+        return $"{pct:F1}%";
+    }
 
     // ── P2P Benchmark State ──
     private bool _p2pRunning;
@@ -380,6 +502,115 @@
 
         _p2pRunning = false;
         StateHasChanged();
+    }
+
+    // ====================================================================
+    //  WASM SIMD128 COMPARISON — same kernel, scalar vs v128, side by side
+    // ====================================================================
+
+    private async Task RunWasmSimdComparison()
+    {
+        if (_simdRunning || _isRunning) return;
+        _simdRunning = true;
+        _simdResults.Clear();
+        _simdProgress = "";
+        StateHasChanged();
+        await Task.Delay(50);
+
+        // (benchId, display name, why) — one ALU-bound (shows the win) + one memory-bound (honest contrast).
+        var kernels = new (string id, string name, string note)[]
+        {
+            ("fmaheavy", "FMA-dense chain", $"ALU-bound: {BenchmarkRunner.FmaHeavyDepth} dependent mul-add per element. SIMD has 4× the f32 ALU lanes."),
+            ("saxpy", "SAXPY", "Memory-bound: 1 mul-add per element — limited by memory bandwidth, not ALU, so SIMD barely helps."),
+        };
+        var profile = new BackendProfile("Wasm",
+            BenchmarkDefs.StandardProfile.DefaultN,
+            BenchmarkDefs.StandardProfile.MandelbrotSize,
+            BenchmarkDefs.StandardProfile.PrimesN);
+
+        bool savedScalar = WasmBackend.ForceScalar, savedSimd = WasmBackend.ForceSimd;
+        try
+        {
+            foreach (var (id, name, note) in kernels)
+            {
+                _simdProgress = $"{name}: scalar…";
+                StateHasChanged();
+                await Task.Delay(1);
+                var scalar = await RunWasmModeBenchmark(id, profile, forceSimd: false);
+
+                _simdProgress = $"{name}: SIMD…";
+                StateHasChanged();
+                await Task.Delay(1);
+                var simd = await RunWasmModeBenchmark(id, profile, forceSimd: true);
+
+                if (scalar.Failed || simd.Failed || !scalar.MedianMs.HasValue || !simd.MedianMs.HasValue)
+                {
+                    _simdResults.Add(new SimdComparison
+                    {
+                        KernelName = name,
+                        Note = note,
+                        Failed = true,
+                        Error = scalar.Error ?? simd.Error ?? "run failed",
+                    });
+                }
+                else
+                {
+                    _simdResults.Add(new SimdComparison
+                    {
+                        KernelName = name,
+                        Note = note,
+                        ScalarMs = scalar.MedianMs.Value,
+                        SimdMs = simd.MedianMs.Value,
+                        ScalarTput = scalar.Throughput ?? "",
+                        SimdTput = simd.Throughput ?? "",
+                        ScalarTputRaw = scalar.ThroughputElemPerSec,
+                        SimdTputRaw = simd.ThroughputElemPerSec,
+                    });
+                }
+                StateHasChanged();
+                await Task.Delay(1);
+            }
+        }
+        finally
+        {
+            // Always restore the global SIMD flags so the regular "Run All" path is unaffected.
+            WasmBackend.ForceScalar = savedScalar;
+            WasmBackend.ForceSimd = savedSimd;
+        }
+
+        _simdRunning = false;
+        _simdProgress = "";
+        StateHasChanged();
+    }
+
+    // Runs one benchmark on a FRESH Wasm context with SIMD forced on or off. Fresh context per call
+    // means the static Force* flags are read at the kernel's compile time (a reused accelerator would
+    // serve the cached scalar/SIMD module). The shared worker pool + linear memory are process-static
+    // and mode-independent, so reusing them is correct.
+    private async Task<BenchmarkResult> RunWasmModeBenchmark(string benchId, BackendProfile profile, bool forceSimd)
+    {
+        WasmBackend.ForceScalar = !forceSimd; // scalar mode forces SIMD OFF
+        WasmBackend.ForceSimd = forceSimd;    // SIMD mode forces v128 emission regardless of runtime detect
+        (global::ILGPU.Context ctx, Accelerator acc)? pair = null;
+        try
+        {
+            pair = await CreateBackend("Wasm");
+            if (pair == null)
+                return new BenchmarkResult { BackendName = "Wasm", BenchmarkName = benchId, Failed = true, Error = "Wasm unavailable" };
+            return await BenchmarkRunner.RunAsync(pair.Value.acc, benchId, profile);
+        }
+        catch (Exception ex)
+        {
+            return new BenchmarkResult { BackendName = "Wasm", BenchmarkName = benchId, Failed = true, Error = ex.Message };
+        }
+        finally
+        {
+            if (pair.HasValue)
+            {
+                pair.Value.acc.Dispose();
+                pair.Value.ctx.Dispose();
+            }
+        }
     }
 
     // ── Backend colors ──

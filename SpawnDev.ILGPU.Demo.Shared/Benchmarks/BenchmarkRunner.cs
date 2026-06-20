@@ -69,6 +69,69 @@ public static class BenchmarkRunner
         results[index] = 1;
     }
 
+    // --- Wasm SIMD128 showcase kernel ---------------------------------------------------
+    //
+    // FmaHeavy is the ALU-DENSE elementwise kernel used by the "Wasm SIMD128 — with vs
+    // without" comparison. Two properties make the Wasm v128 (f32x4) win actually VISIBLE:
+    //
+    //  1. It is a SINGLE straight-line basic block (no branches, no loop) of f32 unit-stride
+    //     load → R dependent mul/add steps → store. That is exactly the Stage-3a vectorizable
+    //     class, so the Wasm backend emits the additive `kernel_simd` (4 lanes/call) for it.
+    //     A `for` loop would split into multiple IR blocks and fall back to scalar — hence the
+    //     hand-unroll. R == FmaHeavyDepth steps; keep the two in sync (the PMT numerical gate
+    //     Wasm_Simd128_FmaHeavyMatchesScalarAndReference fails loud if they drift).
+    //  2. It is ALU-BOUND (R mul/adds per 1 load + 1 store), so the ~3.5x pure-ALU f32x4 win
+    //     measured at the Phase-2 gate dominates the fixed dispatch/memory floor. Memory-bound
+    //     elementwise kernels (Vector Add, SAXPY) gain little — that is the honest contrast the
+    //     comparison card shows: SIMD multiplies ALU throughput, not memory bandwidth.
+    //
+    // Cross-mode determinism: f32 mul-then-add with NO fused FMA, so the v128 path is BIT-exact
+    // to the scalar path (wasm core SIMD has no f32x4 FMA either). 0.999*v + 0.001 stays finite.
+    public const int FmaHeavyDepth = 256;
+    public const float FmaMul = 0.999f;
+    public const float FmaAdd = 0.001f;
+
+    public static void FmaHeavyKernel(Index1D index, ArrayView<float> input, ArrayView<float> output)
+    {
+        float v = input[index];
+        // FmaHeavyDepth (256) hand-unrolled mul-add steps — straight-line, single IR block (so it stays in
+        // the Stage-3a vectorizable class). 8 steps/line × 32 lines. ALU density chosen so the f32x4 win is
+        // a clear, honest fraction of the f32x4 ceiling above the fixed dispatch/memory floor.
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd; v = v * FmaMul + FmaAdd;
+        output[index] = v;
+    }
+
     // ====================================================================
     //  BENCHMARK ORCHESTRATION
     // ====================================================================
@@ -92,6 +155,7 @@ public static class BenchmarkRunner
                 "vecadd" => await RunVectorAdd(acc, profile),
                 "vecscale" => await RunVectorScale(acc, profile),
                 "saxpy" => await RunSaxpy(acc, profile),
+                "fmaheavy" => await RunFmaHeavy(acc, profile),
                 "mandelbrot" => await RunMandelbrot(acc, profile),
                 "primes" => await RunPrimes(acc, profile),
                 _ => throw new ArgumentException($"Unknown benchmark: {benchId}"),
@@ -199,6 +263,30 @@ public static class BenchmarkRunner
         var times = await RunMeasured(() =>
         {
             kernel((Index1D)n, bufY.View, bufX.View, 2.5f);
+            return acc.SynchronizeAsync();
+        });
+
+        return (warmupMs, times);
+    }
+
+    private static async Task<(double warmupMs, double[] times)> RunFmaHeavy(Accelerator acc, BackendProfile profile)
+    {
+        int n = profile.DefaultN;
+        var input = Enumerable.Range(0, n).Select(i => (float)((i % 1000) * 0.001f)).ToArray();
+
+        using var bufIn = acc.Allocate1D(input);
+        using var bufOut = acc.Allocate1D<float>(n);
+        var kernel = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>>(FmaHeavyKernel);
+
+        var warmupMs = await RunWarmup(() =>
+        {
+            kernel((Index1D)n, bufIn.View, bufOut.View);
+            return acc.SynchronizeAsync();
+        });
+
+        var times = await RunMeasured(() =>
+        {
+            kernel((Index1D)n, bufIn.View, bufOut.View);
             return acc.SynchronizeAsync();
         });
 
