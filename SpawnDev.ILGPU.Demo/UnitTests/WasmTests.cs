@@ -3029,6 +3029,79 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
         }
 
+        // Wasm SIMD128 Stage-3b MASKED (conditional) STORE gate (2026-06-20). `if (a[i] > 0) o[i] = a[i]*2`
+        // — wasm has no masked store, so it is per-lane (compute the mask, run the pure value speculatively,
+        // store each lane only if its mask bit is set). CRITICAL: lanes whose condition is FALSE must keep
+        // o's pre-existing value (sentinel) — the test pre-fills o with a sentinel and verifies the false
+        // lanes are UNTOUCHED. Asserts kernel_simd emitted and SIMD == scalar == reference (f32 + i32).
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_MaskedStoreFloatMatchesScalar()
+        {
+            const int N = 1003; const float SENT = -999.5f;
+            var a = new float[N]; for (int i = 0; i < N; i++) a[i] = MathF.Sin(i * 0.05f) * 10f; // ~half > 0
+            var reference = new float[N]; for (int i = 0; i < N; i++) reference[i] = a[i] > 0f ? a[i] * 2f : SENT;
+            var scalar = await RunMaskedStoreFloat(a, N, SENT, false, false);
+            var simd = await RunMaskedStoreFloat(a, N, SENT, true, true);
+            AssertExactF(scalar, reference, simd, "masked-store-float");
+        }
+
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_MaskedStoreIntMatchesScalar()
+        {
+            const int N = 1003; const int SENT = int.MinValue + 7;
+            var a = new int[N]; for (int i = 0; i < N; i++) a[i] = (i % 51) - 25; // ~half > 0
+            var reference = new int[N]; for (int i = 0; i < N; i++) reference[i] = a[i] > 0 ? a[i] * 3 : SENT;
+            var scalar = await RunMaskedStoreInt(a, N, SENT, false, false);
+            var simd = await RunMaskedStoreInt(a, N, SENT, true, true);
+            int mismV = 0, firstV = -1, mismS = 0;
+            for (int i = 0; i < N; i++) { if (simd[i] != reference[i]) { if (mismV == 0) firstV = i; mismV++; } if (scalar[i] != reference[i]) mismS++; }
+            if (mismS > 0) throw new Exception($"Wasm SCALAR masked-store-int != reference: {mismS}/{N} (baseline scalar wrong).");
+            if (mismV > 0) throw new Exception($"Wasm SIMD masked-store-int != reference: {mismV}/{N}, first@{firstV} got={simd[firstV]} exp={reference[firstV]} (mask/untouched-lane bug).");
+        }
+
+        private static void Wasm_Simd_MaskedStoreFloatKernel(Index1D i, ArrayView<float> a, ArrayView<float> o) { if (a[i] > 0f) o[i] = a[i] * 2f; }
+        private static void Wasm_Simd_MaskedStoreIntKernel(Index1D i, ArrayView<int> a, ArrayView<int> o) { if (a[i] > 0) o[i] = a[i] * 3; }
+
+        private static async Task<float[]> RunMaskedStoreFloat(float[] a, int N, float sentinel, bool forceSimd, bool requireSimdEmit)
+        {
+            bool ss = WasmBackend.ForceScalar, sm = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd; WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                using var ctx = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm().ToContext();
+                WasmBackend.VerboseLogging = false; WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>>(Wasm_Simd_MaskedStoreFloatKernel);
+                if (requireSimdEmit && (WasmBackend.LastWasmBinary == null || !ContainsExportName(WasmBackend.LastWasmBinary, "kernel_simd")))
+                    throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for the float masked store.");
+                var oInit = new float[N]; for (int i = 0; i < N; i++) oInit[i] = sentinel;
+                using var aB = acc.Allocate1D(a); using var oB = acc.Allocate1D(oInit);
+                k((Index1D)N, aB.View, oB.View); await acc.SynchronizeAsync();
+                return await oB.CopyToHostAsync<float>();
+            }
+            finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
+        }
+
+        private static async Task<int[]> RunMaskedStoreInt(int[] a, int N, int sentinel, bool forceSimd, bool requireSimdEmit)
+        {
+            bool ss = WasmBackend.ForceScalar, sm = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd; WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                using var ctx = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm().ToContext();
+                WasmBackend.VerboseLogging = false; WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(Wasm_Simd_MaskedStoreIntKernel);
+                if (requireSimdEmit && (WasmBackend.LastWasmBinary == null || !ContainsExportName(WasmBackend.LastWasmBinary, "kernel_simd")))
+                    throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for the int masked store.");
+                var oInit = new int[N]; for (int i = 0; i < N; i++) oInit[i] = sentinel;
+                using var aB = acc.Allocate1D(a); using var oB = acc.Allocate1D(oInit);
+                k((Index1D)N, aB.View, oB.View); await acc.SynchronizeAsync();
+                return await oB.CopyToHostAsync<int>();
+            }
+            finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
+        }
+
         // Scans a wasm binary for an exact length-prefixed export-name token (the export section encodes
         // each name as len-byte + UTF-8 bytes). The length prefix (6 for "kernel", 11 for "kernel_simd")
         // separates the two so "kernel" never matches the "kernel_simd" slice.

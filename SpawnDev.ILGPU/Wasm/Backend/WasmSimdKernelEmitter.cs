@@ -88,9 +88,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             if (_indexParam == null)
                 return false;
             if (_blockCount != 1)
-                // multi-block: canonical counted loop, else a divergent if-diamond (Stage 3b masks);
-                // each bails to the proven scalar path on anything outside its exact shape.
-                return TryGenerateSimdLoopKernel() || TryGenerateSimdDiamondKernel();
+                // multi-block: canonical counted loop, else a divergent if-diamond, else a conditional
+                // (masked) store. Each bails to the proven scalar path on anything outside its exact shape.
+                return TryGenerateSimdLoopKernel() || TryGenerateSimdDiamondKernel() || TryGenerateSimdMaskedStoreKernel();
 
             var analysis = WasmSimdAnalysis.Analyze(Method, _indexParam, out var laneVariant);
             if (!analysis.Vectorizable)
@@ -506,6 +506,145 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 SimdKernelLocals = new List<WasmLocal>(_locals);
                 HasSimdKernel = true;
                 ok = true;
+                return true;
+            }
+            finally
+            {
+                Code.Clear(); Code.AddRange(savedCode);
+                _locals.Clear(); _locals.AddRange(savedLocals);
+                _localMap.Clear(); foreach (var kv in savedMap) _localMap[kv.Key] = kv.Value;
+                _nextLocalIndex = savedNext;
+                _localFirstState.Clear(); foreach (var kv in savedFirstState) _localFirstState[kv.Key] = kv.Value;
+                _localCrossesState.Clear(); foreach (var x in savedCrosses) _localCrossesState.Add(x);
+                _isStateMachine = savedStateMachine;
+                if (!ok) { HasSimdKernel = false; SimdKernelCode = null; SimdKernelLocals = null; }
+            }
+        }
+
+        /// <summary>
+        /// Stage-3b MASKED (conditional) STORE: vectorizes <c>if (cond) o[i] = v;</c> — a 3-block shape
+        /// (entry[cond, IfBranch] → then[pure compute + Store, → merge], merge[return]; the other IfBranch
+        /// edge skips straight to merge). wasm SIMD has no masked store, so: compute the per-lane MASK, run
+        /// the then-side's PURE compute SPECULATIVELY for all 4 lanes (safe — unit-stride loads are in-bounds
+        /// for the by-4 group; gather/div/atomic/call sides BAIL), then per lane emit a wasm `if (maskLane)
+        /// { scalar store }`. ILGPU often INVERTS the condition (store on the false edge); when the store is
+        /// on the ifFALSE path the mask is `v128.not`'d. 4-lane (f32/i32) only. Anything else ⇒ scalar.
+        /// </summary>
+        private bool TryGenerateSimdMaskedStoreKernel()
+        {
+            if (_blockCount != 3) return false;
+            var cfg = Method.Blocks.CreateCFG();
+            if (cfg.CreateLoops().Count != 0) return false;   // acyclic only
+            var entry = Method.Blocks.First();
+            if (entry.Terminator is not IfBranch ifb) return false;
+            var tT = ifb.TrueTarget; var fT = ifb.FalseTarget;
+            if (ReferenceEquals(tT, fT)) return false;
+
+            // One IfBranch target is the THEN block (has a Store, unconditionally branches to MERGE); the
+            // other IS merge (returns). Identify which, and whether the store is on the true or false edge.
+            BasicBlock thenB, mergeB; bool storeOnTrue;
+            if (tT.Terminator is UnconditionalBranch tb && ReferenceEquals(tb.Target, fT) && fT.Terminator is ReturnTerminator)
+            { thenB = tT; mergeB = fT; storeOnTrue = true; }
+            else if (fT.Terminator is UnconditionalBranch fb && ReferenceEquals(fb.Target, tT) && tT.Terminator is ReturnTerminator)
+            { thenB = fT; mergeB = tT; storeOnTrue = false; }
+            else return false;
+
+            var analysis = WasmSimdAnalysis.Analyze(Method, _indexParam, out var laneVariant);
+            if (laneVariant.Count == 0) return false; // barrier/atomic/warp early-reject
+            if (ifb.Condition.Resolve() is not CompareValue cmp || !laneVariant.Contains(cmp) || MapCompare(cmp) == 0)
+                return false; // need a lane-variant 4-lane (f32/i32) compare → v128 mask
+
+            // then-block: collect the Store(s); everything else must be SPECULATION-SAFE pure compute.
+            var stores = new List<Store>();
+            foreach (var ve in thenB)
+            {
+                var v = ve.Value;
+                if (v is Store st)
+                {
+                    if (ClassOf(st.Value.Resolve().Type) is not (LaneClass.F32x4 or LaneClass.I32x4)) return false; // 4-lane only
+                    if (st.Target.Resolve() is LoadElementAddress stl && IsGatherLEA(stl)) return false; // scatter-store: later
+                    stores.Add(st);
+                    continue;
+                }
+                if (v is GenericAtomic or AtomicCAS or global::ILGPU.IR.Values.Barrier or MemoryBarrier or PredicateBarrier or MethodCall or Alloca)
+                    return false;
+                if (v is Load gl && gl.Source.Resolve() is LoadElementAddress gle && IsGatherLEA(gle)) return false; // gather: unsafe to speculate
+                if (v is BinaryArithmeticValue dv && (dv.Kind == BinaryArithmeticKind.Div || dv.Kind == BinaryArithmeticKind.Rem)) return false; // may trap
+                if (!(v.Type is AddressSpaceType) && laneVariant.Contains(v) && ClassOf(v.Type) == LaneClass.None) return false; // unhandled lane-variant
+            }
+            if (stores.Count == 0) return false;
+
+            // ── Save the scalar context ──
+            var savedCode = Code.ToArray();
+            var savedLocals = new List<WasmLocal>(_locals);
+            var savedMap = new Dictionary<string, uint>(_localMap);
+            var savedNext = _nextLocalIndex;
+            var savedFirstState = new Dictionary<uint, int>(_localFirstState);
+            var savedCrosses = new HashSet<uint>(_localCrossesState);
+            bool savedStateMachine = _isStateMachine;
+            bool ok = false;
+            try
+            {
+                Code.Clear(); _locals.Clear();
+                var paramMap = savedMap.Where(kv => kv.Value < _paramCount).ToDictionary(kv => kv.Key, kv => kv.Value);
+                _localMap.Clear(); foreach (var kv in paramMap) _localMap[kv.Key] = kv.Value;
+                _nextLocalIndex = (uint)_paramCount;
+                _localFirstState.Clear(); _localCrossesState.Clear();
+                _simdV128StoreCount = 0; _simdV128Values.Clear(); _simdHiLocal.Clear();
+                _isStateMachine = false;
+
+                // entry values (incl. the lane-variant compare → v128 mask), then the then-side PURE compute
+                // (everything except the Stores) speculatively for all lanes.
+                foreach (var ve in entry) { var v = ve.Value; if (v is PhiValue) continue; if (!EmitSimdValue(v, laneVariant)) return false; }
+                foreach (var ve in thenB) { var v = ve.Value; if (v is PhiValue || v is Store) continue; if (!EmitSimdValue(v, laneVariant)) return false; }
+
+                // Mask for the store: the compare's v128, inverted (v128.not) if the store is on the FALSE edge.
+                uint maskLocal;
+                if (storeOnTrue) { maskLocal = GetLocal(cmp); }
+                else
+                {
+                    maskLocal = AllocateNewLocal(WasmOpCodes.V128);
+                    EmitGetLocal(cmp);
+                    WasmModuleBuilder.EmitSimd(Code, WasmOpCodes.V128Not);
+                    WasmModuleBuilder.EmitLocalSet(Code, maskLocal);
+                }
+
+                // Per-store, per-lane: if (maskLane) o[i+lane] = value[lane].
+                foreach (var st in stores)
+                {
+                    var sv = st.Value.Resolve();
+                    bool isF32 = ClassOf(sv.Type) == LaneClass.F32x4;
+                    byte storeOp = isF32 ? WasmOpCodes.F32Store : WasmOpCodes.I32Store;
+                    uint extractOp = isF32 ? WasmOpCodes.F32x4ExtractLane : WasmOpCodes.I32x4ExtractLane;
+                    // materialize the value v128 (lane-variant local, or splat of a uniform)
+                    var valLocal = AllocateNewLocal(WasmOpCodes.V128);
+                    if (!PushAsV128(sv, laneVariant)) return false;
+                    WasmModuleBuilder.EmitLocalSet(Code, valLocal);
+                    var tgt = st.Target.Resolve(); // scalar lane-base byte address (unit-stride)
+                    for (byte lane = 0; lane < 4; lane++)
+                    {
+                        WasmModuleBuilder.EmitLocalGet(Code, maskLocal);
+                        WasmModuleBuilder.EmitSimdLane(Code, WasmOpCodes.I32x4ExtractLane, lane); // 0 / -1
+                        Code.Add(WasmOpCodes.If); Code.Add(WasmOpCodes.Void);
+                        EmitGetLocal(tgt);                                  // lane-base address
+                        if (lane > 0) { WasmModuleBuilder.EmitI32Const(Code, lane * 4); Code.Add(WasmOpCodes.I32Add); } // f32/i32 = 4 bytes
+                        WasmModuleBuilder.EmitLocalGet(Code, valLocal);
+                        WasmModuleBuilder.EmitSimdLane(Code, extractOp, lane); // scalar value of this lane
+                        WasmModuleBuilder.EmitStore(Code, storeOp, 2, 0);
+                        Code.Add(WasmOpCodes.End);
+                    }
+                    _simdV128StoreCount++;
+                }
+
+                // merge block values (typically none) + return 0.
+                foreach (var ve in mergeB) { var v = ve.Value; if (v is PhiValue) continue; if (!EmitSimdValue(v, laneVariant)) return false; }
+                if (_simdV128StoreCount == 0) return false;
+                if (mergeB.Terminator != null) GenerateCodeFor(mergeB.Terminator);
+                WasmModuleBuilder.EmitI32Const(Code, 0);
+
+                SimdKernelCode = Code.ToArray();
+                SimdKernelLocals = new List<WasmLocal>(_locals);
+                HasSimdKernel = true; ok = true;
                 return true;
             }
             finally
