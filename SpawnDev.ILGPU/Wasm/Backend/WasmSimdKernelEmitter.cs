@@ -65,6 +65,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// index-vector increment lands. Reset per <see cref="TryGenerateSimdKernel"/> attempt.</summary>
         private readonly HashSet<Value> _simdV128Values = new();
 
+        /// <summary>For 2-lane (f64x2) DOUBLE-PUMPED values: the SECOND v128 local (lanes 2,3). The main
+        /// local (lanes 0,1) is the usual one in <see cref="_simdV128Values"/>. The by-4 dispatch processes
+        /// 4 thread-ids; an f64 value spans them as two f64x2 v128s, so every f64 op runs twice (lo + hi).
+        /// Restricted to the single-block path (the loop/diamond paths BAIL on any 2-lane value — their phi
+        /// model is one local per value). Reset per attempt.</summary>
+        private readonly Dictionary<Value, uint> _simdHiLocal = new();
+
         /// <summary>
         /// Attempts to emit the additive v128 <c>kernel_simd</c> for the Stage-3a f32 unit-stride
         /// elementwise class. Saves/clears/restores the generator's local+Code context so the
@@ -121,6 +128,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 _localCrossesState.Clear();
                 _simdV128StoreCount = 0;
                 _simdV128Values.Clear();
+                _simdHiLocal.Clear();
 
                 foreach (var v in block)
                 {
@@ -219,7 +227,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         else if (ReferenceEquals(phi.Sources[j], body)) hasBody = true;
                     }
                     if (!hasEntry || !hasBody) return false;
-                    if (laneVariant.Contains(phi) && ClassOf(phi.Type) == LaneClass.None) return false;
+                    if (laneVariant.Contains(phi) && (ClassOf(phi.Type) == LaneClass.None || Is2Lane(ClassOf(phi.Type)))) return false; // 2-lane (f64) phi unsupported
                     headerPhis.Add(phi);
                 }
 
@@ -230,6 +238,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 {
                     var v = ve.Value;
                     if (v is PhiValue) continue;
+                    if (laneVariant.Contains(v) && Is2Lane(ClassOf(v.Type))) return false; // 2-lane (f64) only in single-block
                     if (!IsStage3aEmittable(v, laneVariant)) return false;
                 }
 
@@ -255,6 +264,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 _localCrossesState.Clear();
                 _simdV128StoreCount = 0;
                 _simdV128Values.Clear();
+                _simdHiLocal.Clear();
                 _isStateMachine = false; // straight-line value emission within blocks
 
                 // Pre-allocate header phi locals (v128 for lane-variant, scalar otherwise).
@@ -408,7 +418,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         else if (ReferenceEquals(phi.Sources[j], fTarget)) hasF = true;
                     }
                     if (!hasT || !hasF) return false;
-                    if (ClassOf(phi.Type) == LaneClass.None) return false; // must be a v128 (bitselect) result
+                    if (ClassOf(phi.Type) == LaneClass.None || Is2Lane(ClassOf(phi.Type))) return false; // must be a 4-lane v128 (bitselect) result
                     mergePhis.Add(phi);
                 }
             if (mergePhis.Count == 0) return false;
@@ -419,6 +429,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 {
                     var v = ve.Value;
                     if (v is PhiValue) continue;
+                    if (laneVariant.Contains(v) && Is2Lane(ClassOf(v.Type))) return false; // 2-lane (f64) only in single-block
                     if (!IsStage3aEmittable(v, laneVariant)) return false;
                 }
 
@@ -444,6 +455,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 _localCrossesState.Clear();
                 _simdV128StoreCount = 0;
                 _simdV128Values.Clear();
+                _simdHiLocal.Clear();
                 _isStateMachine = false;
 
                 // Pre-allocate the merge result phi locals (all v128).
@@ -496,10 +508,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
         }
 
-        /// <summary>The 4-lane SIMD class of a primitive type: f32 → f32x4, i32 → i32x4, else none.
-        /// Both pack 4 elements per v128 (matching the by-4 dispatch). Sub-word ints (byte/short) and
-        /// 2-lane (i64/f64) are deliberately NOT in this set yet — they need a different lane count.</summary>
-        private enum LaneClass { None, F32x4, I32x4 }
+        /// <summary>SIMD lane class of a primitive type. f32→f32x4 / i32→i32x4 pack 4/v128 (the by-4
+        /// dispatch's natural width). f64→f64x2 packs 2/v128 and is DOUBLE-PUMPED across the by-4 dispatch
+        /// (2 v128s per value, lo=lanes[0,1] hi=lanes[2,3]). Sub-word ints + i64 are not in this set yet.</summary>
+        private enum LaneClass { None, F32x4, I32x4, F64x2 }
+
+        /// <summary>True for the 2-lane (double-pumped) classes — currently just f64x2.</summary>
+        private static bool Is2Lane(LaneClass c) => c == LaneClass.F64x2;
 
         private static LaneClass ClassOf(TypeNode t) =>
             t is PrimitiveType pt
@@ -507,6 +522,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 {
                     global::ILGPU.BasicValueType.Float32 => LaneClass.F32x4,
                     global::ILGPU.BasicValueType.Int32 => LaneClass.I32x4,
+                    global::ILGPU.BasicValueType.Float64 => LaneClass.F64x2,
                     _ => LaneClass.None,
                 }
                 : LaneClass.None;
@@ -606,6 +622,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 GenerateCodeFor(v);
                 return true;
             }
+
+            // 2-lane (f64x2) lane-variant values are DOUBLE-PUMPED (2 v128s); a separate emitter keeps the
+            // proven 4-lane path below untouched. A Store is void-typed, so route it by its VALUE's class
+            // (else an f64 store falls through to the 4-lane Store case and writes only the lo v128 — the
+            // hi lanes [2,3] would never be stored).
+            if (Is2Lane(ClassOf(v.Type)) || (v is Store st2l && Is2Lane(ClassOf(st2l.Value.Resolve().Type))))
+                return Emit2LaneValue(v, laneVariant);
 
             switch (v)
             {
@@ -790,6 +813,106 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             return true;
         }
 
+        /// <summary>Emits a lane-VARIANT 2-lane (f64x2) value via DOUBLE-PUMPING: the by-4 dispatch's 4
+        /// thread-ids span two f64x2 v128s (lo = lanes 0,1; hi = lanes 2,3), so each op runs twice. The lo
+        /// half uses the value's usual local; the hi half a parallel local in <see cref="_simdHiLocal"/>.
+        /// Handles unit-stride Load / f64x2 arithmetic / unit-stride Store. Anything else (gather/scatter/
+        /// convert/compare for f64) ⇒ bail. The unit-stride lane-base LEA already uses elemSize 8, so the
+        /// two v128 loads/stores at byte offsets 0 and 16 cover f64[i..i+3].</summary>
+        private bool Emit2LaneValue(Value v, HashSet<Value> laneVariant)
+        {
+            switch (v)
+            {
+                case Load ld:
+                {
+                    if (ld.Source.Resolve() is LoadElementAddress glea && IsGatherLEA(glea)) return false; // f64 gather: later
+                    var lo = AllocateLocal(ld, WasmOpCodes.V128);
+                    EmitGetLocal(ld.Source.Resolve());
+                    WasmModuleBuilder.EmitSimdMem(Code, WasmOpCodes.V128Load, 3, 0);  // lanes 0,1 (align 8)
+                    WasmModuleBuilder.EmitLocalSet(Code, lo);
+                    var hi = AllocateNewLocal(WasmOpCodes.V128);
+                    EmitGetLocal(ld.Source.Resolve());
+                    WasmModuleBuilder.EmitSimdMem(Code, WasmOpCodes.V128Load, 3, 16); // lanes 2,3 (offset 16)
+                    WasmModuleBuilder.EmitLocalSet(Code, hi);
+                    _simdHiLocal[ld] = hi; _simdV128Values.Add(ld);
+                    return true;
+                }
+                case BinaryArithmeticValue ba:
+                {
+                    uint op = MapBinary(ba);
+                    if (op == 0) return false;
+                    var left = ba.Left.Resolve(); var right = ba.Right.Resolve();
+                    var lo = AllocateLocal(ba, WasmOpCodes.V128);
+                    if (!Push2Lane(left, false, laneVariant)) return false;
+                    if (!Push2Lane(right, false, laneVariant)) return false;
+                    WasmModuleBuilder.EmitSimd(Code, op);
+                    WasmModuleBuilder.EmitLocalSet(Code, lo);
+                    var hi = AllocateNewLocal(WasmOpCodes.V128);
+                    if (!Push2Lane(left, true, laneVariant)) return false;
+                    if (!Push2Lane(right, true, laneVariant)) return false;
+                    WasmModuleBuilder.EmitSimd(Code, op);
+                    WasmModuleBuilder.EmitLocalSet(Code, hi);
+                    _simdHiLocal[ba] = hi; _simdV128Values.Add(ba);
+                    return true;
+                }
+                case UnaryArithmeticValue ua:
+                {
+                    uint op = MapUnary(ua);
+                    if (op == 0) return false;
+                    var src = ua.Value.Resolve();
+                    var lo = AllocateLocal(ua, WasmOpCodes.V128);
+                    if (!Push2Lane(src, false, laneVariant)) return false;
+                    WasmModuleBuilder.EmitSimd(Code, op);
+                    WasmModuleBuilder.EmitLocalSet(Code, lo);
+                    var hi = AllocateNewLocal(WasmOpCodes.V128);
+                    if (!Push2Lane(src, true, laneVariant)) return false;
+                    WasmModuleBuilder.EmitSimd(Code, op);
+                    WasmModuleBuilder.EmitLocalSet(Code, hi);
+                    _simdHiLocal[ua] = hi; _simdV128Values.Add(ua);
+                    return true;
+                }
+                case Store st:
+                {
+                    var sv = st.Value.Resolve();
+                    if (ClassOf(sv.Type) != LaneClass.F64x2) return false;
+                    var tgt = st.Target.Resolve();
+                    if (tgt is LoadElementAddress tlea && IsGatherLEA(tlea)) return false; // f64 scatter: later
+                    EmitGetLocal(tgt);
+                    if (!Push2Lane(sv, false, laneVariant)) return false;
+                    WasmModuleBuilder.EmitSimdMem(Code, WasmOpCodes.V128Store, 3, 0);  // lanes 0,1
+                    EmitGetLocal(tgt);
+                    if (!Push2Lane(sv, true, laneVariant)) return false;
+                    WasmModuleBuilder.EmitSimdMem(Code, WasmOpCodes.V128Store, 3, 16); // lanes 2,3
+                    _simdV128StoreCount++;
+                    return true;
+                }
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>Pushes the lo (lanes 0,1) or hi (lanes 2,3) half of a 2-lane value as a v128. A
+        /// lane-variant value uses its lo local / its <see cref="_simdHiLocal"/> hi local; a uniform scalar
+        /// is f64x2.splat'd to BOTH halves. Bails if a lane-variant value lacks a materialized v128.</summary>
+        private bool Push2Lane(Value op, bool hi, HashSet<Value> laneVariant)
+        {
+            if (ClassOf(op.Type) != LaneClass.F64x2) return false;
+            if (laneVariant.Contains(op))
+            {
+                if (!_simdV128Values.Contains(op)) return false;
+                if (hi)
+                {
+                    if (!_simdHiLocal.TryGetValue(op, out var hiLocal)) return false;
+                    WasmModuleBuilder.EmitLocalGet(Code, hiLocal);
+                }
+                else EmitGetLocal(op); // lo = the value's main local
+                return true;
+            }
+            EmitGetLocal(op);                                            // uniform scalar f64
+            WasmModuleBuilder.EmitSimd(Code, WasmOpCodes.F64x2Splat);     // broadcast to both lanes
+            return true;
+        }
+
         /// <summary>Maps a binary arithmetic value to its f32x4/i32x4 opcode, or 0 if unsupported in 3a.
         /// Integer Min/Max pick the signed/unsigned variant from <see cref="ArithmeticFlags.Unsigned"/>;
         /// And/Or/Xor are the whole-vector v128 bitwise ops. Div/Rem (no SIMD int divide) and shifts
@@ -826,6 +949,17 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     BinaryArithmeticKind.Shr => u ? WasmOpCodes.I32x4ShrU : WasmOpCodes.I32x4ShrS,
                     _ => 0u, // Div/Rem (no SIMD int divide) ⇒ scalar fallback
                 };
+            if (cls == LaneClass.F64x2) // double-pumped (2 v128s/value); emitted by Emit2LaneValue
+                return v.Kind switch
+                {
+                    BinaryArithmeticKind.Add => WasmOpCodes.F64x2Add,
+                    BinaryArithmeticKind.Sub => WasmOpCodes.F64x2Sub,
+                    BinaryArithmeticKind.Mul => WasmOpCodes.F64x2Mul,
+                    BinaryArithmeticKind.Div => WasmOpCodes.F64x2Div,
+                    BinaryArithmeticKind.Min => WasmOpCodes.F64x2Min,
+                    BinaryArithmeticKind.Max => WasmOpCodes.F64x2Max,
+                    _ => 0u,
+                };
             return 0u;
         }
 
@@ -849,6 +983,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     UnaryArithmeticKind.Neg => WasmOpCodes.I32x4Neg,
                     UnaryArithmeticKind.Abs => WasmOpCodes.I32x4Abs,
                     UnaryArithmeticKind.Not => WasmOpCodes.V128Not, // whole-vector bitwise not
+                    _ => 0u,
+                };
+            if (cls == LaneClass.F64x2) // double-pumped; emitted by Emit2LaneValue
+                return v.Kind switch
+                {
+                    UnaryArithmeticKind.Neg => WasmOpCodes.F64x2Neg,
+                    UnaryArithmeticKind.Abs => WasmOpCodes.F64x2Abs,
+                    UnaryArithmeticKind.SqrtF => WasmOpCodes.F64x2Sqrt,
                     _ => 0u,
                 };
             return 0u;

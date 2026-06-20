@@ -421,6 +421,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public const uint F32x4ConvertI32x4S = 250;  // f32x4.convert_i32x4_s
         public const uint F32x4ConvertI32x4U = 251;  // f32x4.convert_i32x4_u
         // f64x2 arithmetic
+        public const uint F64x2Abs = 236;        // f64x2.abs
+        public const uint F64x2Neg = 237;        // f64x2.neg
+        public const uint F64x2Sqrt = 239;       // f64x2.sqrt
         public const uint F64x2Add = 240;        // f64x2.add
         public const uint F64x2Sub = 241;        // f64x2.sub
         public const uint F64x2Mul = 242;        // f64x2.mul
