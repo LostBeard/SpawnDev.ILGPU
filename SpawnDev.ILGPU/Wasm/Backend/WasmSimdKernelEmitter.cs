@@ -582,8 +582,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         break; // feeds a loop-carried phi (the v128 accumulator update) — see the loop path
                     case Store st when ReferenceEquals(st.Value.Resolve(), v):
                         break; // used as the stored value (vector store)
+                    case LoadElementAddress lea when IsGatherLEA(lea):
+                        break; // a loaded index feeding a GATHER address — handled by the gather load
                     default:
-                        return false; // address/LEA index, store target, compare, convert, call, struct, terminator…
+                        return false; // unit-stride address index, store target, call, struct, terminator…
                 }
             }
             return true;
@@ -592,6 +594,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// <summary>Emits a single value in the v128 pass. Returns false to bail (unhandled).</summary>
         private bool EmitSimdValue(Value v, HashSet<Value> laneVariant)
         {
+            // A GATHER address (LEA whose offset is a loaded index) is NOT emitted on its own — its
+            // per-lane addresses are computed inside the gather load below. Emitting it scalar would feed
+            // the v128 index into the scalar LEA path (type error). Intercept BEFORE the address branch.
+            if (v is LoadElementAddress glea && IsGatherLEA(glea)) return true;
+
             // Address values + lane-invariant values: reuse the PROVEN scalar emission verbatim
             // (produces a scalar local — the lane-base address, or a uniform scalar to splat later).
             if (v.Type is AddressSpaceType || !laneVariant.Contains(v))
@@ -606,6 +613,33 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 {
                     if (ClassOf(ld.Type) == LaneClass.None) return false;
                     var target = AllocateLocal(ld, WasmOpCodes.V128);
+                    if (IsGatherLoad(ld))
+                    {
+                        // wasm SIMD has no gather: build the result lane-by-lane.
+                        // addr_lane = base + extract_lane(indexV128, lane) * elemSize; scalar load; replace_lane.
+                        var lea = (LoadElementAddress)ld.Source.Resolve();
+                        var baseAddr = lea.Source.Resolve();           // the array base pointer (uniform/scalar)
+                        var indexV = lea.Offset.Resolve();             // the loaded index (a v128 of 4 indices)
+                        if (!_simdV128Values.Contains(indexV)) return false; // index must be a materialized v128
+                        bool isF32 = ClassOf(ld.Type) == LaneClass.F32x4;
+                        byte loadOp = isF32 ? WasmOpCodes.F32Load : WasmOpCodes.I32Load;
+                        uint replaceOp = isF32 ? WasmOpCodes.F32x4ReplaceLane : WasmOpCodes.I32x4ReplaceLane;
+                        for (byte lane = 0; lane < 4; lane++)
+                        {
+                            WasmModuleBuilder.EmitLocalGet(Code, target); // current v128 (zero-init at lane 0)
+                            EmitGetLocal(baseAddr);                     // i32 base ptr
+                            EmitGetLocal(indexV);                       // v128 indices
+                            WasmModuleBuilder.EmitSimdLane(Code, WasmOpCodes.I32x4ExtractLane, lane); // i32 idx
+                            WasmModuleBuilder.EmitI32Const(Code, 4);    // elemSize (f32/i32 = 4 bytes)
+                            Code.Add(WasmOpCodes.I32Mul);
+                            Code.Add(WasmOpCodes.I32Add);               // byte address
+                            WasmModuleBuilder.EmitLoad(Code, loadOp, 2, 0); // scalar load
+                            WasmModuleBuilder.EmitSimdLane(Code, replaceOp, lane); // -> v128 with lane filled
+                            WasmModuleBuilder.EmitLocalSet(Code, target);
+                        }
+                        _simdV128Values.Add(ld);
+                        return true;
+                    }
                     EmitGetLocal(ld.Source.Resolve());                 // scalar lane-base byte address
                     WasmModuleBuilder.EmitSimdMem(Code, WasmOpCodes.V128Load, 2, 0); // 4-byte align, unit-stride
                     WasmModuleBuilder.EmitLocalSet(Code, target);
@@ -816,6 +850,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
             return 0u;
         }
+
+        /// <summary>True if <paramref name="lea"/> is a GATHER address: its element offset is a loaded
+        /// value (e.g. <c>src[idx[i]]</c>), not the linear thread index. Unit-stride addresses use the
+        /// index Parameter directly; a gather indexes by data, so the 4 lanes hit 4 unrelated addresses.</summary>
+        private static bool IsGatherLEA(LoadElementAddress lea) => lea.Offset.Resolve() is Load;
+
+        /// <summary>True if <paramref name="ld"/> is a gather load (its source address is a gather LEA).
+        /// Emitted as 4× (extract index lane → scalar load → replace lane) since wasm SIMD has no gather.</summary>
+        private static bool IsGatherLoad(Load ld) => ld.Source.Resolve() is LoadElementAddress lea && IsGatherLEA(lea);
 
         /// <summary>A lane-variant Predicate (select) is vectorizable iff its CONDITION is a lane-variant
         /// comparison we can emit as a v128 mask, and both selected values are a 4-lane class. (A uniform

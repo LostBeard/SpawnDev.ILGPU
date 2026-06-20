@@ -2546,6 +2546,93 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             finally { WasmBackend.ForceScalar = savedScalar; WasmBackend.ForceSimd = savedSimd; }
         }
 
+        // Wasm SIMD128 Stage-3a GATHER (indexed load) numerical gate (2026-06-20). `o[i] = src[idx[i]]`
+        // is a gather: the 4 lanes read 4 unrelated addresses (driven by a loaded index). wasm SIMD has no
+        // gather, so it is emulated as 4× (extract index lane → scalar load → replace lane). Asserts
+        // kernel_simd is emitted and the gather is EXACTLY equal to scalar and a CPU reference (loads are
+        // exact, both f32 and i32). N=1003 hits the scalar tail; indices span the whole table.
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_GatherFloatMatchesScalarAndReference()
+        {
+            const int N = 1003, M = 256;
+            var src = new float[M]; for (int j = 0; j < M; j++) src[j] = MathF.Sin(j * 0.1f) * 100f + j;
+            var idx = new int[N]; for (int i = 0; i < N; i++) idx[i] = (i * 7) % M;
+            var reference = new float[N]; for (int i = 0; i < N; i++) reference[i] = src[idx[i]];
+
+            var scalar = await RunSimdGatherFloat(src, idx, N, forceSimd: false, requireSimdEmit: false);
+            var simd = await RunSimdGatherFloat(src, idx, N, forceSimd: true, requireSimdEmit: true);
+            AssertExactF(scalar, reference, simd, "gather-float");
+        }
+
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_GatherIntMatchesScalarAndReference()
+        {
+            const int N = 1003, M = 256;
+            var src = new int[M]; for (int j = 0; j < M; j++) src[j] = j * j - 1000;
+            var idx = new int[N]; for (int i = 0; i < N; i++) idx[i] = (i * 13) % M;
+            var reference = new int[N]; for (int i = 0; i < N; i++) reference[i] = src[idx[i]];
+
+            var scalar = await RunSimdGatherInt(src, idx, N, forceSimd: false, requireSimdEmit: false);
+            var simd = await RunSimdGatherInt(src, idx, N, forceSimd: true, requireSimdEmit: true);
+            int mismV = 0, firstV = -1, mismS = 0;
+            for (int i = 0; i < N; i++) { if (simd[i] != reference[i]) { if (mismV == 0) firstV = i; mismV++; } if (scalar[i] != reference[i]) mismS++; }
+            if (mismS > 0) throw new Exception($"Wasm SCALAR gather-int != reference: {mismS}/{N} (baseline scalar wrong).");
+            if (mismV > 0) throw new Exception($"Wasm SIMD gather-int (per-lane) != reference: {mismV}/{N}, first@{firstV} got={simd[firstV]} exp={reference[firstV]}.");
+        }
+
+        private static void Wasm_Simd_GatherFloatKernel(Index1D i, ArrayView<float> src, ArrayView<int> idx, ArrayView<float> o)
+            => o[i] = src[idx[i]];
+        private static void Wasm_Simd_GatherIntKernel(Index1D i, ArrayView<int> src, ArrayView<int> idx, ArrayView<int> o)
+            => o[i] = src[idx[i]];
+
+        private static async Task<float[]> RunSimdGatherFloat(float[] src, int[] idx, int N, bool forceSimd, bool requireSimdEmit)
+        {
+            bool savedScalar = WasmBackend.ForceScalar, savedSimd = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd; WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                using var ctx = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm().ToContext();
+                WasmBackend.VerboseLogging = false; WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<int>, ArrayView<float>>(Wasm_Simd_GatherFloatKernel);
+                if (requireSimdEmit)
+                {
+                    var bin = WasmBackend.LastWasmBinary;
+                    if (bin == null || !ContainsExportName(bin, "kernel_simd"))
+                        throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for the float gather.");
+                }
+                using var sBuf = acc.Allocate1D(src); using var iBuf = acc.Allocate1D(idx); using var oBuf = acc.Allocate1D<float>(N);
+                k((Index1D)N, sBuf.View, iBuf.View, oBuf.View);
+                await acc.SynchronizeAsync();
+                return await oBuf.CopyToHostAsync<float>();
+            }
+            finally { WasmBackend.ForceScalar = savedScalar; WasmBackend.ForceSimd = savedSimd; }
+        }
+
+        private static async Task<int[]> RunSimdGatherInt(int[] src, int[] idx, int N, bool forceSimd, bool requireSimdEmit)
+        {
+            bool savedScalar = WasmBackend.ForceScalar, savedSimd = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd; WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                using var ctx = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm().ToContext();
+                WasmBackend.VerboseLogging = false; WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>, ArrayView<int>>(Wasm_Simd_GatherIntKernel);
+                if (requireSimdEmit)
+                {
+                    var bin = WasmBackend.LastWasmBinary;
+                    if (bin == null || !ContainsExportName(bin, "kernel_simd"))
+                        throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for the int gather.");
+                }
+                using var sBuf = acc.Allocate1D(src); using var iBuf = acc.Allocate1D(idx); using var oBuf = acc.Allocate1D<int>(N);
+                k((Index1D)N, sBuf.View, iBuf.View, oBuf.View);
+                await acc.SynchronizeAsync();
+                return await oBuf.CopyToHostAsync<int>();
+            }
+            finally { WasmBackend.ForceScalar = savedScalar; WasmBackend.ForceSimd = savedSimd; }
+        }
+
         // Scans a wasm binary for an exact length-prefixed export-name token (the export section encodes
         // each name as len-byte + UTF-8 bytes). The length prefix (6 for "kernel", 11 for "kernel_simd")
         // separates the two so "kernel" never matches the "kernel_simd" slice.
