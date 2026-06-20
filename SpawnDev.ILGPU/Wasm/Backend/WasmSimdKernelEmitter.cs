@@ -978,7 +978,42 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             {
                 case Load ld:
                 {
-                    if (ld.Source.Resolve() is LoadElementAddress glea && IsGatherLEA(glea)) return false; // f64 gather: later
+                    if (ld.Source.Resolve() is LoadElementAddress glea && IsGatherLEA(glea))
+                    {
+                        // 2-lane GATHER: src[idx[i]] for f64/i64. Index is i32x4 (4 lanes); the result spans
+                        // two v128s (lo = global lanes 0,1; hi = 2,3). Per global lane: addr = base +
+                        // extract_i32x4(idx)*8; scalar f64/i64 load; replace into the right half.
+                        var gbase = glea.Source.Resolve();
+                        var gindex = glea.Offset.Resolve();
+                        if (!_simdV128Values.Contains(gindex)) return false;
+                        bool gf64 = ClassOf(ld.Type) == LaneClass.F64x2;
+                        byte gLoadOp = gf64 ? WasmOpCodes.F64Load : WasmOpCodes.I64Load;
+                        uint gRepl = gf64 ? WasmOpCodes.F64x2ReplaceLane : WasmOpCodes.I64x2ReplaceLane;
+                        var glo = AllocateLocal(ld, WasmOpCodes.V128);
+                        var ghi = AllocateNewLocal(WasmOpCodes.V128);
+                        for (byte half = 0; half < 2; half++) // lo: global lanes 0,1
+                        {
+                            WasmModuleBuilder.EmitLocalGet(Code, glo);
+                            EmitGetLocal(gbase); EmitGetLocal(gindex);
+                            WasmModuleBuilder.EmitSimdLane(Code, WasmOpCodes.I32x4ExtractLane, half);
+                            WasmModuleBuilder.EmitI32Const(Code, 8); Code.Add(WasmOpCodes.I32Mul); Code.Add(WasmOpCodes.I32Add);
+                            WasmModuleBuilder.EmitLoad(Code, gLoadOp, 3, 0);
+                            WasmModuleBuilder.EmitSimdLane(Code, gRepl, half);
+                            WasmModuleBuilder.EmitLocalSet(Code, glo);
+                        }
+                        for (byte half = 0; half < 2; half++) // hi: global lanes 2,3
+                        {
+                            WasmModuleBuilder.EmitLocalGet(Code, ghi);
+                            EmitGetLocal(gbase); EmitGetLocal(gindex);
+                            WasmModuleBuilder.EmitSimdLane(Code, WasmOpCodes.I32x4ExtractLane, (byte)(half + 2));
+                            WasmModuleBuilder.EmitI32Const(Code, 8); Code.Add(WasmOpCodes.I32Mul); Code.Add(WasmOpCodes.I32Add);
+                            WasmModuleBuilder.EmitLoad(Code, gLoadOp, 3, 0);
+                            WasmModuleBuilder.EmitSimdLane(Code, gRepl, half);
+                            WasmModuleBuilder.EmitLocalSet(Code, ghi);
+                        }
+                        _simdHiLocal[ld] = ghi; _simdV128Values.Add(ld);
+                        return true;
+                    }
                     var lo = AllocateLocal(ld, WasmOpCodes.V128);
                     EmitGetLocal(ld.Source.Resolve());
                     WasmModuleBuilder.EmitSimdMem(Code, WasmOpCodes.V128Load, 3, 0);  // lanes 0,1 (align 8)
@@ -1029,7 +1064,32 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     var sv = st.Value.Resolve();
                     if (!Is2Lane(ClassOf(sv.Type))) return false;
                     var tgt = st.Target.Resolve();
-                    if (tgt is LoadElementAddress tlea && IsGatherLEA(tlea)) return false; // 2-lane scatter: later
+                    if (tgt is LoadElementAddress tlea && IsGatherLEA(tlea))
+                    {
+                        // 2-lane SCATTER: o[idx[i]] = v for f64/i64. Per global lane: addr = base +
+                        // extract_i32x4(idx)*8; extract the value lane (from lo for 0,1 / hi for 2,3); scalar store.
+                        var sbase = tlea.Source.Resolve();
+                        var sindex = tlea.Offset.Resolve();
+                        if (!_simdV128Values.Contains(sindex)) return false;
+                        bool sf64 = ClassOf(sv.Type) == LaneClass.F64x2;
+                        byte sStoreOp = sf64 ? WasmOpCodes.F64Store : WasmOpCodes.I64Store;
+                        uint sExtract = sf64 ? WasmOpCodes.F64x2ExtractLane : WasmOpCodes.I64x2ExtractLane;
+                        var svLo = AllocateNewLocal(WasmOpCodes.V128);
+                        if (!Push2Lane(sv, false, laneVariant)) return false; WasmModuleBuilder.EmitLocalSet(Code, svLo);
+                        var svHi = AllocateNewLocal(WasmOpCodes.V128);
+                        if (!Push2Lane(sv, true, laneVariant)) return false; WasmModuleBuilder.EmitLocalSet(Code, svHi);
+                        for (byte g = 0; g < 4; g++)
+                        {
+                            EmitGetLocal(sbase); EmitGetLocal(sindex);
+                            WasmModuleBuilder.EmitSimdLane(Code, WasmOpCodes.I32x4ExtractLane, g);
+                            WasmModuleBuilder.EmitI32Const(Code, 8); Code.Add(WasmOpCodes.I32Mul); Code.Add(WasmOpCodes.I32Add); // addr
+                            WasmModuleBuilder.EmitLocalGet(Code, g < 2 ? svLo : svHi);
+                            WasmModuleBuilder.EmitSimdLane(Code, sExtract, (byte)(g & 1)); // lane within the half
+                            WasmModuleBuilder.EmitStore(Code, sStoreOp, 3, 0);
+                        }
+                        _simdV128StoreCount++;
+                        return true;
+                    }
                     EmitGetLocal(tgt);
                     if (!Push2Lane(sv, false, laneVariant)) return false;
                     WasmModuleBuilder.EmitSimdMem(Code, WasmOpCodes.V128Store, 3, 0);  // lanes 0,1

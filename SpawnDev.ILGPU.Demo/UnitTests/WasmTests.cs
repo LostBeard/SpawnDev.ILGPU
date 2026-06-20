@@ -3102,6 +3102,89 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
         }
 
+        // Wasm SIMD128 f64 GATHER + SCATTER gate (2026-06-20). Indexed double-precision access (lookup /
+        // interpolation tables, permutations) — the 2-lane (double-pumped) form of gather/scatter: the i32x4
+        // index drives per-lane f64 loads/stores into/out of the lo+hi v128 halves. IEEE f64 exact, so SIMD
+        // == scalar == reference. Asserts kernel_simd emitted. N=1003 hits the scalar tail.
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_GatherF64MatchesScalar()
+        {
+            const int N = 1003, M = 256;
+            var src = new double[M]; for (int j = 0; j < M; j++) src[j] = Math.Sin(j * 0.1) * 100.0 + j;
+            var idx = new int[N]; for (int i = 0; i < N; i++) idx[i] = (i * 7) % M;
+            var reference = new double[N]; for (int i = 0; i < N; i++) reference[i] = src[idx[i]];
+            var scalar = await RunGatherF64(src, idx, N, false, false);
+            var simd = await RunGatherF64(src, idx, N, true, true);
+            AssertExactD(scalar, reference, simd, "gather-f64");
+        }
+
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_ScatterF64MatchesScalar()
+        {
+            const int N = 1003; const double SENT = -1234.5;
+            var a = new double[N]; for (int i = 0; i < N; i++) a[i] = Math.Cos(i * 0.02) * 30.0 + i;
+            var idx = new int[N]; for (int i = 0; i < N; i++) idx[i] = (i * 7 + 3) % N; // permutation (7 coprime to 1003)
+            var reference = new double[N]; for (int i = 0; i < N; i++) reference[i] = SENT;
+            for (int i = 0; i < N; i++) reference[idx[i]] = a[i] * 2.0;
+            var scalar = await RunScatterF64(a, idx, N, SENT, false, false);
+            var simd = await RunScatterF64(a, idx, N, SENT, true, true);
+            AssertExactD(scalar, reference, simd, "scatter-f64");
+        }
+
+        private static void AssertExactD(double[] scalar, double[] reference, double[] simd, string label)
+        {
+            int mismS = 0, mismV = 0, firstV = -1;
+            for (int i = 0; i < scalar.Length; i++)
+            {
+                if (BitConverter.DoubleToInt64Bits(scalar[i]) != BitConverter.DoubleToInt64Bits(reference[i])) mismS++;
+                if (BitConverter.DoubleToInt64Bits(simd[i]) != BitConverter.DoubleToInt64Bits(reference[i])) { if (mismV == 0) firstV = i; mismV++; }
+            }
+            if (mismS > 0) throw new Exception($"Wasm SCALAR {label} != reference: {mismS}/{scalar.Length} (baseline scalar wrong).");
+            if (mismV > 0) throw new Exception($"Wasm SIMD {label} != reference: {mismV}/{scalar.Length}, first@{firstV} got={simd[firstV]} exp={reference[firstV]}.");
+        }
+
+        private static void Wasm_Simd_GatherF64Kernel(Index1D i, ArrayView<double> src, ArrayView<int> idx, ArrayView<double> o) => o[i] = src[idx[i]];
+        private static void Wasm_Simd_ScatterF64Kernel(Index1D i, ArrayView<double> a, ArrayView<int> idx, ArrayView<double> o) => o[idx[i]] = a[i] * 2.0;
+
+        private static async Task<double[]> RunGatherF64(double[] src, int[] idx, int N, bool forceSimd, bool requireSimdEmit)
+        {
+            bool ss = WasmBackend.ForceScalar, sm = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd; WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                using var ctx = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm().ToContext();
+                WasmBackend.VerboseLogging = false; WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<double>, ArrayView<int>, ArrayView<double>>(Wasm_Simd_GatherF64Kernel);
+                if (requireSimdEmit && (WasmBackend.LastWasmBinary == null || !ContainsExportName(WasmBackend.LastWasmBinary, "kernel_simd")))
+                    throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for the f64 gather.");
+                using var sB = acc.Allocate1D(src); using var iB = acc.Allocate1D(idx); using var oB = acc.Allocate1D<double>(N);
+                k((Index1D)N, sB.View, iB.View, oB.View); await acc.SynchronizeAsync();
+                return await oB.CopyToHostAsync<double>();
+            }
+            finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
+        }
+
+        private static async Task<double[]> RunScatterF64(double[] a, int[] idx, int N, double sentinel, bool forceSimd, bool requireSimdEmit)
+        {
+            bool ss = WasmBackend.ForceScalar, sm = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd; WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                using var ctx = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm().ToContext();
+                WasmBackend.VerboseLogging = false; WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<double>, ArrayView<int>, ArrayView<double>>(Wasm_Simd_ScatterF64Kernel);
+                if (requireSimdEmit && (WasmBackend.LastWasmBinary == null || !ContainsExportName(WasmBackend.LastWasmBinary, "kernel_simd")))
+                    throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for the f64 scatter.");
+                var oInit = new double[N]; for (int i = 0; i < N; i++) oInit[i] = sentinel;
+                using var aB = acc.Allocate1D(a); using var iB = acc.Allocate1D(idx); using var oB = acc.Allocate1D(oInit);
+                k((Index1D)N, aB.View, iB.View, oB.View); await acc.SynchronizeAsync();
+                return await oB.CopyToHostAsync<double>();
+            }
+            finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
+        }
+
         // Scans a wasm binary for an exact length-prefixed export-name token (the export section encodes
         // each name as len-byte + UTF-8 bytes). The length prefix (6 for "kernel", 11 for "kernel_simd")
         // separates the two so "kernel" never matches the "kernel_simd" slice.
