@@ -269,21 +269,21 @@ namespace ILGPU
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static float RawBitsToFloat(int rawBits)
         {
+            // SINGLE-EXIT / branchless on purpose (value-identical to the old early-return form). Early
+            // returns inline as control flow, and the WebGL/GLSL structurizer DUPLICATES a following loop's
+            // continuation into every exit arm of an inlined multi-exit function - so this decode inside an
+            // MXFP4 nibble loop already cost ~16k GLSL lines, and stacking another multi-exit decode before
+            // the loop exploded it past WebGL's compile limit. Selects are expressions, nothing to duplicate.
             uint code = (uint)(rawBits & 0xF);
             uint sign = (code & 0x8u) << 28;        // f32 sign bit (bit 31)
             uint e = (code >> 1) & 0x3u;            // exponent field (2 bits)
             uint m = code & 0x1u;                   // mantissa (1 bit)
 
-            if (e == 0u)
-            {
-                if (m == 0u)
-                    return Interop.IntAsFloat(sign);          // +-0
-                // Subnormal 0.5 = 2^-1: f32 exponent 126, mantissa 0.
-                return Interop.IntAsFloat(sign | (126u << 23));
-            }
-            // Normal: value = 1.m * 2^(e-1). f32 exp = (e-1)+127; the single mantissa bit -> bit 22.
-            uint f32Exp = e - 1u + 127u;
-            return Interop.IntAsFloat(sign | (f32Exp << 23) | (m << 22));
+            // Normal (e in 1..3): value = 1.m * 2^(e-1); f32 exp = (e-1)+127, single mantissa bit -> bit 22.
+            uint normal = sign | ((e - 1u + 127u) << 23) | (m << 22);
+            // Denormal (e == 0): m==0 -> +-0 (sign only); m==1 -> subnormal 0.5 = 2^-1 (f32 exp 126, mant 0).
+            uint denorm = sign | ((m == 0u) ? 0u : (126u << 23));
+            return Interop.IntAsFloat((e == 0u) ? denorm : normal);
         }
 
         /// <summary>

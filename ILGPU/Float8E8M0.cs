@@ -120,16 +120,19 @@ namespace ILGPU
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static float RawBitsToFloat(int rawBits)
         {
+            // SINGLE-EXIT / branchless on purpose. Early returns inline as control flow, and the WebGL/GLSL
+            // structurizer DUPLICATES a following loop's continuation into every exit arm of an inlined
+            // multi-exit function - so a multi-exit decode placed before a loop (e.g. an MX block scale
+            // decoded before the FP4 nibble loop, which itself has a multi-exit decode) explodes the GLSL
+            // combinatorially and blows WebGL's shader-compile limits. Selects are expressions, not branches,
+            // so there is nothing to duplicate. Value-identical to the old early-return form.
             uint e = (uint)(rawBits & 0xFF);
-            // e == 0xFF is the only special -> NaN ((e<<23) would give +Inf).
-            if (e == 0xFFu)
-                return Interop.IntAsFloat(0x7FC00000u); // canonical quiet NaN
-            // e == 0 -> 2^-127 ((e<<23) would give +0); 2^-127 is the f32 subnormal 0x00400000.
-            if (e == 0u)
-                return Interop.IntAsFloat(0x00400000u);
-            // e in 1..254: E8M0 and f32 share bias 127, so 2^(e-127) is exactly the normal f32 with
-            // biased exponent e and zero mantissa.
-            return Interop.IntAsFloat(e << 23);
+            // e in 1..254: E8M0 and f32 share bias 127, so 2^(e-127) is the normal f32 with biased exp e,
+            // zero mantissa. e == 0 -> 2^-127 (f32 subnormal 0x00400000). e == 0xFF -> NaN (e<<23 = +Inf).
+            uint bits = e << 23;
+            bits = (e == 0u) ? 0x00400000u : bits;
+            bits = (e == 0xFFu) ? 0x7FC00000u : bits;
+            return Interop.IntAsFloat(bits);
         }
 
         /// <summary>Decodes a <see cref="Float8E8M0"/> scale to f32.</summary>

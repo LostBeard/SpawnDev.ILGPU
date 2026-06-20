@@ -2,6 +2,13 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.14.2 (2026-06-20) - WebGL fix: single-exit quant decoders (multi-exit-before-loop GLSL explosion)
+
+A targeted WebGL/GLSL fix. Forks bump to `2.0.41`.
+
+- **`Float8E8M0Extensions.RawBitsToFloat` and `Float4E2M1Extensions.RawBitsToFloat` are now single-exit / branchless** (value-identical to the old early-return forms; verified bit-exact on all 6 backends). An early `return` inlines as control flow, and the **WebGL/GLSL structurizer duplicates a following loop's continuation into every exit arm** of an inlined multi-exit function. A multi-exit decode placed *before* a loop whose body has *another* multi-exit decode - exactly the MXFP4 dequant shape (a `Float8E8M0` block scale decoded before the `Float4E2M1` nibble loop) - therefore exploded the generated GLSL combinatorially (~16k -> ~77k lines, nesting depth 56) past WebGL's shader-compile limit, failing those kernels on WebGL only (found by Tuvok consuming 4.14.1 in SpawnDev.ILGPU.ML; 5/6 backends were already green). Replacing the early returns with branchless selects (expressions, nothing to duplicate) drops the GLSL back to its single-exit size and WebGL compiles. The underlying structurizer over-duplication is tracked as a separate root-cause item (the FP8 `Float8E4M3`/`Float8E5M2` decoders remain multi-exit and would hit the same wall if inlined before a loop).
+- Gate: `BackendTestBase.MultiExitDecodeBeforeLoop_MXFP4Shape_CompilesAndMatches` reproduces the shape (an E8M0 scale decode before an FP4 nibble-decode loop) and verifies it compiles + matches an independent oracle on all 6 backends - so the library itself catches a regression to multi-exit decoders without depending on the ML consumer.
+
 ## 4.14.1 (2026-06-20) - Harden the 4-bit tier (packed views in `[NoInlining]` helpers, all 6 backends) + `Float8E8M0` (the OCP MX scale)
 
 A hardening + completion pass over 4.14.0. Forks bump to `2.0.40`.
