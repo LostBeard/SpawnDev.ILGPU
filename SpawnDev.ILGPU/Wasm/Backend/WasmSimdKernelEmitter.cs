@@ -728,7 +728,38 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 {
                     var storeVal = st.Value.Resolve();
                     if (ClassOf(storeVal.Type) == LaneClass.None) return false;
-                    EmitGetLocal(st.Target.Resolve());                 // scalar lane-base byte address
+                    var tgt = st.Target.Resolve();
+                    if (tgt is LoadElementAddress tlea && IsGatherLEA(tlea))
+                    {
+                        // SCATTER: o[idx[i]] = value. wasm SIMD has no scatter — store lane-by-lane:
+                        // for each lane, addr = base + extract(indexV128, lane)*elemSize; extract the value
+                        // lane; scalar store. (Unconditional — every lane stores. Masked/conditional scatter
+                        // is a later, Stage-3b masked-store increment.)
+                        var baseAddr = tlea.Source.Resolve();
+                        var indexV = tlea.Offset.Resolve();           // loaded index (v128 of 4 indices)
+                        if (!_simdV128Values.Contains(indexV)) return false;
+                        if (!PushAsV128(storeVal, laneVariant)) return false; // value as v128 (or splat)
+                        var valTmp = AllocateNewLocal(WasmOpCodes.V128);
+                        WasmModuleBuilder.EmitLocalSet(Code, valTmp);
+                        bool isF32s = ClassOf(storeVal.Type) == LaneClass.F32x4;
+                        byte storeOp = isF32s ? WasmOpCodes.F32Store : WasmOpCodes.I32Store;
+                        uint extractOp = isF32s ? WasmOpCodes.F32x4ExtractLane : WasmOpCodes.I32x4ExtractLane;
+                        for (byte lane = 0; lane < 4; lane++)
+                        {
+                            EmitGetLocal(baseAddr);                   // i32 base ptr
+                            EmitGetLocal(indexV);                     // v128 indices
+                            WasmModuleBuilder.EmitSimdLane(Code, WasmOpCodes.I32x4ExtractLane, lane);
+                            WasmModuleBuilder.EmitI32Const(Code, 4);  // elemSize (f32/i32 = 4)
+                            Code.Add(WasmOpCodes.I32Mul);
+                            Code.Add(WasmOpCodes.I32Add);             // byte address
+                            WasmModuleBuilder.EmitLocalGet(Code, valTmp); // value v128
+                            WasmModuleBuilder.EmitSimdLane(Code, extractOp, lane); // scalar value of this lane
+                            WasmModuleBuilder.EmitStore(Code, storeOp, 2, 0); // scalar store (addr, value)
+                        }
+                        _simdV128StoreCount++;
+                        return true;
+                    }
+                    EmitGetLocal(tgt);                                 // scalar lane-base byte address
                     if (!PushAsV128(storeVal, laneVariant)) return false;
                     WasmModuleBuilder.EmitSimdMem(Code, WasmOpCodes.V128Store, 2, 0);
                     _simdV128StoreCount++;                             // real per-lane vector work emitted
