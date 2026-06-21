@@ -4,9 +4,9 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.14.2-local.1</Version>
+		<Version>4.15.0</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>4.14.2: WebGL fix - the in-register quant decoders Float8E8M0Extensions.RawBitsToFloat and Float4E2M1Extensions.RawBitsToFloat are now single-exit / branchless (value-identical). A multi-exit decode inlined before a loop made the WebGL/GLSL structurizer duplicate the loop continuation per exit arm, exploding the shader past WebGL's compile limit (e.g. MXFP4 dequant: an E8M0 scale decoded before the FP4 nibble loop). Full history: CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
+		<PackageReleaseNotes>4.15.0: the Wasm backend now AUTO-VECTORIZES kernels to WebAssembly SIMD128 (v128) - a separate `kernel_simd` is generated alongside the scalar kernel and selected when the runtime supports SIMD (the scalar path stays byte-identical and first-class). Coverage is the complete per-lane kernel class: the full numeric tier (f32x4 / i32x4 / f64x2 / i64x2, the last two double-pumped) across elementwise code, counted loops, divergent if-diamonds, gather, scatter, conditional/masked stores, general acyclic divergent control flow (chained AND nested selects), and DIVERGENT LOOPS (a data-dependent branch inside a loop); plus the whole scalar-math surface (min/max/sqrt/floor/ceil, transcendentals sin/cos/exp/log/tanh, rcp/rsqrt, pow/atan2) on f32 and f64. Cross-mode deterministic (SIMD == scalar bit-exact). Group/barrier/atomic kernels keep their existing multi-worker path. Also: every in-register quant decoder (Float8E8M0 / Float4E2M1 / Float8E4M3 / Float8E5M2 RawBitsToFloat) is now single-exit/branchless, fixing a WebGL/GLSL shader-size explosion when a multi-exit decode is inlined before a loop (MXFP4/MXFP8 dequant). Full history: CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -65,8 +65,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.41" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.41" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.0.42" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.0.42" />
 	</ItemGroup>
 
 	<ItemGroup>
