@@ -10,7 +10,7 @@
         <p class="hero-subtitle">Write once, run on WebGPU, WebGL, Wasm, CUDA, OpenCL, and CPU</p>
         <p class="hero-description">
             SpawnDev.ILGPU extends the ILGPU compiler with six parallel backends — three for the browser and three for the desktop — all driven by a single C# codebase.
-            In the browser, WebGPU and WebGL dispatch to the GPU while Wasm compiles to multithreaded WebAssembly.
+            In the browser, WebGPU and WebGL dispatch to the GPU while Wasm compiles to multithreaded, SIMD128-vectorized WebAssembly.
             On desktop, the same kernels run natively on CUDA, OpenCL, and multithreaded CPU.
             Every backend runs off the main thread, keeping your UI responsive.
         </p>
@@ -46,7 +46,8 @@
         <div class="feature-card feature-highlight-browser">
             <div class="feature-icon">🧊</div>
             <h3>Wasm</h3>
-            <p>Kernels compiled to native WebAssembly binary and dispatched to Web Workers for near-native parallel execution. Compatible with every browser that runs Blazor WASM — even with a single worker if SharedArrayBuffer is unavailable.</p>
+            <p>Kernels compiled to native WebAssembly binary and dispatched to Web Workers for near-native parallel execution — and <strong>auto-vectorized to WebAssembly SIMD128 (v128)</strong> when the engine supports it, with a byte-identical scalar fallback for SIMD-less browsers. Compatible with every browser that runs Blazor WASM — even with a single worker if SharedArrayBuffer is unavailable.</p>
+            <div class="feature-tag">SIMD128 auto-vectorized</div>
             <div class="feature-tag">CPU fallback</div>
         </div>
     </div>

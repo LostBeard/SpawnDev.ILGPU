@@ -275,6 +275,7 @@ if (devices.Count > 0)
 - **Group.Broadcast** — intra-group value sharing
 - **Atomics** — supported via `SharedArrayBuffer`
 - **ILGPU Algorithms** — RadixSort, Scan, Reduce, and Histogram are fully supported with full `hardwareConcurrency` multi-worker barrier synchronization. The Wasm backend uses fiber-based phase dispatch with pure spin barriers, per-thread scratch memory, and an in-Wasm phase dispatcher that eliminates JS-Wasm boundary crossings between phases
+- **SIMD128 (v128) auto-vectorization** *(4.15.0+)* — per-lane kernels are automatically vectorized to WebAssembly SIMD128 and selected at runtime when the engine supports it, with a byte-identical scalar fallback. Covers the full numeric tier (f32/i32/f64/i64) across elementwise code, loops, divergent control flow (diamonds, masked stores, chained/nested selects, divergent loops), gather/scatter, and the full f32/f64 math surface. Additive and bit-exact to the scalar path. See **[Wasm SIMD128](wasm-simd.md)**.
 
 ### Limitations
 
