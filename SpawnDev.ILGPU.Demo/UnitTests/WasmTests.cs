@@ -3223,6 +3223,46 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
         }
 
+        // Wasm SIMD128 CHAINED-diamond (general acyclic CFG) gate (2026-06-20). Two dependent ternaries -
+        // `t = a>0 ? a*2 : b; o = t>1 ? t : c` - lower to a 7-block DAG of branch diamonds the single-diamond
+        // detector can't match. The acyclic if-converter emits all blocks speculatively in topo order and
+        // resolves EACH phi via bitselect with its controlling IfBranch's mask. All-f32 IEEE deterministic =>
+        // SIMD == scalar == reference bit-exact. Asserts kernel_simd emitted. N=1003 hits the scalar tail.
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_ChainedSelectMatchesScalar()
+        {
+            const int N = 1003;
+            var a = new float[N]; var b = new float[N]; var c = new float[N];
+            for (int i = 0; i < N; i++) { a[i] = (i % 7) - 3f; b[i] = MathF.Sin(i * 0.1f) * 2f; c[i] = (i % 5) * 0.5f; } // span both branches
+            var reference = new float[N];
+            for (int i = 0; i < N; i++) { float t = a[i] > 0f ? a[i] * 2f : b[i]; reference[i] = t > 1f ? t : c[i]; }
+            var scalar = await RunChained(a, b, c, N, forceSimd: false, requireSimdEmit: false);
+            var simd = await RunChained(a, b, c, N, forceSimd: true, requireSimdEmit: true);
+            AssertExactF(scalar, reference, simd, "chained-select");
+        }
+
+        private static void Wasm_Simd_ChainedKernel(Index1D i, ArrayView<float> a, ArrayView<float> b, ArrayView<float> c, ArrayView<float> o)
+        { float t = a[i] > 0f ? a[i] * 2f : b[i]; o[i] = t > 1f ? t : c[i]; }
+
+        private static async Task<float[]> RunChained(float[] a, float[] b, float[] c, int N, bool forceSimd, bool requireSimdEmit)
+        {
+            bool ss = WasmBackend.ForceScalar, sm = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd; WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                using var ctx = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm().ToContext();
+                WasmBackend.VerboseLogging = false; WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<float>>(Wasm_Simd_ChainedKernel);
+                if (requireSimdEmit && (WasmBackend.LastWasmBinary == null || !ContainsExportName(WasmBackend.LastWasmBinary, "kernel_simd")))
+                    throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for the chained-select kernel.");
+                using var aB = acc.Allocate1D(a); using var bB = acc.Allocate1D(b); using var cB = acc.Allocate1D(c); using var oB = acc.Allocate1D<float>(N);
+                k((Index1D)N, aB.View, bB.View, cB.View, oB.View); await acc.SynchronizeAsync();
+                return await oB.CopyToHostAsync<float>();
+            }
+            finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
+        }
+
         // Wasm SIMD128 f64 transcendental + rcp/rsqrt gate (2026-06-20) — the double-precision math fallback,
         // completing the math surface. f64 transcendentals run PER LANE (2 lanes/half, f64->f64 import, NO
         // promote/demote); f64 rcp/rsqrt are native f64x2.div sequences. SIMD == SCALAR bit-exact (identical

@@ -88,9 +88,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             if (_indexParam == null)
                 return false;
             if (_blockCount != 1)
-                // multi-block: canonical counted loop, else a divergent if-diamond, else a conditional
-                // (masked) store. Each bails to the proven scalar path on anything outside its exact shape.
-                return TryGenerateSimdLoopKernel() || TryGenerateSimdDiamondKernel() || TryGenerateSimdMaskedStoreKernel();
+                // multi-block: counted loop, single if-diamond, conditional (masked) store, else a general
+                // ACYCLIC pure select region (chained/multi diamonds). Each bails to scalar outside its shape.
+                return TryGenerateSimdLoopKernel() || TryGenerateSimdDiamondKernel()
+                    || TryGenerateSimdMaskedStoreKernel() || TryGenerateSimdAcyclicKernel();
 
             var analysis = WasmSimdAnalysis.Analyze(Method, _indexParam, out var laneVariant);
             if (!analysis.Vectorizable)
@@ -718,6 +719,180 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 _isStateMachine = savedStateMachine;
                 if (!ok) { HasSimdKernel = false; SimdKernelCode = null; SimdKernelLocals = null; }
             }
+        }
+
+        /// <summary>
+        /// General ACYCLIC pure-select region (Stage-3b, beyond the single diamond): chained / multiple
+        /// data-dependent ternaries (`t = c1?a:b; o = c2?t:c`) lower to a DAG of branch diamonds (>4 blocks)
+        /// that the single-diamond detector can't match. If-convert it: no loops, all blocks pure (stores
+        /// only in the always-executed exit), emit every block's pure compute SPECULATIVELY in topological
+        /// (block) order, and resolve EACH 2-source phi via `v128.bitselect(trueSrc, falseSrc, mask)` where
+        /// the mask is its CONTROLLING IfBranch's compare (the single IfBranch both phi predecessors descend
+        /// from). 4-lane and 2-lane masks/phis. A phi with >2 sources (NESTED diamond - needs a
+        /// control-dependence tree) or no single controlling branch ⇒ bail to scalar. Subsumes the single
+        /// diamond (which runs first); this handles the chains.
+        /// </summary>
+        private bool TryGenerateSimdAcyclicKernel()
+        {
+            var cfg = Method.Blocks.CreateCFG();
+            if (cfg.CreateLoops().Count != 0) return false;             // acyclic only
+            var analysis = WasmSimdAnalysis.Analyze(Method, _indexParam, out var laneVariant);
+            if (laneVariant.Count == 0) return false;                   // barrier/atomic/warp early-reject
+
+            BasicBlock exit = null;
+            foreach (var b in Method.Blocks)
+                if (b.Terminator is ReturnTerminator) { if (exit != null) return false; exit = b; }
+            if (exit == null) return false;
+
+            // Validate + plan every phi (2-source, shared controlling IfBranch → mask).
+            var plans = new Dictionary<PhiValue, (CompareValue cond, Value t, Value f)>();
+            foreach (var b in Method.Blocks)
+                foreach (var ve in b)
+                {
+                    var v = ve.Value;
+                    if (v is PhiValue phi)
+                    {
+                        if (!ResolvePhiSelect(phi, laneVariant, out var cond, out var tSrc, out var fSrc)) return false;
+                        plans[phi] = (cond, tSrc, fSrc);
+                        continue;
+                    }
+                    if (v is Store st)
+                    {
+                        if (!ReferenceEquals(b, exit)) return false;     // a store off the always-executed path needs masking
+                        if (st.Target.Resolve() is LoadElementAddress stl && IsGatherLEA(stl)) return false; // scatter: later
+                        if (ClassOf(st.Value.Resolve().Type) == LaneClass.None) return false;
+                        continue;
+                    }
+                    if (v is GenericAtomic or AtomicCAS or global::ILGPU.IR.Values.Barrier or MemoryBarrier or PredicateBarrier or MethodCall or Alloca)
+                        return false;
+                    if (v is Load gl && gl.Source.Resolve() is LoadElementAddress gle && IsGatherLEA(gle)) return false; // gather: unsafe to speculate
+                    if (v is BinaryArithmeticValue dv && (dv.Kind == BinaryArithmeticKind.Div || dv.Kind == BinaryArithmeticKind.Rem)) return false;
+                    if (v.Type is AddressSpaceType) continue;            // address: emitted scalar
+                    if (!laneVariant.Contains(v)) continue;             // invariant: emitted scalar
+                    if (!IsStage3aEmittable(v, laneVariant)) return false;
+                }
+            if (plans.Count < 2) return false; // 0/1 select = single-diamond's job (it ran first); we own the chains
+
+            // ── save context ──
+            var savedCode = Code.ToArray();
+            var savedLocals = new List<WasmLocal>(_locals);
+            var savedMap = new Dictionary<string, uint>(_localMap);
+            var savedNext = _nextLocalIndex;
+            var savedFirstState = new Dictionary<uint, int>(_localFirstState);
+            var savedCrosses = new HashSet<uint>(_localCrossesState);
+            bool savedStateMachine = _isStateMachine;
+            bool ok = false;
+            try
+            {
+                Code.Clear(); _locals.Clear();
+                var paramMap = savedMap.Where(kv => kv.Value < _paramCount).ToDictionary(kv => kv.Key, kv => kv.Value);
+                _localMap.Clear(); foreach (var kv in paramMap) _localMap[kv.Key] = kv.Value;
+                _nextLocalIndex = (uint)_paramCount;
+                _localFirstState.Clear(); _localCrossesState.Clear();
+                _simdV128StoreCount = 0; _simdV128Values.Clear(); _simdHiLocal.Clear();
+                _isStateMachine = false;
+
+                // Topological (block) order: defs precede uses, so each phi's controlling mask + source values
+                // are already emitted when we resolve it at its block head.
+                foreach (var b in Method.Blocks)
+                {
+                    foreach (var ve in b)
+                        if (ve.Value is PhiValue phi)
+                            if (!EmitPhiSelect(phi, plans[phi].cond, plans[phi].t, plans[phi].f, laneVariant)) return false;
+                    foreach (var ve in b)
+                    {
+                        var v = ve.Value;
+                        if (v is PhiValue) continue;
+                        if (!EmitSimdValue(v, laneVariant)) return false;
+                    }
+                }
+                if (_simdV128StoreCount == 0) return false;
+                if (exit.Terminator != null) GenerateCodeFor(exit.Terminator);
+                WasmModuleBuilder.EmitI32Const(Code, 0);
+
+                SimdKernelCode = Code.ToArray();
+                SimdKernelLocals = new List<WasmLocal>(_locals);
+                HasSimdKernel = true; ok = true;
+                return true;
+            }
+            finally
+            {
+                Code.Clear(); Code.AddRange(savedCode);
+                _locals.Clear(); _locals.AddRange(savedLocals);
+                _localMap.Clear(); foreach (var kv in savedMap) _localMap[kv.Key] = kv.Value;
+                _nextLocalIndex = savedNext;
+                _localFirstState.Clear(); foreach (var kv in savedFirstState) _localFirstState[kv.Key] = kv.Value;
+                _localCrossesState.Clear(); foreach (var x in savedCrosses) _localCrossesState.Add(x);
+                _isStateMachine = savedStateMachine;
+                if (!ok) { HasSimdKernel = false; SimdKernelCode = null; SimdKernelLocals = null; }
+            }
+        }
+
+        /// <summary>Resolves a merge phi to a single select: exactly 2 sources whose predecessor blocks both
+        /// descend from ONE IfBranch (one via its true target, one via false) → that branch's compare is the
+        /// mask, and the true-side source is selected where the mask is set. Bails on >2 sources (nested) or
+        /// no single controlling branch. The compare must be lane-variant + a mapped v128 compare whose lane
+        /// width matches the phi's.</summary>
+        private bool ResolvePhiSelect(PhiValue phi, HashSet<Value> laneVariant, out CompareValue cond, out Value trueSrc, out Value falseSrc)
+        {
+            cond = null; trueSrc = null; falseSrc = null;
+            if (!laneVariant.Contains(phi)) return false;     // a uniform phi isn't a per-lane select
+            if (ClassOf(phi.Type) == LaneClass.None) return false;
+            if (phi.Count != 2) return false;                 // >2 = nested (control-dependence tree) - later
+            if (!ControllingBranch(phi.Sources[0], out var q0, out bool s0)) return false;
+            if (!ControllingBranch(phi.Sources[1], out var q1, out bool s1)) return false;
+            if (!ReferenceEquals(q0, q1) || s0 == s1) return false; // must be ONE branch, opposite edges
+            if (q0.Condition.Resolve() is not CompareValue c || !laneVariant.Contains(c) || MapCompare(c) == 0) return false;
+            if (Is2Lane(ClassOf(c.Left.Resolve().Type)) != Is2Lane(ClassOf(phi.Type))) return false; // mask/phi lane width
+            cond = c;
+            trueSrc = (s0 ? phi[0] : phi[1]).Resolve();
+            falseSrc = (s0 ? phi[1] : phi[0]).Resolve();
+            return true;
+        }
+
+        /// <summary>Finds the IfBranch whose true/false target is (or leads directly to) <paramref name="pred"/>:
+        /// the block Q with an IfBranch terminator whose TrueTarget or FalseTarget == pred. Returns the edge
+        /// side in <paramref name="isTrueEdge"/>.</summary>
+        private bool ControllingBranch(BasicBlock pred, out IfBranch branch, out bool isTrueEdge)
+        {
+            branch = null; isTrueEdge = false;
+            foreach (var b in Method.Blocks)
+                if (b.Terminator is IfBranch ib)
+                {
+                    if (ReferenceEquals(ib.TrueTarget, pred)) { branch = ib; isTrueEdge = true; return true; }
+                    if (ReferenceEquals(ib.FalseTarget, pred)) { branch = ib; isTrueEdge = false; return true; }
+                }
+            return false;
+        }
+
+        /// <summary>Emits a phi select as bitselect(trueSrc, falseSrc, mask) into a fresh local (4-lane), or
+        /// lo+hi bitselects (2-lane f64/i64). The mask <paramref name="cond"/> is already materialized.</summary>
+        private bool EmitPhiSelect(PhiValue phi, CompareValue cond, Value trueSrc, Value falseSrc, HashSet<Value> laneVariant)
+        {
+            if (!Is2Lane(ClassOf(phi.Type)))
+            {
+                var t = AllocateLocal(phi, WasmOpCodes.V128); _simdV128Values.Add(phi);
+                if (!PushAsV128(trueSrc, laneVariant)) return false;
+                if (!PushAsV128(falseSrc, laneVariant)) return false;
+                EmitGetLocal(cond);
+                WasmModuleBuilder.EmitSimd(Code, WasmOpCodes.V128Bitselect);
+                WasmModuleBuilder.EmitLocalSet(Code, t);
+                return true;
+            }
+            if (!_simdHiLocal.TryGetValue(cond, out var cHi)) return false;
+            var lo = AllocateLocal(phi, WasmOpCodes.V128); _simdV128Values.Add(phi);
+            var hi = AllocateNewLocal(WasmOpCodes.V128); _simdHiLocal[phi] = hi;
+            if (!Push2Lane(trueSrc, false, laneVariant)) return false;
+            if (!Push2Lane(falseSrc, false, laneVariant)) return false;
+            EmitGetLocal(cond);
+            WasmModuleBuilder.EmitSimd(Code, WasmOpCodes.V128Bitselect);
+            WasmModuleBuilder.EmitLocalSet(Code, lo);
+            if (!Push2Lane(trueSrc, true, laneVariant)) return false;
+            if (!Push2Lane(falseSrc, true, laneVariant)) return false;
+            WasmModuleBuilder.EmitLocalGet(Code, cHi);
+            WasmModuleBuilder.EmitSimd(Code, WasmOpCodes.V128Bitselect);
+            WasmModuleBuilder.EmitLocalSet(Code, hi);
+            return true;
         }
 
         /// <summary>SIMD lane class of a primitive type. f32→f32x4 / i32→i32x4 pack 4/v128 (the by-4
