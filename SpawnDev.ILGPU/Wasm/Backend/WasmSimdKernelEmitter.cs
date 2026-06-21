@@ -765,8 +765,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 case BinaryArithmeticValue ba:
                     return MapBinary(ba) != 0 && AllUsesVectorizable(ba);
                 case UnaryArithmeticValue ua:
-                    return (MapUnary(ua) != 0 || (ClassOf(ua.Type) == LaneClass.F32x4 && PerLaneMathImport(ua.Kind) != null))
-                        && AllUsesVectorizable(ua);
+                    return SimdUnaryOk(ua) && AllUsesVectorizable(ua);
                 case ConvertValue cv:
                     return MapConvert(cv) != 0 && AllUsesVectorizable(cv);
                 case CompareValue cmp:
@@ -798,9 +797,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 {
                     case BinaryArithmeticValue ba when MapBinary(ba) != 0:
                         break; // mapped binary: both operand positions are v128 (we don't map scalar-count shifts)
-                    case UnaryArithmeticValue ua when MapUnary(ua) != 0
-                        || (ClassOf(ua.Type) == LaneClass.F32x4 && PerLaneMathImport(ua.Kind) != null):
-                        break; // mapped unary, or a per-lane transcendental fallback (sin/exp/log/...)
+                    case UnaryArithmeticValue ua when SimdUnaryOk(ua):
+                        break; // mapped unary, per-lane transcendental, or native rcp/rsqrt
                     case ConvertValue cv when MapConvert(cv) != 0:
                         break; // mapped lane conversion consumes its source as a vector lane
                     case CompareValue cmp when MapCompare(cmp) != 0:
@@ -920,6 +918,21 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 case UnaryArithmeticValue ua:
                 {
                     uint op = MapUnary(ua);
+                    if (op == 0 && ClassOf(ua.Type) == LaneClass.F32x4
+                        && (ua.Kind == UnaryArithmeticKind.RcpF || ua.Kind == UnaryArithmeticKind.RsqrtF))
+                    {
+                        // Reciprocal / reciprocal-sqrt: NATIVE v128 (not per-lane) - 1/x and 1/sqrt(x) mirror
+                        // the scalar f32.div(1, [sqrt] x) exactly (same IEEE div) -> bit-identical cross-mode.
+                        var t = AllocateLocal(ua, WasmOpCodes.V128);
+                        WasmModuleBuilder.EmitF32Const(Code, 1.0f);
+                        WasmModuleBuilder.EmitSimd(Code, WasmOpCodes.F32x4Splat);    // [1,1,1,1]
+                        if (!PushAsV128(ua.Value.Resolve(), laneVariant)) return false;
+                        if (ua.Kind == UnaryArithmeticKind.RsqrtF) WasmModuleBuilder.EmitSimd(Code, WasmOpCodes.F32x4Sqrt);
+                        WasmModuleBuilder.EmitSimd(Code, WasmOpCodes.F32x4Div);       // 1 / (x | sqrt x)
+                        WasmModuleBuilder.EmitLocalSet(Code, t);
+                        _simdV128Values.Add(ua);
+                        return true;
+                    }
                     if (op == 0)
                     {
                         // Transcendental/trig (sin/cos/exp/log/tanh/...): wasm SIMD has no such op, so fall
@@ -1322,6 +1335,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             UnaryArithmeticKind.Log10F => "log",
             _ => null,
         };
+
+        /// <summary>True if a unary is SIMD-emittable: a mapped v128 op, OR (f32x4) a per-lane transcendental
+        /// fallback, OR (f32x4) native rcp/rsqrt (1/x, 1/sqrt(x) as f32x4.div sequences).</summary>
+        private static bool SimdUnaryOk(UnaryArithmeticValue ua) =>
+            MapUnary(ua) != 0
+            || (ClassOf(ua.Type) == LaneClass.F32x4
+                && (PerLaneMathImport(ua.Kind) != null
+                    || ua.Kind == UnaryArithmeticKind.RcpF || ua.Kind == UnaryArithmeticKind.RsqrtF));
 
         private static uint MapUnary(UnaryArithmeticValue v)
         {

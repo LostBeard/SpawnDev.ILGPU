@@ -3223,6 +3223,46 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
         }
 
+        // Wasm SIMD128 RCP / RSQRT gate (2026-06-20). Reciprocal (1/x) and reciprocal-sqrt (1/sqrt x) -
+        // common in normalization / RMSNorm / vector-normalize. NATIVE f32x4 (not per-lane): 1/x and
+        // 1/sqrt(x) as f32x4.div(splat 1, [sqrt] x), mirroring the scalar f32.div(1, [sqrt] x). sqrt + div
+        // are IEEE correctly-rounded, so SIMD == scalar == host reference ALL bit-exact (unlike libm
+        // transcendentals). Asserts kernel_simd emitted. N=1003 hits the scalar tail.
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_RcpRsqrtMatchesScalarAndReference()
+        {
+            const int N = 1003;
+            var a = new float[N]; var b = new float[N];
+            for (int i = 0; i < N; i++) { a[i] = (i % 37) * 0.5f + 0.25f; b[i] = (i % 23) * 1.5f + 0.5f; } // > 0
+            var reference = new float[N];
+            for (int i = 0; i < N; i++) reference[i] = (1f / MathF.Sqrt(a[i])) * 2f + 1f / b[i];
+            var scalar = await RunRcpRsqrt(a, b, N, forceSimd: false, requireSimdEmit: false);
+            var simd = await RunRcpRsqrt(a, b, N, forceSimd: true, requireSimdEmit: true);
+            AssertExactF(scalar, reference, simd, "rcp-rsqrt");
+        }
+
+        private static void Wasm_Simd_RcpRsqrtKernel(Index1D i, ArrayView<float> a, ArrayView<float> b, ArrayView<float> o)
+            => o[i] = XMath.Rsqrt(a[i]) * 2f + XMath.Rcp(b[i]);
+
+        private static async Task<float[]> RunRcpRsqrt(float[] a, float[] b, int N, bool forceSimd, bool requireSimdEmit)
+        {
+            bool ss = WasmBackend.ForceScalar, sm = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd; WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                using var ctx = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm().ToContext();
+                WasmBackend.VerboseLogging = false; WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>>(Wasm_Simd_RcpRsqrtKernel);
+                if (requireSimdEmit && (WasmBackend.LastWasmBinary == null || !ContainsExportName(WasmBackend.LastWasmBinary, "kernel_simd")))
+                    throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for the rcp/rsqrt kernel.");
+                using var aB = acc.Allocate1D(a); using var bB = acc.Allocate1D(b); using var oB = acc.Allocate1D<float>(N);
+                k((Index1D)N, aB.View, bB.View, oB.View); await acc.SynchronizeAsync();
+                return await oB.CopyToHostAsync<float>();
+            }
+            finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
+        }
+
         // Wasm SIMD128 per-lane TRANSCENDENTAL fallback gate (2026-06-20). wasm SIMD has no sin/exp/log/tanh,
         // so an activation/trig kernel previously BAILED to scalar entirely. Now the transcendental runs PER
         // LANE (extract f32 lane -> the SAME JS Math import the scalar path uses -> replace) while the
