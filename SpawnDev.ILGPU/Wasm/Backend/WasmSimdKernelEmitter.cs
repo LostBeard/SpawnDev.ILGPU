@@ -88,10 +88,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             if (_indexParam == null)
                 return false;
             if (_blockCount != 1)
-                // multi-block: counted loop, single if-diamond, conditional (masked) store, else a general
-                // ACYCLIC pure select region (chained/multi diamonds). Each bails to scalar outside its shape.
-                return TryGenerateSimdLoopKernel() || TryGenerateSimdDiamondKernel()
-                    || TryGenerateSimdMaskedStoreKernel() || TryGenerateSimdAcyclicKernel();
+                // multi-block: counted loop (single-block body), DIVERGENT loop (multi-block diamond body),
+                // single if-diamond, conditional (masked) store, else a general ACYCLIC pure select region.
+                // Each bails to the proven scalar path on anything outside its exact shape.
+                return TryGenerateSimdLoopKernel() || TryGenerateSimdDivergentLoopKernel()
+                    || TryGenerateSimdDiamondKernel() || TryGenerateSimdMaskedStoreKernel()
+                    || TryGenerateSimdAcyclicKernel();
 
             var analysis = WasmSimdAnalysis.Analyze(Method, _indexParam, out var laneVariant);
             if (!analysis.Vectorizable)
@@ -318,6 +320,192 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 SimdKernelLocals = new List<WasmLocal>(_locals);
                 HasSimdKernel = true;
                 ok = true;
+                return true;
+            }
+            finally
+            {
+                Code.Clear(); Code.AddRange(savedCode);
+                _locals.Clear(); _locals.AddRange(savedLocals);
+                _localMap.Clear(); foreach (var kv in savedMap) _localMap[kv.Key] = kv.Value;
+                _nextLocalIndex = savedNext;
+                _localFirstState.Clear(); foreach (var kv in savedFirstState) _localFirstState[kv.Key] = kv.Value;
+                _localCrossesState.Clear(); foreach (var x in savedCrosses) _localCrossesState.Add(x);
+                _isStateMachine = savedStateMachine;
+                if (!ok) { HasSimdKernel = false; SimdKernelCode = null; SimdKernelLocals = null; }
+            }
+        }
+
+        /// <summary>
+        /// DIVERGENT loop (Stage-3b + loops): a counted while-loop whose BODY is a multi-block acyclic
+        /// diamond region (a data-dependent select inside the loop that ILGPU did NOT if-convert), e.g.
+        /// `for(k&lt;reps) acc += a[i]&gt;0 ? a[i] : b[i]`. The single-block loop path (TryGenerateSimdLoopKernel)
+        /// bails (its body must be one block). This combines the loop structure (header phis + structured
+        /// wasm loop) with the acyclic IF-CONVERTER for the body region: emit the body blocks speculatively
+        /// in topo order, resolve in-body phis via a bitselect tree (control paths STOP at the header so the
+        /// uniform loop condition isn't a per-lane mask), then update the header phis from the back-edge.
+        /// while-loop only, no nested loops, body pure (no stores/atomics/barriers/calls/gather/div), no
+        /// per-lane break (no body edge to the exit). Anything else ⇒ scalar.
+        /// </summary>
+        private bool TryGenerateSimdDivergentLoopKernel()
+        {
+            var cfg = Method.Blocks.CreateCFG();
+            var loops = cfg.CreateLoops();
+            if (loops.Count != 1) return false;                  // exactly one loop (no nested loops)
+            BasicBlock entry = null, header = null, bodyEntry = null, exit = null, backEdge = null;
+            bool isDoWhile = false, got = false;
+            foreach (var loop in loops)
+            {
+                if (!loop.TryGetLoopInfo(out var info) || info == null) return false;
+                entry = info.Entry; header = info.Header; bodyEntry = info.Body; exit = info.Exit;
+                backEdge = info.BackEdge; isDoWhile = info.IsDoWhileLoop; got = true;
+            }
+            if (!got || isDoWhile) return false;
+            if (entry == null || header == null || bodyEntry == null || exit == null || backEdge == null) return false;
+            if (ReferenceEquals(backEdge, bodyEntry)) return false; // single-block body ⇒ TryGenerateSimdLoopKernel's job
+            if (entry.Terminator is not UnconditionalBranch eub || !ReferenceEquals(eub.Target, header)) return false;
+            if (backEdge.Terminator is not UnconditionalBranch beub || !ReferenceEquals(beub.Target, header)) return false;
+            if (header.Terminator is not IfBranch hib) return false;
+            if (exit.Terminator is not ReturnTerminator) return false;
+            bool condTrueIsBody = ReferenceEquals(hib.TrueTarget, bodyEntry) && ReferenceEquals(hib.FalseTarget, exit);
+            bool condTrueIsExit = ReferenceEquals(hib.TrueTarget, exit) && ReferenceEquals(hib.FalseTarget, bodyEntry);
+            if (!condTrueIsBody && !condTrueIsExit) return false;
+
+            var analysis = WasmSimdAnalysis.Analyze(Method, _indexParam, out var laneVariant);
+            if (laneVariant.Count == 0) return false;
+
+            // Body region = the loop's blocks except the header (everything but entry/header/exit).
+            var bodyRegion = new List<BasicBlock>();
+            foreach (var b in Method.Blocks)
+                if (!ReferenceEquals(b, entry) && !ReferenceEquals(b, header) && !ReferenceEquals(b, exit))
+                    bodyRegion.Add(b);
+            if (bodyRegion.Count == 0) return false;
+            var bodySet = new HashSet<BasicBlock>(bodyRegion);
+
+            // Header phis: exactly preds {entry, backEdge}; variant→v128 accumulator, invariant→scalar induction.
+            var headerPhis = new List<PhiValue>();
+            foreach (var ve in header)
+                if (ve.Value is PhiValue phi)
+                {
+                    if (phi.Count != 2) return false;
+                    bool hasEntry = false, hasBack = false;
+                    for (int j = 0; j < phi.Count; j++)
+                    {
+                        if (ReferenceEquals(phi.Sources[j], entry)) hasEntry = true;
+                        else if (ReferenceEquals(phi.Sources[j], backEdge)) hasBack = true;
+                    }
+                    if (!hasEntry || !hasBack) return false;
+                    if (laneVariant.Contains(phi) && ClassOf(phi.Type) == LaneClass.None) return false;
+                    headerPhis.Add(phi);
+                }
+
+            // Validate body region (pure, no break, in-body phis resolvable) + plan the in-body selects.
+            var plans = new Dictionary<PhiValue, List<(Value val, List<(CompareValue cond, bool edge)> path)>>();
+            foreach (var b in bodyRegion)
+            {
+                // successors must stay inside the body, except the back-edge → header (no per-lane break to exit).
+                if (b.Terminator is IfBranch bib)
+                {
+                    if (!bodySet.Contains(bib.TrueTarget) || !bodySet.Contains(bib.FalseTarget)) return false;
+                }
+                else if (b.Terminator is UnconditionalBranch bub2)
+                {
+                    if (!(bodySet.Contains(bub2.Target) || (ReferenceEquals(b, backEdge) && ReferenceEquals(bub2.Target, header)))) return false;
+                }
+                else return false;
+                foreach (var ve in b)
+                {
+                    var v = ve.Value;
+                    if (v is PhiValue phi)
+                    {
+                        var plan = ResolvePhiTree(phi, laneVariant, header); // control paths stop at the header
+                        if (plan == null) return false;
+                        plans[phi] = plan;
+                        continue;
+                    }
+                    if (v is Store) return false;                  // a store inside the loop body is conditional ⇒ later
+                    if (v is GenericAtomic or AtomicCAS or global::ILGPU.IR.Values.Barrier or MemoryBarrier or PredicateBarrier or MethodCall or Alloca) return false;
+                    if (v is Load gl && gl.Source.Resolve() is LoadElementAddress gle && IsGatherLEA(gle)) return false;
+                    if (v is BinaryArithmeticValue dv && (dv.Kind == BinaryArithmeticKind.Div || dv.Kind == BinaryArithmeticKind.Rem)) return false;
+                    if (v.Type is AddressSpaceType) continue;
+                    if (!laneVariant.Contains(v)) continue;
+                    if (!IsStage3aEmittable(v, laneVariant)) return false;
+                }
+            }
+            // entry + header + exit non-phi values must also be emittable.
+            foreach (var b in new[] { entry, header, exit })
+                foreach (var ve in b)
+                {
+                    var v = ve.Value;
+                    if (v is PhiValue) continue;
+                    if (!IsStage3aEmittable(v, laneVariant)) return false;
+                }
+
+            // ── save context ──
+            var savedCode = Code.ToArray();
+            var savedLocals = new List<WasmLocal>(_locals);
+            var savedMap = new Dictionary<string, uint>(_localMap);
+            var savedNext = _nextLocalIndex;
+            var savedFirstState = new Dictionary<uint, int>(_localFirstState);
+            var savedCrosses = new HashSet<uint>(_localCrossesState);
+            bool savedStateMachine = _isStateMachine;
+            bool ok = false;
+            try
+            {
+                Code.Clear(); _locals.Clear();
+                var paramMap = savedMap.Where(kv => kv.Value < _paramCount).ToDictionary(kv => kv.Key, kv => kv.Value);
+                _localMap.Clear(); foreach (var kv in paramMap) _localMap[kv.Key] = kv.Value;
+                _nextLocalIndex = (uint)_paramCount;
+                _localFirstState.Clear(); _localCrossesState.Clear();
+                _simdV128StoreCount = 0; _simdV128Values.Clear(); _simdHiLocal.Clear();
+                _isStateMachine = false;
+
+                foreach (var phi in headerPhis)
+                {
+                    if (laneVariant.Contains(phi))
+                    {
+                        AllocateLocal(phi, WasmOpCodes.V128); _simdV128Values.Add(phi);
+                        if (Is2Lane(ClassOf(phi.Type))) _simdHiLocal[phi] = AllocateNewLocal(WasmOpCodes.V128);
+                    }
+                    else AllocateLocal(phi, GetWasmType(phi));
+                }
+
+                foreach (var ve in entry) { var v = ve.Value; if (v is PhiValue) continue; if (!EmitSimdValue(v, laneVariant)) return false; }
+                if (!WriteHeaderPhis(headerPhis, entry, laneVariant)) return false;
+
+                Code.Add(WasmOpCodes.Block); Code.Add(WasmOpCodes.Void);
+                Code.Add(WasmOpCodes.Loop); Code.Add(WasmOpCodes.Void);
+
+                foreach (var ve in header) { var v = ve.Value; if (v is PhiValue) continue; if (!EmitSimdValue(v, laneVariant)) return false; }
+                EmitGetLocal(hib.Condition.Resolve());
+                if (condTrueIsBody) Code.Add(WasmOpCodes.I32Eqz);
+                Code.Add(WasmOpCodes.BrIf); WasmModuleBuilder.EmitU32Leb128(Code, 1); // → $exit
+
+                // body region: topo (block) order — resolve in-body phis (bitselect tree) then pure values.
+                foreach (var b in bodyRegion)
+                {
+                    foreach (var ve in b)
+                        if (ve.Value is PhiValue phi)
+                            if (!EmitPhiTree(phi, plans[phi], laneVariant)) return false;
+                    foreach (var ve in b)
+                    {
+                        var v = ve.Value;
+                        if (v is PhiValue) continue;
+                        if (!EmitSimdValue(v, laneVariant)) return false;
+                    }
+                }
+                if (!WriteHeaderPhis(headerPhis, backEdge, laneVariant)) return false;
+
+                Code.Add(WasmOpCodes.Br); WasmModuleBuilder.EmitU32Leb128(Code, 0); // br $hdr
+                Code.Add(WasmOpCodes.End); Code.Add(WasmOpCodes.End);
+
+                foreach (var ve in exit) { var v = ve.Value; if (v is PhiValue) continue; if (!EmitSimdValue(v, laneVariant)) return false; }
+                if (_simdV128StoreCount == 0) return false;
+                if (exit.Terminator != null) GenerateCodeFor(exit.Terminator);
+                WasmModuleBuilder.EmitI32Const(Code, 0);
+
+                SimdKernelCode = Code.ToArray();
+                SimdKernelLocals = new List<WasmLocal>(_locals);
+                HasSimdKernel = true; ok = true;
                 return true;
             }
             finally
@@ -839,7 +1027,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// length 1 each (1 bitselect); N-source nested = paths that share a prefix then diverge (a tree).
         /// Returns null (bail) if the phi isn't a per-lane select, any controlling branch isn't a lane-variant
         /// mapped compare of matching lane width, or the paths don't form a resolvable select tree.</summary>
-        private List<(Value val, List<(CompareValue cond, bool edge)> path)> ResolvePhiTree(PhiValue phi, HashSet<Value> laneVariant)
+        private List<(Value val, List<(CompareValue cond, bool edge)> path)> ResolvePhiTree(PhiValue phi, HashSet<Value> laneVariant, BasicBlock headerStop = null)
         {
             if (!laneVariant.Contains(phi)) return null;            // a uniform phi isn't a per-lane select
             if (ClassOf(phi.Type) == LaneClass.None) return null;
@@ -848,7 +1036,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             var srcs = new List<(Value val, List<(CompareValue cond, bool edge)> path)>();
             for (int j = 0; j < phi.Count; j++)
             {
-                var path = ComputeControlPath(phi.Sources[j], laneVariant, phi2lane);
+                var path = ComputeControlPath(phi.Sources[j], phi.BasicBlock, laneVariant, phi2lane, headerStop);
                 if (path == null || path.Count == 0) return null;  // unreachable / invalid controlling branch
                 srcs.Add((phi[j].Resolve(), path));
             }
@@ -860,12 +1048,24 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// <summary>The control-dependence path of a predecessor block: walk up via the IfBranch whose edge
         /// targets the current block, collecting (compare, edge), entry→pred order. Returns null if a
         /// controlling branch's condition isn't a lane-variant mapped compare of the required lane width.</summary>
-        private List<(CompareValue cond, bool edge)> ComputeControlPath(BasicBlock pred, HashSet<Value> laneVariant, bool need2lane)
+        private List<(CompareValue cond, bool edge)> ComputeControlPath(BasicBlock pred, BasicBlock phiBlock, HashSet<Value> laneVariant, bool need2lane, BasicBlock headerStop = null)
         {
             var rev = new List<(CompareValue cond, bool edge)>();
+            // Innermost: if the predecessor's OWN terminator is an IfBranch that goes straight to the phi
+            // block (the "empty-else" diamond - a `if(c) acc+=x` whose false edge falls through to the merge),
+            // that branch+edge IS the controlling condition for this source.
+            if (pred.Terminator is IfBranch ownIf && (ReferenceEquals(ownIf.TrueTarget, phiBlock) || ReferenceEquals(ownIf.FalseTarget, phiBlock)))
+            {
+                if (ownIf.Condition.Resolve() is not CompareValue oc || !laneVariant.Contains(oc) || MapCompare(oc) == 0) return null;
+                if (Is2Lane(ClassOf(oc.Left.Resolve().Type)) != need2lane) return null;
+                rev.Add((oc, ReferenceEquals(ownIf.TrueTarget, phiBlock)));
+            }
             var cur = pred; int guard = 0;
             while (TryControllingBranch(cur, out var ifb, out var ifBlock, out bool edge))
             {
+                // Inside a divergent loop, stop at the header's loop-condition branch: it is UNIFORM (all
+                // active lanes are in the loop), so it must not become a per-lane select mask.
+                if (headerStop != null && ReferenceEquals(ifBlock, headerStop)) break;
                 if (ifb.Condition.Resolve() is not CompareValue c || !laneVariant.Contains(c) || MapCompare(c) == 0) return null;
                 if (Is2Lane(ClassOf(c.Left.Resolve().Type)) != need2lane) return null;
                 rev.Add((c, edge));

@@ -3263,6 +3263,84 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
         }
 
+        // Wasm SIMD128 DIVERGENT-LOOP gate (2026-06-20) - the last SIMD piece. A data-dependent select INSIDE
+        // a counted loop that ILGPU does NOT if-convert (`for(k<reps) acc += a>0 ? a : b`) makes the loop body
+        // a multi-block diamond region the single-block loop path can't take. The divergent-loop path combines
+        // the loop structure (header acc/k phis + structured wasm loop) with the acyclic if-converter for the
+        // body (in-body phi via bitselect, control paths stopping at the header so the uniform loop condition
+        // isn't a mask). All-f32 IEEE deterministic => SIMD == scalar == reference bit-exact. N=1003 tail.
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_DivergentLoopTernaryMatchesScalar()
+        {
+            const int N = 1003, reps = 17;
+            var a = new float[N]; var b = new float[N];
+            for (int i = 0; i < N; i++) { a[i] = (i % 13) - 6f; b[i] = MathF.Sin(i * 0.05f) * 3f; } // span both branches
+            var reference = new float[N];
+            for (int i = 0; i < N; i++) { float acc = 0f; for (int k = 0; k < reps; k++) acc += a[i] > 0f ? a[i] : b[i]; reference[i] = acc; }
+            var scalar = await RunDivLoop(a, b, N, reps, forceSimd: false, requireSimdEmit: false);
+            var simd = await RunDivLoop(a, b, N, reps, true, true);
+            AssertExactF(scalar, reference, simd, "divergent-loop-ternary");
+        }
+
+        // Conditional accumulate: `if (a>1) acc += a` inside the loop - the in-body select carries the header
+        // accumulator on BOTH sides (acc = cond ? acc+a : acc).
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_DivergentLoopCondAccMatchesScalar()
+        {
+            const int N = 1003, reps = 11;
+            var a = new float[N];
+            for (int i = 0; i < N; i++) a[i] = (i % 9) * 0.5f - 1.5f; // some >1, some not
+            var reference = new float[N];
+            for (int i = 0; i < N; i++) { float acc = 0f; for (int k = 0; k < reps; k++) { if (a[i] > 1f) acc += a[i]; } reference[i] = acc; }
+            var scalar = await RunDivLoopCond(a, N, reps, forceSimd: false, requireSimdEmit: false);
+            var simd = await RunDivLoopCond(a, N, reps, true, true);
+            AssertExactF(scalar, reference, simd, "divergent-loop-condacc");
+        }
+
+        private static void Wasm_Simd_DivLoopTernaryKernel(Index1D i, ArrayView<float> a, ArrayView<float> b, ArrayView<float> o, int reps)
+        { float acc = 0f; for (int k = 0; k < reps; k++) acc += a[i] > 0f ? a[i] : b[i]; o[i] = acc; }
+
+        private static void Wasm_Simd_DivLoopCondKernel(Index1D i, ArrayView<float> a, ArrayView<float> o, int reps)
+        { float acc = 0f; for (int k = 0; k < reps; k++) { if (a[i] > 1f) acc += a[i]; } o[i] = acc; }
+
+        private static async Task<float[]> RunDivLoop(float[] a, float[] b, int N, int reps, bool forceSimd, bool requireSimdEmit)
+        {
+            bool ss = WasmBackend.ForceScalar, sm = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd; WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                using var ctx = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm().ToContext();
+                WasmBackend.VerboseLogging = false; WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>, int>(Wasm_Simd_DivLoopTernaryKernel);
+                if (requireSimdEmit && (WasmBackend.LastWasmBinary == null || !ContainsExportName(WasmBackend.LastWasmBinary, "kernel_simd")))
+                    throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for the divergent-loop ternary kernel.");
+                using var aB = acc.Allocate1D(a); using var bB = acc.Allocate1D(b); using var oB = acc.Allocate1D<float>(N);
+                k((Index1D)N, aB.View, bB.View, oB.View, reps); await acc.SynchronizeAsync();
+                return await oB.CopyToHostAsync<float>();
+            }
+            finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
+        }
+
+        private static async Task<float[]> RunDivLoopCond(float[] a, int N, int reps, bool forceSimd, bool requireSimdEmit)
+        {
+            bool ss = WasmBackend.ForceScalar, sm = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd; WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                using var ctx = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm().ToContext();
+                WasmBackend.VerboseLogging = false; WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, int>(Wasm_Simd_DivLoopCondKernel);
+                if (requireSimdEmit && (WasmBackend.LastWasmBinary == null || !ContainsExportName(WasmBackend.LastWasmBinary, "kernel_simd")))
+                    throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for the divergent-loop condacc kernel.");
+                using var aB = acc.Allocate1D(a); using var oB = acc.Allocate1D<float>(N);
+                k((Index1D)N, aB.View, oB.View, reps); await acc.SynchronizeAsync();
+                return await oB.CopyToHostAsync<float>();
+            }
+            finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
+        }
+
         // Wasm SIMD128 CHAINED-diamond (general acyclic CFG) gate (2026-06-20). Two dependent ternaries -
         // `t = a>0 ? a*2 : b; o = t>1 ? t : c` - lower to a 7-block DAG of branch diamonds the single-diamond
         // detector can't match. The acyclic if-converter emits all blocks speculatively in topo order and
