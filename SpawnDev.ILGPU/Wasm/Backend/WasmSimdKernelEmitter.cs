@@ -763,7 +763,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 case Store st:
                     return ClassOf(st.Value.Resolve().Type) != LaneClass.None;
                 case BinaryArithmeticValue ba:
-                    return MapBinary(ba) != 0 && AllUsesVectorizable(ba);
+                    return SimdBinaryOk(ba) && AllUsesVectorizable(ba);
                 case UnaryArithmeticValue ua:
                     return SimdUnaryOk(ua) && AllUsesVectorizable(ua);
                 case ConvertValue cv:
@@ -795,8 +795,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 var user = use.Resolve();
                 switch (user)
                 {
-                    case BinaryArithmeticValue ba when MapBinary(ba) != 0:
-                        break; // mapped binary: both operand positions are v128 (we don't map scalar-count shifts)
+                    case BinaryArithmeticValue ba when SimdBinaryOk(ba):
+                        break; // mapped binary (incl. shifts), or a per-lane pow/atan2/log_b fallback
                     case UnaryArithmeticValue ua when SimdUnaryOk(ua):
                         break; // mapped unary, per-lane transcendental, or native rcp/rsqrt
                     case ConvertValue cv when MapConvert(cv) != 0:
@@ -906,7 +906,39 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 case BinaryArithmeticValue ba:
                 {
                     uint op = MapBinary(ba);
-                    if (op == 0) return false;
+                    if (op == 0)
+                    {
+                        // Binary transcendental (pow/atan2, or log_b = log(a)/log(b)): wasm SIMD has no such
+                        // op, so PER-LANE scalar via the SAME Math import the scalar path uses. f32x4 only,
+                        // cross-mode EXACT (per-lane scalar op == scalar op).
+                        string mname = ClassOf(ba.Type) == LaneClass.F32x4 ? PerLaneBinaryMathName(ba.Kind) : null;
+                        if (mname == null || !MathImports.TryGetValue(mname, out var fidx)) return false;
+                        bool isBinLog = ba.Kind == BinaryArithmeticKind.BinaryLogF; // mname=="log", call per-arg + div
+                        var t = AllocateLocal(ba, WasmOpCodes.V128);
+                        var lL = AllocateNewLocal(WasmOpCodes.V128);
+                        if (!PushAsV128(ba.Left.Resolve(), laneVariant)) return false; WasmModuleBuilder.EmitLocalSet(Code, lL);
+                        var rL = AllocateNewLocal(WasmOpCodes.V128);
+                        if (!PushAsV128(ba.Right.Resolve(), laneVariant)) return false; WasmModuleBuilder.EmitLocalSet(Code, rL);
+                        WasmModuleBuilder.EmitLocalGet(Code, lL); WasmModuleBuilder.EmitLocalSet(Code, t); // seed
+                        for (byte lane = 0; lane < 4; lane++)
+                        {
+                            WasmModuleBuilder.EmitLocalGet(Code, t);                                       // [v128]
+                            WasmModuleBuilder.EmitLocalGet(Code, lL);
+                            WasmModuleBuilder.EmitSimdLane(Code, WasmOpCodes.F32x4ExtractLane, lane);
+                            Code.Add(WasmOpCodes.F64PromoteF32);                                            // left f64
+                            if (isBinLog) WasmModuleBuilder.EmitCall(Code, fidx);                           // log(left)
+                            WasmModuleBuilder.EmitLocalGet(Code, rL);
+                            WasmModuleBuilder.EmitSimdLane(Code, WasmOpCodes.F32x4ExtractLane, lane);
+                            Code.Add(WasmOpCodes.F64PromoteF32);                                            // right f64
+                            if (isBinLog) { WasmModuleBuilder.EmitCall(Code, fidx); Code.Add(WasmOpCodes.F64Div); } // log(l)/log(r)
+                            else WasmModuleBuilder.EmitCall(Code, fidx);                                    // pow/atan2(l,r)
+                            Code.Add(WasmOpCodes.F32DemoteF64);
+                            WasmModuleBuilder.EmitSimdLane(Code, WasmOpCodes.F32x4ReplaceLane, lane);
+                            WasmModuleBuilder.EmitLocalSet(Code, t);
+                        }
+                        _simdV128Values.Add(ba);
+                        return true;
+                    }
                     var target = AllocateLocal(ba, WasmOpCodes.V128);
                     if (!PushAsV128(ba.Left.Resolve(), laneVariant)) return false;
                     if (!PushAsV128(ba.Right.Resolve(), laneVariant)) return false;
@@ -1343,6 +1375,22 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             || (ClassOf(ua.Type) == LaneClass.F32x4
                 && (PerLaneMathImport(ua.Kind) != null
                     || ua.Kind == UnaryArithmeticKind.RcpF || ua.Kind == UnaryArithmeticKind.RsqrtF));
+
+        /// <summary>The JS Math import name for a binary transcendental kind (pow/atan2, and "log" for the
+        /// log_b = log(a)/log(b) form), or null. Used by the SIMD per-lane binary-math fallback (f32x4).</summary>
+        private static string PerLaneBinaryMathName(BinaryArithmeticKind kind) => kind switch
+        {
+            BinaryArithmeticKind.PowF => "pow",
+            BinaryArithmeticKind.Atan2F => "atan2",
+            BinaryArithmeticKind.BinaryLogF => "log",
+            _ => null,
+        };
+
+        /// <summary>True if a binary is SIMD-emittable: a mapped v128 op (incl. shifts, emitted by the
+        /// shift-intercept), OR (f32x4) a per-lane pow/atan2/log_b fallback (wasm SIMD has no such ops).</summary>
+        private static bool SimdBinaryOk(BinaryArithmeticValue ba) =>
+            MapBinary(ba) != 0
+            || (ClassOf(ba.Type) == LaneClass.F32x4 && PerLaneBinaryMathName(ba.Kind) != null);
 
         private static uint MapUnary(UnaryArithmeticValue v)
         {

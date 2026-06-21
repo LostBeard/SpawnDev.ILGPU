@@ -3223,6 +3223,49 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
         }
 
+        // Wasm SIMD128 per-lane BINARY math gate (2026-06-20). pow(a,b) / atan2 / log_b - wasm SIMD has no
+        // such op, so PER-LANE via the SAME Math import the scalar path uses (extract both lanes -> promote ->
+        // import -> demote -> replace), while surrounding f32x4 ALU vectorizes. Cross-mode invariant: SIMD ==
+        // SCALAR bit-exact (identical import); vs host MathF only within tolerance (browser libm differs).
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_PowMatchesScalar()
+        {
+            const int N = 1003;
+            var a = new float[N]; var b = new float[N];
+            for (int i = 0; i < N; i++) { a[i] = (i % 29) * 0.1f + 0.5f; b[i] = (i % 13) * 0.2f + 0.5f; } // a>0
+            var scalar = await RunPow(a, b, N, forceSimd: false, requireSimdEmit: false);
+            var simd = await RunPow(a, b, N, forceSimd: true, requireSimdEmit: true);
+            int mismV = 0, firstV = -1;
+            for (int i = 0; i < N; i++)
+                if (BitConverter.SingleToInt32Bits(simd[i]) != BitConverter.SingleToInt32Bits(scalar[i])) { if (mismV == 0) firstV = i; mismV++; }
+            if (mismV > 0) throw new Exception($"Wasm SIMD pow != SCALAR bit-exact: {mismV}/{N}, first@{firstV} simd={simd[firstV]} scalar={scalar[firstV]} (per-lane import must match the scalar import).");
+            int bad = 0;
+            for (int i = 0; i < N; i++) { float exp = MathF.Pow(a[i], b[i]) * 0.5f + a[i]; if (MathF.Abs(simd[i] - exp) > MathF.Abs(exp) * 1e-4f + 1e-4f) bad++; }
+            if (bad > 0) throw new Exception($"Wasm SIMD pow vs host MathF tolerance: {bad}/{N} exceed 1e-4.");
+        }
+
+        private static void Wasm_Simd_PowKernel(Index1D i, ArrayView<float> a, ArrayView<float> b, ArrayView<float> o)
+            => o[i] = XMath.Pow(a[i], b[i]) * 0.5f + a[i];
+
+        private static async Task<float[]> RunPow(float[] a, float[] b, int N, bool forceSimd, bool requireSimdEmit)
+        {
+            bool ss = WasmBackend.ForceScalar, sm = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd; WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                using var ctx = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm().ToContext();
+                WasmBackend.VerboseLogging = false; WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>>(Wasm_Simd_PowKernel);
+                if (requireSimdEmit && (WasmBackend.LastWasmBinary == null || !ContainsExportName(WasmBackend.LastWasmBinary, "kernel_simd")))
+                    throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for the pow kernel.");
+                using var aB = acc.Allocate1D(a); using var bB = acc.Allocate1D(b); using var oB = acc.Allocate1D<float>(N);
+                k((Index1D)N, aB.View, bB.View, oB.View); await acc.SynchronizeAsync();
+                return await oB.CopyToHostAsync<float>();
+            }
+            finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
+        }
+
         // Wasm SIMD128 RCP / RSQRT gate (2026-06-20). Reciprocal (1/x) and reciprocal-sqrt (1/sqrt x) -
         // common in normalization / RMSNorm / vector-normalize. NATIVE f32x4 (not per-lane): 1/x and
         // 1/sqrt(x) as f32x4.div(splat 1, [sqrt] x), mirroring the scalar f32.div(1, [sqrt] x). sqrt + div
