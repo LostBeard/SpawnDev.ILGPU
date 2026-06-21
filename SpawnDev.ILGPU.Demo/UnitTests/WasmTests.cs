@@ -3223,6 +3223,46 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
         }
 
+        // Wasm SIMD128 NESTED-diamond (general acyclic CFG, control-dependence tree) gate (2026-06-20).
+        // `o = a>0 ? (b>0 ? a : b) : a+b` lowers to a merge with a 3-SOURCE phi (cond1-false, cond1-true&
+        // cond2-true, cond1-true&cond2-false). The acyclic if-converter resolves it via each source's
+        // control-dependence PATH into a bitselect TREE: bitselect(bitselect(a,b,cond2), a+b, cond1).
+        // All-f32 IEEE => SIMD == scalar == reference bit-exact. Asserts kernel_simd emitted. N=1003 tail.
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_NestedSelectMatchesScalar()
+        {
+            const int N = 1003;
+            var a = new float[N]; var b = new float[N];
+            for (int i = 0; i < N; i++) { a[i] = (i % 9) - 4f; b[i] = (i % 11) - 5f; } // span all 3 paths
+            var reference = new float[N];
+            for (int i = 0; i < N; i++) reference[i] = a[i] > 0f ? (b[i] > 0f ? a[i] : b[i]) : a[i] + b[i];
+            var scalar = await RunNested(a, b, N, forceSimd: false, requireSimdEmit: false);
+            var simd = await RunNested(a, b, N, forceSimd: true, requireSimdEmit: true);
+            AssertExactF(scalar, reference, simd, "nested-select");
+        }
+
+        private static void Wasm_Simd_NestedKernel(Index1D i, ArrayView<float> a, ArrayView<float> b, ArrayView<float> o)
+        { o[i] = a[i] > 0f ? (b[i] > 0f ? a[i] : b[i]) : a[i] + b[i]; }
+
+        private static async Task<float[]> RunNested(float[] a, float[] b, int N, bool forceSimd, bool requireSimdEmit)
+        {
+            bool ss = WasmBackend.ForceScalar, sm = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd; WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                using var ctx = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm().ToContext();
+                WasmBackend.VerboseLogging = false; WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>>(Wasm_Simd_NestedKernel);
+                if (requireSimdEmit && (WasmBackend.LastWasmBinary == null || !ContainsExportName(WasmBackend.LastWasmBinary, "kernel_simd")))
+                    throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for the nested-select kernel.");
+                using var aB = acc.Allocate1D(a); using var bB = acc.Allocate1D(b); using var oB = acc.Allocate1D<float>(N);
+                k((Index1D)N, aB.View, bB.View, oB.View); await acc.SynchronizeAsync();
+                return await oB.CopyToHostAsync<float>();
+            }
+            finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
+        }
+
         // Wasm SIMD128 CHAINED-diamond (general acyclic CFG) gate (2026-06-20). Two dependent ternaries -
         // `t = a>0 ? a*2 : b; o = t>1 ? t : c` - lower to a 7-block DAG of branch diamonds the single-diamond
         // detector can't match. The acyclic if-converter emits all blocks speculatively in topo order and

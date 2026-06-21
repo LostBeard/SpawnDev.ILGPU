@@ -744,16 +744,19 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 if (b.Terminator is ReturnTerminator) { if (exit != null) return false; exit = b; }
             if (exit == null) return false;
 
-            // Validate + plan every phi (2-source, shared controlling IfBranch → mask).
-            var plans = new Dictionary<PhiValue, (CompareValue cond, Value t, Value f)>();
+            // Validate + plan every phi: each source's control-dependence PATH (the chain of IfBranch
+            // conditions+edges from entry to its predecessor) → a bitselect TREE (2-source chained = 1
+            // bitselect; N-source nested = a tree).
+            var plans = new Dictionary<PhiValue, List<(Value val, List<(CompareValue cond, bool edge)> path)>>();
             foreach (var b in Method.Blocks)
                 foreach (var ve in b)
                 {
                     var v = ve.Value;
                     if (v is PhiValue phi)
                     {
-                        if (!ResolvePhiSelect(phi, laneVariant, out var cond, out var tSrc, out var fSrc)) return false;
-                        plans[phi] = (cond, tSrc, fSrc);
+                        var plan = ResolvePhiTree(phi, laneVariant);
+                        if (plan == null) return false;
+                        plans[phi] = plan;
                         continue;
                     }
                     if (v is Store st)
@@ -771,7 +774,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     if (!laneVariant.Contains(v)) continue;             // invariant: emitted scalar
                     if (!IsStage3aEmittable(v, laneVariant)) return false;
                 }
-            if (plans.Count < 2) return false; // 0/1 select = single-diamond's job (it ran first); we own the chains
+            if (plans.Count == 0) return false; // need at least one select; the simple single diamond was
+                                                // already taken by TryGenerateSimdDiamondKernel (runs first),
+                                                // so a 1-phi kernel reaching here is one it rejected (e.g. a
+                                                // 3-source nested phi, or a non-canonical diamond shape).
 
             // ── save context ──
             var savedCode = Code.ToArray();
@@ -798,7 +804,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 {
                     foreach (var ve in b)
                         if (ve.Value is PhiValue phi)
-                            if (!EmitPhiSelect(phi, plans[phi].cond, plans[phi].t, plans[phi].f, laneVariant)) return false;
+                            if (!EmitPhiTree(phi, plans[phi], laneVariant)) return false;
                     foreach (var ve in b)
                     {
                         var v = ve.Value;
@@ -828,70 +834,125 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
         }
 
-        /// <summary>Resolves a merge phi to a single select: exactly 2 sources whose predecessor blocks both
-        /// descend from ONE IfBranch (one via its true target, one via false) → that branch's compare is the
-        /// mask, and the true-side source is selected where the mask is set. Bails on >2 sources (nested) or
-        /// no single controlling branch. The compare must be lane-variant + a mapped v128 compare whose lane
-        /// width matches the phi's.</summary>
-        private bool ResolvePhiSelect(PhiValue phi, HashSet<Value> laneVariant, out CompareValue cond, out Value trueSrc, out Value falseSrc)
+        /// <summary>Plans a merge phi as a bitselect TREE: each source gets its control-dependence PATH (the
+        /// chain of (IfBranch compare, edge) from entry down to its predecessor). 2-source chained = a path
+        /// length 1 each (1 bitselect); N-source nested = paths that share a prefix then diverge (a tree).
+        /// Returns null (bail) if the phi isn't a per-lane select, any controlling branch isn't a lane-variant
+        /// mapped compare of matching lane width, or the paths don't form a resolvable select tree.</summary>
+        private List<(Value val, List<(CompareValue cond, bool edge)> path)> ResolvePhiTree(PhiValue phi, HashSet<Value> laneVariant)
         {
-            cond = null; trueSrc = null; falseSrc = null;
-            if (!laneVariant.Contains(phi)) return false;     // a uniform phi isn't a per-lane select
-            if (ClassOf(phi.Type) == LaneClass.None) return false;
-            if (phi.Count != 2) return false;                 // >2 = nested (control-dependence tree) - later
-            if (!ControllingBranch(phi.Sources[0], out var q0, out bool s0)) return false;
-            if (!ControllingBranch(phi.Sources[1], out var q1, out bool s1)) return false;
-            if (!ReferenceEquals(q0, q1) || s0 == s1) return false; // must be ONE branch, opposite edges
-            if (q0.Condition.Resolve() is not CompareValue c || !laneVariant.Contains(c) || MapCompare(c) == 0) return false;
-            if (Is2Lane(ClassOf(c.Left.Resolve().Type)) != Is2Lane(ClassOf(phi.Type))) return false; // mask/phi lane width
-            cond = c;
-            trueSrc = (s0 ? phi[0] : phi[1]).Resolve();
-            falseSrc = (s0 ? phi[1] : phi[0]).Resolve();
-            return true;
+            if (!laneVariant.Contains(phi)) return null;            // a uniform phi isn't a per-lane select
+            if (ClassOf(phi.Type) == LaneClass.None) return null;
+            if (phi.Count < 2) return null;
+            bool phi2lane = Is2Lane(ClassOf(phi.Type));
+            var srcs = new List<(Value val, List<(CompareValue cond, bool edge)> path)>();
+            for (int j = 0; j < phi.Count; j++)
+            {
+                var path = ComputeControlPath(phi.Sources[j], laneVariant, phi2lane);
+                if (path == null || path.Count == 0) return null;  // unreachable / invalid controlling branch
+                srcs.Add((phi[j].Resolve(), path));
+            }
+            // Dry-run the tree partition (depth 0) to confirm it resolves.
+            if (!ValidateSelectTree(srcs.Select(s => (s.val, s.path, 0)).ToList())) return null;
+            return srcs;
         }
 
-        /// <summary>Finds the IfBranch whose true/false target is (or leads directly to) <paramref name="pred"/>:
-        /// the block Q with an IfBranch terminator whose TrueTarget or FalseTarget == pred. Returns the edge
-        /// side in <paramref name="isTrueEdge"/>.</summary>
-        private bool ControllingBranch(BasicBlock pred, out IfBranch branch, out bool isTrueEdge)
+        /// <summary>The control-dependence path of a predecessor block: walk up via the IfBranch whose edge
+        /// targets the current block, collecting (compare, edge), entry→pred order. Returns null if a
+        /// controlling branch's condition isn't a lane-variant mapped compare of the required lane width.</summary>
+        private List<(CompareValue cond, bool edge)> ComputeControlPath(BasicBlock pred, HashSet<Value> laneVariant, bool need2lane)
         {
-            branch = null; isTrueEdge = false;
+            var rev = new List<(CompareValue cond, bool edge)>();
+            var cur = pred; int guard = 0;
+            while (TryControllingBranch(cur, out var ifb, out var ifBlock, out bool edge))
+            {
+                if (ifb.Condition.Resolve() is not CompareValue c || !laneVariant.Contains(c) || MapCompare(c) == 0) return null;
+                if (Is2Lane(ClassOf(c.Left.Resolve().Type)) != need2lane) return null;
+                rev.Add((c, edge));
+                cur = ifBlock;
+                if (++guard > 64) return null; // malformed / cycle guard
+            }
+            rev.Reverse();
+            return rev;
+        }
+
+        /// <summary>Finds the IfBranch whose true/false target is <paramref name="target"/>, plus its block.</summary>
+        private bool TryControllingBranch(BasicBlock target, out IfBranch branch, out BasicBlock branchBlock, out bool isTrueEdge)
+        {
+            branch = null; branchBlock = null; isTrueEdge = false;
             foreach (var b in Method.Blocks)
                 if (b.Terminator is IfBranch ib)
                 {
-                    if (ReferenceEquals(ib.TrueTarget, pred)) { branch = ib; isTrueEdge = true; return true; }
-                    if (ReferenceEquals(ib.FalseTarget, pred)) { branch = ib; isTrueEdge = false; return true; }
+                    if (ReferenceEquals(ib.TrueTarget, target)) { branch = ib; branchBlock = b; isTrueEdge = true; return true; }
+                    if (ReferenceEquals(ib.FalseTarget, target)) { branch = ib; branchBlock = b; isTrueEdge = false; return true; }
                 }
             return false;
         }
 
-        /// <summary>Emits a phi select as bitselect(trueSrc, falseSrc, mask) into a fresh local (4-lane), or
-        /// lo+hi bitselects (2-lane f64/i64). The mask <paramref name="cond"/> is already materialized.</summary>
-        private bool EmitPhiSelect(PhiValue phi, CompareValue cond, Value trueSrc, Value falseSrc, HashSet<Value> laneVariant)
+        /// <summary>Dry-run of the recursive select-tree partition: at each level all items must share the same
+        /// path[depth] compare; split by edge into non-empty true/false sub-trees; recurse. A single item
+        /// terminates a branch.</summary>
+        private static bool ValidateSelectTree(List<(Value val, List<(CompareValue cond, bool edge)> path, int depth)> items)
         {
-            if (!Is2Lane(ClassOf(phi.Type)))
+            if (items.Count == 1) return true;
+            var d = items[0].depth;
+            if (d >= items[0].path.Count) return false;
+            var cond = items[0].path[d].cond;
+            var t = new List<(Value, List<(CompareValue, bool)>, int)>();
+            var f = new List<(Value, List<(CompareValue, bool)>, int)>();
+            foreach (var it in items)
+            {
+                if (it.depth >= it.path.Count || !ReferenceEquals(it.path[it.depth].cond, cond)) return false;
+                (it.path[it.depth].edge ? t : f).Add((it.val, it.path, it.depth + 1));
+            }
+            if (t.Count == 0 || f.Count == 0) return false;
+            return ValidateSelectTree(t) && ValidateSelectTree(f);
+        }
+
+        /// <summary>Emits a phi as a bitselect TREE into its local(s). 4-lane = one tree; 2-lane (f64/i64) =
+        /// the tree run once for lo and once for hi.</summary>
+        private bool EmitPhiTree(PhiValue phi, List<(Value val, List<(CompareValue cond, bool edge)> path)> plan, HashSet<Value> laneVariant)
+        {
+            bool two = Is2Lane(ClassOf(phi.Type));
+            var items = plan.Select(s => (s.val, s.path, 0)).ToList();
+            if (!two)
             {
                 var t = AllocateLocal(phi, WasmOpCodes.V128); _simdV128Values.Add(phi);
-                if (!PushAsV128(trueSrc, laneVariant)) return false;
-                if (!PushAsV128(falseSrc, laneVariant)) return false;
-                EmitGetLocal(cond);
-                WasmModuleBuilder.EmitSimd(Code, WasmOpCodes.V128Bitselect);
+                if (!EmitSelectTree(items, false, false, laneVariant)) return false;
                 WasmModuleBuilder.EmitLocalSet(Code, t);
                 return true;
             }
-            if (!_simdHiLocal.TryGetValue(cond, out var cHi)) return false;
             var lo = AllocateLocal(phi, WasmOpCodes.V128); _simdV128Values.Add(phi);
             var hi = AllocateNewLocal(WasmOpCodes.V128); _simdHiLocal[phi] = hi;
-            if (!Push2Lane(trueSrc, false, laneVariant)) return false;
-            if (!Push2Lane(falseSrc, false, laneVariant)) return false;
-            EmitGetLocal(cond);
-            WasmModuleBuilder.EmitSimd(Code, WasmOpCodes.V128Bitselect);
+            if (!EmitSelectTree(items, false, true, laneVariant)) return false;
             WasmModuleBuilder.EmitLocalSet(Code, lo);
-            if (!Push2Lane(trueSrc, true, laneVariant)) return false;
-            if (!Push2Lane(falseSrc, true, laneVariant)) return false;
-            WasmModuleBuilder.EmitLocalGet(Code, cHi);
-            WasmModuleBuilder.EmitSimd(Code, WasmOpCodes.V128Bitselect);
+            if (!EmitSelectTree(items, true, true, laneVariant)) return false;
             WasmModuleBuilder.EmitLocalSet(Code, hi);
+            return true;
+        }
+
+        /// <summary>Recursively emits the select tree, leaving the (lo or hi) v128 result on the stack:
+        /// bitselect(resolve(trueItems), resolve(falseItems), mask) at each controlling branch; a single item
+        /// is its value.</summary>
+        private bool EmitSelectTree(List<(Value val, List<(CompareValue cond, bool edge)> path, int depth)> items, bool hi, bool two, HashSet<Value> laneVariant)
+        {
+            if (items.Count == 1)
+                return two ? Push2Lane(items[0].val, hi, laneVariant) : PushAsV128(items[0].val, laneVariant);
+            var d = items[0].depth;
+            var cond = items[0].path[d].cond;
+            var t = new List<(Value, List<(CompareValue, bool)>, int)>();
+            var f = new List<(Value, List<(CompareValue, bool)>, int)>();
+            foreach (var it in items)
+            {
+                if (it.depth >= it.path.Count || !ReferenceEquals(it.path[it.depth].cond, cond)) return false;
+                (it.path[it.depth].edge ? t : f).Add((it.val, it.path, it.depth + 1));
+            }
+            if (t.Count == 0 || f.Count == 0) return false;
+            if (!EmitSelectTree(t, hi, two, laneVariant)) return false;   // [trueVal]
+            if (!EmitSelectTree(f, hi, two, laneVariant)) return false;   // [trueVal, falseVal]
+            if (two && hi) { if (!_simdHiLocal.TryGetValue(cond, out var cHi)) return false; WasmModuleBuilder.EmitLocalGet(Code, cHi); }
+            else EmitGetLocal(cond);                                       // [.., mask]
+            WasmModuleBuilder.EmitSimd(Code, WasmOpCodes.V128Bitselect);   // [result]
             return true;
         }
 
