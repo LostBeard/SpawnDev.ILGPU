@@ -81,6 +81,20 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 data[globalIndex] = globalIndex + constant;
         }
 
+        // Broader _uf_group_iter stress (2026-06-21): load MANY uniformity-transform kernels with DIFFERENT
+        // Grid.IdxX-family shapes on one accelerator. If the synthetic-counter declaration leaks across
+        // kernels, the later ones emit a duplicate/undeclared _uf_group_iter and the WGSL fails to compile.
+        static void GridStreamC(ArrayView<float> data, int limit) // grid-stride loop (uses _uf_group_iter / grid-stride)
+        {
+            for (int i = Grid.IdxX * Group.DimX + Group.IdxX; i < limit; i += Group.DimX * Grid.DimX)
+                data[i] = data[i] * 3.0f;
+        }
+        static void GridStreamD(ArrayView<float> data, int limit) // Grid.GlobalIndex.X form
+        {
+            var gid = Grid.GlobalIndex.X;
+            if (gid < limit) data[gid] = data[gid] - 1.0f;
+        }
+
         // --- 2D Grid Dispatch (batched kernel using Grid.IdxY for batch) ---
         static void Batched2DGridKernel(ArrayView<int> output, int cols)
         {
@@ -774,6 +788,35 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 float expected = i * 2.0f + 10f;
                 if (MathF.Abs(result[i] - expected) > 0.01f)
                     throw new Exception($"Multiple LoadStreamKernel failed at [{i}]: expected={expected}, got={result[i]}");
+            }
+        });
+
+        /// <summary>Broader _uf_group_iter stress: FOUR uniformity-transform kernels (two manual-global-index,
+        /// a grid-stride loop, and a Grid.GlobalIndex.X form) loaded + dispatched on one accelerator. Confirms
+        /// the synthetic-counter declaration does not leak across kernels (the redeclaration class).</summary>
+        [TestMethod]
+        public async Task MultipleGridIdxKernelsStressTest() => await RunTest(async accelerator =>
+        {
+            if (accelerator.AcceleratorType == AcceleratorType.WebGL)
+                throw new UnsupportedTestException("WebGL does not support LoadStreamKernel");
+            int length = 128, groupSize = 32, numGroups = (length + groupSize - 1) / groupSize;
+            using var buf = accelerator.Allocate1D<float>(length);
+            buf.MemSetToZero();
+            var kA = accelerator.LoadStreamKernel<ArrayView<float>, int>(StreamKernelA);            // data[i] = i*2
+            var kB = accelerator.LoadStreamKernel<ArrayView<float>, int, float>(StreamKernelB);     // data[i] += 10
+            var kC = accelerator.LoadStreamKernel<ArrayView<float>, int>(GridStreamC);              // data[i] *= 3 (grid-stride)
+            var kD = accelerator.LoadStreamKernel<ArrayView<float>, int>(GridStreamD);              // data[i] -= 1
+            var cfg = new KernelConfig(numGroups, groupSize);
+            kA(cfg, buf.View, length); await accelerator.SynchronizeAsync();
+            kB(cfg, buf.View, length, 10f); await accelerator.SynchronizeAsync();
+            kC(cfg, buf.View, length); await accelerator.SynchronizeAsync();
+            kD(cfg, buf.View, length); await accelerator.SynchronizeAsync();
+            var result = await buf.CopyToHostAsync<float>();
+            for (int i = 0; i < length; i++)
+            {
+                float expected = (i * 2.0f + 10f) * 3.0f - 1.0f;
+                if (MathF.Abs(result[i] - expected) > 0.01f)
+                    throw new Exception($"MultipleGridIdxKernelsStress at [{i}]: expected={expected}, got={result[i]} (_uf_group_iter leak across kernels?).");
             }
         });
 
