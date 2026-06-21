@@ -3223,6 +3223,49 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
         }
 
+        // Wasm SIMD128 f64 transcendental + rcp/rsqrt gate (2026-06-20) — the double-precision math fallback,
+        // completing the math surface. f64 transcendentals run PER LANE (2 lanes/half, f64->f64 import, NO
+        // promote/demote); f64 rcp/rsqrt are native f64x2.div sequences. SIMD == SCALAR bit-exact (identical
+        // import / IEEE div); vs host within tolerance (libm differs; rsqrt part is actually exact).
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_Simd128_Float64MathMatchesScalar()
+        {
+            const int N = 1003;
+            var a = new double[N]; var b = new double[N];
+            for (int i = 0; i < N; i++) { a[i] = (i % 31) * 0.07 - 1.0; b[i] = (i % 19) * 0.5 + 0.5; } // b>0
+            var scalar = await RunF64Math(a, b, N, forceSimd: false, requireSimdEmit: false);
+            var simd = await RunF64Math(a, b, N, forceSimd: true, requireSimdEmit: true);
+            int mismV = 0, firstV = -1;
+            for (int i = 0; i < N; i++)
+                if (BitConverter.DoubleToInt64Bits(simd[i]) != BitConverter.DoubleToInt64Bits(scalar[i])) { if (mismV == 0) firstV = i; mismV++; }
+            if (mismV > 0) throw new Exception($"Wasm SIMD f64-math != SCALAR bit-exact: {mismV}/{N}, first@{firstV} simd={simd[firstV]} scalar={scalar[firstV]} (per-lane f64 import must match scalar).");
+            int bad = 0;
+            for (int i = 0; i < N; i++) { double exp = Math.Exp(a[i]) * 0.5 + 1.0 / Math.Sqrt(b[i]); if (Math.Abs(simd[i] - exp) > Math.Abs(exp) * 1e-9 + 1e-12) bad++; }
+            if (bad > 0) throw new Exception($"Wasm SIMD f64-math vs host tolerance: {bad}/{N} exceed.");
+        }
+
+        private static void Wasm_Simd_F64MathKernel(Index1D i, ArrayView<double> a, ArrayView<double> b, ArrayView<double> o)
+            => o[i] = XMath.Exp(a[i]) * 0.5 + XMath.Rsqrt(b[i]);
+
+        private static async Task<double[]> RunF64Math(double[] a, double[] b, int N, bool forceSimd, bool requireSimdEmit)
+        {
+            bool ss = WasmBackend.ForceScalar, sm = WasmBackend.ForceSimd;
+            WasmBackend.ForceScalar = !forceSimd; WasmBackend.ForceSimd = forceSimd;
+            try
+            {
+                using var ctx = Context.Create().EnableAlgorithms().EnableWasmAlgorithms().Wasm().ToContext();
+                WasmBackend.VerboseLogging = false; WasmBackend.LastWasmBinary = null;
+                using var acc = await ctx.CreateWasmAcceleratorAsync();
+                var k = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<double>, ArrayView<double>, ArrayView<double>>(Wasm_Simd_F64MathKernel);
+                if (requireSimdEmit && (WasmBackend.LastWasmBinary == null || !ContainsExportName(WasmBackend.LastWasmBinary, "kernel_simd")))
+                    throw new Exception("ForceSimd compile did NOT emit a kernel_simd export for the f64 math kernel.");
+                using var aB = acc.Allocate1D(a); using var bB = acc.Allocate1D(b); using var oB = acc.Allocate1D<double>(N);
+                k((Index1D)N, aB.View, bB.View, oB.View); await acc.SynchronizeAsync();
+                return await oB.CopyToHostAsync<double>();
+            }
+            finally { WasmBackend.ForceScalar = ss; WasmBackend.ForceSimd = sm; }
+        }
+
         // Wasm SIMD128 per-lane BINARY math gate (2026-06-20). pow(a,b) / atan2 / log_b - wasm SIMD has no
         // such op, so PER-LANE via the SAME Math import the scalar path uses (extract both lanes -> promote ->
         // import -> demote -> replace), while surrounding f32x4 ALU vectorizes. Cross-mode invariant: SIMD ==

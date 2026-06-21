@@ -1183,17 +1183,64 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 case UnaryArithmeticValue ua:
                 {
                     uint op = MapUnary(ua);
-                    if (op == 0) return false;
                     var src = ua.Value.Resolve();
-                    var lo = AllocateLocal(ua, WasmOpCodes.V128);
+                    if (op == 0 && ClassOf(ua.Type) == LaneClass.F64x2)
+                    {
+                        // f64 rcp/rsqrt: native f64x2.div per half (1/x, 1/sqrt x). Bit-exact cross-mode.
+                        if (ua.Kind == UnaryArithmeticKind.RcpF || ua.Kind == UnaryArithmeticKind.RsqrtF)
+                        {
+                            var lo0 = AllocateLocal(ua, WasmOpCodes.V128);
+                            var hi0 = AllocateNewLocal(WasmOpCodes.V128);
+                            for (int h = 0; h < 2; h++)
+                            {
+                                WasmModuleBuilder.EmitF64Const(Code, 1.0);
+                                WasmModuleBuilder.EmitSimd(Code, WasmOpCodes.F64x2Splat);
+                                if (!Push2Lane(src, h == 1, laneVariant)) return false;
+                                if (ua.Kind == UnaryArithmeticKind.RsqrtF) WasmModuleBuilder.EmitSimd(Code, WasmOpCodes.F64x2Sqrt);
+                                WasmModuleBuilder.EmitSimd(Code, WasmOpCodes.F64x2Div);
+                                WasmModuleBuilder.EmitLocalSet(Code, h == 0 ? lo0 : hi0);
+                            }
+                            _simdHiLocal[ua] = hi0; _simdV128Values.Add(ua);
+                            return true;
+                        }
+                        // f64 transcendental: PER-LANE via the same Math import (f64->f64, NO promote/demote).
+                        string mname = PerLaneMathImport(ua.Kind);
+                        if (mname == null || !MathImports.TryGetValue(mname, out var fidx)) return false;
+                        var lo = AllocateLocal(ua, WasmOpCodes.V128);
+                        var hi = AllocateNewLocal(WasmOpCodes.V128);
+                        var srcLo = AllocateNewLocal(WasmOpCodes.V128);
+                        if (!Push2Lane(src, false, laneVariant)) return false; WasmModuleBuilder.EmitLocalSet(Code, srcLo);
+                        var srcHi = AllocateNewLocal(WasmOpCodes.V128);
+                        if (!Push2Lane(src, true, laneVariant)) return false; WasmModuleBuilder.EmitLocalSet(Code, srcHi);
+                        WasmModuleBuilder.EmitLocalGet(Code, srcLo); WasmModuleBuilder.EmitLocalSet(Code, lo);
+                        WasmModuleBuilder.EmitLocalGet(Code, srcHi); WasmModuleBuilder.EmitLocalSet(Code, hi);
+                        for (int h = 0; h < 2; h++)
+                        {
+                            uint dst = h == 0 ? lo : hi, srcH = h == 0 ? srcLo : srcHi;
+                            for (byte lane = 0; lane < 2; lane++)
+                            {
+                                WasmModuleBuilder.EmitLocalGet(Code, dst);
+                                WasmModuleBuilder.EmitLocalGet(Code, srcH);
+                                WasmModuleBuilder.EmitSimdLane(Code, WasmOpCodes.F64x2ExtractLane, lane);
+                                WasmModuleBuilder.EmitCall(Code, fidx);
+                                if (ua.Kind == UnaryArithmeticKind.Log10F) { WasmModuleBuilder.EmitF64Const(Code, 2.302585092994046); Code.Add(WasmOpCodes.F64Div); }
+                                WasmModuleBuilder.EmitSimdLane(Code, WasmOpCodes.F64x2ReplaceLane, lane);
+                                WasmModuleBuilder.EmitLocalSet(Code, dst);
+                            }
+                        }
+                        _simdHiLocal[ua] = hi; _simdV128Values.Add(ua);
+                        return true;
+                    }
+                    if (op == 0) return false;
+                    var loN = AllocateLocal(ua, WasmOpCodes.V128);
                     if (!Push2Lane(src, false, laneVariant)) return false;
                     WasmModuleBuilder.EmitSimd(Code, op);
-                    WasmModuleBuilder.EmitLocalSet(Code, lo);
-                    var hi = AllocateNewLocal(WasmOpCodes.V128);
+                    WasmModuleBuilder.EmitLocalSet(Code, loN);
+                    var hiN = AllocateNewLocal(WasmOpCodes.V128);
                     if (!Push2Lane(src, true, laneVariant)) return false;
                     WasmModuleBuilder.EmitSimd(Code, op);
-                    WasmModuleBuilder.EmitLocalSet(Code, hi);
-                    _simdHiLocal[ua] = hi; _simdV128Values.Add(ua);
+                    WasmModuleBuilder.EmitLocalSet(Code, hiN);
+                    _simdHiLocal[ua] = hiN; _simdV128Values.Add(ua);
                     return true;
                 }
                 case CompareValue cmp:
@@ -1372,7 +1419,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// fallback, OR (f32x4) native rcp/rsqrt (1/x, 1/sqrt(x) as f32x4.div sequences).</summary>
         private static bool SimdUnaryOk(UnaryArithmeticValue ua) =>
             MapUnary(ua) != 0
-            || (ClassOf(ua.Type) == LaneClass.F32x4
+            || ((ClassOf(ua.Type) == LaneClass.F32x4 || ClassOf(ua.Type) == LaneClass.F64x2)
                 && (PerLaneMathImport(ua.Kind) != null
                     || ua.Kind == UnaryArithmeticKind.RcpF || ua.Kind == UnaryArithmeticKind.RsqrtF));
 
