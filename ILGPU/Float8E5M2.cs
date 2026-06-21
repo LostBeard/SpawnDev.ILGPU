@@ -313,35 +313,30 @@ namespace ILGPU
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static float RawBitsToFloat(int rawBits)
         {
+            // SINGLE-EXIT / branchless on purpose (value-identical to the old early-return + while form). Early
+            // returns inline as control flow, and the WebGL/GLSL structurizer DUPLICATES a following loop's
+            // continuation into every exit arm of an inlined multi-exit function - so a multi-exit decode
+            // before a loop (e.g. an MXFP8 scale decoded before a value loop) explodes the GLSL past WebGL's
+            // shader-compile limit. The subnormal-normalize while loop is replaced by a computed shift count
+            // (the 2-bit mantissa needs 1 or 2 shifts). Selects are expressions; nothing to duplicate.
             uint bits = (uint)(rawBits & 0xFF);
             uint sign = (bits & 0x80u) << 24;          // f32 sign bit
             uint exp = (bits >> 2) & 0x1Fu;            // 5-bit exponent
             uint mant = bits & 0x03u;                  // 2-bit mantissa
 
-            if (exp == 0u)
-            {
-                // Zero or subnormal. Subnormal value = mant * 2^(1-15) * 2^-2 = mant * 2^-16.
-                if (mant == 0u)
-                    return Interop.IntAsFloat(sign);   // +-0
-                // Normalize the subnormal into an f32 normal.
-                uint e = 127u - 15u + 1u;              // start exponent for 2^(1-bias)
-                uint m = mant;
-                while ((m & 0x04u) == 0u)              // shift until the implicit 1 (bit 2) is set
-                {
-                    m <<= 1;
-                    e -= 1u;
-                }
-                m &= 0x03u;                            // drop the implicit bit
-                return Interop.IntAsFloat(sign | (e << 23) | (m << 21));
-            }
-            if (exp == 0x1Fu)
-            {
-                // Inf (mant==0) or NaN. Set all f32 exponent bits; carry mantissa for NaN.
-                return Interop.IntAsFloat(sign | (0xFFu << 23) | (mant << 21));
-            }
             // Normal: rebias exponent, shift the 2 mantissa bits to the top of the f32 mantissa.
-            uint f32Exp = exp - 15u + 127u;
-            return Interop.IntAsFloat(sign | (f32Exp << 23) | (mant << 21));
+            uint normal = sign | ((exp - 15u + 127u) << 23) | (mant << 21);
+            // exp==0x1F: Inf (mant==0) or NaN (carry mantissa).
+            uint infnan = sign | (0xFFu << 23) | (mant << 21);
+            // exp==0, mant!=0: subnormal = mant * 2^-16. Normalize the 2-bit mantissa: mant==1 needs 2 shifts
+            // to set the implicit bit (1->2->4), mant 2|3 need 1. e = 2^(1-bias) start exponent minus shifts.
+            uint shifts = (mant == 1u) ? 2u : 1u;
+            uint sub = sign | (((127u - 15u + 1u) - shifts) << 23) | (((mant << (int)shifts) & 0x03u) << 21);
+            uint denorm = (mant == 0u) ? sign : sub;   // +-0 when mant==0
+
+            uint result = (exp == 0x1Fu) ? infnan : normal;
+            result = (exp == 0u) ? denorm : result;
+            return Interop.IntAsFloat(result);
         }
 
         /// <summary>

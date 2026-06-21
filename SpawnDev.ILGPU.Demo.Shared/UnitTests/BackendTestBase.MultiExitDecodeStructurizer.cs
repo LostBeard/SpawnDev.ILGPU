@@ -61,5 +61,47 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     throw new Exception($"MXFP4-shape block {b} ({BackendName}): expected {exp}, got {got[b]} (multi-exit decode structurizer regression?).");
             }
         });
+
+        // Independent FP8 oracles (decode all 256 codes once on CPU vs the managed struct - that path is
+        // verified bit-exact vs ml_dtypes elsewhere; here we only need a reference for the in-loop decode).
+        // E4M3 (1-byte) + E5M2 decoded BEFORE a loop that decodes more FP8 - the FP8 analogue of the MXFP4
+        // shape. Both FP8 RawBitsToFloat decoders are now single-exit/branchless, so this must compile on
+        // WebGL (a regression to multi-exit would explode the GLSL and fault here).
+        static void Fp8ShapeKernel(Index1D i, ArrayView<int> e4codes, ArrayView<int> e5codes, ArrayView<float> outF)
+        {
+            float scale = Float8E5M2Extensions.RawBitsToFloat(e5codes[i]);   // multi-exit-class decode BEFORE the loop
+            float acc = 0f;
+            for (int k = 0; k < 8; k++)
+                acc += Float8E4M3Extensions.RawBitsToFloat(e4codes[i * 8 + k]) * scale; // multi-exit-class decode IN the loop
+            outF[i] = acc;
+        }
+
+        [TestMethod]
+        public async Task MultiExitDecodeBeforeLoop_FP8Shape_CompilesAndMatches() => await RunTest(async acc =>
+        {
+            const int blocks = 64;
+            var e5 = new int[blocks];
+            var e4 = new int[blocks * 8];
+            // E5M2 scale codes: small NORMAL exponents (avoid NaN/Inf exp=0x1F and subnormal-FTZ on WebGL).
+            for (int b = 0; b < blocks; b++) e5[b] = ((14 + (b % 4)) << 2) | (b & 0x3); // exp ~14..17, mant 0..3
+            // E4M3 value codes: NORMAL finite (avoid the 0x7F/0xFF NaN and exp==0 subnormals for WebGL FTZ).
+            for (int b = 0; b < blocks; b++) for (int k = 0; k < 8; k++) e4[b * 8 + k] = ((4 + ((b + k) % 6)) << 3) | ((b + k) & 0x7);
+            using var e5b = acc.Allocate1D(e5);
+            using var e4b = acc.Allocate1D(e4);
+            using var oBuf = acc.Allocate1D<float>(blocks);
+            var kern = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>, ArrayView<float>>(Fp8ShapeKernel);
+            kern((Index1D)blocks, e4b.View, e5b.View, oBuf.View);
+            await acc.SynchronizeAsync();
+            var got = await oBuf.CopyToHostAsync<float>();
+            for (int b = 0; b < blocks; b++)
+            {
+                float scale = (float)global::ILGPU.Float8E5M2.FromRawBits((byte)e5[b]); // managed decode = independent of the in-kernel path
+                float exp = 0f;
+                for (int k = 0; k < 8; k++) exp += (float)global::ILGPU.Float8E4M3.FromRawBits((byte)e4[b * 8 + k]) * scale;
+                float tol = MathF.Abs(exp) * 1e-4f + 1e-4f;
+                if (MathF.Abs(got[b] - exp) > tol)
+                    throw new Exception($"FP8-shape block {b} ({BackendName}): expected {exp}, got {got[b]} (multi-exit decode structurizer regression?).");
+            }
+        });
     }
 }
