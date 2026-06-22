@@ -29,6 +29,16 @@ internal static class CudaGraphCaptureProof
             data[idx] += 1.0f;
     }
 
+    // Reads a per-step value from a STABLE-pointer device buffer. This is the exact
+    // decode mechanism: the captured kernel reads token-id / KV-pos from a device buffer
+    // whose address is fixed at capture time; the host mutates that buffer's CONTENTS
+    // between replays (outside capture). Proves the recommended update path is sound.
+    static void AddParamKernel(Index1D idx, ArrayView<float> data, ArrayView<float> param)
+    {
+        if (idx < data.Length)
+            data[idx] += param[0];
+    }
+
     public static async Task<int> Run()
     {
         using var context = Context.Create(b => b.Cuda());
@@ -124,7 +134,56 @@ internal static class CudaGraphCaptureProof
         Console.WriteLine($"    graph replay         : {graphMs,8:F2} ms  ({graphMs / R:F3} ms/step)");
         Console.WriteLine($"    dispatch speedup     : {directMs / graphMs,8:F2}x");
 
+        // ============== PER-REPLAY UPDATE (the decode mechanism) ==============
+        // Capture a kernel that reads from a stable-pointer device buffer, then mutate
+        // that buffer's CONTENTS between replays and confirm each replay sees the new
+        // value. This is exactly how Tuvok varies token-id / KV-pos per token.
+        bool updateWorks = await ProvePerReplayUpdate(acc);
+
+        Console.WriteLine($"[cuda-graph-capture] per-replay device-buffer update: {(updateWorks ? "PASS" : "FAIL")}");
+
         stream.Dispose();
-        return correct && captureWasInert ? 0 : 1;
+        return correct && captureWasInert && updateWorks ? 0 : 1;
+    }
+
+    private static async Task<bool> ProvePerReplayUpdate(CudaAccelerator acc)
+    {
+        const int L = 256;
+        var stream = (CudaStream)acc.CreateStream();
+        var launch = acc.LoadAutoGroupedKernel<Index1D, ArrayView<float>, ArrayView<float>>(AddParamKernel);
+        using var data = acc.Allocate1D<float>(L);
+        using var param = acc.Allocate1D<float>(1);   // STABLE pointer; only contents change
+
+        // Warm up + capture ONE AddParam launch (records the param buffer's address).
+        param.CopyFromCPU(new[] { 0f });
+        data.MemSetToZero(stream);
+        launch(stream, (int)data.Length, data.View, param.View);
+        stream.Synchronize();
+
+        data.MemSetToZero(stream);
+        stream.Synchronize();
+        stream.BeginCapture();
+        launch(stream, (int)data.Length, data.View, param.View);
+        using var graph = stream.EndCapture();
+        using var exec = graph.Instantiate();
+
+        // REALISTIC decode pattern: update the stable-pointer param buffer, launch the
+        // graph, sync (decode syncs every token to sample), repeat. Sync each step makes
+        // the host->device update unambiguously ordered before the replay that reads it.
+        float[] perStep = { 1f, 10f, 100f };
+        foreach (var v in perStep)
+        {
+            param.CopyFromCPU(stream, new[] { v });
+            exec.Launch(stream);
+            await stream.SynchronizeAsync();   // mirrors per-token sample point
+        }
+
+        var result = data.GetAsArray1D();
+        stream.Dispose();
+        // 1 + 10 + 100 = 111 on every element if each replay read the updated buffer.
+        Console.WriteLine($"[cuda-graph-capture]   update probe (sync/step): data[0]={result[0]} (expect 111: 1+10+100)");
+        for (int i = 0; i < L; i++)
+            if (result[i] != 111f) return false;
+        return true;
     }
 }
