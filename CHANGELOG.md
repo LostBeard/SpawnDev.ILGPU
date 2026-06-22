@@ -2,6 +2,16 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.15.2-local.1 (2026-06-22) - CUDA graph capture/replay API
+
+Forks bump to `2.0.43-local.1`. Adds first-class CUDA graph capture to the CUDA runtime so a fixed-shape kernel sequence (e.g. LLM decode, M=1, hundreds of launches per token) can be captured once and replayed with a single `cuGraphLaunch`, collapsing per-kernel host dispatch overhead. Built for SpawnDev.ILGPU.ML's decode path, where a dotnet-trace showed ~25 ms/token (of ~32) is CPU dispatch (~72% per-launch driver cost, ~700 nodes/step) - the exact cost graphs eliminate.
+
+- **`CudaStream.BeginCapture(CudaStreamCaptureMode = ThreadLocal)` / `.EndCapture()` / `.CaptureStatus` / `CudaStream.SupportsGraphCapture`.** `EndCapture()` returns a `CudaGraph`; `BeginCapture` throws on the default (NULL) stream, which cannot be captured - use a dedicated `accelerator.CreateStream()`.
+- **`CudaGraph.Instantiate()` -> `CudaGraphExec.Launch(stream)` / `.Upload(stream)`.** Capture once, replay per token. Both are `AcceleratorObject`s (context-bound, tracked dispose). Per-token inputs (token id, KV position) go in a stable-pointer device buffer whose contents are updated between synced replays.
+- **`Accelerator.WithDefaultStream(stream)`** (all backends) - a scoped swap that restores on dispose. The implicitly-grouped `*StreamKernel` launchers read `DefaultStream` at launch time, so swapping it reroutes every such launch (and prefill) onto one capturable stream with no per-call-site change - the can't-miss way to make an existing kernel pipeline capturable. Per-accelerator global state; intended for a single controlled capture sequence, not concurrent multi-request use.
+- Native graph entry points (`cuStreamBeginCapture_v2`/`EndCapture`/`IsCapturing` + `cuGraphInstantiateWithFlags`/`Launch`/`Upload`/`ExecDestroy`/`Destroy`) bound by hand against the loaded driver (same approach as `NvvmAPI`), cross-platform via the existing `LibNameWindows`/`LibNameLinux` constants. `SupportsGraphCapture` gates on the driver exposing the graph API.
+- Verified on RTX 4070 (`DemoConsole -- cuda-graph-capture`): capture is inert (records, does not execute), replay is bit-exact vs CPU reference, per-token device-buffer update is race-free with a per-step sync, `WithDefaultStream` reroutes `*StreamKernel` launches into the captured graph, and graph replay is ~6.6-7x faster than direct host launches on the trivial-kernel dispatch microbench.
+
 ## 4.15.1 (2026-06-21) - Wasm: device-local `new T[]` arrays now compile correctly
 
 Bugfix cut over 4.15.0 (SpawnDev.ILGPU only; forks unchanged at `2.0.42`). A device kernel that uses a managed local array - `var acc = new float[N];` indexed in a loop - produced **silently wrong results on the Wasm backend** while being byte-exact on CPU/CUDA/OpenCL/WebGPU/WebGL. Found by Tuvok consuming 4.15.0 in SpawnDev.ILGPU.ML (`FusedDequantMatMul` multi-row dequant GEMM). Two stacked Wasm-backend bugs:

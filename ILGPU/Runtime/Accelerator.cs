@@ -187,6 +187,68 @@ namespace ILGPU.Runtime
         public AcceleratorStream DefaultStream { get; protected set; }
 
         /// <summary>
+        /// Temporarily replaces <see cref="DefaultStream"/> with the given stream for the
+        /// lifetime of the returned scope, restoring the previous default stream when the
+        /// scope is disposed.
+        /// </summary>
+        /// <param name="stream">The stream to install as the default.</param>
+        /// <returns>A scope that restores the previous default stream on dispose.</returns>
+        /// <remarks>
+        /// The implicitly-grouped <c>*StreamKernel</c> launchers read
+        /// <see cref="DefaultStream"/> at launch time (not at load time), so swapping it
+        /// reroutes every such launch onto <paramref name="stream"/> with no call-site
+        /// changes. This is the supported way to point an entire existing kernel pipeline
+        /// at one capturable CUDA stream for graph capture without rewriting each operator
+        /// to use the explicit-stream launchers.
+        /// <para>
+        /// NOTE: the default stream is per-accelerator global state. Do NOT use this scope
+        /// while other threads concurrently launch work on the same accelerator - it is
+        /// intended for a single controlled capture/replay sequence (e.g. an LLM decode
+        /// generator that owns its accelerator).
+        /// </para>
+        /// </remarks>
+        public DefaultStreamScope WithDefaultStream(AcceleratorStream stream)
+        {
+            if (stream == null)
+                throw new ArgumentNullException(nameof(stream));
+            if (stream.Accelerator != this)
+            {
+                throw new ArgumentException(
+                    "The stream belongs to a different accelerator.",
+                    nameof(stream));
+            }
+            return new DefaultStreamScope(this, stream);
+        }
+
+        /// <summary>
+        /// A scope that restores the previous <see cref="DefaultStream"/> when disposed.
+        /// Created by <see cref="WithDefaultStream(AcceleratorStream)"/>.
+        /// </summary>
+        public readonly struct DefaultStreamScope : IDisposable
+        {
+            private readonly Accelerator accelerator;
+            private readonly AcceleratorStream previous;
+
+            internal DefaultStreamScope(
+                Accelerator accelerator,
+                AcceleratorStream stream)
+            {
+                this.accelerator = accelerator;
+                previous = accelerator.DefaultStream;
+                accelerator.DefaultStream = stream;
+            }
+
+            /// <summary>
+            /// Restores the previous default stream.
+            /// </summary>
+            public void Dispose()
+            {
+                if (accelerator != null)
+                    accelerator.DefaultStream = previous;
+            }
+        }
+
+        /// <summary>
         /// Returns the current native accelerator pointer.
         /// </summary>
         public IntPtr NativePtr

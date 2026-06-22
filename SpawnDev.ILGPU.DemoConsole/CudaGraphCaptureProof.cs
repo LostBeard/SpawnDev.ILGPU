@@ -143,7 +143,15 @@ internal static class CudaGraphCaptureProof
         Console.WriteLine($"[cuda-graph-capture] per-replay device-buffer update: {(updateWorks ? "PASS" : "FAIL")}");
 
         stream.Dispose();
-        return correct && captureWasInert && updateWorks ? 0 : 1;
+
+        // ============== ROUTING via WithDefaultStream (.ML's can't-miss path) ==============
+        // .ML launches through *StreamKernel (bind accelerator.DefaultStream at launch
+        // time). Swapping DefaultStream to a capturable stream must reroute those launches
+        // so they're captured - no per-call-site change. Proves Tuvok's §2 ask.
+        bool routingWorks = await ProveDefaultStreamRouting(acc);
+        Console.WriteLine($"[cuda-graph-capture] WithDefaultStream routing (*StreamKernel captured): {(routingWorks ? "PASS" : "FAIL")}");
+
+        return correct && captureWasInert && updateWorks && routingWorks ? 0 : 1;
     }
 
     private static async Task<bool> ProvePerReplayUpdate(CudaAccelerator acc)
@@ -185,5 +193,48 @@ internal static class CudaGraphCaptureProof
         for (int i = 0; i < L; i++)
             if (result[i] != 111f) return false;
         return true;
+    }
+
+    private static async Task<bool> ProveDefaultStreamRouting(CudaAccelerator acc)
+    {
+        const int L = 256, S = 64, R = 50;
+        var capStream = (CudaStream)acc.CreateStream();
+        // The *StreamKernel launcher (binds accelerator.DefaultStream at launch time).
+        var streamLaunch = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>>(IncKernel);
+        using var data = acc.Allocate1D<float>(L);
+
+        bool ok;
+        // Swap DefaultStream -> capStream for the whole capture; the *StreamKernel launches
+        // now hit capStream and get recorded instead of running on the (un-capturable) NULL
+        // default stream.
+        using (acc.WithDefaultStream(capStream))
+        {
+            // warm up + reset on the capturable stream
+            data.MemSetToZero(capStream);
+            streamLaunch((int)data.Length, data.View);
+            capStream.Synchronize();
+            data.MemSetToZero(capStream);
+            capStream.Synchronize();
+
+            capStream.BeginCapture();
+            for (int i = 0; i < S; i++)
+                streamLaunch((int)data.Length, data.View);   // no explicit stream - uses DefaultStream==capStream
+            using var graph = capStream.EndCapture();
+
+            // Capture status must have been active during; the *StreamKernels were captured
+            // (if they'd hit the NULL stream, EndCapture would have thrown / captured nothing).
+            using var exec = graph.Instantiate();
+            for (int r = 0; r < R; r++)
+                exec.Launch(capStream);
+            await capStream.SynchronizeAsync();
+
+            var res = data.GetAsArray1D();
+            float expected = (float)S * R;
+            ok = res[0] == expected && res[L - 1] == expected;
+            Console.WriteLine($"[cuda-graph-capture]   routing probe: data[0]={res[0]} (expect {expected}: S={S}*R={R})");
+        }
+        // DefaultStream restored to the NULL stream here.
+        capStream.Dispose();
+        return ok;
     }
 }
