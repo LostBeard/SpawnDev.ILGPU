@@ -4440,32 +4440,43 @@ EmitSaveAllLocals();
                 // Primary key miss — try fallback matching by element type + array size.
                 // The Alloca IR node from GenerateCode may be a different instance
                 // from the one registered during SetupSharedAllocations().
-                // Try fallback matching regardless of address space — the IR optimizer
-                // may have changed Shared to Generic, but the alloca still maps to shared memory.
+                // The fallback matches SHARED allocas only (incl. ones the IR optimizer
+                // changed Shared -> Generic, which still map to shared memory). A
+                // device-LOCAL alloca (e.g. `new float[N]` lowered by LowerArrays into
+                // the Local address space) must NEVER fallback-match a shared entry:
+                // its element type can coincide with a shared buffer's (Float32 ==
+                // Float32) and the type-only match would alias the local array onto the
+                // shared buffer's offset, so the array shares storage with shared memory
+                // and gets clobbered by group writes/reductions (silently wrong results
+                // across barriers — Tuvok 2026-06-21). Local allocas go straight to the
+                // per-thread scratch path below.
                 {
                     string allocaElemType = value.AllocaType.ToString();
                     long allocaArrayLen = value.ArrayLength.Resolve() is global::ILGPU.IR.Values.PrimitiveValue pv
                         ? pv.Int64Value : -1;
 
                     string? matchedKey = null;
-                    // Try exact match (type + size)
-                    foreach (var kvp in _sharedAllocaMetadata)
+                    if (value.AddressSpace != MemoryAddressSpace.Local)
                     {
-                        if (kvp.Value.ElemType == allocaElemType && kvp.Value.ArraySize == allocaArrayLen)
-                        {
-                            matchedKey = kvp.Key;
-                            break;
-                        }
-                    }
-                    // Try type-only match if exact fails
-                    if (matchedKey == null)
-                    {
+                        // Try exact match (type + size)
                         foreach (var kvp in _sharedAllocaMetadata)
                         {
-                            if (kvp.Value.ElemType == allocaElemType)
+                            if (kvp.Value.ElemType == allocaElemType && kvp.Value.ArraySize == allocaArrayLen)
                             {
                                 matchedKey = kvp.Key;
                                 break;
+                            }
+                        }
+                        // Try type-only match if exact fails
+                        if (matchedKey == null)
+                        {
+                            foreach (var kvp in _sharedAllocaMetadata)
+                            {
+                                if (kvp.Value.ElemType == allocaElemType)
+                                {
+                                    matchedKey = kvp.Key;
+                                    break;
+                                }
                             }
                         }
                     }

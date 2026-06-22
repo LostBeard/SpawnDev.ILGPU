@@ -14,6 +14,7 @@ using global::ILGPU.Backends.EntryPoints;
 using global::ILGPU.IR;
 using global::ILGPU.IR.Analyses;
 using global::ILGPU.IR.Intrinsics;
+using global::ILGPU.IR.Transformations;
 using global::ILGPU.IR.Values;
 using global::ILGPU.Runtime;
 using System.IO;
@@ -272,7 +273,26 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             InitializeKernelTransformers(builder =>
             {
-                // No Wasm-specific transformers needed for Phase 1
+                // Lower managed local arrays (`new T[N]` in a kernel) into static
+                // allocations + views + LoadElementAddress, exactly as the other
+                // linear-memory backends (CPU/CUDA/OpenCL/PTX) do via
+                // AddBackendOptimizations. Without this, `new float[]` reaches Wasm
+                // codegen as un-lowered NewArray/LoadArrayElementAddress nodes that
+                // the Wasm code generator does not handle — element addresses were
+                // never computed, so loads/stores hit memory address 0 and produced
+                // silently-wrong results (Tuvok 2026-06-21). LocalMemory.Allocate was
+                // unaffected because it already uses the Alloca path directly.
+                // Wasm is a linear-memory target, so lowering arrays to memory is the
+                // natural fit (the browser GPU backends instead handle NewArray
+                // natively via value-semantics arrays in WGSL/GLSL).
+                // TransformerConfiguration.Empty (NOT .Transformed): run on every
+                // method unconditionally. The other linear-memory backends (PTX/IL/
+                // Velocity) all use .Empty for AddBackendOptimizations; .Transformed
+                // requires a prior pass to have already flagged the method, which a
+                // simple array kernel never gets, so LowerArrays would silently skip it.
+                builder.Add(Transformer.Create(
+                    TransformerConfiguration.Empty,
+                    new LowerArrays(MemoryAddressSpace.Local)));
             });
 
             // Hard reference for bundling
@@ -547,6 +567,22 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmCodeGenerator.GeneratorArgs data)
         {
             var gen = new WasmKernelFunctionGenerator(data, method, allocas);
+
+            // DIAGNOSTIC (Geordi 2026-06-21, Tuvok new-float[] miscompile): dump the
+            // post-lowering IR of the kernel method to a file when WASM_DUMP_IR is set.
+            // Off by default; pure observability for the device-local-array investigation.
+            var irDumpPath = Environment.GetEnvironmentVariable("WASM_DUMP_IR");
+            if (!string.IsNullOrEmpty(irDumpPath))
+            {
+                try
+                {
+                    using var w = new System.IO.StreamWriter(irDumpPath, append: true);
+                    w.WriteLine($"==== IR DUMP: {method.Name} ====");
+                    method.Dump(w);
+                    w.WriteLine();
+                }
+                catch { /* diagnostic only */ }
+            }
 
             // Pre-populate math imports with deterministic indices.
             // These MUST match the import order in CreateKernel exactly.

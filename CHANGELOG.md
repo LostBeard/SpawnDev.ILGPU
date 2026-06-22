@@ -2,6 +2,15 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.15.1 (2026-06-21) - Wasm: device-local `new T[]` arrays now compile correctly
+
+Bugfix cut over 4.15.0 (SpawnDev.ILGPU only; forks unchanged at `2.0.42`). A device kernel that uses a managed local array - `var acc = new float[N];` indexed in a loop - produced **silently wrong results on the Wasm backend** while being byte-exact on CPU/CUDA/OpenCL/WebGPU/WebGL. Found by Tuvok consuming 4.15.0 in SpawnDev.ILGPU.ML (`FusedDequantMatMul` multi-row dequant GEMM). Two stacked Wasm-backend bugs:
+
+- **No `LowerArrays` IR pass.** The Wasm backend registered zero kernel transformers, so `new T[]` reached codegen as un-lowered `NewArray`/`LoadArrayElementAddress` IR nodes that the Wasm code generator has no handler for - the element address was never computed and loads/stores hit memory address 0. Every other linear-memory backend (CPU/CUDA/OpenCL/PTX/IL/Velocity) runs `LowerArrays` (which converts those nodes into a static alloca + view + `LoadElementAddress`); the Wasm backend now does too (`LowerArrays(MemoryAddressSpace.Local)`, `TransformerConfiguration.Empty`). `LocalMemory.Allocate<T>` was never affected (it uses the alloca path directly).
+- **Local array aliased onto shared memory.** Once lowered to a `Ptr<T, Local>` alloca, the Wasm `GenerateCode(Alloca)` shared-allocation fallback matched the local array onto a shared buffer by element type only (e.g. `Float32 == Float32`), so a local `float[N]` shared storage with a kernel's shared-memory buffer and got clobbered by group writes/reductions across barriers. The fallback now skips `Local`-address-space allocas (only `Shared`/`Generic` allocas participate in shared-metadata matching), so a local array always gets its own per-thread scratch slot.
+
+- Gate: `BackendTestBase.LocalArrayAcrossBarrier` - a `new float[8]` fill+read with no barrier (one output per thread) and the exact across-barrier tree-reduction shape; CPU-oracle, all 6 backends (the across-barrier shape skips WebGL, where in-kernel shared-memory reduction is structurally unsupported). Full PMT suite green across all 6 backends (3999/0/260).
+
 ## 4.15.0 (2026-06-21) - Wasm SIMD128 (v128) auto-vectorization + all quant decoders single-exit
 
 Headline: the **Wasm backend now auto-vectorizes kernels to WebAssembly SIMD128 (v128)**. Forks bump to `2.0.42` (folds in the 4.14.2-local decoder fix). Stable cut over 4.14.1.
