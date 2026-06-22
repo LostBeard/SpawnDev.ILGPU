@@ -42,6 +42,11 @@ try
     if (args.Length > 0 && args[0] == "warp-reduce-gemv-ptx")
         return await WarpReduceGemvPtxDump.Run();
 
+    // CUDA graph capture/replay correctness + dispatch-savings proof for the new
+    // CudaStream.BeginCapture/EndCapture + CudaGraph API (Tuvok decode dispatch, 2026-06-22).
+    if (args.Length > 0 && args[0] == "cuda-graph-capture")
+        return await CudaGraphCaptureProof.Run();
+
     // Offline Wasm +inf codegen probe (Tuvok finding #2). No browser, no dispatch.
     if (args.Length > 0 && args[0] == "wasm-inf")
         return await WasmInfProbe.Run();

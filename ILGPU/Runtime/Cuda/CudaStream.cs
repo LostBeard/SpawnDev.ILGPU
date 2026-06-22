@@ -97,6 +97,68 @@ namespace ILGPU.Runtime.Cuda
 
         #endregion
 
+        #region Graph Capture
+
+        /// <summary>
+        /// Returns true when the CUDA driver on this machine exposes the graph API.
+        /// </summary>
+        public static bool SupportsGraphCapture => CudaGraphNativeMethods.IsSupported;
+
+        /// <summary>
+        /// Begins capturing every subsequent operation issued on this stream into a CUDA
+        /// graph instead of executing it. End the sequence with <see cref="EndCapture"/>.
+        /// </summary>
+        /// <param name="mode">The capture safety mode (default: thread-local).</param>
+        /// <remarks>
+        /// The stream MUST NOT be the accelerator's default stream - the legacy NULL
+        /// stream cannot be captured. Create a dedicated stream via
+        /// <c>accelerator.CreateStream()</c> and launch the captured work on it using the
+        /// explicit-stream kernel launchers (<c>LoadAutoGroupedKernel</c> /
+        /// <c>LoadKernel</c>, NOT the <c>*StreamKernel</c> variants, which target the
+        /// default stream). During capture, do NOT synchronize, read back to the host, or
+        /// allocate device memory - those operations are illegal mid-capture.
+        /// </remarks>
+        public void BeginCapture(
+            CudaStreamCaptureMode mode = CudaStreamCaptureMode.ThreadLocal)
+        {
+            if (StreamPtr == IntPtr.Zero)
+            {
+                throw new InvalidOperationException(
+                    "Cannot capture the default (NULL) CUDA stream. Capture requires a " +
+                    "dedicated stream created via accelerator.CreateStream().");
+            }
+            using var binding = Accelerator.BindScoped();
+            CudaGraphNativeMethods.BeginCapture(StreamPtr, mode);
+        }
+
+        /// <summary>
+        /// Ends the capture started by <see cref="BeginCapture(CudaStreamCaptureMode)"/>
+        /// and returns the recorded graph. Instantiate it with
+        /// <see cref="CudaGraph.Instantiate"/> to get a replayable
+        /// <see cref="CudaGraphExec"/>.
+        /// </summary>
+        /// <returns>The captured graph.</returns>
+        public CudaGraph EndCapture()
+        {
+            using var binding = Accelerator.BindScoped();
+            var graph = CudaGraphNativeMethods.EndCapture(StreamPtr);
+            return new CudaGraph((CudaAccelerator)Accelerator, graph);
+        }
+
+        /// <summary>
+        /// Returns the current capture status of this stream.
+        /// </summary>
+        public CudaStreamCaptureStatus CaptureStatus
+        {
+            get
+            {
+                using var binding = Accelerator.BindScoped();
+                return CudaGraphNativeMethods.GetCaptureStatus(StreamPtr);
+            }
+        }
+
+        #endregion
+
         #region IDisposable
 
         /// <summary>
