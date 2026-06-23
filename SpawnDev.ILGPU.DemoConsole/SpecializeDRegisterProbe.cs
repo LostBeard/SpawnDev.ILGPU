@@ -100,7 +100,7 @@ internal static class SpecializeDRegisterProbe
     {
         // NOTE: add `.Verify()` (obsolete API, enables the IR verifier) to see that the
         // partial-unroll malformation is present for D>=32 too, not just the D=48/64 that
-        // crash codegen - the verifier rejects D=32 (which otherwise limps to spilled PTX).
+        // crash codegen - the verifier rejects D>=32 (D<=24 full-unrolls and is verifier-clean).
         using var context = Context.Create(b => b.Cuda());
         var dev = context.GetCudaDevice(0);
         if (dev == null) { Console.WriteLine("[specialize-d-probe] no CUDA device"); return Task.FromResult(1); }
