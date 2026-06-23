@@ -126,6 +126,22 @@ namespace ILGPU.IR.Transformations
                 .AsNotNull()
                 .TargetAddressSpace;
 
+            // Insert all of the values we are about to create (the length math, the
+            // alloca, the view, and the defaultElement) BEFORE `value` instead of
+            // after it. The rewriter positions us at value.Index + 1, so by default
+            // our setup lands AFTER the NewArray. That matters for the N > 32 path:
+            // SplitBlock(value) below moves everything after the split point into the
+            // loop's exit block AND removes the split point itself - so with the
+            // default position our own alloca/view/defaultElement would be pushed into
+            // the exit block, leaving the array view defined in the loop EXIT while the
+            // zero-init loop body uses it (an SSA dominance violation). GPU codegen
+            // tolerated it by rematerializing the static alloca address at each use,
+            // but the Wasm state machine ran the zero-init loop with an unset (0) view
+            // and clobbered low memory (read back 0). Creating the setup before `value`
+            // keeps it in the dominating current block; SplitBlock(value) then only
+            // exports the user code that followed the NewArray.
+            builder.SetupInsertPosition(value);
+
             // Compute array length
             Value totalLength = builder.CreatePrimitiveValue(location, 1);
             foreach (Value length in value)
@@ -213,10 +229,13 @@ namespace ILGPU.IR.Transformations
                 var methodBuilder = builder.MethodBuilder;
                 var int32Type = builder.CreateType(typeof(int));
 
-                // Split the current block at the NewArray value. This moves
-                // all values that come after it (including the terminator) to
-                // a new "exit" block, leaving the current block open for us
-                // to redirect into the loop.
+                // Split the current block at the NewArray value. This removes
+                // `value` (it is replaced by the array structure below) and moves
+                // all values that came after it - the user code following the
+                // NewArray - into a new "exit" block, leaving the current block
+                // (which now holds our alloca/view/defaultElement, created before
+                // `value` above) open for us to redirect into the loop. Because the
+                // setup precedes the split point it stays in this dominating block.
                 var exitBlock = builder.SplitBlock(value);
 
                 // Create the loop header and body blocks

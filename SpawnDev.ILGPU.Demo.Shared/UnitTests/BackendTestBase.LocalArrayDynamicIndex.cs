@@ -28,6 +28,18 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
     // This kernel hits BOTH conditions: N = 64 (> 32 -> IR init loop) and a runtime index
     // dd in a loop (write + read). One output per thread, no shared memory, no barrier ->
     // valid on all 6 backends incl WebGL (Transform Feedback one-record-per-vertex).
+    //
+    // SECOND ROOT CAUSE (fixed 2026-06-23, also in LowerArrays.cs): the N>32 init-loop fix
+    // above unmasked a Wasm-only "reads 0" bug. The rewriter positions new values at
+    // value.Index + 1, so the alloca/view/defaultElement created while lowering NewArray sit
+    // AFTER `value` in the block; SplitBlock(value) then pushed that setup into the loop EXIT
+    // block, leaving the array view DEFINED in the exit while the zero-init loop body (and the
+    // struct) USE it - an SSA dominance violation. GPU backends rematerialize the static alloca
+    // address at each use and tolerated it; the Wasm state machine executes the literal block
+    // order, so the zero-init loop ran with an unset (0) view local and clobbered low linear
+    // memory instead of the array. Fixed by inserting the setup BEFORE `value`
+    // (builder.SetupInsertPosition(value)) so it stays in the dominating current block while
+    // SplitBlock(value) exports only the user code. Now correct on ALL 6 backends.
     public abstract partial class BackendTestBase
     {
         private const int LADI_N = 64; // > MaxUnrolledArrayInitSize(32) -> emits the IR init loop
@@ -56,24 +68,9 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task LocalArray_DynamicIndex_MatchesCpuOracle() => await RunTest(async accelerator =>
         {
-            // KNOWN ISSUE (Wasm only, tracked) - the IR-level fix above makes this kernel
-            // COMPILE + run correct on CUDA / OpenCL / CPU / WebGPU / WebGPU-no-subgroups /
-            // WebGL. It then exposed a previously-unreachable Wasm codegen bug: a device-LOCAL
-            // alloca that is NOT the first scratch consumer (here scratchOffset=16, because the
-            // array-impl struct takes scratch[0..16) first) reads back 0 - the large (N>32,
-            // loop-init) dynamically-indexed array's scratch addressing is wrong when
-            // baseOff != 0 (WasmKernelFunctionGenerator local-alloca path, scratchBase+baseOff).
-            // N<=32 (companion LocalArrayAcrossBarrier, Tile=8) has baseOff=0 and passes. Under
-            // active investigation in MY lane - see DevComms
-            // geordi-localarray-dynindex-fixed-wasm-scratchoffset-open-2026-06-22. Tracked, not
-            // hidden (Rule 2a): the other 6 backends - including every browser GPU backend Tuvok
-            // needs for the universal attention - are verified correct.
-            if (accelerator.AcceleratorType == AcceleratorType.Wasm)
-                throw new UnsupportedTestException(
-                    "KNOWN OPEN BUG (Geordi, tracked): Wasm scratch addressing for a large (N>32) " +
-                    "dynamically-indexed device-local alloca with scratchOffset!=0 reads 0. " +
-                    "Fixed on the other 6 backends. See geordi-localarray-dynindex-fixed-wasm-scratchoffset-open-2026-06-22.");
-
+            // Verified correct on ALL 6 backends (CUDA / OpenCL / CPU / WebGPU /
+            // WebGPU-no-subgroups / WebGL / Wasm) after both LowerArrays fixes - see the
+            // class-level comment for the two root causes.
             const int G = 64;
             const int D = LADI_N;   // exercise the full array length
             const int REPS = 3;

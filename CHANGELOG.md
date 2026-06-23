@@ -2,6 +2,25 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.16.0 (2026-06-23) - CUDA graph capture API + device-local dynamic-index array fix complete on all 6 backends
+
+Stable cut over 4.15.1. Forks bump to **2.1.0** (minor, not patch: this release adds genuinely new public API in the fork - see the fork-version note at the bottom of this entry). Rolls up the 4.15.2-local and 4.15.3-local builds plus the final Wasm fix. Two headline items:
+
+**1. CUDA graph capture/replay API** (new public surface in `ILGPU.Runtime.Cuda`). Capture a fixed-shape kernel sequence once and replay it with a single `cuGraphLaunch`, collapsing per-kernel host dispatch overhead (built for LLM decode in SpawnDev.ILGPU.ML).
+- `CudaStream.BeginCapture(CudaStreamCaptureMode = ThreadLocal)` / `.EndCapture()` -> `CudaGraph` / `.CaptureStatus` / `CudaStream.SupportsGraphCapture`. `BeginCapture` throws on the default (NULL) stream - use a dedicated `accelerator.CreateStream()`.
+- `CudaGraph.Instantiate()` -> `CudaGraphExec.Launch(stream)` / `.Upload(stream)`. Both are context-bound `AcceleratorObject`s.
+- `Accelerator.WithDefaultStream(stream)` (all backends) - a scoped swap (restores on dispose) that reroutes every implicitly-grouped `*StreamKernel` launch onto one capturable stream with no per-call-site change.
+- Native graph entry points bound by hand against the loaded driver (same approach as `NvvmAPI`), cross-platform. Verified on RTX 4070 (`DemoConsole -- cuda-graph-capture`): capture inert, replay bit-exact vs CPU reference, ~6.6-7x dispatch microbench.
+
+**2. Device-local dynamically-indexed `new T[]` arrays now correct on ALL 6 backends.** A per-thread device-LOCAL array `var acc = new float[N];` (compile-time size, **N > 32**) that is WRITTEN and READ by a **runtime index** is now correct on CUDA, OpenCL, CPU, WebGPU, WebGL, and Wasm. Two stacked `ILGPU/IR/Transformations/LowerArrays.cs` fixes:
+- **(a) Register-allocation crash (N > 32 init loop), from 4.15.3-local.1:** for N > 32 the array zero-init is an IR loop; its counter phi took its initial `0` from the loop **header** instead of the **predecessor**, breaking SSA dominance ("No register allocated for PrimitiveValue 0" at JIT). Only surfaced with dynamic indexing (static indices scalar-replace the array) and N > 32 (N <= 32 unrolls). Fix: create the init `0` in the predecessor.
+- **(b) Wasm "reads 0", new in this release:** fix (a) unmasked a Wasm-only miscompile. The rewriter positions new values at `value.Index + 1`, so the alloca/view/defaultElement created while lowering `NewArray` landed AFTER `value`; `SplitBlock(value)` then pushed that setup into the loop EXIT block, leaving the array view DEFINED in the exit while the zero-init loop body USES it - an SSA dominance violation. GPU backends rematerialize the static alloca address at each use and tolerated it; the Wasm state machine executes the literal block order, so the zero-init loop ran with an unset (0) view local and clobbered low linear memory (read back 0). Fix: create the setup BEFORE `value` (`builder.SetupInsertPosition(value)`) so it stays in the dominating current block while `SplitBlock(value)` exports only the user code. Result-neutral for the 5 GPU backends; the unroll path (N <= 32) is byte-identical.
+- Gate: `BackendTestBase.LocalArray_DynamicIndex_MatchesCpuOracle` (N=64, runtime index in a loop, CPU oracle) - passes on all 6 backends; the previous Wasm named-skip is removed. Full PMT sweep **4006 passed / 0 failed / 260 skipped (4266 total)**.
+
+Also includes `ShaderDebugService.AppLoadTimestamp` (4.15.2-local.2). 
+
+**Fork version note:** the `SpawnDev.ILGPU.Fork` / `.Algorithms.Fork` `2.x` line is normally a lockstep sync counter bumped by patch. This release moves it to a **minor** (`2.0.x` -> `2.1.0`) because the CUDA graph API is genuinely new public surface that lives in the fork (`ILGPU/`), not the wrapper. Going forward: minor-bump the fork only when `ILGPU/` gains real public API, patch for bugfix/sync-only bundles.
+
 ## 4.15.3-local.1 (2026-06-22) - Device-local dynamically-indexed array codegen fix
 
 Forks bump to `2.0.44-local.1`. A per-thread device-LOCAL array `var acc = new float[N];` (compile-time size, **N > 32**) that is WRITTEN and READ by a **runtime index inside a loop** threw `InvalidCodeGenerationException` ("No register allocated for PrimitiveValue 0") at kernel JIT - blocking the register/local-memory-accumulator universal (flash-class) per-query attention kernel (SpawnDev.ILGPU.ML, Tuvok).
