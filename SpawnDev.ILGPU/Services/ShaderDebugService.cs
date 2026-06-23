@@ -54,6 +54,14 @@ public class ShaderDebugService : IAsyncBackgroundService, IAsyncDisposable
         WebGLAccelerator.OnShaderCompiled += OnGLSLCompiled;
     }
 
+    /// <summary>
+    /// Timestamp captured when this service (the app/page) loaded — it is a singleton, so this is fixed for the
+    /// whole app session. The auto-created run folder uses it, and a results writer (e.g. UnitTestsView) can read
+    /// it so the shader-dump folder and the test-results file share ONE timestamp per app load (each page reload =
+    /// a new app instance = a new value). Format matches the run folder: "yyyy-MM-dd_HH-mm-ss".
+    /// </summary>
+    public string AppLoadTimestamp { get; } = DateTime.UtcNow.ToString("yyyy-MM-dd_HH-mm-ss");
+
     /// <summary>Auto-restore on first callback if not already restored.</summary>
     private async Task EnsureRestoredAsync()
     {
@@ -150,12 +158,12 @@ public class ShaderDebugService : IAsyncBackgroundService, IAsyncDisposable
     }
 
     /// <summary>Start a new timestamped run folder. Call before running tests.</summary>
-    public async Task<string?> StartNewRunAsync(string? description = null)
+    public async Task<string?> StartNewRunAsync(string? description = null, string? timestampOverride = null)
     {
         if (_debugDir == null || !HasWritePermission) return null;
         // Close previous run's subdirs
         DisposeRunDirs();
-        CurrentRunTimestamp = DateTime.UtcNow.ToString("yyyy-MM-dd_HH-mm-ss");
+        CurrentRunTimestamp = timestampOverride ?? DateTime.UtcNow.ToString("yyyy-MM-dd_HH-mm-ss");
         _runDir = await _debugDir.GetDirectoryHandle(CurrentRunTimestamp, create: true);
         _wgslCount = 0;
         _wasmCount = 0;
@@ -172,7 +180,8 @@ public class ShaderDebugService : IAsyncBackgroundService, IAsyncDisposable
         if (_runDir != null) return;
         if (_creatingRun) { while (_runDir == null) await Task.Yield(); return; }
         _creatingRun = true;
-        try { await StartNewRunAsync(); }
+        // Use the app-load timestamp so the auto-created shader-dump folder matches the results file's timestamp.
+        try { await StartNewRunAsync(timestampOverride: AppLoadTimestamp); }
         finally { _creatingRun = false; }
     }
 

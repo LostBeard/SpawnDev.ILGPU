@@ -4,7 +4,7 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.15.2-local.1</Version>
+		<Version>4.15.2-local.2</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
 		<PackageReleaseNotes>4.15.2-local.1: CUDA graph capture/replay API (Fork 2.0.43-local.1). New `CudaStream.BeginCapture(mode)`/`.EndCapture()`/`.CaptureStatus`/`.SupportsGraphCapture` + `CudaGraph.Instantiate()` -> `CudaGraphExec.Launch(stream)`/`.Upload(stream)` capture a fixed-shape kernel sequence once and replay it with a single `cuGraphLaunch`, collapsing per-kernel host dispatch overhead (the lever for LLM decode, where ~25ms/token is CPU dispatch). Plus `Accelerator.WithDefaultStream(stream)` - a scoped swap of the default stream so the existing implicitly-grouped `*StreamKernel` launchers (which read DefaultStream at launch time) all reroute onto one capturable stream with no call-site changes. Note: the default (NULL) stream cannot be captured; create a dedicated `accelerator.CreateStream()`. Verified on RTX 4070: capture inert, replay bit-exact vs CPU reference, ~6.6-7x dispatch speedup. Full history: CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
