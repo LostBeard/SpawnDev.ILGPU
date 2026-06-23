@@ -58,6 +58,11 @@ try
     if (args.Length > 0 && args[0] == "specialize-d-probe")
         return await SpecializeDRegisterProbe.Run();
 
+    // Offline WGSL dump of the register-attention shape that makes an invalid WebGPU pipeline
+    // (const-16 register array + Warp.ShuffleXor in a kv loop; Tuvok 2026-06-23).
+    if (args.Length > 0 && args[0] == "register-attn-wgsl")
+        return await RegisterAttnWgslProbe.Run();
+
     // Verify ILGPU emits ld.global.v4 for a 16-byte-aligned struct load (decode GEMV
     // vectorized-load lever, Tuvok 2026-06-22).
     if (args.Length > 0 && args[0] == "vectorized-load-ptx")

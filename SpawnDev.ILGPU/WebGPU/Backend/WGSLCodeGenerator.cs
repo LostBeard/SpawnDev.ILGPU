@@ -3284,23 +3284,53 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             Declare(target);
             if (HasSubgroups)
             {
-                AppendLine($"{target} = subgroupShuffle({source}, u32({origin}));");
+                // Map the shuffle KIND to the matching WGSL subgroup builtin. Emitting plain
+                // subgroupShuffle (absolute source lane) for an Xor/Up/Down shuffle is wrong:
+                // ShuffleXor's butterfly reduce reads lane (id ^ mask), not lane (mask). The
+                // idiomatic subgroupShuffleXor is also what Tint accepts for the butterfly.
+                AppendLine($"{target} = {SubgroupShuffleBuiltin(value.Kind)}({source}, u32({origin}));");
             }
             else
             {
-                // Shared-memory emulation:
-                // 'origin' is a lane index (0..warpSize-1), not a global thread index.
-                // The buffer is indexed by local_index, so we must compute:
+                // Shared-memory emulation: 'origin' is a lane-relative operand (not a global
+                // thread index). Compute the source lane WITHIN the warp per shuffle kind:
                 //   warp_base = (local_index / warp_size) * warp_size
-                //   src_idx   = warp_base + origin
+                //   lane      = local_index - warp_base
+                //   src_lane  = Generic: origin | Xor: lane^origin | Up: lane-origin | Down: lane+origin
                 var warpBase = $"_wb_{target.Name}";
+                var lane = $"_wl_{target.Name}";
                 AppendLine($"_warp_shuffle_buf[local_index] = {BitcastToU32($"{source}", source.Type)};");
                 AppendLine("workgroupBarrier();");
                 AppendLine($"let {warpBase} = (local_index / u32(workgroup_size.x)) * u32(workgroup_size.x);");
-                AppendLine($"{target} = {BitcastFromU32($"_warp_shuffle_buf[{warpBase} + u32({origin})]", target.Type)};");
+                AppendLine($"let {lane} = local_index - {warpBase};");
+                var srcLane = EmulatedShuffleSrcLane(value.Kind, lane, $"u32({origin})");
+                AppendLine($"{target} = {BitcastFromU32($"_warp_shuffle_buf[{warpBase} + ({srcLane})]", target.Type)};");
                 AppendLine("workgroupBarrier();");
             }
         }
+
+        /// <summary>
+        /// Returns the WGSL subgroup shuffle builtin for the given shuffle kind.
+        /// </summary>
+        private static string SubgroupShuffleBuiltin(ShuffleKind kind) => kind switch
+        {
+            ShuffleKind.Xor => "subgroupShuffleXor",
+            ShuffleKind.Up => "subgroupShuffleUp",
+            ShuffleKind.Down => "subgroupShuffleDown",
+            _ => "subgroupShuffle",
+        };
+
+        /// <summary>
+        /// Computes the source-lane expression (within the warp) for shared-memory shuffle
+        /// emulation, given the lane-within-warp expression and the shuffle operand.
+        /// </summary>
+        private static string EmulatedShuffleSrcLane(ShuffleKind kind, string lane, string operand) => kind switch
+        {
+            ShuffleKind.Xor => $"{lane} ^ {operand}",
+            ShuffleKind.Up => $"{lane} - {operand}",
+            ShuffleKind.Down => $"{lane} + {operand}",
+            _ => operand,
+        };
 
         public virtual void GenerateCode(SubWarpShuffle value)
         {
@@ -3310,16 +3340,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             Declare(target);
             if (HasSubgroups)
             {
-                AppendLine($"{target} = subgroupShuffle({source}, u32({origin}));");
+                AppendLine($"{target} = {SubgroupShuffleBuiltin(value.Kind)}({source}, u32({origin}));");
             }
             else
             {
                 // Same fix as WarpShuffle: origin is lane-relative, buffer is global.
                 var warpBase = $"_wb_{target.Name}";
+                var lane = $"_wl_{target.Name}";
                 AppendLine($"_warp_shuffle_buf[local_index] = {BitcastToU32($"{source}", source.Type)};");
                 AppendLine("workgroupBarrier();");
                 AppendLine($"let {warpBase} = (local_index / u32(workgroup_size.x)) * u32(workgroup_size.x);");
-                AppendLine($"{target} = {BitcastFromU32($"_warp_shuffle_buf[{warpBase} + u32({origin})]", target.Type)};");
+                AppendLine($"let {lane} = local_index - {warpBase};");
+                var srcLane = EmulatedShuffleSrcLane(value.Kind, lane, $"u32({origin})");
+                AppendLine($"{target} = {BitcastFromU32($"_warp_shuffle_buf[{warpBase} + ({srcLane})]", target.Type)};");
                 AppendLine("workgroupBarrier();");
             }
         }
