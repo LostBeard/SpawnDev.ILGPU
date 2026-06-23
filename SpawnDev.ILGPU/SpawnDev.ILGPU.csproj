@@ -4,7 +4,7 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.16.2-local.1</Version>
+		<Version>4.16.2</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
 		<PackageReleaseNotes>4.15.3-local.1: Device-LOCAL dynamically-indexed array codegen fix (Fork 2.0.44-local.1). A per-thread `new T[N]` (N>32) written/read by a RUNTIME index in a loop threw InvalidCodeGenerationException ("No register allocated for PrimitiveValue 0") at kernel JIT. Root cause: the LowerArrays N>32 zero-init loop created the counter-phi's initial 0 constant in the loop HEADER instead of the predecessor block (invalid SSA dominance). Fixed (result-neutral). Verified compile+correct on CUDA/OpenCL/CPU/WebGPU/WebGPU-no-subgroups/WebGL; one tracked Wasm-only follow-up (large dynamically-indexed local alloca with scratchOffset!=0). Unblocks register/local-memory accumulator kernels (flash-class per-query attention) on the GPU backends. Also includes 4.15.2-local CUDA graph capture API + Accelerator.WithDefaultStream + ShaderDebugService.AppLoadTimestamp.
 

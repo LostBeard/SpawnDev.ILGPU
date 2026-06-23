@@ -2,15 +2,15 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
-## 4.16.2-local.1 (2026-06-23) - WebGPU register attention unblocked (subgroup uniformity) + Wasm shuffle-kind fix
+## 4.16.2 (2026-06-23) - WebGPU register attention unblocked (subgroup uniformity) + Wasm shuffle-kind fix
 
-Wrapper-only (forks unchanged at 2.1.0). Completes the WebGPU enablement of the register per-query attention shape (const-size `new float[T]` register accumulator + `Warp.ShuffleXor` butterfly reduce) that 4.16.1-local.1 started.
+Stable cut over 4.16.0 (wrapper-only; forks unchanged at 2.1.0). Completes the WebGPU enablement of the register per-query attention shape (const-size `new float[T]` register accumulator + `Warp.ShuffleXor` butterfly reduce); rolls up the 4.16.1-local / 4.16.2-local WGSL shuffle-kind + subgroup-uniformity + Wasm shuffle-kind fixes. Verified by SpawnDev.ILGPU.ML on real Dawn: register per-query attention 8/8 all six backends incl WebGPU, byte-identical.
 
 - **WebGPU subgroup uniformity (the pipeline blocker).** The register-attention kernel produced an INVALID ComputePipeline on Dawn: `'subgroupShuffleXor' must only be called from uniform control flow`. WGSL uniformity is SYNTACTIC - it conservatively flags a subgroup op inside a loop whose bound came from a storage buffer (an attention seqKV / nLanes) or after a per-lane divergent early-return, even though the bound is identical for every invocation in the subgroup (uniform at runtime). Fix: emit a module-level `diagnostic(off, subgroup_uniformity);` directive alongside `enable subgroups;` for any subgroup-using kernel. Downgrades the error, matching CUDA `__shfl` semantics (the kernel author is responsible for uniform usage). Verified on real Dawn: the register-attention shape now creates a valid pipeline and matches the CPU oracle.
 - **Wasm `Warp.ShuffleXor`/Up/Down were silently wrong.** `EmitWarpShuffle` assumed the frontend pre-resolved the shuffle kind into an absolute source lane and read `warpBase + (origin % warpSize)` for ALL kinds - but `Origin` is the OPERAND (xor mask / delta / lane) and `Kind` carries the operation (PTX/CPU branch on it). So `Warp.ShuffleXor` read from absolute lane `mask` instead of `laneInWarp ^ mask`. Fix: branch on `ShuffleKind` and compute the in-warp source lane per kind (Generic: origin, Xor: lane^origin, Up: lane-origin, Down: lane+origin), masked into the warp.
 - **Gate:** new `BackendTestBase.RegisterAttnShuffleXor_MatchesCpuOracle` (const-16 register accumulator + ShuffleXor butterfly in a storage-buffer-bound loop, CPU oracle) - passes on CUDA / CPU / WebGPU / Wasm; WebGL skips (cross-lane warp shuffle is structurally impossible there - no shared memory/barriers). Full PMT sweep 4010 passed / 0 failed / 263 skipped.
 
-**For Tuvok/ML:** bump to `SpawnDev.ILGPU 4.16.2-local.1`, flip the WebGPU register-attention gate back on (`WarpSize == 32 && headDim % 16 == 0`), re-verify `GGUFDecodeKVCache` on WebGPU. (The directive makes WGSL compile divergent/storage-bound subgroup flow; for runtime correctness the divergent early-return case should still be made uniform ML-side - clamp + guard only the output store - so all lanes execute the shuffle.)
+**For Tuvok/ML:** consume `SpawnDev.ILGPU 4.16.2`, flip the WebGPU register-attention gate on (`WarpSize == 32 && headDim % 16 == 0`). (The directive makes WGSL compile divergent/storage-bound subgroup flow; for runtime correctness the divergent early-return case should still be made uniform ML-side - clamp + guard only the output store - so all lanes execute the shuffle.)
 
 ## 4.16.1-local.1 (2026-06-23) - WGSL: warp/subgroup shuffle honors ShuffleKind (Xor/Up/Down)
 
