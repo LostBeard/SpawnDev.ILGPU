@@ -47,6 +47,30 @@ internal static class SpecializeDRegisterProbe
         for (int j = 0; j < SKV; j++) { float w = 1.0f / (j + 1); for (int d = 0; d < D; d++) acc[d] = acc[d] * 0.97f + w * v[(j & 3) * D + d]; }
         float s = 0f; for (int d = 0; d < D; d++) s += acc[d]; outF[i] = s;
     }
+    static void Attn_D24(Index1D i, ArrayView<float> v, ArrayView<float> outF, int SKV)
+    {
+        const int D = 24;
+        var acc = new float[D];
+        for (int d = 0; d < D; d++) acc[d] = 0f;
+        for (int j = 0; j < SKV; j++) { float w = 1.0f / (j + 1); for (int d = 0; d < D; d++) acc[d] = acc[d] * 0.97f + w * v[(j & 3) * D + d]; }
+        float s = 0f; for (int d = 0; d < D; d++) s += acc[d]; outF[i] = s;
+    }
+    static void Attn_D48(Index1D i, ArrayView<float> v, ArrayView<float> outF, int SKV)
+    {
+        const int D = 48;
+        var acc = new float[D];
+        for (int d = 0; d < D; d++) acc[d] = 0f;
+        for (int j = 0; j < SKV; j++) { float w = 1.0f / (j + 1); for (int d = 0; d < D; d++) acc[d] = acc[d] * 0.97f + w * v[(j & 3) * D + d]; }
+        float s = 0f; for (int d = 0; d < D; d++) s += acc[d]; outF[i] = s;
+    }
+    static void Attn_D96(Index1D i, ArrayView<float> v, ArrayView<float> outF, int SKV)
+    {
+        const int D = 96;
+        var acc = new float[D];
+        for (int d = 0; d < D; d++) acc[d] = 0f;
+        for (int j = 0; j < SKV; j++) { float w = 1.0f / (j + 1); for (int d = 0; d < D; d++) acc[d] = acc[d] * 0.97f + w * v[(j & 3) * D + d]; }
+        float s = 0f; for (int d = 0; d < D; d++) s += acc[d]; outF[i] = s;
+    }
     static void Attn_D32(Index1D i, ArrayView<float> v, ArrayView<float> outF, int SKV)
     {
         const int D = 32;
@@ -74,6 +98,9 @@ internal static class SpecializeDRegisterProbe
 
     public static Task<int> Run()
     {
+        // NOTE: add `.Verify()` (obsolete API, enables the IR verifier) to see that the
+        // partial-unroll malformation is present for D>=32 too, not just the D=48/64 that
+        // crash codegen - the verifier rejects D=32 (which otherwise limps to spilled PTX).
         using var context = Context.Create(b => b.Cuda());
         var dev = context.GetCudaDevice(0);
         if (dev == null) { Console.WriteLine("[specialize-d-probe] no CUDA device"); return Task.FromResult(1); }
@@ -87,8 +114,11 @@ internal static class SpecializeDRegisterProbe
         {
             ("D=8",  nameof(Attn_D8)),
             ("D=16", nameof(Attn_D16)),
+            ("D=24", nameof(Attn_D24)),
             ("D=32", nameof(Attn_D32)),
+            ("D=48", nameof(Attn_D48)),
             ("D=64", nameof(Attn_D64)),
+            ("D=96", nameof(Attn_D96)),
             ("D=128",nameof(Attn_D128)),
         })
         {
@@ -113,13 +143,17 @@ internal static class SpecializeDRegisterProbe
             catch (Exception ex)
             {
                 Console.WriteLine($"  {name,-6} -> COMPILE FAILED: {ex.GetType().Name}: {ex.Message}");
-                var inner = ex.InnerException; int depth = 0;
-                while (inner != null && depth < 6)
+                // Full recursive ToString() keeps the frames that .StackTrace loses across
+                // the parallel-compile boundary. Dump to disk + print the ILGPU frames.
+                var full = ex.ToString();
+                File.WriteAllText(Path.Combine(outDir, mname + ".crash.txt"), full);
+                foreach (var line in full.Split('\n'))
                 {
-                    Console.WriteLine($"        inner[{depth}] {inner.GetType().FullName}: {inner.Message}");
-                    var st = (inner.StackTrace ?? "").Split('\n');
-                    for (int s = 0; s < Math.Min(6, st.Length); s++) Console.WriteLine($"           {st[s].Trim()}");
-                    inner = inner.InnerException; depth++;
+                    var l = line.TrimEnd('\r');
+                    if (l.Contains("ILGPU.IR") || l.Contains("Transformation") || l.Contains("LoopUnroll")
+                        || l.Contains("Rebuild") || l.Contains("Specializ") || l.Contains("AssertNotNull")
+                        || l.Contains("InvalidOperation"))
+                        Console.WriteLine($"        {l.Trim()}");
                 }
             }
         }
