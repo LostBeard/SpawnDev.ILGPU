@@ -2,6 +2,13 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.16.1-local.1 (2026-06-23) - WGSL: warp/subgroup shuffle honors ShuffleKind (Xor/Up/Down)
+
+Wrapper-only (forks unchanged at 2.1.0). The WebGPU WGSL codegen for `GenerateCode(WarpShuffle)`/`(SubWarpShuffle)` emitted plain `subgroupShuffle(value, id)` for **every** shuffle kind, dropping `ShuffleOperation.Kind`. So `Warp.ShuffleXor(v, mask)` read from absolute lane `mask` instead of lane `id ^ mask` - wrong results for the butterfly reduce used by the register per-query attention (SpawnDev.ILGPU.ML, WebGPU). The shared-memory emulation path likewise only handled the generic kind.
+
+- **Fix:** map `ShuffleKind` to the matching WGSL subgroup builtin (`subgroupShuffle` / `subgroupShuffleXor` / `subgroupShuffleUp` / `subgroupShuffleDown`); for the shared-mem emulation, compute the source lane within the warp per kind (Generic: `origin`, Xor: `lane^origin`, Up: `lane-origin`, Down: `lane+origin`). PTX already mapped the kind; WGSL now matches.
+- **Verified:** full PMT sweep 4006/0/260 - `WebGPUTests.SubgroupShuffleTest` + all Reduce/AllReduce/GroupReduce green on real Dawn (the new builtins compile + are correct, no regression). The register-attention const-16 `new float[16]` scalar-replace validates clean with naga (ruled out as the WebGPU blocker). Offline dump: `DemoConsole -- register-attn-wgsl`.
+
 ## 4.16.0 (2026-06-23) - CUDA graph capture API + device-local dynamic-index array fix complete on all 6 backends
 
 Stable cut over 4.15.1. Forks bump to **2.1.0** (minor, not patch: this release adds genuinely new public API in the fork - see the fork-version note at the bottom of this entry). Rolls up the 4.15.2-local and 4.15.3-local builds plus the final Wasm fix. Two headline items:
