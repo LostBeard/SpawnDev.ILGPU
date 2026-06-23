@@ -506,6 +506,19 @@ namespace ILGPU.IR.Transformations
 
                 // Replace all values used outside of the loop with their computed values
                 loopSpecializer.ReplaceValues();
+
+                // Clear all old body blocks to remove all old uses. The header's branch was
+                // remapped to the unrolled chain (newBodyEntry) and the phis were rewired to
+                // the new back-edge (current) above, so the original body is now dead - but
+                // its values still dangle as uses on anything they reference that is defined
+                // OUTSIDE the loop (e.g. a kernel-local `new T[]` array referenced by the
+                // body's LoadArrayElementAddress nodes). Without this clear, that array keeps
+                // a use pointing at a removed-from-CFG LEA; LowerArrays then fails to lower it
+                // and a LoadArrayElementAddress reaches the backend with a non-array operand
+                // (PointerAlignments NRE on D where the body-cost cap forces partial unroll).
+                // The full-unroll branch below already does this; the partial branch must too.
+                // (Header is NOT cleared here - unlike full unroll, the loop is preserved.)
+                loopSpecializer.ClearBody();
             }
             else
             {
