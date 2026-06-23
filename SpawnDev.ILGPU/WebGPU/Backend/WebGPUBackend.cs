@@ -1137,7 +1137,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                       wgslSource.Contains("subgroup_id");
                 if (needsSubgroups)
                 {
-                    wgslSource = wgslSource.Replace("/*__WGSL_ENABLE_SUBGROUPS_PLACEHOLDER__*/", "enable subgroups;");
+                    // Assert subgroup uniformity. WGSL's uniformity analysis is SYNTACTIC and
+                    // conservatively flags subgroup ops (e.g. subgroupShuffleXor in a butterfly
+                    // reduce) inside loops whose bound came from a storage buffer (e.g. an
+                    // attention seqKV / nLanes), even though that bound is identical for every
+                    // invocation in the subgroup -> the control flow IS uniform at runtime. The
+                    // module-level diagnostic downgrades the "must only be called from uniform
+                    // control flow" error, matching CUDA __shfl semantics (the kernel author is
+                    // responsible for uniform usage). Without it the register per-query attention
+                    // kernel produced an invalid ComputePipeline on Dawn.
+                    wgslSource = wgslSource.Replace(
+                        "/*__WGSL_ENABLE_SUBGROUPS_PLACEHOLDER__*/",
+                        "enable subgroups;\ndiagnostic(off, subgroup_uniformity);");
                 }
                 else
                 {

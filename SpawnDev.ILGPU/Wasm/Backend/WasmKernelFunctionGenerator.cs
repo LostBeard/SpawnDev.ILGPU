@@ -4920,17 +4920,51 @@ EmitSaveAllLocals();
             int barrier1 = _barrierCounter++;
             EmitBarrier(barrier1);
 
-            // ── Step 3: srcLane = (threadIdX / warpSize)*warpSize + (origin % warpSize); read its slot ──
+            // ── Step 3: srcLane = warpBase + (inWarpSrc & (warpSize-1)); read its slot ──
+            // 'Origin' is the shuffle OPERAND, not a pre-resolved absolute lane: for ShuffleXor
+            // it is the xor mask, for Up/Down the delta, for Generic the source lane. Branch on
+            // ShuffleKind to compute the in-warp source lane (PTX/CPU branch on Kind too; the
+            // earlier "frontend resolves it" assumption was wrong - Warp.ShuffleXor produced
+            // wrong results). warpSize is a power of two so `& (warpSize-1)` masks into the warp
+            // (and wraps a negative Up delta safely).
+            int laneMask = warpSize - 1;
             var srcLaneLocal = AllocateNewLocal(WasmOpCodes.I32);
             WasmModuleBuilder.EmitLocalGet(Code, _threadIdXLocal);
             WasmModuleBuilder.EmitI32Const(Code, warpSize);
             Code.Add(WasmOpCodes.I32DivU); // WarpIdx
             WasmModuleBuilder.EmitI32Const(Code, warpSize);
             Code.Add(WasmOpCodes.I32Mul);  // warpBase
-            EmitGetLocal(origin);
-            WasmModuleBuilder.EmitI32Const(Code, warpSize);
-            Code.Add(WasmOpCodes.I32RemU); // origin % warpSize (in-warp, bounds-safe)
-            Code.Add(WasmOpCodes.I32Add);  // warpBase + maskedLane
+            // inWarpSrc per kind (leaves the in-warp source lane on the stack):
+            switch (shuffle.Kind)
+            {
+                case global::ILGPU.IR.Values.ShuffleKind.Generic:
+                    EmitGetLocal(origin);
+                    break;
+                case global::ILGPU.IR.Values.ShuffleKind.Xor:
+                    WasmModuleBuilder.EmitLocalGet(Code, _threadIdXLocal);
+                    WasmModuleBuilder.EmitI32Const(Code, laneMask);
+                    Code.Add(WasmOpCodes.I32And); // laneInWarp
+                    EmitGetLocal(origin);
+                    Code.Add(WasmOpCodes.I32Xor); // laneInWarp ^ mask
+                    break;
+                case global::ILGPU.IR.Values.ShuffleKind.Up:
+                    WasmModuleBuilder.EmitLocalGet(Code, _threadIdXLocal);
+                    WasmModuleBuilder.EmitI32Const(Code, laneMask);
+                    Code.Add(WasmOpCodes.I32And); // laneInWarp
+                    EmitGetLocal(origin);
+                    Code.Add(WasmOpCodes.I32Sub); // laneInWarp - delta
+                    break;
+                default: // Down
+                    WasmModuleBuilder.EmitLocalGet(Code, _threadIdXLocal);
+                    WasmModuleBuilder.EmitI32Const(Code, laneMask);
+                    Code.Add(WasmOpCodes.I32And); // laneInWarp
+                    EmitGetLocal(origin);
+                    Code.Add(WasmOpCodes.I32Add); // laneInWarp + delta
+                    break;
+            }
+            WasmModuleBuilder.EmitI32Const(Code, laneMask);
+            Code.Add(WasmOpCodes.I32And);  // & (warpSize-1) -> in-warp, bounds-safe
+            Code.Add(WasmOpCodes.I32Add);  // warpBase + inWarpSrc
             WasmModuleBuilder.EmitLocalSet(Code, srcLaneLocal);
 
             WasmModuleBuilder.EmitLocalGet(Code, _sharedMemBaseLocal);
