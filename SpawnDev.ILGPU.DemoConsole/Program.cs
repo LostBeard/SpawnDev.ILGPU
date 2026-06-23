@@ -52,6 +52,11 @@ try
     if (args.Length > 0 && args[0] == "local-array-dyn")
         return await LocalArrayDynamicIndexRepro.Run();
 
+    // Verify ILGPU emits ld.global.v4 for a 16-byte-aligned struct load (decode GEMV
+    // vectorized-load lever, Tuvok 2026-06-22).
+    if (args.Length > 0 && args[0] == "vectorized-load-ptx")
+        return await VectorizedLoadPtxDump.Run();
+
     // Offline Wasm +inf codegen probe (Tuvok finding #2). No browser, no dispatch.
     if (args.Length > 0 && args[0] == "wasm-inf")
         return await WasmInfProbe.Run();
