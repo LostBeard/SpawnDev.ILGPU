@@ -59,6 +59,18 @@ internal static class LocalArrayDump
         output[g] = s;
     }
 
+    // E) bisect: new float[64], init loop, STATIC write acc[5]=42, static read. Wasm returns 0.
+    private static void BisectStaticKernel(
+        Index1D g, ArrayView<float> input, ArrayView<float> output, ArrayView<int> p)
+    {
+        int G = p[0], D = p[1];
+        if (g >= G) return;
+        var acc = new float[DN];
+        for (int dd = 0; dd < D; dd++) acc[dd] = 0f;
+        acc[5] = 42f;
+        output[g] = acc[5];
+    }
+
     private const int GS = 32;
 
     // C) new float[] read ACROSS barriers (group kernel, tree reduce per element) — Tuvok's exact shape.
@@ -105,6 +117,8 @@ internal static class LocalArrayDump
             () => acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<int>>(LocalMemKernel));
         DumpOne(acc, "D_NewArrayN64", outDir,
             () => acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<int>>(NewArrayN64Kernel));
+        DumpOne(acc, "E_BisectStatic", outDir,
+            () => acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<int>>(BisectStaticKernel));
         DumpOne(acc, "C_NewArrayBarrier", outDir,
             () => acc.LoadStreamKernel<ArrayView<float>, ArrayView<float>, ArrayView<int>>(NewArrayBarrierKernel));
 
@@ -150,6 +164,8 @@ internal static class LocalArrayDump
         finally { Console.SetOut(prevOut); WasmBackend.VerboseLogging = prevVerbose; }
 
         var log = sw.ToString();
+        // Full verbose log to disk for grepping (local map / NewView / LEA tracing).
+        try { File.WriteAllText(Path.Combine(outDir, label + ".log"), log); } catch { }
         foreach (var raw in log.Split('\n'))
         {
             var l = raw.TrimEnd('\r').Trim();
