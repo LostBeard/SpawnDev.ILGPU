@@ -334,6 +334,14 @@ ArrayView1D's BaseView access creates a GetField indirection that breaks direct 
 
 **LOCAL ALLOCA RULE**: The base `Alloca` handler in `WasmCodeGenerator.cs` sets local alloca addresses to `i32.const 0`. This causes the kernel to write to Wasm memory address 0 (the data buffer region). The `WasmKernelFunctionGenerator` MUST override this for non-shared allocas to allocate scratch memory (`scratchBaseLocal + offset`). Without this fix, the ExclusiveScan helper's output struct gets written to address 0, corrupting sorted data between RadixSort passes.
 
+## ⚠ OPEN BUG: device-local `new T[N>32]` dynamically-indexed reads 0 (2026-06-22)
+
+**A kernel-local `var acc = new T[N]` with N > 32 that is WRITTEN+READ by a RUNTIME index returns 0 on Wasm** (correct on CUDA/OpenCL/CPU/WebGPU/WebGL). For N ≤ 32 `LowerArrays` UNROLLS the zero-init (works); for **N > 32** it emits the zero-init as an IR LOOP (`SplitBlock`-spliced, `LowerArrays.cs:208-282`) and the Wasm **state machine mis-sequences that spliced loop** so the zero-init effectively clobbers the array AFTER the user writes → 0.
+
+**WORKAROUND (use this on Wasm): `LocalMemory.Allocate<T>(N)`** — it uses the alloca path directly (no `LowerArrays` NewArray, no spliced init loop) and works for any N + dynamic indexing (verified). `new T[]` is the only broken form.
+
+**RULED OUT as the cause** (do not re-try these): it is NOT the alloca addressing (offline-disasm-confirmed every access uses the right `scratchBase+off`), NOT the array-impl struct `{view,length}` slot (lowering it via `LowerStructures`+`SSAStructureConstruction` moved scratchOffset 16→0 but still 0), and NOT uncanonical CFG (`CleanupBlocks`+`SimplifyControlFlow` after `LowerArrays` reduced blocks but still 0). All four passes were tried and reverted (no fix + barrier-kernel regression risk). **NEXT:** runtime SM instrumentation (a kernel that records its executed-state sequence to the output buffer, observed via PMT). Diagnostic tools: `DemoConsole -- local-array-dump` (offline Wasm compile + `{label}.log`). Tracked: `_DevComms/SpawnDev.ILGPU/geordi-localarray-dynindex-fixed-wasm-scratchoffset-open-2026-06-22.md`. Regression guard `BackendTestBase.LocalArray_DynamicIndex_MatchesCpuOracle` (Wasm case = named tracked skip). NON-BLOCKING (GPU backends green; LocalMemory is the alternative).
+
 ## Tribal Knowledge: Post-Helper Barrier (March 2026)
 
 **POST-HELPER BARRIER RULE**: After every helper function call that uses barriers, the codegen
