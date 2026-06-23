@@ -47,6 +47,11 @@ try
     if (args.Length > 0 && args[0] == "cuda-graph-capture")
         return await CudaGraphCaptureProof.Run();
 
+    // Repro for the device-local dynamically-indexed array codegen gap that caps the
+    // universal per-query attention (Tuvok, 2026-06-22). Captures the real CUDA JIT error.
+    if (args.Length > 0 && args[0] == "local-array-dyn")
+        return await LocalArrayDynamicIndexRepro.Run();
+
     // Offline Wasm +inf codegen probe (Tuvok finding #2). No browser, no dispatch.
     if (args.Length > 0 && args[0] == "wasm-inf")
         return await WasmInfProbe.Run();

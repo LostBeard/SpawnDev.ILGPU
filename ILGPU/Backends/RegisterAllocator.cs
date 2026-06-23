@@ -535,7 +535,9 @@ namespace ILGPU.Backends
                 node = alias;
             return registerLookup.TryGetValue(node, out RegisterEntry entry)
                 ? entry.Register
-                : throw new InvalidCodeGenerationException();
+                : throw new InvalidCodeGenerationException(
+                    $"No register allocated for {node.GetType().Name} " +
+                    $"[{node}] : {node.Type} (block {node.BasicBlock})");
         }
 
         /// <summary>

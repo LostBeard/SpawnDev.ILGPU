@@ -2,6 +2,14 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.15.3-local.1 (2026-06-22) - Device-local dynamically-indexed array codegen fix
+
+Forks bump to `2.0.44-local.1`. A per-thread device-LOCAL array `var acc = new float[N];` (compile-time size, **N > 32**) that is WRITTEN and READ by a **runtime index inside a loop** threw `InvalidCodeGenerationException` ("No register allocated for PrimitiveValue 0") at kernel JIT - blocking the register/local-memory-accumulator universal (flash-class) per-query attention kernel (SpawnDev.ILGPU.ML, Tuvok).
+
+- **Root cause (`ILGPU/IR/Transformations/LowerArrays.cs`):** for N > 32 the array zero-initialization is emitted as an **IR loop**; its counter phi took its initial `0` constant from the loop **header** block instead of the **predecessor** block. The phi argument for the `predecessor -> header` edge must be defined in the predecessor (SSA dominance) - defining it in the header (the edge's successor) is invalid SSA, so the PTX phi-copy emitted at the end of the predecessor found no register for a constant from a block it had not entered. It only surfaced with a **dynamically indexed** array (static indices scalar-replace the array, eliminating the init loop before the register allocator runs) and **N > 32** (N <= 32 unrolls the init with no loop), which is why the companion `LocalArrayAcrossBarrier` tests (Tile = 8) never hit it. **Fix:** create the init `0` in the predecessor block. Result-neutral - it only fixes register allocation, never changes any kernel's output.
+- **Verified** (`BackendTestBase.LocalArray_DynamicIndex_MatchesCpuOracle`, N=64, runtime index in a loop, CPU oracle): compiles + correct on **CUDA, OpenCL, CPU, WebGPU, WebGPU-no-subgroups, WebGL**. The register/local-memory accumulator path (flash-class attention) is unblocked on every GPU backend.
+- **One tracked follow-up (Wasm only, my lane):** the now-compiling kernel reads 0 on Wasm - a separate, previously-unreachable Wasm codegen bug (a device-local alloca that is not the first scratch consumer gets `scratchOffset != 0`, and the large-array scratch addressing is wrong for `baseOff != 0`). The test's Wasm case is a named tracked skip (not hidden); investigation continues. Also bundles the 4.15.2-local CUDA graph capture API + `WithDefaultStream` + `ShaderDebugService.AppLoadTimestamp`.
+
 ## 4.15.2-local.1 (2026-06-22) - CUDA graph capture/replay API
 
 Forks bump to `2.0.43-local.1`. Adds first-class CUDA graph capture to the CUDA runtime so a fixed-shape kernel sequence (e.g. LLM decode, M=1, hundreds of launches per token) can be captured once and replayed with a single `cuGraphLaunch`, collapsing per-kernel host dispatch overhead. Built for SpawnDev.ILGPU.ML's decode path, where a dotnet-trace showed ~25 ms/token (of ~32) is CPU dispatch (~72% per-launch driver cost, ~700 nodes/step) - the exact cost graphs eliminate.

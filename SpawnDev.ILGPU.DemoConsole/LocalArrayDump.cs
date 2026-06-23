@@ -43,6 +43,22 @@ internal static class LocalArrayDump
         for (int t = 0; t < TT; t++) output[g * TT + t] = acc[t];
     }
 
+    // D) new float[64] dynamic-index in a loop — the N>32 (IR loop-init) shape that FAILS
+    //    on Wasm only (reads 0). N=8 (kernel A) passes on Wasm; this isolates N>32.
+    private const int DN = 64;
+    private static void NewArrayN64Kernel(
+        Index1D g, ArrayView<float> input, ArrayView<float> output, ArrayView<int> p)
+    {
+        int G = p[0], D = p[1];
+        if (g >= G) return;
+        var acc = new float[DN];
+        for (int dd = 0; dd < D; dd++) acc[dd] = 0f;
+        for (int dd = 0; dd < D; dd++) acc[dd] += input[g * D + dd] * 2f;
+        float s = 0f;
+        for (int dd = 0; dd < D; dd++) s += acc[dd];
+        output[g] = s;
+    }
+
     private const int GS = 32;
 
     // C) new float[] read ACROSS barriers (group kernel, tree reduce per element) — Tuvok's exact shape.
@@ -87,6 +103,8 @@ internal static class LocalArrayDump
             () => acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<int>>(NewArrayKernel));
         DumpOne(acc, "B_LocalMem", outDir,
             () => acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<int>>(LocalMemKernel));
+        DumpOne(acc, "D_NewArrayN64", outDir,
+            () => acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<int>>(NewArrayN64Kernel));
         DumpOne(acc, "C_NewArrayBarrier", outDir,
             () => acc.LoadStreamKernel<ArrayView<float>, ArrayView<float>, ArrayView<int>>(NewArrayBarrierKernel));
 

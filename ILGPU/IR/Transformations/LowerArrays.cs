@@ -227,10 +227,19 @@ namespace ILGPU.IR.Transformations
                 // SplitBlock already set a branch to exitBlock; replace it
                 // with a branch to our loop header instead.
                 builder.Terminator = null;
+                // The loop-counter phi's initial value (0) is the argument for the
+                // current-block -> loopHeader edge, so it MUST be defined in this
+                // predecessor block. Creating it in loopHeader (the edge's successor)
+                // breaks SSA dominance: the PTX phi-copy is emitted at the end of this
+                // predecessor and would find no register for a constant defined in the
+                // header it has not entered yet ("No register allocated for
+                // PrimitiveValue 0"). Only surfaces when the array stays in memory
+                // (dynamic indexing) - static indexing scalar-replaces the array and
+                // this init loop never reaches the register allocator.
+                var zeroVal = builder.CreatePrimitiveValue(location, 0);
                 builder.CreateBranch(location, loopHeader);
 
                 // --- Loop header: phi(i), compare, conditional branch ---
-                var zeroVal = loopHeader.CreatePrimitiveValue(location, 0);
                 var phiBuilder = loopHeader.CreatePhi(
                     location,
                     int32Type,
