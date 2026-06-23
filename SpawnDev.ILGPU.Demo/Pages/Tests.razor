@@ -37,7 +37,7 @@
 @* Registration-only discovery: pass explicit Types (registered test-class services)
    and NOT TestAssemblies — assembly scanning would re-discover P2P classes regardless
    of registration, defeating the comment-out-to-gate model. *@
-<UnitTestsView TypeInstanceResolver="TestTypeResolver" TestTypes="Types" ResultsDirectory="_shaderDebug.DebugDirectory"></UnitTestsView>
+<UnitTestsView TypeInstanceResolver="TestTypeResolver" TestTypes="Types" ResultsDirectory="_shaderDebug.DebugDirectory" SessionTimestamp="@_shaderDebug.AppLoadTimestamp"></UnitTestsView>
 
 @* 
 @if (_dumpStatus != null) { <span style="color:green;">@_dumpStatus</span> }
