@@ -115,6 +115,34 @@ browserBuffer.CopyFromJS(jsData, targetByteOffset: 1024);
 
 If your data is already in a `byte[]` / `float[]` / etc., use `CopyFromCPU` — that's the right path for managed-array sources. `CopyFromJS` is specifically for when the data hasn't crossed into .NET yet and you want to keep it that way.
 
+### Via CopyFromStreamAsync (Bounded Streaming — Browser Zero-Copy from `IJSReadStream`)
+
+`CopyFromJS` uploads data that is *already fully resident* in a JS `TypedArray` / `ArrayBuffer`. When the source is a **stream** — a multi-hundred-MB model file, a `Blob` / `File`, a WebTorrent piece stream — you don't want the whole thing in memory at once. `ArrayView<T>.CopyFromStreamAsync` streams a .NET `Stream` into a GPU buffer **in bounded chunks** (default 16 MiB), reading exactly `view.Length * sizeof(T)` bytes:
+
+```csharp
+using SpawnDev.ILGPU;
+
+using var buf = accelerator.Allocate1D<float>(weightCount);
+
+await buf.View.CopyFromStreamAsync(sourceStream);                              // default 16 MiB chunks
+await buf.View.CopyFromStreamAsync(sourceStream, chunkSizeInBytes: 4 * 1024 * 1024);
+await buf.View.SubView(offset, count).CopyFromStreamAsync(sourceStream);       // into a sub-range
+```
+
+- **All 6 backends.** On CUDA / OpenCL / CPU it `await`s `Stream.ReadExactlyAsync` into a pooled buffer and copies each chunk (a model streaming off disk / network never blocks a thread). Correct on the browser backends too via the managed hop.
+- **Browser zero-copy fast path.** If the source `Stream` implements `SpawnDev.BlazorJS.Toolbox.IJSReadStream`, the browser backends read each chunk as a JS `Uint8Array` and upload it via `CopyFromJS` — the bytes go **JS → GPU without ever entering the .NET/WASM managed heap**. (WebGPU requires 4-byte-aligned transfers, which fp32 and even-count `Half` always satisfy; an odd-count `Half` upload falls back to the padded managed path.)
+- **Exact length.** A stream that ends before `view.Length * sizeof(T)` bytes throws `EndOfStreamException` — a truncated asset surfaces instead of silently zero-padding the tail.
+
+**`IJSReadStream`** (in `SpawnDev.BlazorJS.Toolbox`) is the primitive that enables the fast path — a `Stream` whose data can be read *while it stays in JS*:
+
+| Member | Meaning |
+|--------|---------|
+| `bool CanReadSync` | `true` if a synchronous read works (`ArrayBufferStream` — data already in JS memory); `false` for async-only sources (`BlobStream`, network streams). |
+| `Task<Uint8Array> ReadUint8ArrayAsync(int count, …)` | Reads up to `count` bytes from the current `Position` as a JS `Uint8Array` (stays JS-side), advances `Position`; empty `Uint8Array` at EOF. |
+| `Uint8Array ReadUint8Array(int count)` | Synchronous counterpart (throws when `CanReadSync` is false). |
+
+Implemented by **`BlobStream`** (`Blob` / `File`, `CanReadSync = false`) and **`ArrayBufferStream`** (`ArrayBuffer`, `CanReadSync = true`). Any `Stream` that implements it gets the zero-copy upload automatically.
+
 ## Copying Between GPU Buffers (GPU→GPU)
 
 Use `CopyFrom` to copy data between GPU buffers. This works on **all six backends** — it's a native GPU operation with no CPU involvement:
@@ -140,6 +168,8 @@ Not all copy operations work the same way on every backend. This table shows wha
 | **JS→GPU** | `IBrowserMemoryBuffer.CopyFromJS` | N/A | `queue.WriteBuffer` | Backing-array copy + `NeedsUpload` | JS→JS within SharedArrayBuffer |
 | **GPU→CPU (async)** | `CopyToHostAsync` | Sync fallback | `mapAsync(Read)` | Readback | SharedArrayBuffer |
 | **GPU→CPU (sync)** | `CopyTo` / `CopyToCPU` / `GetAsArray1D` | Sync | **THROWS** | **THROWS** | **THROWS** |
+| **Stream→GPU (chunked)** | `ArrayView.CopyFromStreamAsync` | `ReadExactlyAsync` + copy | `IJSReadStream`→`CopyFromJS` | `IJSReadStream`→backing copy | `IJSReadStream`→JS copy |
+| **GPU→Stream (chunked)** | `ArrayView.CopyToStreamAsync` | readback + `WriteAsync` | `IJSWriteStream`→`WriteUint8ArrayAsync` | `IJSWriteStream`→`WriteUint8ArrayAsync` | `IJSWriteStream`→`WriteUint8ArrayAsync` |
 
 **Key rules:**
 - **GPU→GPU copies: always use `CopyFrom`.** It's fast, native, and works on all backends.
@@ -279,6 +309,53 @@ else
     outputBuffer.View.BaseView.CopyToCPU(resultArray);
 }
 ```
+
+### CopyToStreamAsync — Bounded Save (Browser Zero-Copy to `IJSWriteStream`)
+
+The save-side mirror of [`CopyFromStreamAsync`](#via-copyfromstreamasync-bounded-streaming--browser-zero-copy-from-ijsreadstream). `ArrayView<T>.CopyToStreamAsync` streams a GPU buffer **out** to a .NET `Stream` **in bounded chunks** (default 16 MiB) — so saving a multi-hundred-MB buffer to OPFS / disk / network never materializes the whole thing at once:
+
+```csharp
+using SpawnDev.ILGPU;
+
+// Save to any .NET Stream (e.g. a MemoryStream, a file):
+using var ms = new MemoryStream();
+await buf.View.CopyToStreamAsync(ms);                              // default 16 MiB chunks
+await buf.View.CopyToStreamAsync(ms, chunkSizeInBytes: 4 * 1024 * 1024);
+await buf.View.SubView(offset, count).CopyToStreamAsync(ms);       // just a sub-range
+```
+
+- **All 6 backends.** The base path does an async GPU→CPU readback of each chunk (`CopyToRawAsync`) and writes it to the target `Stream` — correct everywhere via the managed hop.
+- **Browser zero-copy fast path.** If the target `Stream` implements `SpawnDev.BlazorJS.Toolbox.IJSWriteStream`, the browser backends read each chunk back as a JS `Uint8Array` (`CopyToHostUint8ArrayAsync`) and write it via `WriteUint8ArrayAsync` — the bytes go **GPU → JS → stream without ever entering the .NET/WASM managed heap**.
+
+**`IJSWriteStream`** (in `SpawnDev.BlazorJS.Toolbox`) is the write-side sibling of `IJSReadStream`:
+
+| Member | Meaning |
+|--------|---------|
+| `bool CanWriteSync` | `true` if a synchronous write works (`ArrayBufferStream` — in-memory JS buffer); `false` for async-only sinks (`FileSystemHandleWritableStream` — OPFS / disk). |
+| `Task WriteUint8ArrayAsync(Uint8Array data, …)` | Writes `data` at the current `Position` (stays JS-side), advances `Position`. |
+| `void WriteUint8Array(Uint8Array data)` | Synchronous counterpart (throws when `CanWriteSync` is false). |
+
+Implemented by **`FileSystemHandleWritableStream`** (OPFS / disk, `CanWriteSync = false`) and **`ArrayBufferStream`** (in-memory `ArrayBuffer`, `CanWriteSync = true` — a full duplex `IJSReadStream` + `IJSWriteStream`).
+
+**Saving a GPU buffer to an OPFS file — the full pattern:**
+
+```csharp
+using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.BlazorJS.Toolbox;
+
+using var storage = JS.Get<StorageManager>("navigator.storage");
+using var root = await storage.GetDirectory();
+using var fileHandle = await root.GetFileHandle("scene.bin", create: true);
+
+// ⚠ await using — the OPFS close() is the async disk commit. CopyToStreamAsync WRITES the
+// bytes but does NOT own/close the target stream; a plain `using` can return before the file
+// is flushed, leaving an empty/short file (browser-timing dependent). await using (or an
+// explicit await writable.CloseAsync()) guarantees the bytes are on disk before you read back.
+await using var writable = await fileHandle.GetWritableStream();
+await packedBuf.View.CopyToStreamAsync(writable);
+```
+
+> `CopyToStreamAsync` requires **SpawnDev.BlazorJS 3.5.14+** for `IJSWriteStream` and the `FileSystemHandleWritableStream` async commit (`DisposeAsync` / `CloseAsync`).
 
 ## Buffer Lifecycle
 
