@@ -159,6 +159,31 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 chunkSizeInBytes, cancellationToken);
         }
 
+        /// <inheritdoc/>
+        /// <remarks>
+        /// Zero-copy save to an <see cref="IJSWriteStream"/> via chunked
+        /// <see cref="CopyToHostUint8ArrayAsync"/> -&gt; <c>WriteUint8ArrayAsync</c>: the WebGPU readback
+        /// (<c>copyBufferToBuffer</c> + <c>mapAsync</c>) keeps the bytes JS-side, never entering the
+        /// .NET/WASM managed heap, and handles arbitrary (non-4-aligned) sizes internally. A plain .NET
+        /// <see cref="System.IO.Stream"/> target takes the managed base path (async readback -&gt; WriteAsync).
+        /// </remarks>
+        protected override System.Threading.Tasks.Task CopyToStreamRawAsync(
+            AcceleratorStream stream,
+            System.IO.Stream target,
+            long sourceOffsetInBytes,
+            long lengthInBytes,
+            int chunkSizeInBytes,
+            System.Threading.CancellationToken cancellationToken)
+        {
+            if (target is IJSWriteStream js)
+                return BrowserStreamDownload.CopyToJSWriteStreamAsync(
+                    this, js, sourceOffsetInBytes, lengthInBytes, LengthInBytes,
+                    chunkSizeInBytes, cancellationToken);
+            return base.CopyToStreamRawAsync(
+                stream, target, sourceOffsetInBytes, lengthInBytes,
+                chunkSizeInBytes, cancellationToken);
+        }
+
         protected override void MemSet(AcceleratorStream stream, byte value, in ArrayView<byte> view)
         {
             var length = (int)view.Length;

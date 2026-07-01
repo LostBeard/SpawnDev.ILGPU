@@ -4,9 +4,11 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.16.2</Version>
+		<Version>4.17.0-local.1</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>4.15.3-local.1: Device-LOCAL dynamically-indexed array codegen fix (Fork 2.0.44-local.1). A per-thread `new T[N]` (N>32) written/read by a RUNTIME index in a loop threw InvalidCodeGenerationException ("No register allocated for PrimitiveValue 0") at kernel JIT. Root cause: the LowerArrays N>32 zero-init loop created the counter-phi's initial 0 constant in the loop HEADER instead of the predecessor block (invalid SSA dominance). Fixed (result-neutral). Verified compile+correct on CUDA/OpenCL/CPU/WebGPU/WebGPU-no-subgroups/WebGL; one tracked Wasm-only follow-up (large dynamically-indexed local alloca with scratchOffset!=0). Unblocks register/local-memory accumulator kernels (flash-class per-query attention) on the GPU backends. Also includes 4.15.2-local CUDA graph capture API + Accelerator.WithDefaultStream + ShaderDebugService.AppLoadTimestamp.
+		<PackageReleaseNotes>4.17.0-local.1: ArrayView&lt;T&gt;.CopyToStreamAsync - the GPU-&gt;Stream save primitive (save-side mirror of CopyFromStreamAsync). Chunked async readback -&gt; Stream.WriteAsync on all 6 backends; browser backends take a zero-copy fast path when the target is a SpawnDev.BlazorJS.Toolbox.IJSWriteStream (Uint8Array chunks stay JS-side). Forks bump to 2.2.0 (new public API). Requires SpawnDev.BlazorJS 3.5.14. See CHANGELOG.md.
+
+4.15.3-local.1: Device-LOCAL dynamically-indexed array codegen fix (Fork 2.0.44-local.1). A per-thread `new T[N]` (N>32) written/read by a RUNTIME index in a loop threw InvalidCodeGenerationException ("No register allocated for PrimitiveValue 0") at kernel JIT. Root cause: the LowerArrays N>32 zero-init loop created the counter-phi's initial 0 constant in the loop HEADER instead of the predecessor block (invalid SSA dominance). Fixed (result-neutral). Verified compile+correct on CUDA/OpenCL/CPU/WebGPU/WebGPU-no-subgroups/WebGL; one tracked Wasm-only follow-up (large dynamically-indexed local alloca with scratchOffset!=0). Unblocks register/local-memory accumulator kernels (flash-class per-query attention) on the GPU backends. Also includes 4.15.2-local CUDA graph capture API + Accelerator.WithDefaultStream + ShaderDebugService.AppLoadTimestamp.
 
 4.15.2-local.1: CUDA graph capture/replay API (Fork 2.0.43-local.1). New `CudaStream.BeginCapture(mode)`/`.EndCapture()`/`.CaptureStatus`/`.SupportsGraphCapture` + `CudaGraph.Instantiate()` -> `CudaGraphExec.Launch(stream)`/`.Upload(stream)` capture a fixed-shape kernel sequence once and replay it with a single `cuGraphLaunch`, collapsing per-kernel host dispatch overhead (the lever for LLM decode, where ~25ms/token is CPU dispatch). Plus `Accelerator.WithDefaultStream(stream)` - a scoped swap of the default stream so the existing implicitly-grouped `*StreamKernel` launchers (which read DefaultStream at launch time) all reroute onto one capturable stream with no call-site changes. Note: the default (NULL) stream cannot be captured; create a dedicated `accelerator.CreateStream()`. Verified on RTX 4070: capture inert, replay bit-exact vs CPU reference, ~6.6-7x dispatch speedup. Full history: CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
@@ -32,7 +34,7 @@
 
 	<ItemGroup>
 		<PackageReference Include="Microsoft.AspNetCore.Components.Web" Version="10.0.2" />
-		<PackageReference Include="SpawnDev.BlazorJS" Version="3.5.12" />
+		<PackageReference Include="SpawnDev.BlazorJS" Version="3.5.14-local.3" />
 	</ItemGroup>
 
 	<ItemGroup>
@@ -67,8 +69,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.1.0" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.1.0" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.2.0-local.1" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.2.0-local.1" />
 	</ItemGroup>
 
 	<ItemGroup>

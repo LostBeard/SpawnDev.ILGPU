@@ -414,6 +414,30 @@ namespace SpawnDev.ILGPU.Wasm
                 chunkSizeInBytes, cancellationToken);
         }
 
+        /// <inheritdoc/>
+        /// <remarks>
+        /// Zero-copy save to an <see cref="IJSWriteStream"/> via chunked
+        /// <see cref="CopyToHostUint8ArrayAsync"/> -&gt; <c>WriteUint8ArrayAsync</c> so the bytes never enter
+        /// the .NET/WASM managed heap. A plain .NET <see cref="System.IO.Stream"/> target falls back to the
+        /// managed base implementation (async readback -&gt; WriteAsync).
+        /// </remarks>
+        protected override System.Threading.Tasks.Task CopyToStreamRawAsync(
+            AcceleratorStream stream,
+            System.IO.Stream target,
+            long sourceOffsetInBytes,
+            long lengthInBytes,
+            int chunkSizeInBytes,
+            System.Threading.CancellationToken cancellationToken)
+        {
+            if (target is IJSWriteStream js)
+                return BrowserStreamDownload.CopyToJSWriteStreamAsync(
+                    this, js, sourceOffsetInBytes, lengthInBytes, LengthInBytes,
+                    chunkSizeInBytes, cancellationToken);
+            return base.CopyToStreamRawAsync(
+                stream, target, sourceOffsetInBytes, lengthInBytes,
+                chunkSizeInBytes, cancellationToken);
+        }
+
         public async Task<Uint8Array> CopyToHostUint8ArrayAsync(long sourceByteOffset = 0, long? copyBytes = null)
         {
             if (SharedBuffer == null) return new Uint8Array();

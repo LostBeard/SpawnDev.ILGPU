@@ -301,6 +301,64 @@ namespace ILGPU.Runtime
         }
 
         /// <summary>
+        /// Asynchronously streams <paramref name="lengthInBytes"/> bytes of this buffer (starting at
+        /// <paramref name="sourceOffsetInBytes"/>) OUT to a <see cref="Stream"/>, in chunks. The save-side
+        /// mirror of <see cref="CopyFromStreamRawAsync"/>.
+        /// </summary>
+        /// <remarks>
+        /// This is the overridable async GPU-&gt;Stream save hook. The default implementation reads each chunk
+        /// back to the host via <see cref="CopyToRawAsync"/> (a real async GPU-&gt;CPU readback on every
+        /// backend, including the browser ones) and writes it to <paramref name="target"/> via
+        /// <see cref="Stream.WriteAsync(ReadOnlyMemory{byte}, CancellationToken)"/> - correct on every backend
+        /// via the managed hop. Browser backends override this to take a fast path when the target is a
+        /// <c>SpawnDev.BlazorJS.Toolbox.IJSWriteStream</c>: each chunk is read back as a JS <c>Uint8Array</c>
+        /// and written via <c>IJSWriteStream.WriteUint8ArrayAsync</c> without ever entering the .NET/WASM
+        /// managed heap. Writes EXACTLY <paramref name="lengthInBytes"/> bytes. Prefer the typed
+        /// <c>ArrayView&lt;T&gt;.CopyToStreamAsync</c> extension over calling this directly.
+        /// </remarks>
+        /// <param name="stream">The accelerator stream the chunk readbacks are issued on.</param>
+        /// <param name="target">The byte sink. Written sequentially from its current position.</param>
+        /// <param name="sourceOffsetInBytes">The source byte offset within this buffer.</param>
+        /// <param name="lengthInBytes">The exact number of bytes to read back and write.</param>
+        /// <param name="chunkSizeInBytes">The per-chunk transfer size.</param>
+        /// <param name="cancellationToken">Cancels the in-flight writes.</param>
+        protected internal virtual async Task CopyToStreamRawAsync(
+            AcceleratorStream stream,
+            Stream target,
+            long sourceOffsetInBytes,
+            long lengthInBytes,
+            int chunkSizeInBytes,
+            CancellationToken cancellationToken)
+        {
+            if (target is null)
+                throw new ArgumentNullException(nameof(target));
+            if (lengthInBytes < 0)
+                throw new ArgumentOutOfRangeException(nameof(lengthInBytes));
+            if (chunkSizeInBytes <= 0)
+                throw new ArgumentOutOfRangeException(nameof(chunkSizeInBytes));
+            if (sourceOffsetInBytes < 0 ||
+                sourceOffsetInBytes + lengthInBytes > LengthInBytes)
+                throw new ArgumentOutOfRangeException(nameof(sourceOffsetInBytes));
+            if (lengthInBytes == 0)
+                return;
+
+            long remaining = lengthInBytes;
+            long srcOffset = sourceOffsetInBytes;
+            while (remaining > 0)
+            {
+                int want = (int)Math.Min((long)chunkSizeInBytes, remaining);
+                // Real async GPU->CPU readback (overridden to a true async wait on browser backends).
+                byte[] chunk = await CopyToRawAsync(stream, srcOffset, want)
+                    .ConfigureAwait(false);
+                await target
+                    .WriteAsync(chunk.AsMemory(0, want), cancellationToken)
+                    .ConfigureAwait(false);
+                srcOffset += want;
+                remaining -= want;
+            }
+        }
+
+        /// <summary>
         /// Copies elements from the source view to the current buffer.
         /// </summary>
         /// <param name="stream">The used accelerator stream.</param>

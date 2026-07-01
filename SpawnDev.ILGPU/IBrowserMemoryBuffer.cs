@@ -56,6 +56,51 @@ namespace SpawnDev.ILGPU
     }
 
     /// <summary>
+    /// Shared helper for the browser <c>MemoryBuffer.CopyToStreamRawAsync</c> overrides:
+    /// streams a browser GPU buffer OUT to an <see cref="IJSWriteStream"/> chunk-by-chunk via
+    /// <see cref="IBrowserMemoryBuffer.CopyToHostUint8ArrayAsync(long, long?)"/>, keeping the bytes
+    /// JS-side (never entering the .NET/WASM managed heap). The save-side mirror of
+    /// <see cref="BrowserStreamUpload"/>. Writes EXACTLY <paramref name="lengthInBytes"/> bytes.
+    /// </summary>
+    internal static class BrowserStreamDownload
+    {
+        public static async Task CopyToJSWriteStreamAsync(
+            IBrowserMemoryBuffer buffer,
+            IJSWriteStream target,
+            long sourceOffsetInBytes,
+            long lengthInBytes,
+            long bufferLengthInBytes,
+            int chunkSizeInBytes,
+            CancellationToken cancellationToken)
+        {
+            if (lengthInBytes < 0)
+                throw new ArgumentOutOfRangeException(nameof(lengthInBytes));
+            if (chunkSizeInBytes <= 0)
+                throw new ArgumentOutOfRangeException(nameof(chunkSizeInBytes));
+            if (sourceOffsetInBytes < 0 ||
+                sourceOffsetInBytes + lengthInBytes > bufferLengthInBytes)
+                throw new ArgumentOutOfRangeException(nameof(sourceOffsetInBytes));
+            if (lengthInBytes == 0)
+                return;
+
+            long remaining = lengthInBytes;
+            long srcOffset = sourceOffsetInBytes;
+            while (remaining > 0)
+            {
+                int want = (int)Math.Min((long)chunkSizeInBytes, remaining);
+                using var u8 = await buffer
+                    .CopyToHostUint8ArrayAsync(srcOffset, want)
+                    .ConfigureAwait(false);
+                await target
+                    .WriteUint8ArrayAsync(u8, cancellationToken)
+                    .ConfigureAwait(false);
+                srcOffset += want;
+                remaining -= want;
+            }
+        }
+    }
+
+    /// <summary>
     /// Defines a contract for managing a memory buffer in a browser environment and provides asynchronous methods to
     /// copy its contents to a host-side Uint8Array.
     /// </summary>
