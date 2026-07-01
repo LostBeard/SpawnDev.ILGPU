@@ -2,15 +2,17 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
-## 4.17.0-local.1 - ArrayView<T>.CopyToStreamAsync (GPU->Stream save primitive)
+## 4.17.0-local.2 - ArrayView<T>.CopyToStreamAsync (GPU->Stream save primitive)
 
 The save-side mirror of `CopyFromStreamAsync` (4.9.14): stream a GPU buffer OUT to a `Stream` in bounded chunks. Forks bump to **2.2.0** (genuinely new public API in the fork - see the four-package note in `SpawnDev.ILGPU.csproj`).
+
+- **local.2:** pull BlazorJS `3.5.14-local.4` for its `FileSystemHandleWritableStream` async-commit fix. **When saving to an OPFS/disk `IJSWriteStream`, the consumer must `await using` the writable stream (or call `CloseAsync()`) after `CopyToStreamAsync` - the OPFS `close()` commit is async, so a plain `using` can return before the bytes are on disk (empty/short file, browser-timing dependent - hard-failed on Firefox).** `CopyToStreamAsync` writes but does not own/close the target stream (by design).
 
 - **`ArrayView<T>.CopyToStreamAsync(Stream target, [AcceleratorStream], [chunkSizeInBytes], [ct])`** - 4 overloads (explicit + default stream, `ArrayView<T>` + `ArrayView1D`). Routes through the new virtual `MemoryBuffer.CopyToStreamRawAsync`; base impl = chunked async `CopyToRawAsync` -> `Stream.WriteAsync` (correct on all 6 backends via the managed hop). Default chunk = 16 MiB (`DefaultStreamChunkSizeInBytes`), same as the load path.
 - **Browser zero-copy fast path.** WebGPU / WebGL / Wasm override `CopyToStreamRawAsync`: when the target is a `SpawnDev.BlazorJS.Toolbox.IJSWriteStream` (new in BlazorJS 3.5.14), each chunk is read back as a JS `Uint8Array` and written via `WriteUint8ArrayAsync` - the bytes stay JS-side, never entering the .NET/WASM managed heap (mirror of the `IJSReadStream` upload path). New internal `BrowserStreamDownload` helper (mirror of `BrowserStreamUpload`).
 - **Why:** any consumer saving a large GPU buffer to OPFS / disk / network gets bounded-memory GPU->Stream, exactly mirroring the load. SpawnScene's full-scene OPFS save (a single 588 MB `Uint8Array`) becomes one bounded line: `await packedBuf.View.CopyToStreamAsync(writableStream)`.
 - **Gate:** `BackendTestBase.CopyToStream.cs` - MemoryStream round-trips, multi-chunk, sub-view, CopyFrom->CopyTo identity, browser `IJSWriteStream` float + odd-count Half. PMT scoped (`PMT_FILTER=Stream`): **80 passed / 0 failed / 13 skipped** across all 6 backends (the 13 skips = browser-only `JS*Stream` tests correctly skipping on CPU/CUDA/OpenCL). `CopyFromStream` unchanged - no regression.
-- Requires **SpawnDev.BlazorJS 3.5.14-local.3** (transitive).
+- Requires **SpawnDev.BlazorJS 3.5.14-local.4** (transitive).
 
 ## 4.16.2 (2026-06-23) - WebGPU register attention unblocked (subgroup uniformity) + Wasm shuffle-kind fix
 
