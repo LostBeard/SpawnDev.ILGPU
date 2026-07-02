@@ -30,15 +30,10 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task AsAligned16_StructOf4_SumsCorrectly() => await RunTest(async accelerator =>
         {
-            // WebGL SKIP (tracked): a struct-of-4 ArrayView load emits invalid GLSL (`assign float to
-            // struct_514` / `float + int` - the struct load/field path through texelFetch, NOT the
-            // AsAligned alias, which is fixed). WebGL has no native struct storage and cannot do 128-bit
-            // loads regardless, so this construct is never a WebGL optimization. Separate deeper GLSL
-            // struct-load-via-texelFetch bug - tracked for a focused pass, see
-            // geordi-webgl-struct-of-4-load-glsl-bug-tracked-2026-07-01.
-            if (accelerator.AcceleratorType == AcceleratorType.WebGL)
-                throw new UnsupportedTestException("WebGL: struct-element ArrayView load emits invalid GLSL (separate tracked struct-load-via-texelFetch bug; AsAligned itself is fixed).");
-
+            // NOTE: runs on ALL 6 backends now, incl. WebGL. WebGL has no native struct storage, so an
+            // AsAligned16'd struct-of-4 element loads via per-field texelFetch + struct assembly (element
+            // i -> texels 4i+0..3); the AsAligned node is traced through to the param by the GLSL
+            // resolvers (was falling to the generic-LEA fallback -> invalid GLSL; fixed 2026-07-02).
             const int n = 512;
             var data = new AsAlignedF4[n];
             var expected = new float[n];

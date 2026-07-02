@@ -2,6 +2,15 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.17.2-local.1 - WebGL: AsAligned16 struct-element load fixed (GLSL resolvers now trace AsAligned)
+
+Wrapper-only over 4.17.1-local.1 (forks unchanged at 2.2.0). Closes the tracked WebGL struct-of-4 GLSL load bug (`geordi-webgl-struct-of-4-load-glsl-bug-tracked-2026-07-01`).
+
+- **Symptom:** a kernel loading a struct-of-4-f32 element through `view.AsAligned16()[i]` compiled to invalid GLSL on WebGL only (`'v_0' : undeclared identifier`, `cannot convert float to struct_N`, `float + int`) - a "generic LEA" fallback fired and no input sampler was declared for the struct view. Every other backend handled it.
+- **Root cause:** the GLSL parameter resolvers (`ResolveToParameter`, `ResolveToParameterStatic`, `ResolveToParamAndFieldStaticInner`) walk through `Load`/`LEA`/`SubView`/`NewView`/`AddressSpaceCast`/`ConvertValue`/`GetField`/`Phi` but had no case for the `AsAligned`/`AlignTo` node. So a load whose address chain passed through `AsAligned16()` never resolved to its parameter: `AnalyzeInputBuffers` didn't mark the param an input buffer (no `isampler2D` declared) and `GenerateCode(LoadElementAddress)` fell to the generic-LEA fallback. A *plain* `view[i]` struct load (no AsAligned) already worked - proving the struct-element texelFetch machinery was fine; only the AsAligned trace was missing.
+- **Fix:** add a `BaseAlignOperationValue` (covers `AsAligned` + `AlignTo`) case to all three resolvers, tracing through `.Source` - mirrors the existing `SubViewValue` case. Now the struct view binds `isampler2D u_param{N}` and the element loads via per-field `intBitsToFloat(texelFetch(...).r)` assembly (element i -> texels 4i+0..3), identical to the plain-load path.
+- **Gate:** `AsAligned16_StructOf4_SumsCorrectly` **un-skipped on WebGL** - PMT `PMT_FILTER=AsAligned16` now **9 passed / 0 failed / 0 skipped** (was 8/0/1); WebGL runs the load on real ANGLE and matches the CPU reference. Offline dump: `DemoConsole -- vectorized-load-wgsl` (now also emits the GLSL for the struct load).
+
 ## 4.17.1-local.1 - WebGPU WGSL 128-bit vectorized load (AsAligned16 -> array<vec4<f32>>)
 
 Wrapper-only over 4.17.0 (forks unchanged at 2.2.0). The WebGPU kernel-side lever for SpawnDev.ILGPU.ML's DAv3 GEMM (Seven's beat-ORT campaign): every WGSL storage-buffer load was scalar, so a register-blocked GEMM tile load cost four scalar loads per 16-byte element. This makes a 16-byte 4xf32 struct reached through `AsAligned16()` load in ONE 128-bit load.

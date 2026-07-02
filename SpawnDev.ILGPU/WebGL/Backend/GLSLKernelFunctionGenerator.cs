@@ -584,6 +584,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (value is NewView nv) return ResolveToParamAndFieldStaticInner(nv.Pointer, pendingFieldIdx);
             if (value is AddressSpaceCast asc) return ResolveToParamAndFieldStaticInner(asc.Value, pendingFieldIdx);
             if (value is SubViewValue sv) return ResolveToParamAndFieldStaticInner(sv.Source, pendingFieldIdx);
+            // AsAligned/AlignTo are compile-time alignment hints — the runtime view is the source,
+            // so trace through to the underlying view/param (else a `view.AsAligned16()[i]` load never
+            // resolves to its param → the param isn't classified as an input buffer / no sampler).
+            if (value is global::ILGPU.IR.Values.BaseAlignOperationValue align) return ResolveToParamAndFieldStaticInner(align.Source, pendingFieldIdx);
             if (value is ConvertValue cv) return ResolveToParamAndFieldStaticInner(cv.Value, pendingFieldIdx);
             if (value is PhiValue phi)
             {
@@ -613,6 +617,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (value is AddressSpaceCast asc) return ResolveToParameterStatic(asc.Value);
             // SubViewValue creates a sub-range — trace the source view
             if (value is SubViewValue sv) return ResolveToParameterStatic(sv.Source);
+            // AsAligned/AlignTo are compile-time alignment hints — trace through to the source view
+            if (value is global::ILGPU.IR.Values.BaseAlignOperationValue align) return ResolveToParameterStatic(align.Source);
             // ConvertValue (pointer/view casts) — trace through
             if (value is ConvertValue cv) return ResolveToParameterStatic(cv.Value);
             if (value is PhiValue phi)
@@ -4419,6 +4425,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (value is AddressSpaceCast asc) return ResolveToParameter(asc.Value);
             // SubViewValue creates a sub-range — trace the source view.
             if (value is SubViewValue sv) return ResolveToParameter(sv.Source);
+            // AsAligned/AlignTo are compile-time alignment hints — trace through to the source view
+            // (else `view.AsAligned16()[i]`'s LEA never resolves to its param and falls to the
+            // generic-LEA fallback that emits invalid GLSL for a struct-element load).
+            if (value is global::ILGPU.IR.Values.BaseAlignOperationValue align) return ResolveToParameter(align.Source);
             // ConvertValue (pointer/view casts) — trace through.
             if (value is ConvertValue cv) return ResolveToParameter(cv.Value);
             if (value is PhiValue phi)

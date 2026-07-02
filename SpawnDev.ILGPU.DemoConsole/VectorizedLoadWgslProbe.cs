@@ -35,6 +35,14 @@ internal static class VectorizedLoadWgslProbe
         o[i] = v.a + v.b + v.c + v.d;
     }
 
+    // B') plain struct-element load, NO AsAligned16 — isolates whether the WebGL struct-load
+    //     bug is the AsAligned path or struct-element input views in general.
+    private static void StructLoadNoAlignKernel(Index1D i, ArrayView<F4> w, ArrayView<float> o)
+    {
+        var v = w[i];
+        o[i] = v.a + v.b + v.c + v.d;
+    }
+
     public static Task<int> Run()
     {
         var outDir = @"D:\users\tj\Projects\SpawnDev.ILGPU\vectorized_load_wgsl";
@@ -61,6 +69,38 @@ internal static class VectorizedLoadWgslProbe
         Check(CountOccurrences(bWgsl, "var<storage") >= 1 && bWgsl.Contains("param1 : array<vec4<f32>>"), "B_struct16 param1 is the 128-bit binding");
         Check(bWgsl.Contains(".x") && bWgsl.Contains(".y") && bWgsl.Contains(".z") && bWgsl.Contains(".w"), "B_struct16 field access swizzles .x/.y/.z/.w");
         Check(!bWgsl.Contains(".field_"), "B_struct16 has NO .field_N access (would be invalid on a vec4)");
+
+        // --- WebGL/GLSL struct-load diagnostic. Tracked-open bug: a struct-of-4-f32 element load
+        //     emits invalid GLSL (WebGL has no native struct storage - buffers are R32I/R32F
+        //     textures read via texelFetch, so the element must be assembled per-field). Dump only,
+        //     no assertion yet - this is the path being fixed. ---
+        try
+        {
+            var glsl = ShaderCompiler.Generate(
+                (Action<Index1D, ArrayView<F4>, ArrayView<float>>)StructLoadKernel,
+                CapabilityProfiles.WebGL2Baseline);
+            var gsrc = glsl.Source ?? "";
+            var gpath = Path.Combine(outDir, "B_struct16.glsl");
+            File.WriteAllText(gpath, gsrc);
+            Console.WriteLine($"[vectorized-load-glsl] B_struct16 (AsAligned16): HasErrors={glsl.HasErrors} len={gsrc.Length} -> {gpath}");
+            foreach (var diag in glsl.Diagnostics)
+                Console.WriteLine($"    glsl-diag: {diag}");
+
+            // B') the same load WITHOUT AsAligned16 - isolates AsAligned vs struct-view-in-general.
+            var glsl2 = ShaderCompiler.Generate(
+                (Action<Index1D, ArrayView<F4>, ArrayView<float>>)StructLoadNoAlignKernel,
+                CapabilityProfiles.WebGL2Baseline);
+            var gsrc2 = glsl2.Source ?? "";
+            var gpath2 = Path.Combine(outDir, "B_struct16_noalign.glsl");
+            File.WriteAllText(gpath2, gsrc2);
+            bool g2HasSampler = gsrc2.Contains("sampler2D u_param1");
+            bool g2GenericLea = gsrc2.Contains("generic LEA");
+            Console.WriteLine($"[vectorized-load-glsl] B_noalign (plain w[i]): HasErrors={glsl2.HasErrors} len={gsrc2.Length} sampler_u_param1={g2HasSampler} generic_LEA={g2GenericLea} -> {gpath2}");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[vectorized-load-glsl] B_struct16 EXCEPTION: {ex.Message}");
+        }
 
         Console.WriteLine($"[vectorized-load-wgsl] {(failures == 0 ? "ALL CHECKS PASS" : $"{failures} CHECK(S) FAILED")}");
         return Task.FromResult(failures == 0 ? 0 : 1);
