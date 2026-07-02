@@ -173,12 +173,12 @@ scan(stream, input.View, output.View, tempView);
 
 | Algorithm | WebGPU | WebGL | Wasm |
 |-----------|--------|-------|------|
-| RadixSort | ✅ | ❌ | ✅ |
-| Scan | ✅ | ❌ | ✅ |
-| Reduce | ✅ | ❌ | ✅ |
+| RadixSort | ✅ | ✅ host† | ✅ |
+| Scan | ✅ | ✅ host† | ✅ |
+| Reduce | ✅ | ✅ host† | ✅ |
 | Histogram | ✅ | ❌ | ✅ |
 
-WebGL lacks shared memory and barriers, so algorithm extensions are not available there.
+**† Host-level only on WebGL.** The host-level builders `accelerator.CreateRadixSort`/`CreateRadixSortPairs`/`CreateScan`/`CreateReduce` DO run on WebGL — they use shared-memory-free multi-dispatch, where the draw-call boundary acts as the barrier (RadixSort via render-to-texture scatter). What WebGL cannot do is the **in-kernel** group/warp ops (`Group.Scan`/`Group.Reduce`/`Warp.*`): those need shared memory + barriers and throw `UnsupportedKernelFeatureException` at kernel-compile time.
 
 ## GPUDevice Sharing
 
@@ -386,11 +386,11 @@ This enables detailed console output including:
 After loading a kernel the generated shader source is captured automatically:
 
 ```csharp
-using SpawnDev.ILGPU.WebGPU;
-using SpawnDev.ILGPU.WebGL;
+using SpawnDev.ILGPU.WebGPU.Backend;   // WebGPUBackend
+using SpawnDev.ILGPU.WebGL;            // WebGLAccelerator
 
 // Available immediately after LoadAutoGroupedStreamKernel / LoadStreamKernel
-string? wgsl = WebGPUAccelerator.LastGeneratedWGSL;   // WebGPU backend
+string? wgsl = WebGPUBackend.LastGeneratedWGSL;       // WebGPU backend
 string? glsl = WebGLAccelerator.LastGeneratedGLSL;    // WebGL backend
 ```
 
@@ -401,7 +401,7 @@ Both properties are `static` and updated on every kernel load, so they always ho
 ```csharp
 // Print device info
 var devices = context.GetWebGPUDevices();
-devices[0].PrintInfo();
+devices[0].PrintInformation(Console.Out);
 
 // Check enabled features
 var features = accelerator.NativeAccelerator.EnabledFeatures;

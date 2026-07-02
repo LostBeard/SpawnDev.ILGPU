@@ -133,12 +133,12 @@ See **[Docs/atomic-operations.md](atomic-operations.md)** for the complete per-o
 |------|---------|:------:|:----:|:-----:|:----:|:------:|:---:|
 | Int32 | int | [x] | [x] | [!] Add only (vote TF) | [x] | [x] | [x] |
 | UInt32 | uint | [x] | [x] | [!] Add only (vote TF) | [x] | [x] | [x] |
-| Int64 | long | [x] Add/bitwise, [!] Min/Max/Exch/CAS | [x] | [!] | [x] | [x] | [x] |
-| UInt64 | ulong | [x] Add/bitwise, [!] Min/Max/Exch/CAS | [x] | [!] | [x] | [x] | [x] |
+| Int64 | long | [x] Add/bitwise, [Lock] Min/Max/Exch, [!] CAS | [x] | [!] | [x] | [x] | [x] |
+| UInt64 | ulong | [x] Add/bitwise, [Lock] Min/Max/Exch, [!] CAS | [x] | [!] | [x] | [x] | [x] |
 | Float32 | float | [x] CAS loop | [x] CAS loop | [!] | [x] | [x] | [x] |
-| Float64 | double | [!] | [x] CAS loop | [!] | [x] | [x] | [x] |
+| Float64 | double | [Lock] Add/Min/Max/Exch, [!] CAS | [x] CAS loop | [!] | [x] | [x] | [x] |
 
-**[!]** = Throws `NotSupportedException` at kernel compilation time. See [atomic-operations.md](atomic-operations.md) for details.
+**[Lock]** = correct via a per-element spinlock (companion `array<atomic<u32>>` lock buffer) so both u32 halves of the 64-bit value update as one unit. **[!]** = Throws `NotSupportedException` at kernel compilation time. See [atomic-operations.md](atomic-operations.md) for details.
 
 ---
 

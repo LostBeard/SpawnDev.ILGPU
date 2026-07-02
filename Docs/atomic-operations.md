@@ -1,11 +1,12 @@
 # Atomic Operations by Backend
 
 Tracks support for all atomic operations across all backends and data types.
-Updated: 2026-04-14
+Updated: 2026-07-02
 
 **Legend:**
 - [x] PASS - native or correctly emulated, verified with tests
 - [CAS] - emulated via compare-and-swap loop (correct, slightly slower)
+- [Lock] - emulated via a per-element spinlock (a companion `array<atomic<u32>>` lock buffer, auto-provisioned by `ScanForAtomicUsage`; correct, serializes access so both u32 halves of a 64-bit value update as one unit)
 - [!] NOT SUPPORTED - throws `NotSupportedException` at kernel compilation time
 - [V] VOTE - WebGL Transform Feedback vote pattern (accumulation only, return value always 0)
 - [-] NOT TESTED - no dedicated tests yet
@@ -41,9 +42,9 @@ i64 is emulated as `vec2<u32>` on WebGPU and WebGL. Native on Wasm, CUDA, OpenCL
 | And | [x] Dual | [x] | [!] | [x] | [x] | [x] |
 | Or | [x] Dual | [x] | [!] | [x] | [x] | [x] |
 | Xor | [x] Dual | [x] | [!] | [x] | [x] | [x] |
-| Min | [!] | [CAS] | [!] | [x] | [x] | [x] |
-| Max | [!] | [CAS] | [!] | [x] | [x] | [x] |
-| Exchange | [!] | [x] | [!] | [x] | [x] | [x] |
+| Min | [Lock] | [CAS] | [!] | [x] | [x] | [x] |
+| Max | [Lock] | [CAS] | [!] | [x] | [x] | [x] |
+| Exchange | [Lock] | [x] | [!] | [x] | [x] | [x] |
 | CompareExchange | [!] | [x] | [!] | [x] | [x] | [x] |
 
 ### WebGPU i64 emulation details
@@ -52,7 +53,9 @@ i64 is emulated as `vec2<u32>` on WebGPU and WebGL. Native on Wasm, CUDA, OpenCL
 
 **Add - "CAS loop":** Lock-free CAS loop on the lo half + `atomicAdd` on the hi half with carry. The CAS loop (`atomicCompareExchangeWeak`) on the lo half serializes low-half updates. When the lo half wraps (unsigned overflow), a carry of 1 is added to the hi half via `atomicAdd`. This works because `atomicAdd` is commutative - multiple threads can add their carry values in any order and the final result is correct.
 
-**Min/Max/Exchange/CompareExchange - NOT SUPPORTED:** These operations require both halves of the i64 value to be read and/or written atomically as a single 64-bit unit. WGSL only has 32-bit atomic operations. There is no way to atomically compare or exchange two u32 words simultaneously without hardware support for 64-bit atomics. Attempting to use these operations on i64 with a WebGPU accelerator throws `NotSupportedException` at kernel compilation time with a clear error message.
+**Min/Max/Exchange - "[Lock]" spinlock:** These require both halves of the i64 value to be read and/or written atomically as a single 64-bit unit, which WGSL's 32-bit atomics can't do directly. A per-element companion `array<atomic<u32>>` lock buffer (auto-provisioned by `ScanForAtomicUsage`) serializes access: each thread `atomicCompareExchangeWeak`-acquires the slot's lock, reads/compares/writes both u32 words inside the critical section, then releases the lock. Verified with tests on WebGPU.
+
+**CompareExchange (CAS) - NOT SUPPORTED:** a lock-free 64-bit compare-and-swap has no 32-bit-atomic equivalent, so `Atomic.CompareExchange` on an i64 with a WebGPU accelerator throws `NotSupportedException` at kernel compilation time with a clear error message.
 
 ---
 
@@ -93,12 +96,12 @@ Half-precision hardware atomics are not available on any backend (f16 is 2 bytes
 
 | Operation | WebGPU | Wasm | WebGL | CUDA | OpenCL | CPU |
 |-----------|:------:|:----:|:-----:|:----:|:------:|:---:|
-| Add | [!] | [CAS] | [!] | [x] | [x] | [x] |
-| Min | [!] | [CAS] | [!] | [x] | [x] | [x] |
-| Max | [!] | [CAS] | [!] | [x] | [x] | [x] |
-| Exchange | [!] | [CAS] | [!] | [x] | [x] | [x] |
+| Add | [Lock] | [CAS] | [!] | [x] | [x] | [x] |
+| Min | [Lock] | [CAS] | [!] | [x] | [x] | [x] |
+| Max | [Lock] | [CAS] | [!] | [x] | [x] | [x] |
+| Exchange | [Lock] | [CAS] | [!] | [x] | [x] | [x] |
 
-**WebGPU:** f64 is emulated as two 32-bit words (Dekker `vec2<f32>` or Ozaki `vec4<f32>`). Like i64, atomic arithmetic requires both words to update atomically. Throws `NotSupportedException`.
+**WebGPU - "[Lock]" spinlock:** f64 is emulated as two 32-bit words (Dekker `vec2<f32>` or Ozaki `vec4<f32>`). Add/Min/Max/Exchange each acquire a per-element companion lock (`array<atomic<u32>>`, auto-provisioned by `ScanForAtomicUsage`), read both words + the emulated f64, compute, write both words back, then release - so both words update as one atomic unit. (A lock-free 64-bit CompareExchange has no 32-bit-atomic form and is not offered.)
 
 **Wasm:** f64 is native. CAS loop uses `i64.atomic.rmw.cmpxchg` with `f64.reinterpret_i64` / `i64.reinterpret_f64` for bitwise conversion.
 

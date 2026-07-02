@@ -245,7 +245,7 @@ Hardware-accelerated BLAS (Basic Linear Algebra Subprograms) operations on NVIDI
 ```csharp
 using ILGPU.Runtime.Cuda;
 
-var cublas = new CuBlas<CuBlasPointerModeHostHandler>(cudaAccelerator);
+var cublas = new CuBlas(cudaAccelerator);   // non-generic: defaults to ManualMode pointer-mode management
 ```
 
 ### BLAS Levels
@@ -258,12 +258,19 @@ var cublas = new CuBlas<CuBlasPointerModeHostHandler>(cudaAccelerator);
 
 ### Pointer Modes
 
-cuBLAS supports two pointer modes that control where scalar parameters (alpha, beta) are read from:
+cuBLAS reads scalar parameters (alpha, beta) from either host or device memory. The runtime `CuBlasPointerMode` enum selects which:
 
-| Mode | Handler | Description |
-|------|---------|-------------|
-| Host | `CuBlasPointerModeHostHandler` | Scalars on CPU (default, most convenient) |
-| Device | `CuBlasPointerModeDeviceHandler` | Scalars on GPU (avoids CPU-GPU sync for chained operations) |
+| `CuBlasPointerMode` | Description |
+|---------------------|-------------|
+| `Host` | Scalars on CPU (default, most convenient) |
+| `Device` | Scalars on GPU (avoids CPU-GPU sync for chained operations) |
+
+*How* the pointer mode is managed is chosen by the `CuBlas<TPointerModeHandler>` type parameter — a struct implementing `ICuBlasPointerModeHandler<T>`, from `CuBlasPointerModeHandlers`:
+
+| Handler | Behavior |
+|---------|----------|
+| `CuBlasPointerModeHandlers.ManualMode` | You set `cublas.PointerMode` yourself (the non-generic `CuBlas` uses this) |
+| `CuBlasPointerModeHandlers.AutomaticMode` | The wrapper switches pointer mode per call as needed |
 
 ### Configuration
 

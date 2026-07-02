@@ -90,7 +90,7 @@ kernel output buffer (WebGL texture in worker)
 Used for any accelerator that is neither WebGPU nor WebGL (Wasm in the browser; CPU on desktop). It reuses a single `ImageData` object to avoid GC churn:
 
 1. If the buffer is browser-backed (`IBrowserMemoryBuffer`) — true for Wasm buffers — it calls `CopyToHostUint8ArrayAsync` for a fast JS-side copy with no managed allocation.
-2. Otherwise it falls back to synchronous `CopyToCPU` into a pooled `uint[]` array.
+2. Otherwise it falls back to synchronous `CopyToCPU` into a freshly allocated `uint[]` (only the destination `ImageData` / `Uint8ClampedArray` is reused across calls, not this staging array).
 3. `ctx.putImageData` writes the `ImageData` to the canvas.
 
 ---

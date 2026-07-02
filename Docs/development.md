@@ -58,7 +58,7 @@ The reason: ILGPU and ILGPU.Algorithms are upstream projects we forked, and they
 
 ### `SynchronizeAsync` vs `Synchronize` in Blazor WASM
 
-Blazor WebAssembly runs on a single thread. **Calling synchronous APIs that wait on a Task will deadlock the main thread** — the JS event loop can't pump message-channel callbacks while the C# call stack is blocked, and the resolution that the C# code is waiting for never arrives.
+Blazor WebAssembly runs on a single thread. The synchronous wait/observe APIs — `accelerator.Synchronize()` and `buffer.GetAsArray1D()` / `CopyToCPU()` — **throw `NotSupportedException` on the browser backends** (loud and immediate: the single thread cannot block-wait). Use `Flush()` if you only need to submit without waiting. Separately, **blocking on any async GPU work with `.Result` / `.Wait()` deadlocks the main thread** — the JS event loop can't pump message-channel callbacks while the C# call stack is blocked, so the resolution never arrives. Both are why you `await` the async forms.
 
 In Blazor WASM, always use:
 - `await accelerator.SynchronizeAsync()` (NOT `accelerator.Synchronize()`)

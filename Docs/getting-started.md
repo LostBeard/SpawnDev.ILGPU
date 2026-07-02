@@ -162,7 +162,7 @@ Key rules:
 await accelerator.SynchronizeAsync();
 ```
 
-> **Critical:** In Blazor WASM, you **must** use `SynchronizeAsync()` instead of `Synchronize()`. The main thread is single-threaded — calling the synchronous version will deadlock. On desktop, both sync and async work, but async is recommended for cross-platform code.
+> **Critical:** In Blazor WASM, you **must** use `SynchronizeAsync()` instead of `Synchronize()`. The main thread is single-threaded, so the synchronous `Synchronize()` **throws `NotSupportedException`** on the browser backends (use `Flush()` if you only need to submit without waiting). On desktop, both sync and async work, but async is recommended for cross-platform code. (Separately, blocking on any async GPU work with `.Result`/`.Wait()` will deadlock the thread.)
 
 ### Data Readback
 

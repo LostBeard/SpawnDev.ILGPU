@@ -70,14 +70,14 @@ var results = await bufC.CopyToHostAsync<float>();   // The only GPU→CPU data 
 If you're certain your code will **never** run in a browser, you can use ILGPU's standard synchronous API:
 
 ```csharp
-// Desktop only — will deadlock in Blazor WASM
+// Desktop only — the synchronous Synchronize()/GetAsArray1D() below THROW NotSupportedException in Blazor WASM
 using var context = Context.Create(builder => builder.AllAccelerators());
 using var accelerator = context.GetPreferredDevice(preferCPU: false)
     .CreateAccelerator(context);
 
 // ... load kernel, dispatch ...
 
-accelerator.Synchronize();  // Desktop: blocks until GPU done. Browser: only FLUSHES (dispatches) the queue, does NOT wait and does NOT deadlock — use `await accelerator.SynchronizeAsync()` to await completion
+accelerator.Synchronize();  // Desktop: blocks until GPU done. Browser: THROWS NotSupportedException — use `await accelerator.SynchronizeAsync()` to wait, or `accelerator.Flush()` to submit without waiting
 var results = bufC.GetAsArray1D();  // Synchronous readback — desktop only (sync GPU->CPU read THROWS on browser; use `await bufC.CopyToHostAsync()`)
 ```
 
@@ -409,11 +409,11 @@ This outputs compiled shader source, buffer binding details, and dispatch inform
 After loading a kernel the generated shader source is captured automatically:
 
 ```csharp
-using SpawnDev.ILGPU.WebGPU;
-using SpawnDev.ILGPU.WebGL;
+using SpawnDev.ILGPU.WebGPU.Backend;   // WebGPUBackend
+using SpawnDev.ILGPU.WebGL;            // WebGLAccelerator
 
 // Available immediately after LoadAutoGroupedStreamKernel / LoadStreamKernel
-string? wgsl = WebGPUAccelerator.LastGeneratedWGSL;   // WebGPU backend
+string? wgsl = WebGPUBackend.LastGeneratedWGSL;       // WebGPU backend
 string? glsl = WebGLAccelerator.LastGeneratedGLSL;    // WebGL backend
 ```
 

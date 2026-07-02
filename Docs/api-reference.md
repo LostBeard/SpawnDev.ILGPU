@@ -17,16 +17,16 @@ using SpawnDev.ILGPU;
 | Method | Return | Description |
 |--------|--------|-------------|
 | `Context.CreateAsync(Action<Builder>)` | `Task<Context>` | Creates a context using an async builder (required for WebGPU probing) |
-| `builder.AllAcceleratorsAsync()` | `Builder` | Enables all available backends (browser: WebGPU, WebGL, Wasm; desktop: CUDA, OpenCL, CPU). Silently skips unavailable ones |
-| `builder.WebGPU()` | `Builder` | Enables WebGPU backend only |
-| `builder.WebGL()` | `Builder` | Enables WebGL backend only |
-| `builder.Wasm()` | `Builder` | Enables Wasm backend only |
+| `builder.AllAcceleratorsAsync()` | `Task<Builder>` | Enables all available backends (browser: WebGPU, WebGL, Wasm; desktop: CUDA, OpenCL, CPU). Silently skips unavailable ones. Async (WebGPU/WebGL probing is async) — `await` it |
+| `builder.WebGPU()` | `Task` | Enables WebGPU backend only (async probe — `await` it) |
+| `builder.WebGL()` | `Task` | Enables WebGL backend only (async probe — `await` it) |
+| `builder.Wasm()` | `Builder` | Enables Wasm backend only (synchronous — chainable) |
 | `context.CreatePreferredAcceleratorAsync()` | `Task<Accelerator>` | Creates the best available accelerator (browser: WebGPU > WebGL > Wasm; desktop: CUDA > OpenCL > CPU) |
 | `accelerator.SynchronizeAsync()` | `Task` | Async wait for all GPU work to complete |
 | `buffer.CopyToHostAsync<T>()` | `Task<T[]>` | Copies buffer data to a new array (works with all backends) |
 | `view.CopyFromAsync(source)` | `Task` | Backend-agnostic async mirror of sync `CopyFrom` (on `ArrayView<T>`, `ArrayView1D<T,TStride>`, `MemoryBuffer1D<T,TStride>`). Drains pending Wasm worker dispatches before the copy so GPU→GPU copies after an unawaited kernel dispatch don't read `SharedArrayBuffer` mid-write; no-op drain on WebGPU/WebGL/CUDA/OpenCL/CPU |
-| `context.GetWebGPUDevices()` | `List<WebGPUILGPUDevice>` | Lists registered WebGPU devices |
-| `context.GetWebGLDevices()` | `List<WebGLILGPUDevice>` | Lists registered WebGL devices |
+| `context.GetWebGPUDevices()` | `Context.DeviceCollection<WebGPUILGPUDevice>` | Lists registered WebGPU devices |
+| `context.GetWebGLDevices()` | `Context.DeviceCollection<WebGLILGPUDevice>` | Lists registered WebGL devices |
 
 ### GpuMatrix4x4
 
@@ -197,10 +197,10 @@ Represents a WebGPU device available in the browser.
 
 | Member | Type | Description |
 |--------|------|-------------|
-| `GetDevicesAsync()` | `Task<List<WebGPUDevice>>` | Detect all available WebGPU devices |
+| `GetDevicesAsync()` | `Task<ImmutableArray<WebGPUDevice>>` | Detect all available WebGPU devices |
 | `GetDefaultDeviceAsync()` | `Task<WebGPUDevice?>` | Get the first available device |
-| `CreateAcceleratorAsync(context)` | `Task<WebGPUAccelerator>` | Create a WebGPU accelerator |
-| `PrintInfo()` | `void` | Print device information to console |
+| `CreateAcceleratorAsync()` | `Task<WebGPUNativeAccelerator>` | Create a low-level native accelerator from this JS-wrapper device. (For the ILGPU `WebGPUAccelerator`, use `WebGPUILGPUDevice.CreateAcceleratorAsync(context)` — the type `context.GetWebGPUDevices()` returns.) |
+| `PrintInfo(TextWriter)` | `void` | Print device information to the given writer, e.g. `PrintInfo(Console.Out)` |
 
 ### WebGPUNativeAccelerator
 
@@ -237,9 +237,10 @@ Configuration for the WebGPU transpiler.
 
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
-| `EnableF64Emulation` | `bool` | `true` | Emulate `double` as `vec2<f32>` |
-| `UseOzakiF64Emulation` | `bool` | `false` | Use Ozaki (precise) vs Dekker (fast) |
-| `EnableI64Emulation` | `bool` | `true` | Emulate `long`/`ulong` as `vec2<u32>` |
+| `F64Emulation` | `F64EmulationMode` | `Dekker` | How to emulate `double`: `Dekker` (`vec2<f32>`, fast), `Ozaki` (`vec4<f32>`, precise), or `Disabled` |
+| `ForceDisableSubgroups` | `bool` | `false` | Force-disable subgroup features even when the adapter exposes them |
+
+(There is no i64 emulation toggle — `long`/`ulong` are always emulated as `vec2<u32>` on WebGPU.)
 
 ### ExternalWebGPUMemoryBuffer
 
