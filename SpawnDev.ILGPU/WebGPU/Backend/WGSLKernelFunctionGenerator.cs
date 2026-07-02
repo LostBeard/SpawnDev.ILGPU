@@ -7636,11 +7636,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                 string fieldAccess = $".field_{value.FieldSpan.Index}";
 
-                // Heuristic: If source is a vector type string, use x/y/z/w
+                // Heuristic: a vector-typed source accesses lanes by swizzle, not struct
+                // members. Covers Index2D/3D (vec2/vec3<i32>) and AsAligned16-forced
+                // vec4<f32> struct elements (the 128-bit vectorized GEMM load - a struct's
+                // field_0..3 map to .x/.y/.z/.w on the vec4).
                 var typeStr = TypeGenerator[value.ObjectValue.Type];
-                if (typeStr.Contains("vec2"))
+                if (typeStr.StartsWith("vec2") || typeStr.StartsWith("vec3") || typeStr.StartsWith("vec4"))
                 {
-                    fieldAccess = value.FieldSpan.Index == 0 ? ".x" : ".y";
+                    fieldAccess = value.FieldSpan.Index switch
+                    {
+                        0 => ".x",
+                        1 => ".y",
+                        2 => ".z",
+                        3 => ".w",
+                        _ => fieldAccess
+                    };
                 }
 
                 AppendLine($"{finalPrefix}{standardTarget} = {standardSource}{fieldAccess};");
@@ -7653,7 +7663,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var val = Load(value.Value);
             // Directly update the field of the hoisted variable
             // Note: This relies on 'target' being a mutable 'var' (hoisted primitive)
-            AppendLine($"{target}.field_{value.FieldSpan.Index} = {val};");
+            // Vector-typed target (Index2D/3D or an AsAligned16-forced vec4<f32> struct)
+            // sets lanes by swizzle, not struct members.
+            string setFieldAccess = $".field_{value.FieldSpan.Index}";
+            var setTypeStr = TypeGenerator[value.ObjectValue.Type];
+            if (setTypeStr.StartsWith("vec2") || setTypeStr.StartsWith("vec3") || setTypeStr.StartsWith("vec4"))
+            {
+                setFieldAccess = value.FieldSpan.Index switch
+                {
+                    0 => ".x",
+                    1 => ".y",
+                    2 => ".z",
+                    3 => ".w",
+                    _ => setFieldAccess
+                };
+            }
+            AppendLine($"{target}{setFieldAccess} = {val};");
 
             // Define the result value to maintain connectivity for downstream users (like Phi)
             // Since we mutated 'target' in place, the result 'value' is logically equivalent to 'target'

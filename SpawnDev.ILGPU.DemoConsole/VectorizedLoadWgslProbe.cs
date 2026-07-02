@@ -39,12 +39,34 @@ internal static class VectorizedLoadWgslProbe
     {
         var outDir = @"D:\users\tj\Projects\SpawnDev.ILGPU\vectorized_load_wgsl";
         Directory.CreateDirectory(outDir);
-        Dump((Action<Index1D, ArrayView<float>, ArrayView<float>>)ScalarLoadsKernel, "A_scalar", outDir);
-        Dump((Action<Index1D, ArrayView<F4>, ArrayView<float>>)StructLoadKernel, "B_struct16", outDir);
-        return Task.FromResult(0);
+        string aWgsl = Dump((Action<Index1D, ArrayView<float>, ArrayView<float>>)ScalarLoadsKernel, "A_scalar", outDir);
+        string bWgsl = Dump((Action<Index1D, ArrayView<F4>, ArrayView<float>>)StructLoadKernel, "B_struct16", outDir);
+
+        // Offline gate for the AsAligned16 -> vec4<f32> 128-bit-load trigger. These are the
+        // assertions the trigger MUST satisfy; a regression flips exit code (non-zero) so this
+        // command doubles as a fast pre-PMT check.
+        int failures = 0;
+        void Check(bool ok, string what)
+        {
+            Console.WriteLine($"    [{(ok ? "PASS" : "FAIL")}] {what}");
+            if (!ok) failures++;
+        }
+
+        // A) control: plain scalar view, NO AsAligned16 -> stays array<f32>, never vec4.
+        Check(CountOccurrences(aWgsl, "array<vec4<f32>>") == 0, "A_scalar (no AsAligned16) is NOT vec4-ified");
+
+        // B) F4 + AsAligned16: exactly one vec4 binding, one 128-bit dereference load, lane
+        //    swizzles, and NO struct field_N access left on the vec4 local.
+        Check(CountOccurrences(bWgsl, "array<vec4<f32>>") == 1, "B_struct16 binds array<vec4<f32>>");
+        Check(CountOccurrences(bWgsl, "var<storage") >= 1 && bWgsl.Contains("param1 : array<vec4<f32>>"), "B_struct16 param1 is the 128-bit binding");
+        Check(bWgsl.Contains(".x") && bWgsl.Contains(".y") && bWgsl.Contains(".z") && bWgsl.Contains(".w"), "B_struct16 field access swizzles .x/.y/.z/.w");
+        Check(!bWgsl.Contains(".field_"), "B_struct16 has NO .field_N access (would be invalid on a vec4)");
+
+        Console.WriteLine($"[vectorized-load-wgsl] {(failures == 0 ? "ALL CHECKS PASS" : $"{failures} CHECK(S) FAILED")}");
+        return Task.FromResult(failures == 0 ? 0 : 1);
     }
 
-    private static void Dump(Delegate kernel, string label, string outDir)
+    private static string Dump(Delegate kernel, string label, string outDir)
     {
         try
         {
@@ -63,10 +85,12 @@ internal static class VectorizedLoadWgslProbe
                     Console.WriteLine("    BIND " + line.Trim());
             foreach (var diag in result.Diagnostics)
                 Console.WriteLine($"    diag: {diag}");
+            return wgsl;
         }
         catch (Exception ex)
         {
             Console.Error.WriteLine($"[vectorized-load-wgsl] {label} EXCEPTION: {ex.Message}");
+            return "";
         }
     }
 

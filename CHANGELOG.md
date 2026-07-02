@@ -2,6 +2,16 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.17.1-local.1 - WebGPU WGSL 128-bit vectorized load (AsAligned16 -> array<vec4<f32>>)
+
+Wrapper-only over 4.17.0 (forks unchanged at 2.2.0). The WebGPU kernel-side lever for SpawnDev.ILGPU.ML's DAv3 GEMM (Seven's beat-ORT campaign): every WGSL storage-buffer load was scalar, so a register-blocked GEMM tile load cost four scalar loads per 16-byte element. This makes a 16-byte 4xf32 struct reached through `AsAligned16()` load in ONE 128-bit load.
+
+- **`AsAligned16()` trigger.** When a kernel (or any helper it calls) reads a 16-byte 4xf32 struct element through an `AsAligned(>=16)` view, that view binds as `array<vec4<f32>>` and its element load becomes a single `vec4<f32>` dereference; the struct's `field_0..3` accesses lower to `.x/.y/.z/.w` swizzles. **Opt-in via the `AsAligned16()` CALL, not the element type** - a plain `ArrayView<F4>` with no alignment call is untouched, so no unrelated 4xf32 struct in any other kernel is re-lowered (no blast radius). Same C# construct as the PTX side (`ArrayView<F4>().AsAligned16()[i]`, which already emits `ld.v4.b32` on CUDA).
+- **How.** `WebGPUBackend.CreateKernelBuilder` scans the kernel + helper IR for qualifying `AsAligned` nodes before any code generator runs and forces the element `StructureType` to WGSL `vec4<f32>` in the shared `WGSLTypeGenerator` (`ForceVec4Element`). Because every WGSL type name flows through that generator, the binding (`array<vec4<f32>>`), the element load, and struct construction all render `vec4<f32>` consistently; `GetField`/`SetField` swizzle by lane. Keying on the aligned view's element type (not a Source->param walk) means a `SubView` of the param triggers it too.
+- **Folds in `a601957`** (the AsAligned lowering fix that never shipped in a package): `AsAligned` was mis-declared with its element type then indexed, producing invalid WGSL; it now aliases the source view (like `SubView`). Without this, any consumer using `AsAligned16()` on WebGPU hit a Dawn shader-creation error.
+- **CUDA/OpenCL/Wasm:** the 4xf32 struct stays scalar-correct (unchanged). **WebGL:** capability-gate such kernels until the tracked GLSL struct-load bug is fixed (WebGL cannot do 128-bit loads anyway).
+- **Gate:** `BackendTestBase.AsAligned16_StructOf4_SumsCorrectly` (a `struct { float A,B,C,D; }` + `AsAligned16()`, CPU-reference comparison) now exercises the vec4 path - PMT scoped (`PMT_FILTER=AsAligned16`): **8 passed / 0 failed / 1 skipped**, both WebGPU + WebGPU-no-subgroups valid on real Dawn (0 shader errors) and numerically correct; WebGL skips (tracked GLSL bug). Offline dump: `DemoConsole -- vectorized-load-wgsl` (asserts `array<vec4<f32>>` binding + single vec4 load + `.x/.y/.z/.w`).
+
 ## 4.17.0 - ArrayView<T>.CopyToStreamAsync (GPU->Stream save primitive)
 
 Stable cut over 4.16.2. The save-side mirror of `CopyFromStreamAsync` (4.9.14): stream a GPU buffer OUT to a `Stream` in bounded chunks. Forks bump to **2.2.0** (genuinely new public API in the fork - see the four-package note in `SpawnDev.ILGPU.csproj`).

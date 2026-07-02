@@ -931,6 +931,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             var typeGenerator = new WGSLTypeGenerator(this, Context.TypeContext);
 
+            // AsAligned16 vec4-load trigger (2026-07-02): when the kernel (or any helper it calls)
+            // reads a 16-byte 4×f32 struct element through an AsAligned(>=16) view, bind that view
+            // as array<vec4<f32>> so the element load is ONE 128-bit vectorized load on WebGPU
+            // (every WGSL load is scalar otherwise - Seven's DAv3 GEMM lever). Opt-in via the
+            // AsAligned16() CALL, not the element type, so it never re-lowers an unrelated 4×f32
+            // struct (no Rule-1 blast radius). MUST run here - before any generator constructor -
+            // so the shared type override is set before the first type access.
+            ScanForVec4AlignedViews(backendContext, typeGenerator);
+
             // For explicitly grouped kernels, use the specialization's MaxNumThreadsPerGroup
             // if available. Do NOT fall back to DefaultMaxWorkgroupSize (the device's max,
             // e.g. 1024) — that would bake a too-large @workgroup_size into the WGSL, causing
@@ -949,6 +958,72 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 maxWorkgroupSize);
 
             return builder;
+        }
+
+        /// <summary>
+        /// Scans the kernel method and every helper it calls for <c>AsAligned(&gt;=16)</c> view
+        /// loads whose element type is a 16-byte 4×f32 struct, and forces those element types to
+        /// WGSL <c>vec4&lt;f32&gt;</c> (one 128-bit vectorized load). See
+        /// <see cref="WGSLTypeGenerator.ForceVec4Element"/>. Runs from CreateKernelBuilder BEFORE
+        /// any code generator so the shared type generator's override is in place before the first
+        /// type access.
+        /// </summary>
+        private static void ScanForVec4AlignedViews(
+            in BackendContext backendContext,
+            WGSLTypeGenerator typeGenerator)
+        {
+            var visited = new HashSet<global::ILGPU.IR.Method>();
+            ScanMethodForVec4AlignedViews(backendContext.KernelMethod, typeGenerator, visited);
+            foreach (var (method, _) in backendContext)
+                ScanMethodForVec4AlignedViews(method, typeGenerator, visited);
+        }
+
+        private static void ScanMethodForVec4AlignedViews(
+            global::ILGPU.IR.Method method,
+            WGSLTypeGenerator typeGenerator,
+            HashSet<global::ILGPU.IR.Method> visited)
+        {
+            if (method == null || !visited.Add(method))
+                return;
+            foreach (var block in method.Blocks)
+            {
+                foreach (var entry in block)
+                {
+                    if (entry.Value is not global::ILGPU.IR.Values.AsAligned aligned)
+                        continue;
+                    // View operation only (pointer alignment is not a vectorized array binding),
+                    // with a resolvable compile-time alignment of at least 16 bytes (a 4×f32 tile
+                    // is exactly a 16-byte vec4).
+                    if (!aligned.IsViewOperation)
+                        continue;
+                    if (!aligned.TryGetAlignmentConstant(out int alignBytes) || alignBytes < 16)
+                        continue;
+                    if (aligned.Source.Type is not global::ILGPU.IR.Types.AddressSpaceType viewType)
+                        continue;
+                    if (viewType.ElementType is not global::ILGPU.IR.Types.StructureType elemStruct)
+                        continue;
+                    if (IsFourFloat32Struct(elemStruct, typeGenerator))
+                        typeGenerator.ForceVec4Element(elemStruct);
+                }
+            }
+        }
+
+        /// <summary>
+        /// True if the struct is exactly a 16-byte, 4-lane all-f32 value (its flattened leaf
+        /// fields are four Float32s) - the WGSL <c>vec4&lt;f32&gt;</c> layout. Classifies fields
+        /// through the type generator (matching <c>ComputePackedLayout</c>) so a struct built from
+        /// nested 2×f32 sub-structs also qualifies.
+        /// </summary>
+        private static bool IsFourFloat32Struct(
+            global::ILGPU.IR.Types.StructureType structType,
+            WGSLTypeGenerator typeGenerator)
+        {
+            if (structType.NumFields != 4)
+                return false;
+            for (int i = 0; i < structType.NumFields; i++)
+                if (typeGenerator[structType.Fields[i]] != "f32")
+                    return false;
+            return true;
         }
 
         /// <summary>

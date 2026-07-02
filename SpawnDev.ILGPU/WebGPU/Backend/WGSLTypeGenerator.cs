@@ -19,6 +19,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             new Dictionary<TypeNode, string>();
 
         /// <summary>
+        /// Element struct types (16-byte, 4×f32) reached through an <c>AsAligned(&gt;=16)</c>
+        /// view load, forced to map to WGSL <c>vec4&lt;f32&gt;</c> for a single 128-bit
+        /// vectorized load. Populated by <see cref="WebGPUBackend"/> BEFORE any code generator
+        /// runs (opt-in via the <c>AsAligned16()</c> CALL, not the type - so it is contained to
+        /// aligned views and never re-lowers an unrelated 4×f32 struct). Because every WGSL type
+        /// name flows through this generator, forcing the mapping makes the binding
+        /// (<c>array&lt;vec4&lt;f32&gt;&gt;</c>), the element load, and struct construction all
+        /// render <c>vec4&lt;f32&gt;</c> consistently; GetField/SetField swizzle field_0..3 to
+        /// .x/.y/.z/.w (see <see cref="IsVec4Element"/>).
+        /// </summary>
+        private readonly HashSet<TypeNode> vec4Structs = new HashSet<TypeNode>();
+
+        /// <summary>
         /// Constructs a new type generator.
         /// </summary>
         internal WGSLTypeGenerator(WebGPUBackend backend, IRTypeContext typeContext)
@@ -157,6 +170,35 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 _ => null
             };
         }
+
+        /// <summary>
+        /// Forces a 16-byte 4×f32 struct element type to map to WGSL <c>vec4&lt;f32&gt;</c> so an
+        /// <c>AsAligned16()</c>'d view of it binds as <c>array&lt;vec4&lt;f32&gt;&gt;</c> (one
+        /// 128-bit load). MUST be called before any type access (i.e. before the code generators
+        /// run - see <see cref="WebGPUBackend"/>'s AsAligned scan in CreateKernelBuilder) so the
+        /// mapping is consistent across binding, element load, and struct construction.
+        /// </summary>
+        public void ForceVec4Element(StructureType structType)
+        {
+            readerWriterLock.EnterWriteLock();
+            try
+            {
+                vec4Structs.Add(structType);
+                mapping[structType] = "vec4<f32>";
+            }
+            finally
+            {
+                readerWriterLock.ExitWriteLock();
+            }
+        }
+
+        /// <summary>
+        /// True if the given type was forced to <c>vec4&lt;f32&gt;</c> by
+        /// <see cref="ForceVec4Element"/>. Used by GetField/SetField to swizzle field_0..3 to
+        /// .x/.y/.z/.w. The set is populated single-threaded before parallel codegen, so a plain
+        /// read is safe here.
+        /// </summary>
+        public bool IsVec4Element(TypeNode type) => vec4Structs.Contains(type);
 
         private string GetOrCreateType(TypeNode typeNode)
         {

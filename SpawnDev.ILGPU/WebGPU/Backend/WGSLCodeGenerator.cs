@@ -2222,13 +2222,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             Declare(target);
 
             string fieldName = $"field_{value.FieldSpan.Index}";
-            if (IsIndexType(value.ObjectValue.Type))
+            // Index types (vec2/vec3<i32>) and AsAligned16-forced vec4<f32> struct elements
+            // access their lanes by swizzle, not field_N. Index types never have a field 3, so
+            // the `3 => "w"` case is inert for them and only serves the vec4 element case.
+            if (IsIndexType(value.ObjectValue.Type) || TypeGenerator.IsVec4Element(value.ObjectValue.Type))
             {
                 fieldName = value.FieldSpan.Index switch
                 {
                     0 => "x",
                     1 => "y",
                     2 => "z",
+                    3 => "w",
                     _ => fieldName
                 };
             }
@@ -2245,13 +2249,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             AppendLine($"{target} = {source};");
 
             string fieldName = $"field_{value.FieldSpan.Index}";
-            if (IsIndexType(value.ObjectValue.Type))
+            // See GetField: Index types and AsAligned16-forced vec4<f32> elements swizzle lanes.
+            if (IsIndexType(value.ObjectValue.Type) || TypeGenerator.IsVec4Element(value.ObjectValue.Type))
             {
                 fieldName = value.FieldSpan.Index switch
                 {
                     0 => "x",
                     1 => "y",
                     2 => "z",
+                    3 => "w",
                     _ => fieldName
                 };
             }
