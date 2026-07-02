@@ -68,6 +68,11 @@ try
     if (args.Length > 0 && args[0] == "vectorized-load-ptx")
         return await VectorizedLoadPtxDump.Run();
 
+    // WGSL counterpart: does a 16-byte struct-of-4 view via AsAligned16() emit a vec4 (128-bit)
+    // load on WebGPU, or flatten to scalar array<f32>? Seven's GEMM-core 128-bit-load spike (2026-07-01).
+    if (args.Length > 0 && args[0] == "vectorized-load-wgsl")
+        return await VectorizedLoadWgslProbe.Run();
+
     // Offline Wasm +inf codegen probe (Tuvok finding #2). No browser, no dispatch.
     if (args.Length > 0 && args[0] == "wasm-inf")
         return await WasmInfProbe.Run();
