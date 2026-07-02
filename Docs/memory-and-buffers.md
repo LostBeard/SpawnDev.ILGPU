@@ -11,7 +11,8 @@ GPU memory is separate from CPU memory. You allocate **buffers** on the GPU, pas
 | **`MemoryBuffer1D<T, Stride>`** | Host-side handle to GPU memory — allocated and disposed on the CPU |
 | **`ArrayView<T>`** | GPU-side reference — passed to kernels, indexable like an array |
 | **`CopyToHostAsync`** | Reads data from GPU back to a CPU array |
-| **`SynchronizeAsync`** | Waits for all GPU work to complete |
+| **`Flush`** | Submits queued GPU work to the device **without waiting** — valid on every backend (no-op on desktop; submits the batched encoder/queue on the browser backends) |
+| **`SynchronizeAsync`** | Submits **and waits** for all GPU work to complete — the browser-safe way to wait (the synchronous `Synchronize()` **throws** on the browser backends) |
 
 ## Allocating Buffers
 
@@ -185,14 +186,21 @@ After launching a kernel, you must synchronize before reading results:
 ```csharp
 kernel((Index1D)length, bufA.View, bufB.View, bufC.View);
 
-// Synchronize() flushes commands to the backend (non-blocking, safe in WASM)
-accelerator.Synchronize();
+// Flush() SUBMITS the batched work without waiting — valid on every backend
+// (no-op on desktop; submits the command encoder / worker queue on the browser backends).
+accelerator.Flush();
 
-// SynchronizeAsync() flushes AND waits for GPU completion
+// SynchronizeAsync() SUBMITS and WAITS for GPU completion — the browser-safe way to wait.
 await accelerator.SynchronizeAsync();
 ```
 
-> **Semantics:** `Synchronize()` flushes queued commands to the backend but does **not** wait for completion and does **not** transfer data. `SynchronizeAsync()` flushes and waits for all GPU operations to complete. Neither transfers data — use `CopyToHostAsync()` to read results back to the CPU.
+> **Semantics (the sync/async contract).** Three distinct surfaces — none of them transfer data (use `CopyToHostAsync()` to read results back):
+>
+> - **`Flush()`** submits pending work to the device but does **not** wait. It is fire-and-forget, so it is valid **synchronously on every backend** (desktop: a no-op, work is already submitted as it is enqueued; browser: submits the batched command encoder / worker queue and returns). Use it to submit periodically during a long dispatch loop. It is the honestly-named replacement for the old browser habit of calling `Synchronize()` as a non-blocking flush.
+> - **`SynchronizeAsync()`** submits **and waits** for all submitted GPU work to complete. This is the portable way to wait before disposing buffers a pending dispatch references (a host readback via `CopyToHostAsync()` already drains, so it does not need a separate wait). `await` it.
+> - **`Synchronize()`** (synchronous wait) blocks until done on the desktop backends (CPU/CUDA/OpenCL) but **throws `NotSupportedException` on the browser backends (WebGPU/WebGL/Wasm)** — the single Blazor thread cannot block-wait, so the throw makes the misuse loud instead of silently reading stale data. To wait on a browser backend, `await SynchronizeAsync()`; to submit without waiting, call `Flush()`.
+>
+> See [async.md](async.md) for the full per-operation sync/async surface.
 
 ### CopyToHostAsync — Unified Extension Method
 

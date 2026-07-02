@@ -20,17 +20,20 @@ task.GetAwaiter().GetResult();       // DEADLOCKS
 ### ✅ Correct Async Pattern
 
 ```csharp
-// Synchronize() flushes commands to the backend (non-blocking, safe in WASM)
-accelerator.Synchronize();
+// Flush() SUBMITS batched work without waiting — valid on every backend (no-op on desktop,
+// submits the command encoder / worker queue on browser). Use it in a long dispatch loop.
+accelerator.Flush();
 
-// SynchronizeAsync() flushes AND waits for completion
+// SynchronizeAsync() SUBMITS and WAITS for completion — the browser-safe way to wait.
 await accelerator.SynchronizeAsync();
 
-// CopyToHostAsync() is the only way to read GPU data back to CPU
+// CopyToHostAsync() is the only way to read GPU data back to CPU (it drains, then reads).
 var results = await buffer.CopyToHostAsync<float>();
 ```
 
 > **Rule:** Always propagate `async/await` through your entire call stack. Never use `.Result`, `.Wait()`, or `.GetAwaiter().GetResult()` on the main thread.
+>
+> **Never call the synchronous `accelerator.Synchronize()` on a browser backend — it THROWS `NotSupportedException`** (the single Blazor thread cannot block-wait). Use `await SynchronizeAsync()` to wait, or `Flush()` to submit without waiting. (It blocks-until-done only on the desktop backends: CPU/CUDA/OpenCL.) See [async.md](async.md).
 
 ## `throw` Not Supported in Kernels
 
