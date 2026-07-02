@@ -1,0 +1,63 @@
+using System;
+using System.Runtime.InteropServices;
+using System.Threading.Tasks;
+using ILGPU;
+using ILGPU.Runtime;
+using SpawnDev.UnitTesting;
+
+namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
+{
+    // AsAligned16() on a 16-byte struct-of-4 view. On PTX this emits a 128-bit ld.v4.b32; on the
+    // browser backends the view is a compile-time alignment hint (pass-through). This guards the WGSL
+    // AsAligned lowering, which previously mis-declared the view result with its ELEMENT type
+    // (`var v : struct_403;`) and then indexed it -> invalid WGSL that Dawn rejected (latent: no
+    // production kernel used AsAligned16). The fix aliases the result to the source view (like SubView).
+    public abstract partial class BackendTestBase
+    {
+        [StructLayout(LayoutKind.Sequential)]
+        public struct AsAlignedF4 { public float A, B, C, D; }
+
+        static void AsAlignedStructSumKernel(Index1D i, ArrayView<AsAlignedF4> w, ArrayView<float> o)
+        {
+            var v = w.AsAligned16()[i];
+            o[i] = v.A + v.B + v.C + v.D;
+        }
+
+        /// <summary>
+        /// AsAligned16() struct-of-4 load must produce correct results on every backend (and valid,
+        /// Dawn-accepted WGSL on WebGPU). Regression guard for the AsAligned WGSL lowering.
+        /// </summary>
+        [TestMethod]
+        public async Task AsAligned16_StructOf4_SumsCorrectly() => await RunTest(async accelerator =>
+        {
+            // WebGL SKIP (tracked): a struct-of-4 ArrayView load emits invalid GLSL (`assign float to
+            // struct_514` / `float + int` - the struct load/field path through texelFetch, NOT the
+            // AsAligned alias, which is fixed). WebGL has no native struct storage and cannot do 128-bit
+            // loads regardless, so this construct is never a WebGL optimization. Separate deeper GLSL
+            // struct-load-via-texelFetch bug - tracked for a focused pass, see
+            // geordi-webgl-struct-of-4-load-glsl-bug-tracked-2026-07-01.
+            if (accelerator.AcceleratorType == AcceleratorType.WebGL)
+                throw new UnsupportedTestException("WebGL: struct-element ArrayView load emits invalid GLSL (separate tracked struct-load-via-texelFetch bug; AsAligned itself is fixed).");
+
+            const int n = 512;
+            var data = new AsAlignedF4[n];
+            var expected = new float[n];
+            for (int i = 0; i < n; i++)
+            {
+                data[i] = new AsAlignedF4 { A = i * 0.5f, B = i + 1.0f, C = -i * 0.25f, D = 3.0f };
+                expected[i] = data[i].A + data[i].B + data[i].C + data[i].D;
+            }
+
+            using var w = accelerator.Allocate1D(data);
+            using var o = accelerator.Allocate1D<float>(n);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<AsAlignedF4>, ArrayView<float>>(AsAlignedStructSumKernel);
+            kernel((Index1D)n, w.View, o.View);
+            await accelerator.SynchronizeAsync();
+
+            var got = await o.CopyToHostAsync<float>();
+            for (int i = 0; i < n; i++)
+                if (MathF.Abs(got[i] - expected[i]) > 1e-3f)
+                    throw new Exception($"AsAligned16 struct sum mismatch at [{i}]: expected {expected[i]}, got {got[i]}");
+        });
+    }
+}

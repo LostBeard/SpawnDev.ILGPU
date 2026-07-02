@@ -2319,9 +2319,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         public virtual void GenerateCode(AsAligned value)
         {
-            var target = Load(value); var source = Load(value.Source);
-            Declare(target);
-            AppendLine($"{target} = {source}; // asAligned");
+            // AsAligned is a compile-time alignment hint - the runtime view is unchanged, so alias
+            // the result to the source view (no new declaration). The old Declare(target) + assign
+            // mis-handled the VIEW result and left an undeclared identifier in the GLSL (WebGL
+            // "'v_N' : undeclared identifier" compile error). Mirrors the WGSL AsAligned fix.
+            var source = Load(value.Source);
+            Bind(value, source);
         }
 
         public virtual void GenerateCode(LanguageEmitValue value) { }

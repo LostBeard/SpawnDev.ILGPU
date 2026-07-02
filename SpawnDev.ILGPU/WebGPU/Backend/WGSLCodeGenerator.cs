@@ -3414,10 +3414,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         public virtual void GenerateCode(AsAligned value)
         {
-            var target = Load(value);
+            // AsAligned is a compile-time alignment hint - the runtime view is unchanged, so
+            // alias the result to the source view (same as SubView) and emit nothing. The old
+            // Declare(target) + assignment mis-declared the VIEW result with its ELEMENT type
+            // (e.g. `var v : struct_403;`) and then indexed it, producing invalid WGSL that
+            // naga/Dawn rejects (no production WGSL kernel used AsAligned, so it was latent).
             var source = Load(value.Source);
-            Declare(target);
-            AppendLine($"{target} = {source}; // asAligned");
+            Bind(value, source);
         }
 
         public virtual void GenerateCode(LanguageEmitValue value)
