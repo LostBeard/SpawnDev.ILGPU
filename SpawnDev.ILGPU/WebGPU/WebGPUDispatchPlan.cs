@@ -120,6 +120,14 @@ public sealed class WebGPUDispatchPlan : IDisposable
         await EnsureHelperLoadedAsync();
         var device = _accelerator.NativeAccelerator.NativeDevice
             ?? throw new InvalidOperationException("WebGPU device unavailable (lost or disposed).");
+        // Submit any batched-but-unsubmitted accelerator work FIRST. A caller that refreshed the
+        // captured input buffers via a KERNEL DISPATCH (e.g. a video pipeline's per-frame preprocess
+        // into the stable input) has that dispatch sitting in the accelerator's pending encoder;
+        // the plan's own submit below is a SEPARATE JS-side command buffer, so without this flush
+        // the pending work would land AFTER the replay and the replay would read the PREVIOUS
+        // frame's data (caught by the DA3 video-path stale-replay guard, 2026-07-03). writeBuffer
+        // uploads (CopyFromCPU) were always safe - they are queue-ordered, not encoder-batched.
+        _accelerator.FlushPendingCommands();
         return BlazorJSRuntime.JS.Call<int>("ilgpuWebGPUPlan.replay", device, _plan);
     }
 
@@ -143,6 +151,7 @@ public sealed class WebGPUDispatchPlan : IDisposable
         await EnsureHelperLoadedAsync();
         var device = _accelerator.NativeAccelerator.NativeDevice
             ?? throw new InvalidOperationException("WebGPU device unavailable (lost or disposed).");
+        _accelerator.FlushPendingCommands();   // same stale-input ordering contract as ReplayAsync
         return await BlazorJSRuntime.JS.CallAsync<string>("ilgpuWebGPUPlan.replayTimed", device, _plan);
     }
 

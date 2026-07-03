@@ -2,6 +2,13 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.17.2-local.6 - Dispatch-plan replay: flush pending encoder first (stale-input fix)
+
+Wrapper-only over 4.17.2-local.5 (forks unchanged at 2.2.0).
+
+- **`WebGPUDispatchPlan.ReplayAsync`/`ReplayTimedAsync` now call `FlushPendingCommands()` before the plan submit.** A caller refreshing the captured input buffers via a KERNEL DISPATCH (a video pipeline's per-frame preprocess into the stable input) had that dispatch batched in the accelerator's pending encoder; the plan's submit is a separate JS-side command buffer, so the pending work landed AFTER the replay - the replay silently read the PREVIOUS frame's data. `writeBuffer` uploads (`CopyFromCPU`) were always safe (queue-ordered, not encoder-batched). Caught by SpawnDev.ILGPU.ML's DA3 video-path stale-replay guard (a flipped input image produced identical depth).
+- **Gate:** `DispatchPlan_CaptureReplay_MultiKernel_MatchesCPU` extended with the dispatch-written-input pattern - kernel writes the captured input, NO sync, replay must see the new data.
+
 ## 4.17.2-local.5 - WebGPU per-kernel GPU-time attribution (timed dispatch-plan replay)
 
 Wrapper-only over 4.17.2-local.4 (forks unchanged at 2.2.0). The instrument for the DAv3 102ms-GPU-floor hunt: decompose a captured plan's GPU time by kernel, on hardware, in one call.

@@ -102,6 +102,23 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 await accelerator.SynchronizeAsync();
                 await VerifyOutput(input3, "replay 2");
 
+                // Replay 3: the captured input refreshed by a KERNEL DISPATCH (not a writeBuffer)
+                // with NO sync in between - the video-pipeline pattern (per-frame preprocess into
+                // the stable input, then replay). ReplayAsync must flush the accelerator's pending
+                // encoder BEFORE its own submit, or the replay reads the PREVIOUS data (the
+                // 2026-07-03 stale-replay bug, caught by the DA3 video-path gate).
+                var input5 = MakeInput(9);
+                var input5Halved = new float[n];
+                for (int i = 0; i < n; i++) input5Halved[i] = input5[i] / 2f;
+                using (var staging = accelerator.Allocate1D<float>(n))
+                {
+                    staging.View.CopyFromCPU(input5Halved);
+                    k1((Index1D)n, staging.View, a.View);   // a = 2*staging = input5, PENDING in the encoder
+                    await plan.ReplayAsync();               // must flush the pending dispatch first
+                    await accelerator.SynchronizeAsync();
+                    await VerifyOutput(input5, "replay 3 (dispatch-written input, no pre-sync)");
+                }
+
                 // Timed replay: per-pass GPU timestamps aggregated by pipeline label. Must stay
                 // CORRECT (it re-runs the same dispatches - output must match) and, when the device
                 // has 'timestamp-query', report all 3 passes with labels. Skip-quietly when the
