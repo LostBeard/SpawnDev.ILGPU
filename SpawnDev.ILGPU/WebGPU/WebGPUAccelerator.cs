@@ -544,7 +544,8 @@ namespace SpawnDev.ILGPU.WebGPU
             return CreateScalarBuffer(device);
         }
 
-        private static void ReturnPooledScalarBuffer(GPUBuffer buffer)
+        // internal: WebGPUDispatchPlan returns its retained scalar buffers here on Dispose.
+        internal static void ReturnPooledScalarBuffer(GPUBuffer buffer)
         {
             if (!WebGPUBackend.EnableBufferPooling)
             {
@@ -1323,7 +1324,12 @@ namespace SpawnDev.ILGPU.WebGPU
                                 copySize = srcBufferSize - srcByteOffset;
 
                             if (copySize > 0)
+                            {
                                 copyEnc.CopyBufferToBuffer(srcBuffer, srcByteOffset, coalescedBuffer, runningByteOffset, copySize);
+                                // Dispatch-plan capture: the coalesce gather reads tensor data that is
+                                // recomputed on every replay - the copy must re-run in captured order.
+                                webGpuAccel._activeDispatchPlan?.RecordCopy(srcBuffer, srcByteOffset, coalescedBuffer, runningByteOffset, copySize);
+                            }
 
                             // Per-field offset within coalesced buffer, expressed in u32 slots.
                             //
@@ -2231,6 +2237,20 @@ namespace SpawnDev.ILGPU.WebGPU
                 while (_dispatchLog.Count > MaxDispatchLogSize)
                     _dispatchLog.Dequeue();
 
+                // Dispatch-plan capture: record this dispatch for single-crossing replay. The JS plan
+                // array holds the pipeline + bind group JS objects (keeping them alive independent of
+                // the .NET wrapper disposal below), and the plan takes OWNERSHIP of this dispatch's
+                // scalar/coalesced param buffers - returning a scalar buffer to the pool would let a
+                // later dispatch overwrite it, and destroying a coalesce buffer would break replay.
+                var capturePlan = webGpuAccel._activeDispatchPlan;
+                if (capturePlan != null)
+                {
+                    capturePlan.Record(shader.Pipeline!, bindGroup, workX, workY, workZ);
+                    capturePlan.RetainScalarBuffers(scalarBuffersToReturn);
+                    if (coalescedBuffersToDestroyAfterDispatch != null)
+                        capturePlan.RetainCoalesceBuffers(coalescedBuffersToDestroyAfterDispatch);
+                }
+
                 // Defer resource cleanup until the batch is flushed.
                 // A bind group that went INTO the cache (a hit, or a recurring miss we just stored)
                 // is owned by the cache - it outlives the flush, so don't defer-dispose it, and its
@@ -2338,6 +2358,45 @@ namespace SpawnDev.ILGPU.WebGPU
         /// </summary>
         public void FlushPendingCommands() => ((WebGPUStream)DefaultStream).FlushPending();
 
+        // ── Dispatch-plan capture (the WebGPU twin of CUDA graph capture) ─────────────────────
+        private WebGPUDispatchPlan? _activeDispatchPlan;
+
+        /// <summary>The dispatch plan currently recording, or null. See <see cref="BeginDispatchCapture"/>.</summary>
+        public WebGPUDispatchPlan? ActiveDispatchPlan => _activeDispatchPlan;
+
+        /// <summary>
+        /// Starts recording every subsequent kernel dispatch (in addition to executing it normally)
+        /// into a <see cref="WebGPUDispatchPlan"/> for later single-crossing replay. Capture is only
+        /// valid under a stable-buffer regime at a fixed shape - see the plan's validity contract.
+        /// Bind-group caching must be off (a cache-hit rewrites its owned scalar buffer, corrupting
+        /// earlier plan entries).
+        /// </summary>
+        public WebGPUDispatchPlan BeginDispatchCapture()
+        {
+            if (_activeDispatchPlan != null)
+                throw new InvalidOperationException("A dispatch capture is already active.");
+            if (WebGPUBackend.EnableBindGroupCaching)
+                throw new InvalidOperationException(
+                    "Dispatch capture requires WebGPUBackend.EnableBindGroupCaching = false: a bind-group " +
+                    "cache hit rewrites its owned scalar buffer, which would retroactively corrupt earlier " +
+                    "plan entries. Disable caching for the capture pass.");
+            _activeDispatchPlan = new WebGPUDispatchPlan(this);
+            return _activeDispatchPlan;
+        }
+
+        /// <summary>
+        /// Stops recording and seals the active plan for replay. The caller owns the returned plan
+        /// (dispose it to release its retained buffers).
+        /// </summary>
+        public WebGPUDispatchPlan EndDispatchCapture()
+        {
+            var plan = _activeDispatchPlan
+                ?? throw new InvalidOperationException("No dispatch capture is active.");
+            _activeDispatchPlan = null;
+            plan.IsSealed = true;
+            return plan;
+        }
+
         /// <summary>
         /// Records a <c>clearBuffer</c> command on the given stream's encoder,
         /// zeroing a region of a GPU buffer.  Unlike <c>Queue.WriteBuffer</c>,
@@ -2349,6 +2408,8 @@ namespace SpawnDev.ILGPU.WebGPU
             var webGpuStream = stream as WebGPUStream ?? (WebGPUStream)DefaultStream;
             var encoder = webGpuStream.GetOrCreateEncoder();
             encoder.ClearBuffer(buffer, offset, size);
+            // Dispatch-plan capture: a replay must re-zero this region or kernels read stale data.
+            _activeDispatchPlan?.RecordClear(buffer, offset, size);
         }
 
         /// <summary>

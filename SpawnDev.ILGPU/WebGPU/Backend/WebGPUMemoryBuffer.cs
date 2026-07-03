@@ -95,6 +95,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 using var commandBuffer = encoder.Finish();
                 _submitArray[0] = commandBuffer;
                 accelerator.NativeAccelerator.Queue?.Submit(_submitArray);
+                // Dispatch-plan capture: device copies during a forward (Concat assembly, cache writes)
+                // move data recomputed by earlier replayed dispatches - a replay must re-run them.
+                accelerator.ActiveDispatchPlan?.RecordCopy(
+                    srcGpuBuffer, (ulong)srcContiguous.Index,
+                    _buffer!.NativeBuffer!, (ulong)destContiguous.Index,
+                    (ulong)paddedBytes);
             }
         }
 
