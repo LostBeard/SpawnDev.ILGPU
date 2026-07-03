@@ -15,11 +15,18 @@
 // passes/copies on the same queue.
 (() => {
     const api = {
+        // JS-side timing of the most recent replay() call on this page: encodeMs = the re-encode
+        // loop (createCommandEncoder .. last op), submitMs = enc.finish() + queue.submit(). GPU
+        // EXECUTION is not included - it completes asynchronously after submit (await
+        // onSubmittedWorkDone / SynchronizeAsync for that). Reading performance.now() is ~free,
+        // so this records unconditionally; .NET fetches it on demand only.
+        last: { ops: 0, encodeMs: 0, submitMs: 0 },
         // Replays a recorded plan on the given device: one encoder, one pass per dispatch
         // (pass-per-dispatch keeps storage-buffer write->read ordering guarantees airtight),
         // copies/clears encoded inline in captured order, one queue submit.
         // Returns the number of operations encoded.
         replay(device, plan) {
+            const t0 = performance.now();
             const enc = device.createCommandEncoder();
             const n = plan.length;
             for (let i = 0; i < n; i += 7) {
@@ -36,7 +43,12 @@
                     enc.clearBuffer(plan[i + 1], plan[i + 2], plan[i + 3]);
                 }
             }
+            const t1 = performance.now();
             device.queue.submit([enc.finish()]);
+            const t2 = performance.now();
+            api.last.ops = n / 7;
+            api.last.encodeMs = t1 - t0;
+            api.last.submitMs = t2 - t1;
             return n / 7;
         }
     };

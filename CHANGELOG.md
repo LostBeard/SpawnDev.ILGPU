@@ -2,6 +2,23 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.17.2-local.4 - WebGPU dispatch-plan replay timing + PMT hardware-adapter fix
+
+Wrapper-only over 4.17.2-local.3 (forks unchanged at 2.2.0).
+
+- **`WebGPUDispatchPlan.GetLastReplayTimings()`** - JS-side split of the most recent `ReplayAsync`: `EncodeMs` (the JS re-encode loop over the plan) and `SubmitMs` (`enc.finish()` + `queue.submit()`). GPU execution is not included (it completes after the submit - await `SynchronizeAsync()`). `webgpuDispatchPlan.js` records the numbers unconditionally via `performance.now()` (free); the accessor costs two interop reads and is meant for instrumentation only. Feeds the DAv3 99.5ms-frame split measurement (what a pipelined video path can hide vs the true GPU floor).
+- **PMT harness: hardware WebGPU adapter (repo-local, not packaged).** The PMT Playwright BUNDLED Chromium only ever exposes the SwiftShader SOFTWARE WebGPU adapter on the dev machine (isFallbackAdapter=true; confirmed by Captain 2026-07-03) - every WebGPU perf number measured through this repo's PMT before this fix was CPU-rasterizer time (correctness results stand). Fix (port of the ML repo's): `Channel` defaults to `"chrome"` (installed Chrome; `PMT_BROWSER_CHANNEL=bundled` deliberately selects the bundled build), the `Vulkan` feature flag is REMOVED from the Chromium args (it pushed Dawn off its native D3D12 path into the fallback), and `--disable-software-rasterizer` makes any future fallback fail loudly.
+- **`WebGPU_AdapterIdentity_Probe`** (new `BackendTestBase` test) - reports vendor/architecture/device/isFallbackAdapter in every run and FAILS on a software adapter, so the harness regression class can never hide again.
+
+## 4.17.2-local.3 - WebGPU dispatch-plan capture/replay (the browser twin of CUDA graph capture)
+
+Wrapper-only over 4.17.2-local.1 (forks unchanged at 2.2.0; local.2 was an intermediate iteration of the same feature). Shipped in commit `b28b11a` 2026-07-03; this entry documents it retroactively (the entry was missed in the overnight push).
+
+- **`WebGPUAccelerator.BeginDispatchCapture()` / `EndDispatchCapture()` -> `WebGPUDispatchPlan`.** During a capture pass every kernel dispatch the accelerator encodes is ALSO recorded into a flat JS-side plan (`[pipeline, bindGroup, dims]` + encoder-level `copyBufferToBuffer` + `clearBuffer` entries - compute passes alone are NOT the forward). `ReplayAsync()` re-encodes the whole plan with ONE .NET->JS interop crossing (`wwwroot/webgpuDispatchPlan.js`, glWorker static-asset pattern) - one compute pass per dispatch, one submit - removing the per-dispatch interop cost exactly like `cuGraphLaunch` removes per-kernel launch prep.
+- **Validity contract** (same as CUDA graph capture): replay re-runs the captured dispatches against the SAME buffers; capture under a stable-buffer regime at a fixed input shape, write fresh input into the captured input buffers before each replay. The plan retains per-dispatch scalar-params buffers and coalesced param buffers (they would otherwise be pool-recycled/destroyed and retroactively corrupt the plan); bind-group caching must be OFF during capture (`BeginDispatchCapture` enforces it).
+- **Gate:** `BackendTestBase.DispatchPlan.cs` - captures a 3-kernel chain (including a scalar-param kernel), replays twice against fresh inputs vs the CPU reference, verifies post-dispose accelerator health.
+- **Measured (SpawnDev.ILGPU.ML DAv3-5D, RTX 4070 hardware Dawn):** direct forward 18.9s -> replay **99.5ms/frame**, bit-exact (maxAbsDiff=0), 2515 ops - 190x, at 1.36x of ORT-Web's 73ms warm.
+
 ## 4.17.2-local.1 - WebGL: AsAligned16 struct-element load fixed (GLSL resolvers now trace AsAligned)
 
 Wrapper-only over 4.17.1-local.1 (forks unchanged at 2.2.0). Closes the tracked WebGL struct-of-4 GLSL load bug (`geordi-webgl-struct-of-4-load-glsl-bug-tracked-2026-07-01`).

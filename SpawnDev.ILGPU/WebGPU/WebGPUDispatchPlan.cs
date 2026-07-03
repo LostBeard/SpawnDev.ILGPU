@@ -124,6 +124,20 @@ public sealed class WebGPUDispatchPlan : IDisposable
     }
 
     /// <summary>
+    /// JS-side timing of the most recent <see cref="ReplayAsync"/> on this page (any plan):
+    /// EncodeMs = the JS re-encode loop, SubmitMs = <c>enc.finish()</c> + <c>queue.submit()</c>.
+    /// GPU execution is NOT included - it completes asynchronously after the submit (await
+    /// <c>SynchronizeAsync()</c> for that). Diagnostic accessor - two interop reads, call it only
+    /// when instrumenting; the replay hot path records the numbers JS-side for free either way.
+    /// </summary>
+    public static (double EncodeMs, double SubmitMs) GetLastReplayTimings()
+    {
+        var encode = BlazorJSRuntime.JS.Get<double?>("ilgpuWebGPUPlan.last.encodeMs") ?? -1;
+        var submit = BlazorJSRuntime.JS.Get<double?>("ilgpuWebGPUPlan.last.submitMs") ?? -1;
+        return (encode, submit);
+    }
+
+    /// <summary>
     /// Releases the plan: returns retained scalar buffers to the accelerator's scalar pool,
     /// destroys retained coalesced buffers, and drops the JS plan array (releasing the recorded
     /// pipelines/bind groups to normal JS GC).

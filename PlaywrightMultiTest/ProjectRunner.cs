@@ -40,8 +40,15 @@ namespace PlaywrightMultiTest
             var args = new System.Collections.Generic.List<string>
             {
                 "--enable-unsafe-webgpu",
-                "--enable-features=Vulkan,WebGPUService,SkiaGraphite,FileSystemAccessPersistentPermission",
+                // NO "Vulkan" here: forcing Chromium's Vulkan feature on Windows pushed Dawn off its
+                // native D3D12 path and the browser silently fell back to the SwiftShader SOFTWARE
+                // WebGPU adapter (vendor=google arch=swiftshader isFallbackAdapter=true - caught by
+                // the ML repo's WebGPU_AdapterIdentity_Probe 2026-07-03, confirmed here by Captain).
+                // Every WebGPU perf number measured before this fix was CPU-software-rasterizer time.
+                "--enable-features=WebGPUService,SkiaGraphite,FileSystemAccessPersistentPermission",
                 "--ignore-gpu-blocklist",
+                // Fail loudly rather than silently falling back to SwiftShader again.
+                "--disable-software-rasterizer",
                 "--no-sandbox",
                 "--disable-features=FileSystemAccessPermissionPrompt",
                 "--allow-file-access-from-files"
@@ -218,11 +225,21 @@ namespace PlaywrightMultiTest
                             new BrowserTypeLaunchPersistentContextOptions
                             {
                                 Headless = false,
-                                // PMT_BROWSER_CHANNEL=chrome runs the system Chrome instead of
-                                // the Playwright-bundled Chromium (V8-version discriminator for
-                                // engine-level wasm issues; same precedent as WebTorrent's
-                                // H.264 Channel fix). Unset = bundled Chromium (default).
-                                Channel = Environment.GetEnvironmentVariable("PMT_BROWSER_CHANNEL"),
+                                // Installed Chrome by DEFAULT, not Playwright's bundled Chromium: the
+                                // bundled build only ever exposes the SwiftShader SOFTWARE WebGPU
+                                // adapter on this machine (vendor=google arch=swiftshader
+                                // isFallbackAdapter=true; fresh profile + ignore-blocklist made no
+                                // difference) - every WebGPU perf number before 2026-07-03 was
+                                // CPU-rasterizer time. Real Chrome exposes the hardware adapter (and is
+                                // what users run anyway). PMT_BROWSER_CHANNEL still overrides (set it
+                                // to "bundled" to deliberately run the bundled Chromium, e.g. as a
+                                // V8-version discriminator for engine-level wasm issues).
+                                Channel = Environment.GetEnvironmentVariable("PMT_BROWSER_CHANNEL") switch
+                                {
+                                    "bundled" => null,
+                                    string s => s,
+                                    null => "chrome",
+                                },
                                 Args = BuildChromiumArgs()
                             }).ConfigureAwait(false);
                         testableProject.Browser = testableProject.BrowserContext.Browser;
