@@ -42,6 +42,39 @@ public sealed class WebGPUDispatchPlan : IDisposable
     /// <summary>Number of dispatches recorded into this plan.</summary>
     public int DispatchCount { get; private set; }
 
+    /// <summary>
+    /// When set BEFORE capture, every recorded compute dispatch also snapshots its packed
+    /// _scalar_params upload (the retained buffer + the exact bytes written) into
+    /// <see cref="ScalarSnapshots"/>, and every recorded copy logs (entryIndex, dstOffset) into
+    /// <see cref="CopyEntries"/>. This is the PATCH SURFACE for parameterized replay: a driver that
+    /// captures two plans at two values of a loop variable (e.g. an LLM decode step at pastLen P and
+    /// P+1) can diff the snapshots to find every scalar byte and copy offset that depends on the
+    /// variable, then patch them per replay (<see cref="PatchScalarInt"/> /
+    /// <see cref="PatchCopyDstOffsets"/>).
+    /// </summary>
+    public bool CaptureScalarSnapshots { get; set; }
+
+    /// <summary>Per-dispatch packed-scalar snapshot: the dispatch's plan entry index, the retained
+    /// _scalar_params buffer its bind group references, and the exact bytes uploaded. Entries with no
+    /// scalar params are absent. Populated only when <see cref="CaptureScalarSnapshots"/>.</summary>
+    public List<(int EntryIndex, GPUBuffer Buffer, byte[] Bytes)> ScalarSnapshots { get; } = new();
+
+    /// <summary>Recorded copyBufferToBuffer entries (entry index + src/dst byte offsets + size).
+    /// Populated only when <see cref="CaptureScalarSnapshots"/>.</summary>
+    public List<(int EntryIndex, ulong SrcOffset, ulong DstOffset, ulong Size)> CopyEntries { get; } = new();
+
+    private GPUBuffer? _pendingScalarBuf;
+    private byte[]? _pendingScalarBytes;
+
+    /// <summary>Called by the dispatch path right after the packed-scalar writeBuffer; attached to the
+    /// NEXT recorded dispatch (upload always precedes Record in the dispatch flow).</summary>
+    internal void NoteScalarUpload(GPUBuffer buffer, byte[] bytes)
+    {
+        if (!CaptureScalarSnapshots) return;
+        _pendingScalarBuf = buffer;
+        _pendingScalarBytes = (byte[])bytes.Clone();
+    }
+
     /// <summary>True once <see cref="WebGPUAccelerator.EndDispatchCapture"/> sealed this plan.</summary>
     public bool IsSealed { get; internal set; }
 
@@ -61,6 +94,12 @@ public sealed class WebGPUDispatchPlan : IDisposable
     internal void Record(GPUComputePipeline pipeline, GPUBindGroup bindGroup, uint x, uint y, uint z)
     {
         _plan.JSRef!.CallVoid("push", 0, pipeline, bindGroup, (int)x, (int)y, (int)z, 0);
+        if (_pendingScalarBytes != null)
+        {
+            ScalarSnapshots.Add((DispatchCount, _pendingScalarBuf!, _pendingScalarBytes));
+            _pendingScalarBuf = null;
+            _pendingScalarBytes = null;
+        }
         DispatchCount++;
     }
 
@@ -69,7 +108,38 @@ public sealed class WebGPUDispatchPlan : IDisposable
     internal void RecordCopy(GPUBuffer src, ulong srcOffset, GPUBuffer dst, ulong dstOffset, ulong size)
     {
         _plan.JSRef!.CallVoid("push", 1, src, (double)srcOffset, dst, (double)dstOffset, (double)size, 0);
+        if (CaptureScalarSnapshots)
+            CopyEntries.Add((DispatchCount, srcOffset, dstOffset, size));
         DispatchCount++;
+    }
+
+    /// <summary>
+    /// Overwrite a 4-byte int inside a snapshotted dispatch's retained _scalar_params buffer (a
+    /// queue-ordered writeBuffer - lands before the next replay's submit). The patch surface for
+    /// parameterized replay; see <see cref="CaptureScalarSnapshots"/>.
+    /// </summary>
+    public void PatchScalarInt(int snapshotIndex, int byteOffset, int value)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        var (_, buf, _) = ScalarSnapshots[snapshotIndex];
+        var device = _accelerator.NativeAccelerator.NativeDevice
+            ?? throw new InvalidOperationException("WebGPU device unavailable (lost or disposed).");
+        device.Queue.WriteBuffer(buf, (ulong)byteOffset, BitConverter.GetBytes(value));
+    }
+
+    /// <summary>
+    /// Rewrite the dstOffset of recorded copy entries in place (one interop crossing for the whole
+    /// batch). Entry indices come from <see cref="CopyEntries"/>; offsets are BYTES (what
+    /// copyBufferToBuffer takes). The replayed copies then write at the new destinations - the
+    /// KV-cache-append case, where the destination row advances per decode token.
+    /// </summary>
+    public async Task PatchCopyDstOffsetsAsync(int[] entryIndices, double[] newDstOffsets)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (entryIndices.Length != newDstOffsets.Length)
+            throw new ArgumentException("entryIndices and newDstOffsets must have equal length");
+        await EnsureHelperLoadedAsync();
+        BlazorJSRuntime.JS.CallVoid("ilgpuWebGPUPlan.patchCopyDst", _plan, entryIndices, newDstOffsets);
     }
 
     /// <summary>Record an encoder-level clearBuffer (zero-fill) - replays must re-zero, or kernels

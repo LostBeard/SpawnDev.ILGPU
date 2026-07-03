@@ -21,6 +21,17 @@
         // onSubmittedWorkDone / SynchronizeAsync for that). Reading performance.now() is ~free,
         // so this records unconditionally; .NET fetches it on demand only.
         last: { ops: 0, encodeMs: 0, submitMs: 0 },
+        // Rewrite the dstOffset (slot [i*7+4]) of copy entries in place - the patch surface for
+        // parameterized replay (e.g. a KV-cache append whose destination row advances per decode
+        // token). Entries must be tag-1 copies; throws otherwise (a wrong index would silently
+        // corrupt a dispatch record).
+        patchCopyDst(plan, entryIndices, newDstOffsets) {
+            for (let k = 0; k < entryIndices.length; k++) {
+                const i = entryIndices[k] * 7;
+                if (plan[i] !== 1) throw new Error(`patchCopyDst: entry ${entryIndices[k]} is tag ${plan[i]}, not a copy`);
+                plan[i + 4] = newDstOffsets[k];
+            }
+        },
         // Replays a recorded plan on the given device: one encoder, one pass per dispatch
         // (pass-per-dispatch keeps storage-buffer write->read ordering guarantees airtight),
         // copies/clears encoded inline in captured order, one queue submit.

@@ -2,6 +2,16 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.17.2-local.7 - Dispatch-plan PATCH SURFACE (parameterized replay)
+
+Wrapper-only over 4.17.2-local.6 (forks unchanged at 2.2.0). Enables replaying one captured plan across a moving loop variable (the LLM decode case: one plan, patched per token) instead of re-capturing.
+
+- **`WebGPUDispatchPlan.CaptureScalarSnapshots`**: when set before capture, every recorded dispatch also snapshots its packed `_scalar_params` upload (retained buffer + exact bytes) into `ScalarSnapshots`, and every recorded copy logs (entryIndex, srcOfs, dstOfs, size) into `CopyEntries`. A driver captures TWO plans at two values of the loop variable and diffs the snapshots to discover every dependent byte - no per-consumer knowledge of param layouts.
+- **`PatchScalarInt(snapshotIndex, byteOffset, value)`**: queue-ordered 4-byte write into a snapshotted dispatch's retained scalar buffer (~0.02ms).
+- **`PatchCopyDstOffsetsAsync(entryIndices, newDstOffsets)`** + js `patchCopyDst`: rewrite copy destinations in the plan in place, one interop crossing per batch (the KV-append case - the destination row advances per decode token; a wrong-tag index throws).
+- Proven by SpawnDev.ILGPU.ML's `WebGPUDecodeCapture`: qwen2.5-0.5b decode 686ms/tok -> **44.8ms/tok token-identical** (patch 1.9ms + plan 0.3ms + GPU 23.3ms).
+- KNOWN separate issue surfaced by this work: `ArrayView.CopyFromCPU` on WebGPU costs **~14ms per call** (vs ~0.02ms raw `queue.WriteBuffer`) - consumers on hot paths should batch or use raw writes until root-caused (tracked).
+
 ## 4.17.2-local.6 - Dispatch-plan replay: flush pending encoder first (stale-input fix)
 
 Wrapper-only over 4.17.2-local.5 (forks unchanged at 2.2.0).

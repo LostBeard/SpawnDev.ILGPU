@@ -1958,6 +1958,9 @@ namespace SpawnDev.ILGPU.WebGPU
                         scalarBuffersToReturn.Add(packedBuffer);
                     }
                     device.Queue.WriteBuffer(packedBuffer, 0, packedData);
+                    // Snapshot the scalar upload for the dispatch plan's patch surface (attached to
+                    // the Record() below; no-op unless the plan opted into snapshots).
+                    webGpuAccel._activeDispatchPlan?.NoteScalarUpload(packedBuffer, packedData);
 
                     entries.Add(new GPUBindGroupEntry
                     {
