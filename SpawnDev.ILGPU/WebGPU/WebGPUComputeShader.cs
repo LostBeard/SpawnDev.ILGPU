@@ -30,7 +30,8 @@ namespace SpawnDev.ILGPU.WebGPU
             WebGPUNativeAccelerator accelerator,
             string wgslSource,
             string entryPoint,
-            Dictionary<string, object>? overrideConstants = null)
+            Dictionary<string, object>? overrideConstants = null,
+            string? label = null)
         {
             Accelerator = accelerator ?? throw new ArgumentNullException(nameof(accelerator));
             WGSLSource = wgslSource ?? throw new ArgumentNullException(nameof(wgslSource));
@@ -67,7 +68,11 @@ namespace SpawnDev.ILGPU.WebGPU
             var pipelineDescriptor = new GPUComputePipelineDescriptor
             {
                 Layout = "auto",
-                Compute = programmableStage
+                Compute = programmableStage,
+                // Kernel name as the pipeline label: names the pipeline in GPUError messages /
+                // console warnings AND is what the dispatch-plan timed replay aggregates GPU
+                // time by (webgpuDispatchPlan.js replayTimed reads pipeline.label).
+                Label = label ?? entryPoint
             };
             _pipeline = device.CreateComputePipeline(pipelineDescriptor);
 

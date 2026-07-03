@@ -2,6 +2,15 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.17.2-local.5 - WebGPU per-kernel GPU-time attribution (timed dispatch-plan replay)
+
+Wrapper-only over 4.17.2-local.4 (forks unchanged at 2.2.0). The instrument for the DAv3 102ms-GPU-floor hunt: decompose a captured plan's GPU time by kernel, on hardware, in one call.
+
+- **`WebGPUDispatchPlan.ReplayTimedAsync()`** - replays the plan with a WebGPU `timestamp-query` timestamp at the start of every compute pass (+ end of the last), then returns a JSON aggregation of GPU time **by pipeline label = kernel name**: `{supported, passes, ops, totalMs, spanMs, kernels:[{label, ms, count, maxMs}...]}` sorted by total ms. Passes execute back-to-back on the queue, so start-to-start diffs are per-pass durations (encoder-level copies/clears attribute to the preceding pass). Chunked query sets (4096-stamp cap each); waits for completion internally; `{"supported":false}` when the device lacks the feature ('timestamp-query' was already in `KnownFeatures`, requested whenever the adapter offers it). Diagnostic path - timestampWrites add overhead, don't frame-time with it.
+- **Kernel-name pipeline labels.** The dispatch path now passes `CompiledKernel.EntryPoint.Name` down to `CreateComputePipeline` as the pipeline `label` - names pipelines in Dawn error messages/console warnings too, not just in attribution.
+- **PMT harness:** `--enable-webgpu-developer-features` added (repo-local; also ported to the ML repo's PMT) - Chrome otherwise quantizes GPU timestamps to 100us, which zeroes most per-pass durations.
+- **Gate:** `DispatchPlan_CaptureReplay_MultiKernel_MatchesCPU` extended - the timed replay must still produce correct output (it re-runs the real dispatches), report all passes, and carry kernel labels.
+
 ## 4.17.2-local.4 - WebGPU dispatch-plan replay timing + PMT hardware-adapter fix
 
 Wrapper-only over 4.17.2-local.3 (forks unchanged at 2.2.0).

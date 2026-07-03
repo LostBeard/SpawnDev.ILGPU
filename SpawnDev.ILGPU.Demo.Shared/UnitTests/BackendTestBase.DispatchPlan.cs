@@ -101,6 +101,27 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 await plan.ReplayAsync();
                 await accelerator.SynchronizeAsync();
                 await VerifyOutput(input3, "replay 2");
+
+                // Timed replay: per-pass GPU timestamps aggregated by pipeline label. Must stay
+                // CORRECT (it re-runs the same dispatches - output must match) and, when the device
+                // has 'timestamp-query', report all 3 passes with labels. Skip-quietly when the
+                // feature is absent (JSON says so) - correctness is still asserted either way.
+                var input4t = MakeInput(5);
+                a.View.CopyFromCPU(input4t);
+                var timedJson = await plan.ReplayTimedAsync();
+                await VerifyOutput(input4t, "timed replay");
+                if (webGpu.NativeAccelerator.HasTimestampQuery)
+                {
+                    // The device HAS the feature - the timed path must fully work, not quietly
+                    // report unsupported.
+                    if (!timedJson.Contains("\"supported\":true"))
+                        throw new Exception($"device has timestamp-query but timed replay reported: {timedJson}");
+                    if (!timedJson.Contains("\"passes\":3"))
+                        throw new Exception($"timed replay expected 3 passes: {timedJson}");
+                    if (!timedJson.Contains("\"kernels\":[") || timedJson.Contains("(unlabeled)"))
+                        throw new Exception($"timed replay missing kernel labels (pipeline Label plumbing broke): {timedJson}");
+                }
+                Console.WriteLine($"[DispatchPlan] timed replay (HasTimestampQuery={webGpu.NativeAccelerator.HasTimestampQuery}): {timedJson}");
             }
 
             // Post-dispose health: the plan returned its retained scalar buffers; normal dispatch works.

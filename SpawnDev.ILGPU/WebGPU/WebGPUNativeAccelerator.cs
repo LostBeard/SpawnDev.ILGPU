@@ -457,10 +457,11 @@ namespace SpawnDev.ILGPU.WebGPU
         public WebGPUComputeShader CreateComputeShader(
             string wgslSource,
             string entryPoint = "main",
-            Dictionary<string, object>? overrideConstants = null)
+            Dictionary<string, object>? overrideConstants = null,
+            string? label = null)
         {
             EnsureInitialized();
-            return new WebGPUComputeShader(this, wgslSource, entryPoint, overrideConstants);
+            return new WebGPUComputeShader(this, wgslSource, entryPoint, overrideConstants, label);
         }
 
         /// <summary>
@@ -471,10 +472,11 @@ namespace SpawnDev.ILGPU.WebGPU
         public WebGPUComputeShader GetOrCreateComputeShader(
             string wgslSource,
             string entryPoint = "main",
-            Dictionary<string, object>? overrideConstants = null)
+            Dictionary<string, object>? overrideConstants = null,
+            string? label = null)
         {
             if (!WebGPUBackend.EnableShaderCaching)
-                return CreateComputeShader(wgslSource, entryPoint, overrideConstants);
+                return CreateComputeShader(wgslSource, entryPoint, overrideConstants, label);
 
             // Build cache key: (WGSL source, sorted override-constants signature). Using a composite
             // key instead of concatenating the constants onto the WGSL avoids allocating a full
@@ -494,7 +496,7 @@ namespace SpawnDev.ILGPU.WebGPU
             }
 
             if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log("[WebGPU] Creating and caching new shader");
-            var shader = CreateComputeShader(wgslSource, entryPoint, overrideConstants);
+            var shader = CreateComputeShader(wgslSource, entryPoint, overrideConstants, label);
             _shaderCache[cacheKey] = shader;
             return shader;
         }

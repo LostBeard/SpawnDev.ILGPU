@@ -977,14 +977,16 @@ namespace SpawnDev.ILGPU.WebGPU
                 }
                 else
                 {
-                    shader = nativeAccel.GetOrCreateComputeShader(wgslSource, "main", overrideConstants);
+                    shader = nativeAccel.GetOrCreateComputeShader(wgslSource, "main", overrideConstants,
+                        compiledKernel.EntryPoint?.Name);
                     webGpuAccel._shaderResolveCache[resolveKey] = shader;
                     webGpuAccel._shaderResolveCacheMisses++;
                 }
             }
             else
             {
-                shader = nativeAccel.GetOrCreateComputeShader(wgslSource, "main", overrideConstants);
+                shader = nativeAccel.GetOrCreateComputeShader(wgslSource, "main", overrideConstants,
+                    compiledKernel.EntryPoint?.Name);
             }
             var device = nativeAccel.NativeDevice!;
             if (_prof) _profTsShader = System.Diagnostics.Stopwatch.GetTimestamp(); // end shader-resolve phase

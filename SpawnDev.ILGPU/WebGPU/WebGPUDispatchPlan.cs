@@ -124,6 +124,29 @@ public sealed class WebGPUDispatchPlan : IDisposable
     }
 
     /// <summary>
+    /// Replays the captured plan with per-pass GPU timestamps (WebGPU 'timestamp-query') and returns
+    /// a JSON string aggregating GPU time by pipeline label (the kernel name): <c>{"supported":true,
+    /// "passes":N,"ops":N,"totalMs":x,"spanMs":x,"kernels":[{"label","ms","count","maxMs"},...]}</c>
+    /// sorted by total ms descending, or <c>{"supported":false,"reason":...}</c> when the device
+    /// lacks the feature. Runs the SAME dispatches as <see cref="ReplayAsync"/> (same validity
+    /// contract) and waits for GPU completion internally - no separate SynchronizeAsync needed.
+    /// Diagnostic path: per-pass timestampWrites add overhead; do not use it for frame timing.
+    /// NOTE: Chrome quantizes GPU timestamps to 100us unless launched with
+    /// --enable-webgpu-developer-features; totals telescope exactly either way, but fine per-kernel
+    /// attribution wants the flag.
+    /// </summary>
+    public async Task<string> ReplayTimedAsync()
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (!IsSealed)
+            throw new InvalidOperationException("Dispatch plan is still recording - call EndDispatchCapture() first.");
+        await EnsureHelperLoadedAsync();
+        var device = _accelerator.NativeAccelerator.NativeDevice
+            ?? throw new InvalidOperationException("WebGPU device unavailable (lost or disposed).");
+        return await BlazorJSRuntime.JS.CallAsync<string>("ilgpuWebGPUPlan.replayTimed", device, _plan);
+    }
+
+    /// <summary>
     /// JS-side timing of the most recent <see cref="ReplayAsync"/> on this page (any plan):
     /// EncodeMs = the JS re-encode loop, SubmitMs = <c>enc.finish()</c> + <c>queue.submit()</c>.
     /// GPU execution is NOT included - it completes asynchronously after the submit (await
