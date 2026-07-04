@@ -2,6 +2,13 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.17.2-local.9 - Stream-upload timing diagnostics (split read vs writeBuffer)
+
+Wrapper-only over 4.17.2-local.8 (forks unchanged at 2.2.0). Pure measurement - default OFF, byte-identical behavior in production. After the bulk model weights stream JS-side (parser fix, ML side) and the tiny GPU-consumed constants go through the zero-copy `CopyFromCPU` (local.8), the residual model-load cost is the **stream (zero-copy `writeBuffer`) bucket** - measured ~65s on SD-Turbo/WebGPU vs CUDA's ~7.6s. That bucket is a single loop of read-a-chunk then write-a-chunk, and the time could be in the READ (torrent/OPFS-bound `IJSReadStream`) or the WRITE (`queue.writeBuffer` transport / 16MiB chunk size mistuned) - measure before tuning.
+
+- **`BrowserBufferPolicy.TraceStreamUploadTiming`** (new, default `false`). When true, `BrowserStreamUpload.CopyFromJSReadStreamAsync` (the `CopyFromStreamAsync` browser fast path) times `ReadUint8ArrayAsync` and `CopyFromJS` separately into `BrowserBufferPolicy.StreamReadMs` / `StreamWriteMs` (+ `StreamBytes` / `StreamChunks`), with `ResetStreamUploadTiming()` to zero them before a measured window. A consumer's weight-load trace reads these to attribute the stream bucket to read-side vs writeBuffer-side. Gated OFF via a single `bool` read per chunk, so production is unaffected.
+- **Gate:** PMT `PMT_FILTER=CopyFromStream` 38/0 - the stream path (incl. the IJSReadStream zero-copy fast path) is unchanged with tracing off.
+
 ## 4.17.2-local.8 - Zero-copy host→GPU CopyFromCPU on ALL browser backends + shared fail-loud host-copy guard
 
 Wrapper-only over 4.17.2-local.7 (forks unchanged at 2.2.0). Captain-directed: pulling bulk data from JS into the single-threaded .NET/WASM managed heap on its way to an accelerator is the same main-thread tax on **every** browser backend (WebGPU, WebGL, Wasm), not a WebGPU-only problem. All three had the identical `new byte[]` + `Marshal.Copy` waste in their host `CopyFrom` CPU branch (Wasm copied twice: WASM→.NET→SharedArrayBuffer).

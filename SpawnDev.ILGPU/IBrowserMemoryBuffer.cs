@@ -48,6 +48,32 @@ namespace SpawnDev.ILGPU
                     "enter the .NET heap. This transfer pulled bulk data through the single-threaded WASM " +
                     "managed heap.");
         }
+
+        // ── Stream-upload timing diagnostics (default OFF; measure, don't guess) ─────────────────
+        // The IJSReadStream->GPU zero-copy stream path (CopyFromStreamAsync) is ONE loop of
+        // read-a-chunk (ReadUint8ArrayAsync) then write-a-chunk (CopyFromJS = queue.writeBuffer). When
+        // model load is slow, the time can be in the READ (torrent/OPFS-bound stream), the WRITE
+        // (writeBuffer transport / chunk-size), or elsewhere - they must be split to know which lever
+        // to pull. Set TraceStreamUploadTiming = true around a load; BrowserStreamUpload then times the
+        // two halves into these accumulators (cheap Stopwatch ticks). A harness reads + resets them.
+
+        /// <summary>When true, <c>BrowserStreamUpload</c> accumulates read-vs-write timing below (default OFF).</summary>
+        public static bool TraceStreamUploadTiming { get; set; } = false;
+
+        /// <summary>Cumulative ms spent in <c>IJSReadStream.ReadUint8ArrayAsync</c> (the stream read) while tracing.</summary>
+        public static double StreamReadMs;
+        /// <summary>Cumulative ms spent in <c>IBrowserMemoryBuffer.CopyFromJS</c> (queue.writeBuffer / JS-&gt;GPU) while tracing.</summary>
+        public static double StreamWriteMs;
+        /// <summary>Cumulative bytes streamed while tracing.</summary>
+        public static long StreamBytes;
+        /// <summary>Cumulative chunk (read+write) iterations while tracing.</summary>
+        public static long StreamChunks;
+
+        /// <summary>Zero the stream-upload timing accumulators (call before a measured load window).</summary>
+        public static void ResetStreamUploadTiming()
+        {
+            StreamReadMs = 0; StreamWriteMs = 0; StreamBytes = 0; StreamChunks = 0;
+        }
     }
 
     /// <summary>
@@ -78,20 +104,37 @@ namespace SpawnDev.ILGPU
             if (lengthInBytes == 0)
                 return;
 
+            bool trace = BrowserBufferPolicy.TraceStreamUploadTiming;
             long remaining = lengthInBytes;
             long destOffset = targetOffsetInBytes;
             while (remaining > 0)
             {
                 int want = (int)Math.Min((long)chunkSizeInBytes, remaining);
+
+                // READ a chunk (torrent/OPFS/stream-bound on the browser).
+                long tRead = trace ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                 using var u8 = await source
                     .ReadUint8ArrayAsync(want, cancellationToken)
                     .ConfigureAwait(false);
+                if (trace)
+                    BrowserBufferPolicy.StreamReadMs += System.Diagnostics.Stopwatch.GetElapsedTime(tRead).TotalMilliseconds;
+
                 long got = u8?.Length ?? 0;
                 if (got < want)
                     throw new EndOfStreamException(
                         $"Stream ended after {lengthInBytes - remaining + got} of " +
                         $"{lengthInBytes} bytes; CopyFromStreamAsync requires the exact length.");
+
+                // WRITE the chunk JS->GPU (queue.writeBuffer / .Set - the transport we may need to tune).
+                long tWrite = trace ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                 buffer.CopyFromJS(u8, destOffset);
+                if (trace)
+                {
+                    BrowserBufferPolicy.StreamWriteMs += System.Diagnostics.Stopwatch.GetElapsedTime(tWrite).TotalMilliseconds;
+                    BrowserBufferPolicy.StreamBytes += want;
+                    BrowserBufferPolicy.StreamChunks++;
+                }
+
                 destOffset += want;
                 remaining -= want;
             }
