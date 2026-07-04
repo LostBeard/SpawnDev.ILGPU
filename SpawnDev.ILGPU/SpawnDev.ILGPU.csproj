@@ -4,7 +4,7 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.17.2-local.7</Version>
+		<Version>4.17.2</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
 		<PackageReleaseNotes>4.17.2-local.1: WebGL AsAligned16 struct-element load fixed - the GLSL parameter resolvers now trace through the AsAligned/AlignTo node (they walked SubView/Cast/etc. but not AsAligned), so a `view.AsAligned16()[i]` struct-of-4 load resolves to its param, binds an isampler2D, and loads via per-field texelFetch assembly instead of emitting invalid GLSL. `AsAligned16_StructOf4_SumsCorrectly` un-skipped on WebGL (PMT 9/0/0). Wrapper-only; forks unchanged at 2.2.0.
 
