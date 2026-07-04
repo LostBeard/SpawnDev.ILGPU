@@ -41,6 +41,51 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         });
 
         /// <summary>
+        /// Fail-loud guard (ALL browser backends): a host->GPU CopyFromCPU larger than
+        /// BrowserBufferPolicy.StrictHostCopyMaxBytes must THROW - bulk browser data (model weights) must
+        /// stream JS-side via CopyFromStreamAsync/CopyFromJS over an IJSReadStream, never through the
+        /// single-threaded .NET heap (the same main-thread tax on WebGPU, WebGL AND Wasm). A sub-threshold
+        /// copy must still succeed (tiny .NET-origin constants are allowed); with the guard off the same
+        /// bulk copy succeeds (proving the throw is the guard, not a real transfer error). Byte-level
+        /// round-trip correctness of the zero-copy CopyFromCPU path is covered per-backend by the
+        /// *_RoundTrip_NoKernel_Test family above. Captain directive 2026-07-05.
+        /// </summary>
+        [TestMethod]
+        public async Task StrictHostCopyGuard_ThrowsOnBulkCopyTest() => await RunTest(async accelerator =>
+        {
+            if (accelerator.AcceleratorType is not (AcceleratorType.WebGPU or AcceleratorType.WebGL or AcceleratorType.Wasm))
+                throw new UnsupportedTestException("BrowserBufferPolicy host-copy guard applies to browser backends only");
+
+            var big = new float[512];   // 2048 bytes
+            for (int i = 0; i < big.Length; i++) big[i] = i;
+            var small = new float[4];   // 16 bytes
+            for (int i = 0; i < small.Length; i++) small[i] = i;
+
+            long prev = BrowserBufferPolicy.StrictHostCopyMaxBytes;
+            BrowserBufferPolicy.StrictHostCopyMaxBytes = 1024;
+            try
+            {
+                using var buf = accelerator.Allocate1D<float>(big.Length);
+
+                // Sub-threshold copy (16 bytes <= 1024) is still allowed.
+                buf.View.SubView(0, small.Length).CopyFromCPU(small);
+
+                // Bulk copy (2048 bytes > 1024) must trip the fail-loud guard.
+                bool threw = false;
+                try { buf.CopyFromCPU(big); }
+                catch (InvalidOperationException ex) when (ex.Message.Contains("StrictHostCopyMaxBytes"))
+                { threw = true; }
+                if (!threw)
+                    throw new Exception("BrowserBufferPolicy guard did NOT throw on a bulk host->GPU CopyFromCPU.");
+
+                // Guard OFF: the same bulk copy must NOT throw (proves the throw was the guard, not a real error).
+                BrowserBufferPolicy.StrictHostCopyMaxBytes = -1;
+                buf.CopyFromCPU(big);
+            }
+            finally { BrowserBufferPolicy.StrictHostCopyMaxBytes = prev; }
+        });
+
+        /// <summary>
         /// Verify CopyFromJS with ArrayBuffer writes data correctly.
         /// </summary>
         [TestMethod]

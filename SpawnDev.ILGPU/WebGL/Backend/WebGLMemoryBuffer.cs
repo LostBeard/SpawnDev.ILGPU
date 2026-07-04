@@ -103,15 +103,23 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (source.GetAcceleratorType() == AcceleratorType.CPU)
             {
                 var length = (int)source.Length;
+
+                // Fail-loud guard (shared across browser backends; default OFF): bulk data must stream
+                // JS-side, never through the .NET heap. See BrowserBufferPolicy.
+                BrowserBufferPolicy.CheckHostCopy(length, "WebGL");
+
                 var sourceContiguous = (IContiguousArrayView)source;
                 var sourceBuffer = sourceContiguous.Buffer;
                 var srcPtr = sourceBuffer.NativePtr + (int)sourceContiguous.Index;
-
-                var byteArray = new byte[length];
-                Marshal.Copy(srcPtr, byteArray, 0, length);
-
                 var destContiguous = (IContiguousArrayView)destination;
-                _backingArray!.Write(byteArray, (int)destContiguous.Index);
+
+                // ZERO-COPY host->device: the CPU source already lives in WASM linear memory (its
+                // NativePtr is a byte offset into Module.HEAPU8.buffer), so view it as a Uint8Array and
+                // JS->JS .Set it straight into the backing Uint8Array - no intermediate .NET byte[], no
+                // Marshal.Copy, no Write marshal. The bytes never enter the managed heap in transit.
+                using var heapBuffer = HeapView.GetHeapBuffer();
+                using var srcView = new Uint8Array(heapBuffer, (long)srcPtr, length);
+                _backingArray!.Set(srcView, (int)destContiguous.Index);
 
                 // Mark CPU-dirty — needs upload to worker before next dispatch
                 NeedsUpload = true;

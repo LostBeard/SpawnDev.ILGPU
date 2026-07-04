@@ -47,26 +47,48 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 var length = (int)source.Length;
 
+                // Fail-loud guard (opt-in, default OFF; shared across all browser backends): bulk data
+                // must stream JS-side (CopyFromStreamAsync/CopyFromJS over an IJSReadStream), never
+                // through this synchronous .NET CopyFromCPU path. See BrowserBufferPolicy.
+                BrowserBufferPolicy.CheckHostCopy(length, "WebGPU");
+
                 // Use IContiguousArrayView to access internal members
                 var sourceContiguous = (IContiguousArrayView)source;
                 var sourceBuffer = sourceContiguous.Buffer;
                 var srcPtr = sourceBuffer.NativePtr + (int)sourceContiguous.Index;
 
-                // Read from CPU buffer to managed byte array (still required for NativePtr access)
-                var byteArray = new byte[length];
-                Marshal.Copy(srcPtr, byteArray, 0, length);
-
-                // Flush pending dispatches before writing to the buffer
+                // Flush pending dispatches before writing (queue-timeline ordering: a pending dispatch
+                // that reads this buffer must be submitted BEFORE the writeBuffer overwrites it).
                 var accelerator = (WebGPUAccelerator)Accelerator;
                 accelerator.FlushPendingCommands();
 
                 var destContiguous = (IContiguousArrayView)destination;
-                // WebGPU writeBuffer requires the number of bytes to write to be a multiple of 4
-                var paddedLength = (int)WebGPUAlignment.AlignTo4(length);
-                if (paddedLength > length)
-                    System.Array.Resize(ref byteArray, paddedLength);
-                using var typedArray = new Uint8Array(byteArray);
-                accelerator.NativeAccelerator.Queue!.WriteBuffer(_buffer.NativeBuffer!, (long)destContiguous.Index, typedArray);
+
+                // ZERO-COPY host->GPU upload. In Blazor WASM the CPU source already lives in WASM linear
+                // memory, so `srcPtr` is a byte offset into the JS heap ArrayBuffer (Module.HEAPU8.buffer) -
+                // the exact mechanism HeapView uses. Wrap those bytes in a transient Uint8Array VIEW (no
+                // copy) and let queue.writeBuffer consume it synchronously (writeBuffer copies host->GPU
+                // immediately, within this sync call, so a heap resize cannot invalidate the view mid-flight).
+                // This replaces the old `new byte[]` + Marshal.Copy + `(ArrayBuffer)byteArray` whole-buffer
+                // JS marshal - two redundant copies + a fresh JS allocation per call, the CopyFromCPU wrapper
+                // cost Seven measured at ~14ms vs 0.02ms for a raw writeBuffer.
+                //
+                // writeBuffer REQUIRES a 4-byte-multiple byte count; fp32 (and even-count Half) uploads always
+                // are, so they take the zero-copy fast path. A non-4-aligned length (odd-count sub-word) falls
+                // back to the padded managed copy - rare, and the destination is 4-byte-padded at allocation.
+                if ((length & 3) == 0)
+                {
+                    using var heapBuffer = HeapView.GetHeapBuffer();
+                    using var srcView = new Uint8Array(heapBuffer, (long)srcPtr, length);
+                    accelerator.NativeAccelerator.Queue!.WriteBuffer(_buffer.NativeBuffer!, (long)destContiguous.Index, srcView);
+                }
+                else
+                {
+                    var byteArray = new byte[(int)WebGPUAlignment.AlignTo4(length)];
+                    Marshal.Copy(srcPtr, byteArray, 0, length);
+                    using var typedArray = new Uint8Array(byteArray);
+                    accelerator.NativeAccelerator.Queue!.WriteBuffer(_buffer.NativeBuffer!, (long)destContiguous.Index, typedArray);
+                }
             }
             else
             {

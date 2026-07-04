@@ -2,6 +2,14 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.17.2-local.8 - Zero-copy host→GPU CopyFromCPU on ALL browser backends + shared fail-loud host-copy guard
+
+Wrapper-only over 4.17.2-local.7 (forks unchanged at 2.2.0). Captain-directed: pulling bulk data from JS into the single-threaded .NET/WASM managed heap on its way to an accelerator is the same main-thread tax on **every** browser backend (WebGPU, WebGL, Wasm), not a WebGPU-only problem. All three had the identical `new byte[]` + `Marshal.Copy` waste in their host `CopyFrom` CPU branch (Wasm copied twice: WASM→.NET→SharedArrayBuffer).
+
+- **Zero-copy host→device on WebGPU + WebGL + Wasm.** The CPU source already lives in WASM linear memory, so its native pointer is a byte offset into `Module.HEAPU8.buffer` (the mechanism `HeapView` uses). Each backend now views the source bytes with `new Uint8Array(HEAPU8.buffer, srcPtr, len)` and hands them JS-side directly - `queue.writeBuffer` (WebGPU, which consumes the source synchronously), JS→JS `.Set` into the backing `Uint8Array` (WebGL), JS→JS `.Set` into the `SharedArrayBuffer` view (Wasm). No intermediate `byte[]`, no `Marshal.Copy`, no whole-buffer marshal; the bytes never enter the managed heap in transit. WebGPU keeps a padded-copy fallback only for a non-4-aligned odd-count sub-word transfer (writeBuffer requires a 4-byte-multiple count). **Resolves the ~14ms/call `ArrayView.CopyFromCPU` cost tracked in local.7** (vs ~0.02ms raw `writeBuffer`).
+- **`BrowserBufferPolicy.StrictHostCopyMaxBytes`** (new, `SpawnDev.ILGPU` namespace; default `-1` = off). A shared fail-loud guard checked by all three browser backends' host `CopyFrom`: when set to a non-negative byte count, a host `CopyFromCPU` exceeding it THROWS `InvalidOperationException` naming the size. A consumer wraps a model-load window in it so any weight that regresses onto the .NET copy path fails loud in the PMT run - on whichever browser backend the test lands - instead of silently costing seconds of main-thread copies. Model weights must stream JS-side via `CopyFromStreamAsync`/`CopyFromJS` over an `IJSReadStream`; this guards that contract in code.
+- **Gate:** PMT `PMT_FILTER=RoundTrip` 198/0 - the `CopyFromCPU`→readback round-trip family (incl. sub-word odd-count fallback + GPT-2-scale chunked upload) is bit-exact vs the CPU oracle on Wasm (29), WebGL (25), and WebGPU (29). New `StrictHostCopyGuard_ThrowsOnBulkCopyTest` green on all three browser backends (throws on a bulk copy over the threshold, allows a sub-threshold copy, and does not throw with the guard off); it skips on desktop backends.
+
 ## 4.17.2-local.7 - Dispatch-plan PATCH SURFACE (parameterized replay)
 
 Wrapper-only over 4.17.2-local.6 (forks unchanged at 2.2.0). Enables replaying one captured plan across a moving loop variable (the LLM decode case: one plan, patched per token) instead of re-capturing.

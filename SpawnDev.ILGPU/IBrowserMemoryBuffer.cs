@@ -8,6 +8,49 @@ using System.Threading.Tasks;
 namespace SpawnDev.ILGPU
 {
     /// <summary>
+    /// Cross-browser-backend policy for host→device transfers. Applies to EVERY browser backend
+    /// (WebGPU, WebGL, Wasm) - pulling bulk data from JS into the single-threaded .NET/WASM managed
+    /// heap on its way to an accelerator is the same main-thread tax on all three, not a WebGPU-only
+    /// problem. The whole point of the browser backends is to keep compute (and its data) off the
+    /// Blazor WASM main thread.
+    /// </summary>
+    public static class BrowserBufferPolicy
+    {
+        /// <summary>
+        /// Fail-loud guard (default <c>-1</c> = OFF, no behavior change). When set to a non-negative
+        /// byte count, a synchronous host→GPU <c>CopyFromCPU</c> on ANY browser backend whose transfer
+        /// exceeds this many bytes THROWS <see cref="System.InvalidOperationException"/> naming the size -
+        /// because on a browser backend bulk data (model weights especially) must stream JS-side via
+        /// <c>CopyFromStreamAsync</c> / <c>CopyFromJS</c> over an <see cref="IJSReadStream"/> and never
+        /// enter the .NET heap. A consumer wraps a load window in <c>StrictHostCopyMaxBytes = N;
+        /// try { ...load... } finally { StrictHostCopyMaxBytes = -1; }</c> so any weight that regresses
+        /// onto the .NET <c>CopyFromCPU</c> path trips the guard IN THE PMT RUN (on whichever browser
+        /// backend the test lands) rather than silently costing seconds of main-thread copies. A small
+        /// positive threshold (e.g. 65536) still lets genuinely-tiny, genuinely-.NET-origin constants
+        /// through while catching every real weight. Captain directive 2026-07-05: the code enforces
+        /// "model bytes stay JS+GPU" across every browser backend, not human review.
+        /// </summary>
+        public static long StrictHostCopyMaxBytes { get; set; } = -1;
+
+        /// <summary>
+        /// Throws if <see cref="StrictHostCopyMaxBytes"/> is enabled and <paramref name="byteLength"/>
+        /// exceeds it. Called from each browser backend's host→device <c>CopyFrom</c> CPU branch.
+        /// <paramref name="backend"/> names the backend in the message.
+        /// </summary>
+        public static void CheckHostCopy(long byteLength, string backend)
+        {
+            var max = StrictHostCopyMaxBytes;
+            if (max >= 0 && byteLength > max)
+                throw new System.InvalidOperationException(
+                    $"{backend} host->GPU CopyFromCPU of {byteLength} bytes exceeds " +
+                    $"BrowserBufferPolicy.StrictHostCopyMaxBytes={max}. Bulk browser data (model weights) " +
+                    "must stream JS-side via CopyFromStreamAsync/CopyFromJS over an IJSReadStream and never " +
+                    "enter the .NET heap. This transfer pulled bulk data through the single-threaded WASM " +
+                    "managed heap.");
+        }
+    }
+
+    /// <summary>
     /// Shared helper for the browser <c>MemoryBuffer.CopyFromStreamRawAsync</c> overrides:
     /// streams an <see cref="IJSReadStream"/> into a browser GPU buffer chunk-by-chunk via
     /// <see cref="IBrowserMemoryBuffer.CopyFromJS(TypedArray, long)"/>, keeping the bytes JS-side

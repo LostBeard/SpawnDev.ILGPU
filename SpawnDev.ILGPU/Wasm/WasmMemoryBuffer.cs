@@ -527,18 +527,26 @@ namespace SpawnDev.ILGPU.Wasm
         {
             int length = (int)sourceView.LengthInBytes;
 
-            byte[] data = new byte[length];
-            unsafe
-            {
-                var sourcePtr = sourceView.LoadEffectiveAddressAsPtr();
-                System.Runtime.InteropServices.Marshal.Copy(sourcePtr, data, 0, length);
-            }
+            // Fail-loud guard (shared across browser backends; default OFF): bulk data must stream
+            // JS-side, never through the .NET heap. See BrowserBufferPolicy.
+            BrowserBufferPolicy.CheckHostCopy(length, "Wasm");
 
             // Write to SharedArrayBuffer
             PrepareHostWrite();
             int dstOffset = (int)targetView.LoadEffectiveAddressAsPtr();
             using var dstUint8 = new Uint8Array(SharedBuffer, dstOffset, length);
-            dstUint8.WriteBytes(data);
+
+            // ZERO-COPY host->device: the CPU source already lives in WASM linear memory (its native
+            // address is a byte offset into Module.HEAPU8.buffer), so view it as a Uint8Array and JS->JS
+            // .Set it straight into the destination SharedArrayBuffer view - no intermediate .NET byte[],
+            // no Marshal.Copy, no WriteBytes marshal. The bytes never enter the managed heap in transit.
+            unsafe
+            {
+                var sourcePtr = sourceView.LoadEffectiveAddressAsPtr();
+                using var heapBuffer = HeapView.GetHeapBuffer();
+                using var srcView = new Uint8Array(heapBuffer, (long)sourcePtr, length);
+                dstUint8.Set(srcView);
+            }
             NotifyHostWrite();
         }
 
