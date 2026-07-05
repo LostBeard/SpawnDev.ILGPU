@@ -2,6 +2,16 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.17.3 - Browser zero-copy host→GPU + BrowserBufferPolicy (stable)
+
+Promotes 4.17.2-local.7/8/9 to a stable nuget.org release. SpawnDev.ILGPU.ML's zero-copy weight-load path (and the SpawnDev.AI GitHub Pages build downstream) depend on `BrowserBufferPolicy`, which only existed on the local feed until now. No behavior change over local.9; forks unchanged at 2.2.0.
+
+- **Zero-copy host→device `CopyFromCPU` on WebGPU + WebGL + Wasm** (local.8): the CPU source is viewed as `new Uint8Array(HEAPU8.buffer, srcPtr, len)` and handed JS-side directly (`queue.writeBuffer` / `.Set`) - no intermediate `byte[]`, no `Marshal.Copy`, never entering the managed heap in transit. Resolves the ~14ms/call `ArrayView.CopyFromCPU` cost.
+- **`BrowserBufferPolicy.StrictHostCopyMaxBytes`** (local.8, `SpawnDev.ILGPU` namespace, default `-1` = off): shared fail-loud guard checked by all three browser backends - a host `CopyFromCPU` over the set size THROWS, so a weight regressing off the JS-stream path fails loud in PMT instead of silently costing seconds of main-thread copies.
+- **`BrowserBufferPolicy.TraceStreamUploadTiming`** (local.9, default off): splits the stream-upload read (`ReadUint8ArrayAsync`) vs write (`CopyFromJS`/`writeBuffer`) time for load-perf attribution.
+- **Dispatch-plan patch surface** (local.7): parameterized capture/replay.
+- **Gate:** full PMT sweep green across all six backends (see release commit).
+
 ## 4.17.2-local.9 - Stream-upload timing diagnostics (split read vs writeBuffer)
 
 Wrapper-only over 4.17.2-local.8 (forks unchanged at 2.2.0). Pure measurement - default OFF, byte-identical behavior in production. After the bulk model weights stream JS-side (parser fix, ML side) and the tiny GPU-consumed constants go through the zero-copy `CopyFromCPU` (local.8), the residual model-load cost is the **stream (zero-copy `writeBuffer`) bucket** - measured ~65s on SD-Turbo/WebGPU vs CUDA's ~7.6s. That bucket is a single loop of read-a-chunk then write-a-chunk, and the time could be in the READ (torrent/OPFS-bound `IJSReadStream`) or the WRITE (`queue.writeBuffer` transport / 16MiB chunk size mistuned) - measure before tuning.
