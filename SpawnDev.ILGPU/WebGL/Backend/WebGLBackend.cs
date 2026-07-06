@@ -429,21 +429,31 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // ordering and gets stripped to empty here.
             var structDefs = new StringBuilder();
             data.TypeGenerator.GenerateTypeDefinitions(structDefs, data.BodyStructTypeIdsToSkip);
-            var glslSource = builder.ToString()
-                .Replace("// __STRUCT_DEFS_TOP_PLACEHOLDER__\r\n", structDefs.ToString())
-                .Replace("// __STRUCT_DEFS_TOP_PLACEHOLDER__\n", structDefs.ToString())
-                // The original kernel-header placeholder. Helpers physically appear
-                // before this line in the file (helpers Merge before the kernel's
-                // GenerateHeader runs), so replacing this one with struct defs would
-                // place them AFTER the helpers that use them - GLSL parse error.
-                // Strip it to empty; the top-of-file placeholder above carries the
-                // real struct defs.
-                .Replace("// __STRUCT_DEFS_PLACEHOLDER__\r\n", "")
-                .Replace("// __STRUCT_DEFS_PLACEHOLDER__\n", "")
-                // GLSL ES 3.0: ANGLE crashes on INT_MIN (-2147483648) regardless
-                // of representation (even constant-folded expressions). Replace with
-                // -2147483647 which is semantically equivalent for bounds checks.
-                .Replace("int(-2147483648)", "int(-2147483647)");
+            // Assemble the final source by mutating the existing StringBuilder IN PLACE, not by chaining
+            // String.Replace (each of which allocated a fresh copy of the ENTIRE shader source). On the
+            // constrained Blazor WASM managed heap, a large kernel's 5-copy Replace chain over hundreds of
+            // compiles in one browser session exhausted the heap → System.OutOfMemoryException in
+            // String.Replace under Backend.Compile (the WebGL lane's chronic compile OOM; ~24 tests/full-run).
+            // StringBuilder.Replace mutates the builder's own char buffer (no per-step immutable full-string
+            // copy), and structDefs is materialized ONCE — cutting per-compile transient string allocation
+            // ~5-6×. The builder is a local consumed here (CodeGeneratorBackend returns immediately after
+            // CreateKernel), so the in-place mutation is safe. Semantics are identical to the old chain.
+            var structDefsStr = structDefs.ToString();
+            builder.Replace("// __STRUCT_DEFS_TOP_PLACEHOLDER__\r\n", structDefsStr);
+            builder.Replace("// __STRUCT_DEFS_TOP_PLACEHOLDER__\n", structDefsStr);
+            // The original kernel-header placeholder. Helpers physically appear
+            // before this line in the file (helpers Merge before the kernel's
+            // GenerateHeader runs), so replacing this one with struct defs would
+            // place them AFTER the helpers that use them - GLSL parse error.
+            // Strip it to empty; the top-of-file placeholder above carries the
+            // real struct defs.
+            builder.Replace("// __STRUCT_DEFS_PLACEHOLDER__\r\n", "");
+            builder.Replace("// __STRUCT_DEFS_PLACEHOLDER__\n", "");
+            // GLSL ES 3.0: ANGLE crashes on INT_MIN (-2147483648) regardless
+            // of representation (even constant-folded expressions). Replace with
+            // -2147483647 which is semantically equivalent for bounds checks.
+            builder.Replace("int(-2147483648)", "int(-2147483647)");
+            var glslSource = builder.ToString();
             if (VerboseLogging)
             {
                 Log("--- GENERATED GLSL ---");

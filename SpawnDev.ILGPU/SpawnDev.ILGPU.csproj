@@ -4,7 +4,7 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.17.3</Version>
+		<Version>4.17.4</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
 		<PackageReleaseNotes>4.17.2-local.9: Stream-upload timing diagnostics (measure the model-load transport). The browser IJSReadStream-&gt;GPU stream path is one loop of read-a-chunk (ReadUint8ArrayAsync) then write-a-chunk (CopyFromJS / queue.writeBuffer); when load is slow the time can be in the READ (torrent/OPFS-bound) or the WRITE (writeBuffer transport / chunk size). `BrowserBufferPolicy.TraceStreamUploadTiming` (default OFF) splits the two halves into `StreamReadMs`/`StreamWriteMs`/`StreamBytes`/`StreamChunks` (+ `ResetStreamUploadTiming()`) so a harness can attribute the cost to the right lever before tuning. Pure measurement, gated OFF - byte-identical behavior in production. Wrapper-only; forks unchanged at 2.2.0.
 

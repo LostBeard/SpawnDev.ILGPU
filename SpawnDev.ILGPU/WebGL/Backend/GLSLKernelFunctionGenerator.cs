@@ -2442,67 +2442,56 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 }
             }
 
-            // Note: We intentionally do NOT temporarily mark the merge as visited.
-            // The merge block may be needed as a continuation target by nested
-            // branches (e.g., the merge for an outer if/else might be the PHI
-            // write-back + continue block that an inner branch needs to reach).
+            // EMIT EACH BLOCK ONCE (fixes exponential tail-duplication). PIN the in-loop merge
+            // (the post-dominator = the block both branches converge on) as visited BEFORE emitting
+            // the branches, so neither branch runs INTO the loop-body continuation — each stops at
+            // the merge. The merge is then emitted exactly ONCE after the if/else.
+            //
+            // The OLD approach re-emitted the merge by resetting `_visitedBlocks` to the pre-branch
+            // state after the if/else (`IntersectWith(visitedBeforeTrueBranch); GenerateLoopBody(merge)`).
+            // Because the merge is the loop-body continuation, and that continuation contains further
+            // Case-4 branches that each did the SAME reset+regenerate, the loop body was duplicated on
+            // every nested conditional → 2^N. A 4×4 bicubic loop with ~15 bounds/weight conditionals
+            // produced a 33 MB / 500K-line GLSL shader (`CubicWeight` inlined 5,561× vs the intended ~20)
+            // that exhausted the Blazor WASM managed heap during compile. This mirrors the acyclic
+            // `EmitIfBranch` (which passes `merge` as the `stop` and emits it once) and the WGSL backend,
+            // which stays ~30 KB on the SAME IR.
+            bool pinnedMerge = false;
+            if (mergeInLoop && merge != null && !_visitedBlocks.Contains(merge))
+            {
+                _visitedBlocks.Add(merge);
+                pinnedMerge = true;
+            }
 
-            // Save visited state before the true branch so that blocks consumed
-            // by the true path can be re-visited by the false path. This is
-            // essential when both paths share a common back-edge block (e.g.,
-            // the PHI write-back + continue block in BVH traversal).
+            // Snapshot AFTER pinning the merge. The || short-circuit restore below still lets the false
+            // path re-reach a shared in-branch body block, but the merge stays pinned in the snapshot so
+            // both branches keep stopping at it (the restore never un-pins it).
             var visitedBeforeTrueBranch = new HashSet<BasicBlock>(_visitedBlocks);
 
             AppendLine($"if ({cond}) {{");
             PushIndent();
             PushPhiValues(trueTarget, source);
-            if (trueTarget == merge)
-            {
-                // True goes directly to merge — nothing to generate
-            }
-            else
-            {
+            if (trueTarget != merge)
                 GenerateLoopBody(trueTarget, loop, outerStop);
-            }
             PopIndent();
             AppendLine("} else {");
             PushIndent();
             PushPhiValues(falseTarget, source);
-
-            // Restore visited state: remove blocks that were only visited during
-            // the true branch, so the false branch can reach shared targets.
+            // Restore visited to the pre-true-branch state so the false path can re-reach a shared
+            // `||` body block (e.g. the PHI write-back + continue block in BVH traversal). The merge
+            // is part of this snapshot, so it stays pinned — this is a bounded re-visit, not the old
+            // unbounded merge-subtree regeneration.
             _visitedBlocks.IntersectWith(visitedBeforeTrueBranch);
-
-            if (falseTarget == merge)
-            {
-                // False goes directly to merge — nothing to generate
-            }
-            else
-            {
+            if (falseTarget != merge)
                 GenerateLoopBody(falseTarget, loop, outerStop);
-            }
             PopIndent();
             AppendLine("}");
 
-            // Always regenerate the merge block after the if/else by restoring
-            // _visitedBlocks to the pre-branch state. This handles two failure modes:
-            //
-            // 1. The false branch may have internally visited BB_phi_merge (e.g.,
-            //    via BB_if_body → BB_phi_merge), leaving it marked visited and
-            //    causing the old `!Contains(merge)` guard to skip generation.
-            //
-            // 2. Sub-blocks of the merge (e.g., BB_case0 in a color-select switch)
-            //    may have been visited during the true or false branch. If only
-            //    `Remove(merge)` were used, those sub-blocks would still be marked
-            //    visited when the merge re-runs its own nested Case-4 branches,
-            //    producing empty else-blocks and wrong phi values.
-            //
-            // By intersecting back to visitedBeforeTrueBranch we let the merge and
-            // its entire sub-tree regenerate cleanly. Any code emitted after an
-            // already-executed `continue` is dead but harmless.
-            if (mergeInLoop)
+            // Emit the merge (the loop-body continuation) exactly ONCE, only if we pinned it here
+            // (otherwise an enclosing scope owns and will emit it). Un-pin so GenerateLoopBody runs it.
+            if (pinnedMerge)
             {
-                _visitedBlocks.IntersectWith(visitedBeforeTrueBranch);
+                _visitedBlocks.Remove(merge);
                 GenerateLoopBody(merge, loop, outerStop);
             }
         }

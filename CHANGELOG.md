@@ -2,6 +2,13 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.17.4 - WebGL codegen: fix exponential GLSL blow-up on branchy loops (stable)
+
+Fixes a WebGL/GLSL backend bug where a **loop containing conditionals** could emit an exponentially-large shader, exhausting the Blazor WASM managed heap during compilation (`System.OutOfMemoryException` / `ILGPU.InternalCompilerException`). Any consumer transpiling branchy loop kernels to WebGL was affected - the same IR compiles to ~30 KB WGSL but was ballooning to tens of MB of GLSL. Forks unchanged.
+
+- **Loop-body structurizer tail-duplication fixed** (`GLSLKernelFunctionGenerator.EmitLoopIfBranch`). After an in-loop `if`/`else`, the old code reset its visited-set to the pre-branch state and re-emitted the loop-body continuation (the post-dominator merge block). Because that continuation contains further conditionals that each did the SAME reset-and-regenerate, the loop body duplicated **2^N** for N conditionals. A 4×4 bicubic-resize loop (~15 bounds-clamp + cubic-weight conditionals) produced a **33 MB / 500K-line** GLSL shader - its cubic-weight polynomial inlined **5,561×** instead of the intended ~20. The structurizer now **pins the merge block as visited before emitting the branches** (so each branch stops at it) and emits it **exactly once** afterward, matching the acyclic path and the WGSL backend. Result on the SpawnDev.ILGPU.ML WebGL suite: **24 compile OOM/ICE failures → 0**; WebGL lane wall time **16:38 → 5:33**; no correctness change to any passing kernel.
+- **Kernel final-assembly uses `StringBuilder.Replace` in place** (`WebGLBackend.CreateKernel`), replacing a 5-call `String.Replace` chain (each copied the ENTIRE shader source) with in-place mutation on the existing builder + a single `structDefs` materialization - ~5-6× less transient string allocation per compile on the constrained WASM heap.
+
 ## 4.17.3 - Browser zero-copy host→GPU + BrowserBufferPolicy (stable)
 
 Promotes 4.17.2-local.7/8/9 to a stable nuget.org release. SpawnDev.ILGPU.ML's zero-copy weight-load path (and the SpawnDev.AI GitHub Pages build downstream) depend on `BrowserBufferPolicy`, which only existed on the local feed until now. No behavior change over local.9; forks unchanged at 2.2.0.
