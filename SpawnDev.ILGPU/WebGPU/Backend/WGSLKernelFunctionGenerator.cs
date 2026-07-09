@@ -80,6 +80,25 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private Dictionary<int, int> _subWordParams = new Dictionary<int, int>(); // paramIndex -> elementByteSize
         // Float16 sub-word params need f16-to-f32 conversion instead of sign extension
         private HashSet<int> _subWordFloat16Params = new HashSet<int>();
+        // Kernel params (or the buffers behind them, mapped through helper call chains) that
+        // are the target of ANY Store / GenericAtomic / AtomicCAS in the kernel or any helper
+        // it calls. A sub-word param that is NEVER written needs no atomic RMW for its packed
+        // stores (there are none), so its buffer can be declared plain array<u32> and read with
+        // a plain indexed load instead of atomicLoad. Populated by ScanForStoredSubWordParams().
+        private HashSet<int> _storedSubWordParams = new HashSet<int>();
+        // Kernel params whose BUFFER (not a loaded value) is passed by pointer to a NoInlining
+        // helper. Such a buffer's WGSL binding type must match the helper's ptr param type, and
+        // the helper generator independently declares sub-word f16 ptr params as atomic<u32>.
+        // We therefore never demote a helper-passed f16 param to plain u32 (would mismatch at the
+        // call site). Populated by ScanForStoredSubWordParams().
+        private HashSet<int> _paramPassedToHelper = new HashSet<int>();
+        // READ-ONLY Float16 sub-word params that get their own direct binding and are demoted from
+        // array<atomic<u32>> + atomicLoad to array<u32> + plain indexed load. Computed ONCE in
+        // GenerateCode (after PreScanEmulatedParameters, before body generation) so both the load
+        // sites (body gen) and the binding declaration (GenerateHeader, runs after body) agree.
+        // The atomicLoad on a small weight buffer read by tens of millions of threads serializes
+        // (~220x slower measured); a plain load of a never-atomically-written buffer is value-identical.
+        private HashSet<int> _plainLoadFloat16Params = new HashSet<int>();
         private HashSet<int> _subWordBFloat16Params = new HashSet<int>();
         // FP8 sub-word params (1-byte storage, 4 per atomic<u32>): paramIdx -> isE4M3
         // (true = Float8E4M3, false = Float8E5M2). Load/store apply _e4m3/_e5m2 conversion.
@@ -565,6 +584,103 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
             }
         }
+
+        /// <summary>
+        /// Whole-module scan that records, for each kernel parameter: (a) whether it is ever the
+        /// target of a Store / GenericAtomic / AtomicCAS (in the kernel OR any helper it calls,
+        /// mapped back to the kernel param through the call chain) — <see cref="_storedSubWordParams"/>;
+        /// and (b) whether its buffer is passed by pointer to a helper — <see cref="_paramPassedToHelper"/>.
+        /// A sub-word Float16 param that is NEVER written and NEVER passed to a helper can have its
+        /// atomic RMW machinery elided (plain array&lt;u32&gt; binding + plain indexed load). Mirrors the
+        /// helper-param→kernel-param mapping used by <see cref="ScanForAtomicUsage"/> so a write hidden
+        /// inside a NoInlining helper is correctly attributed to the kernel param that backs it.
+        /// Conservative: any store that cannot be resolved to a param is simply not credited (it can
+        /// only fail to demote something, never wrongly demote a written buffer).
+        /// </summary>
+        private void ScanForStoredSubWordParams()
+        {
+            ScanBlocksForStoredParams(Method.Blocks, paramIndex => paramIndex);
+            var visited = new HashSet<global::ILGPU.IR.Method>();
+            ScanMethodCallsForStoredParams(Method, paramIndex => paramIndex, visited);
+        }
+
+        private void ScanBlocksForStoredParams(
+            IEnumerable<global::ILGPU.IR.BasicBlock> blocks,
+            Func<int, int> paramMapper)
+        {
+            foreach (var block in blocks)
+            {
+                foreach (var entry in block)
+                {
+                    Value? target = null;
+                    if (entry.Value is global::ILGPU.IR.Values.Store store)
+                        target = store.Target;
+                    else if (entry.Value is global::ILGPU.IR.Values.GenericAtomic atomic)
+                        target = atomic.Target;
+                    else if (entry.Value is global::ILGPU.IR.Values.AtomicCAS cas)
+                        target = cas.Target;
+                    if (target == null) continue;
+
+                    if (ResolveToParameterWithFieldChain(target, out var param, out _) && param != null)
+                    {
+                        int kernelParamIdx = paramMapper(param.Index);
+                        if (kernelParamIdx >= 0)
+                            _storedSubWordParams.Add(kernelParamIdx);
+                    }
+                }
+            }
+        }
+
+        private void ScanMethodCallsForStoredParams(
+            global::ILGPU.IR.Method method,
+            Func<int, int> parentParamMapper,
+            HashSet<global::ILGPU.IR.Method> visited)
+        {
+            if (!visited.Add(method)) return;
+
+            foreach (var block in method.Blocks)
+            {
+                foreach (var entry in block)
+                {
+                    if (entry.Value is not global::ILGPU.IR.Values.MethodCall methodCall) continue;
+
+                    var targetMethod = methodCall.Target;
+                    var paramMap = new Dictionary<int, int>();
+                    var targetParams = targetMethod.Parameters.ToArray();
+
+                    for (int argIdx = 0; argIdx < methodCall.Count && argIdx < targetParams.Length; argIdx++)
+                    {
+                        var arg = methodCall[argIdx];
+                        // Only a BUFFER passed by pointer resolves to a param here; a loaded scalar
+                        // value (e.g. weight[i] fed to a conversion) does not, so it is not flagged.
+                        if (ResolveToParameterWithFieldChain(arg, out var parentParam, out _) && parentParam != null)
+                        {
+                            int kernelIdx = parentParamMapper(parentParam.Index);
+                            if (kernelIdx >= 0)
+                            {
+                                _paramPassedToHelper.Add(kernelIdx);
+                                paramMap[targetParams[argIdx].Index] = kernelIdx;
+                            }
+                        }
+                    }
+
+                    if (paramMap.Count > 0)
+                    {
+                        Func<int, int> childMapper = helperParamIdx =>
+                            paramMap.TryGetValue(helperParamIdx, out var k) ? k : -1;
+                        ScanBlocksForStoredParams(targetMethod.Blocks, childMapper);
+                        ScanMethodCallsForStoredParams(targetMethod, childMapper, visited);
+                    }
+                }
+            }
+        }
+
+        /// <summary>
+        /// True if the given sub-word Float16 param was demoted to a plain (non-atomic) array&lt;u32&gt;
+        /// binding + plain indexed load. Both the load-site codegen and the binding declaration key
+        /// off this single set so they always agree on the element type.
+        /// </summary>
+        private bool IsPlainLoadF16(int paramIdx) => _plainLoadFloat16Params.Contains(paramIdx);
 
         /// <summary>
         /// Recursively walks MethodCall nodes in a method, scanning each called helper
@@ -2171,9 +2287,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     else if (_subWordParams.ContainsKey(param.Index))
                     {
                         // Sub-word: packed 8/16-bit values in u32 words.
-                        // Must be atomic<u32> because multiple threads may write to different
-                        // sub-word slots within the same u32 word (data race on RMW).
-                        bindingWgslType = "atomic<u32>";
+                        // Normally atomic<u32> because concurrent sub-word STORES race on the u32
+                        // word (RMW). A read-only Float16 param (never written, own binding) has no
+                        // such race, so it is declared plain array<u32> and read with a plain
+                        // indexed load (still read_write access mode - the aliasing rules are about
+                        // access mode, unchanged here; only the atomicLoad serialization is removed).
+                        bindingWgslType = IsPlainLoadF16(param.Index) ? "u32" : "atomic<u32>";
                     }
 
                     if (isAtomic)
@@ -3297,6 +3416,28 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // 0. Pre-scan parameters to identify emulated 64-bit types
             // This MUST happen before hoisting so that Load/Store know which buffers are emulated
             PreScanEmulatedParameters();
+
+            // 0b. Decide which read-only Float16 sub-word params can skip the atomic RMW machinery.
+            // MUST run here: PreScanEmulatedParameters (above) has populated _subWordFloat16Params,
+            // the constructor has populated coalesce/body-struct classification, and this is still
+            // BEFORE body generation (so the load sites see the decision) and BEFORE GenerateHeader
+            // (which emits the binding decl and runs after body gen). A packed sub-word f16 buffer
+            // only needs array<atomic<u32>> because concurrent sub-word STORES race on the u32 word;
+            // a param that is never written (a weight/activation input) has no such race, so plain
+            // array<u32> + plain indexed load is value-identical and ~220x faster at conv/GEMM scale
+            // (atomicLoad on a small shared weight buffer read by tens of millions of threads
+            // serializes; measured 30,523ms -> 138ms on RTX 4070). Scoped to Float16 first and to
+            // params that get their OWN direct binding (not coalesced, not a body-struct field, not
+            // passed by pointer to a helper whose ptr param type would then mismatch).
+            ScanForStoredSubWordParams();
+            foreach (var f16ParamIdx in _subWordFloat16Params)
+            {
+                if (_storedSubWordParams.Contains(f16ParamIdx)) continue;        // ever written -> keep atomic
+                if (_paramPassedToHelper.Contains(f16ParamIdx)) continue;        // helper ptr type would mismatch
+                if (_directParamCoalesceMembership.ContainsKey(f16ParamIdx)) continue; // shares a coalesced binding
+                if (_bodyStructParams.ContainsKey(f16ParamIdx)) continue;        // body-struct field, not a direct binding
+                _plainLoadFloat16Params.Add(f16ParamIdx);
+            }
 
             // 1. Scan and declare hoisted variables
             HoistCrossBlockVariables();
@@ -5856,9 +5997,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // Helper from WGSLEmulationLibrary.F16Functions handles all cases correctly:
                     // signed zero, denormals (flushed), normal, Inf, NaN. Previous inline code
                     // mishandled exp==0 denormals and exp==31 Inf/NaN (produced huge finites).
+                    // Read-only weight/activation params are demoted to a plain array<u32> binding
+                    // (IsPlainLoadF16) and read with a plain indexed load - value-identical to
+                    // atomicLoad on a never-atomically-written buffer, but ~220x faster at conv scale.
                     var wordIdx = $"(u32({idx}) / 2u)";
                     var shift = $"((u32({idx}) % 2u) * 16u)";
-                    var rawExpr = $"((u32(atomicLoad(&{subWordBinding}[{wordIdx}])) >> {shift}) & 0xFFFFu)";
+                    var wordLoad = IsPlainLoadF16(subWordParamIdx)
+                        ? $"{subWordBinding}[{wordIdx}]"
+                        : $"atomicLoad(&{subWordBinding}[{wordIdx}])";
+                    var rawExpr = $"((u32({wordLoad}) >> {shift}) & 0xFFFFu)";
                     extractExpr = $"_f16_to_f32({rawExpr})";
                 }
                 else if (_subWordBFloat16Params.Contains(subWordParamIdx))
