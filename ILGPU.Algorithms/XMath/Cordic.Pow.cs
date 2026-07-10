@@ -49,11 +49,24 @@ namespace ILGPU.Algorithms
                 if (value == float.NegativeInfinity)
                     return 0.0f;
 
-                // Deal with negative exponents
+                // Deal with negative exponents. NB: call ExpImpl (NOT Exp) so this does not
+                // recurse - a self-recursive Exp broke the GPU path (upstream ILGPU #1334;
+                // GPU backends cannot recurse, and our browser backends use CORDIC for exp).
                 if (value < 0)
                     return 1.0f /
-                        Exp(-1.0f * value);
+                        ExpImpl(-1.0f * value);
 
+                return ExpImpl(value);
+            }
+
+            /// <summary>
+            /// Calculates the base-e exponential of a NON-NEGATIVE value. Separated from
+            /// <see cref="Exp"/> so its negative-value handling does not recurse into Exp
+            /// (GPU backends cannot recurse; upstream ILGPU #1334).
+            /// </summary>
+            [MethodImpl(MethodImplOptions.NoInlining)]
+            private static float ExpImpl(float value)
+            {
                 // The exponential function is related to hyperbolic functions with the
                 // identity:
                 //  exp(x) = cosh(x) + sinh(x)
@@ -106,11 +119,24 @@ namespace ILGPU.Algorithms
                 if (value == double.NegativeInfinity)
                     return 0.0;
 
-                // Deal with negative exponents
+                // Deal with negative exponents. NB: call ExpImpl (NOT Exp) so this does not
+                // recurse - a self-recursive Exp broke the GPU path (upstream ILGPU #1334;
+                // GPU backends cannot recurse, and our browser backends use CORDIC for exp).
                 if (value < 0)
                     return 1.0 /
-                        Exp(-1.0 * value);
+                        ExpImpl(-1.0 * value);
 
+                return ExpImpl(value);
+            }
+
+            /// <summary>
+            /// Calculates the base-e exponential of a NON-NEGATIVE value. Separated from
+            /// <see cref="Exp"/> so its negative-value handling does not recurse into Exp
+            /// (GPU backends cannot recurse; upstream ILGPU #1334).
+            /// </summary>
+            [MethodImpl(MethodImplOptions.NoInlining)]
+            private static double ExpImpl(double value)
+            {
                 // The exponential function is related to hyperbolic functions with the
                 // identity:
                 //  exp(x) = cosh(x) + sinh(x)
