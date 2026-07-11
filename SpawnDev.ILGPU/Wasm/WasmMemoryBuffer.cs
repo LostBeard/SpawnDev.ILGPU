@@ -543,8 +543,12 @@ namespace SpawnDev.ILGPU.Wasm
             unsafe
             {
                 var sourcePtr = sourceView.LoadEffectiveAddressAsPtr();
-                using var heapBuffer = HeapView.GetHeapBuffer();
-                using var srcView = new Uint8Array(heapBuffer, (long)sourcePtr, length);
+                // HeapViewPtr PRIMES the heap (pre-grow + headroom via HeapView.PrimeHeap) so a managed
+                // allocation in the wrap->Set window can't trigger a memory.grow that DETACHES srcView (the
+                // unprimed HeapView.GetHeapBuffer() path is the "external Instance reference no longer exists"
+                // class — a detached WASM heap ArrayBuffer). Mirrors the WebGPU CopyFrom fix.
+                using var heapView = new HeapViewPtr(sourcePtr, length);
+                using var srcView = heapView.As<Uint8Array>();
                 dstUint8.Set(srcView);
             }
             NotifyHostWrite();

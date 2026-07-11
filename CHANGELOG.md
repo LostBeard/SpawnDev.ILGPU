@@ -2,6 +2,14 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.17.5 - Browser heap-view priming: fix detached-heap `CopyFrom` crash under managed-heap pressure
+
+The three browser backends' zero-copy host→GPU upload paths viewed the WASM heap source through the **unprimed** `HeapView.GetHeapBuffer()`. A `Uint8Array` view over WASM linear memory is only valid until the next `memory.grow()`, which **detaches** the backing ArrayBuffer — and Mono grows the heap on managed-allocation pressure. With no primed headroom, a managed allocation in the wrap→consume window (even the JSObject wrapper allocations) can trigger a grow that detaches the view mid-upload, surfacing as **"A valid external Instance reference no longer exists"**. This fired in production under real managed-heap pressure (a co-resident model + allocation-heavy inference), not on a lightly-loaded test page.
+
+- **WebGPU** `WebGPUMemoryBuffer.CopyFrom` (CPU→GPU), **Wasm** `WasmMemoryBuffer` host-write, **WebGL** `WebGLMemoryBuffer` host-write now wrap the source via **`HeapViewPtr`** instead of `HeapView.GetHeapBuffer()`. `HeapViewPtr`'s base ctor runs `HeapView.PrimeHeap()` (pre-allocate ~16 MB + forced compacting GC → headroom) when no view is outstanding, so a subsequent small managed allocation fits without a grow and the view stays attached for the synchronous `writeBuffer`/`.Set`.
+- `HeapView` gained `UsePrimer` (default true; disables priming for testing) and `DefaultHeapPrimeSize` (16 MB).
+- **Promotes 4.17.5-local.1** (WebGPU read-only Float16 weights skip atomicLoad — ~220x faster f16-weight kernels) **+ Cordic.Exp de-recursion** (upstream ILGPU #1334). Forks unchanged at 2.2.0. Depends SpawnDev.BlazorJS 3.5.20.
+
 ## 4.17.5-local.1 - WebGPU: read-only Float16 weights skip atomicLoad (~220x faster f16-weight kernels)
 
 On WebGPU without native `shader-f16`, an `ArrayView<Half>` is emulated as packed u16-in-u32 storage. Until now EVERY such buffer was declared `array<atomic<u32>>` and read via `atomicLoad` - the atomic is only needed for concurrent sub-word *stores* (the `atomicAnd`/`atomicOr` RMW that packs a half without clobbering its neighbor), but a read-only weight/activation buffer never stores. `atomicLoad` on a small weight buffer read by tens of millions of threads *serializes*: measured **30,523 ms vs 138 ms (~220x)** at the SD-Turbo up_blocks.3 conv shape (67M threads x 2304 taps) on an RTX 4070. Forks unchanged at 2.2.0.

@@ -75,19 +75,24 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 //
                 // writeBuffer REQUIRES a 4-byte-multiple byte count; fp32 (and even-count Half) uploads always
                 // are, so they take the zero-copy fast path. A non-4-aligned length (odd-count sub-word) falls
-                // back to the padded managed copy - rare, and the destination is 4-byte-padded at allocation.
+                // back to a padded copy - rare, and the destination is 4-byte-padded at allocation.
                 if ((length & 3) == 0)
                 {
-                    using var heapBuffer = HeapView.GetHeapBuffer();
-                    using var srcView = new Uint8Array(heapBuffer, (long)srcPtr, length);
-                    accelerator.NativeAccelerator.Queue!.WriteBuffer(_buffer.NativeBuffer!, (long)destContiguous.Index, srcView);
+                    // heap view as Uint8Array
+                    using var heapView = new HeapViewPtr(srcPtr, length);
+                    using var srcView = heapView.As<Uint8Array>();
+                    accelerator.NativeAccelerator.Queue!.WriteBuffer(_buffer!.NativeBuffer!, (long)destContiguous.Index, srcView);
                 }
                 else
                 {
-                    var byteArray = new byte[(int)WebGPUAlignment.AlignTo4(length)];
-                    Marshal.Copy(srcPtr, byteArray, 0, length);
-                    using var typedArray = new Uint8Array(byteArray);
-                    accelerator.NativeAccelerator.Queue!.WriteBuffer(_buffer.NativeBuffer!, (long)destContiguous.Index, typedArray);
+                    // create properly sized source
+                    using var typedArray = new Uint8Array(WebGPUAlignment.AlignTo4(length));
+                    // heap view as Uint8Array
+                    using var heapView = new HeapViewPtr(srcPtr, length);
+                    using var srcView = heapView.As<Uint8Array>();
+                    // copy heap view to into the properly sized Uint8Array
+                    typedArray.Set(srcView);
+                    accelerator.NativeAccelerator.Queue!.WriteBuffer(_buffer!.NativeBuffer!, (long)destContiguous.Index, typedArray);
                 }
             }
             else

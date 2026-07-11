@@ -117,8 +117,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // NativePtr is a byte offset into Module.HEAPU8.buffer), so view it as a Uint8Array and
                 // JS->JS .Set it straight into the backing Uint8Array - no intermediate .NET byte[], no
                 // Marshal.Copy, no Write marshal. The bytes never enter the managed heap in transit.
-                using var heapBuffer = HeapView.GetHeapBuffer();
-                using var srcView = new Uint8Array(heapBuffer, (long)srcPtr, length);
+                // HeapViewPtr PRIMES the heap (pre-grow + headroom via HeapView.PrimeHeap) so a managed
+                // allocation in the wrap->Set window can't trigger a memory.grow that DETACHES srcView (the
+                // unprimed HeapView.GetHeapBuffer() path is the "external Instance reference no longer exists"
+                // class — a detached WASM heap ArrayBuffer). Mirrors the WebGPU CopyFrom fix.
+                using var heapView = new HeapViewPtr(srcPtr, length);
+                using var srcView = heapView.As<Uint8Array>();
                 _backingArray!.Set(srcView, (int)destContiguous.Index);
 
                 // Mark CPU-dirty — needs upload to worker before next dispatch
