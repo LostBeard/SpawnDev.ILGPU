@@ -1,4 +1,23 @@
 (function () {
+    // Blazor Wasm's JS interop reviver can throw an exception when reviving a JS 
+    // object like a cross-origin window simply by looking for a property that 
+    // does not exist like '__internalId'.
+    // This patch simply allows the revive to work without crashing
+    const originalHasOwnPropertyPrototype = Object.prototype.hasOwnProperty;
+    Object.prototype.hasOwnProperty = function (prop) {
+        try {
+            // Attempt the normal engine execution
+            return originalHasOwnPropertyPrototype.apply(this, [prop]);
+        } catch (error) {
+            // Catch DOMException / SecurityError (e.g., cross-origin window access)
+            if (error instanceof DOMException || error.name === 'SecurityError') {
+                // Return false so Blazor treats it as a non-existent property
+                return false;
+            }
+            // Re-throw genuine, unrelated engine errors
+            throw error;
+        }
+    };
     // helper function used in place of 'in' operator for checking if a property exists to allow a consistent operation regardless of obj's type
     function _in(key, obj) {
         if (obj === null || obj === void 0) return false;
@@ -318,11 +337,81 @@
         wrapJSObject(o) {
             return { __wrappedJSObject: o };
         }
+        heapViewTagger(value) {
+            const runtimeModule = globalThis.Blazor?.runtime?.Module || globalThis.Module;
+            const liveBuffer = runtimeModule.HEAPU8.buffer;
+            if (_in('buffer', value)) {
+                // if it is attached to the current heap make sure it has heapViewInfo
+                if (value.buffer === liveBuffer && !value._heapViewInfo) {
+                    // this ArrayBuffer view is a view on the .Net heap and needs info saved
+                    value._heapViewInfo = {
+                        viewType: value.constructor.name,
+                        address: value.byteOffset,
+                        byteLength: value.byteLength,
+                        heapSize: liveBuffer.byteLength
+                    };
+                    if (this.verbose) console.log('Tagged heap view', value);
+                }
+            } else if (value === liveBuffer && !value._heapAutoRestore) {
+                value._heapAutoRestore = 1;
+                if (this.verbose) console.log('Tagged heap', value);
+            }
+        }
+        heapViewRestore(value) {
+            var _this = this;
+            const constructorName = value.constructor?.name;
+            const runtimeModule = globalThis.Blazor?.runtime?.Module || globalThis.Module;
+            const liveBuffer = runtimeModule.HEAPU8.buffer;
+            // ArrayBuffer views on the .Net heap can become detached whe nit is resized.
+            // This code was added to this reviver to allow detached heap views to always revive as attached
+            // heap views by replacing detached views with new ones.
+            //
+            // if view (value) is detached,
+            // - first check for an existing view replacement and if it is not itself detached use that
+            // - if there is no existing replacement or it is detached we create a new replacement and use that
+            var heapViewInfo = value._heapViewInfo;
+            const valueIsValidView = heapViewInfo.byteLength === value.byteLength && (value.buffer?.byteLength ?? 0) > 0;
+            if (valueIsValidView) {
+                // return the view that is still valid
+                return value;
+            }
+            // check if it already has a valid override view
+            const overrideViewIsValid = heapViewInfo.byteLength === value._overrideView?.byteLength && (value._overrideView?.buffer?.byteLength ?? 0) > 0;
+            if (overrideViewIsValid) {
+                // return the already existing and still valid override view
+                return value._overrideView;
+            }
+            // create the new view
+            const TypedArrayConstructor = globalThis[heapViewInfo.viewType];
+            const elementSize = TypedArrayConstructor.BYTES_PER_ELEMENT ?? 1;
+            const length = heapViewInfo.byteLength / elementSize;
+            // new TypedArray/DataView
+            value._overrideView = new TypedArrayConstructor(liveBuffer, heapViewInfo.address, length);
+            // attach the heapView info to it
+            value._overrideView._heapViewInfo = Object.assign({}, heapViewInfo, { heapSize: liveBuffer.byteLength });
+            if (_this.verbose) {
+                if (value.buffer) {
+                    console.log('Recreated heap view', value._overrideView._heapViewInfo);
+                } else {
+                    console.log('Created heap view', value._overrideView._heapViewInfo);
+                }
+            } 
+            // return the new valid view
+            return value._overrideView;
+        }
         serializeToDotNet(value, returnType) {
             var typeOfValue = typeof value;
             if (typeOfValue === 'undefined') {
                 typeOfValue = 'object';
                 value = null;
+            }
+            // heap view info check
+            // checks if this is an ArrayBuffer view on the .Net heap, and if it is it makes sure it is properly tagged for revive
+            if (value && typeof value === 'object') {
+                if (_in('_heapViewInfo', value)) {
+                    value =  this.heapViewRestore(value);
+                }
+                this.heapViewTagger(value);
             }
             if (!returnType) {
                 return value;
@@ -425,7 +514,12 @@
         customReviverfunction(key, value) {
             var _this = this;
             if (value && typeof value === 'object') {
-                if (_in('_callbackId', value)) {
+                if (_in('_heapViewInfo', value)) {
+                    return _this.heapViewRestore(value);
+                } else if (_in('_heapAutoRestore', value)) {
+                    const runtimeModule = globalThis.Blazor?.runtime?.Module || globalThis.Module;
+                    return runtimeModule.HEAPU8.buffer;
+                } else if (_in('_callbackId', value)) {
                     var _callbackId = value._callbackId;
                     var callback = _this.callbacks[_callbackId];
                     if (callback) return callback;
