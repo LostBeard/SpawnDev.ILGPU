@@ -4,7 +4,7 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.17.5</Version>
+		<Version>4.17.6</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
 		<PackageReleaseNotes>4.17.5: Browser heap-view priming fix — the zero-copy host-&gt;GPU `CopyFrom`/upload paths (WebGPU, Wasm, WebGL) now wrap the WASM heap source via `HeapViewPtr` (which primes the heap) instead of the unprimed `HeapView.GetHeapBuffer()`. Without priming, a managed allocation in the wrap-&gt;consume window can trigger a `memory.grow` that DETACHES the heap view mid-upload -&gt; "A valid external Instance reference no longer exists" under managed-heap pressure (e.g. a co-resident model + allocation-heavy inference). Also promotes 4.17.5-local.1 (WebGPU read-only Float16 weights skip atomicLoad, ~220x faster f16-weight kernels) + Cordic.Exp de-recursion. Forks unchanged at 2.2.0.
 
@@ -44,7 +44,7 @@
 
 	<ItemGroup>
 		<PackageReference Include="Microsoft.AspNetCore.Components.Web" Version="10.0.2" />
-		<PackageReference Include="SpawnDev.BlazorJS" Version="3.5.21" />
+		<PackageReference Include="SpawnDev.BlazorJS" Version="3.5.25" />
 	</ItemGroup>
 
 	<ItemGroup>

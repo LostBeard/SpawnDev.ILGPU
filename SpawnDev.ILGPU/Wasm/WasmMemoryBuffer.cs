@@ -543,10 +543,11 @@ namespace SpawnDev.ILGPU.Wasm
             unsafe
             {
                 var sourcePtr = sourceView.LoadEffectiveAddressAsPtr();
-                // HeapViewPtr PRIMES the heap (pre-grow + headroom via HeapView.PrimeHeap) so a managed
-                // allocation in the wrap->Set window can't trigger a memory.grow that DETACHES srcView (the
-                // unprimed HeapView.GetHeapBuffer() path is the "external Instance reference no longer exists"
-                // class — a detached WASM heap ArrayBuffer). Mirrors the WebGPU CopyFrom fix.
+                // HeapViewPtr wraps the CPU source's WASM-heap bytes; srcView is built against the live heap
+                // and consumed within this synchronous window. As of BlazorJS 3.5.22+ a heap view detached by
+                // a memory.grow is transparently re-attached on revive (HeapView.UsePrimer now defaults false -
+                // no forced-GC priming). Verified detach-safe by the full ILGPU 6-backend PMT on BlazorJS 3.5.25
+                // (the old "external Instance reference no longer exists" class no longer fires).
                 using var heapView = new HeapViewPtr(sourcePtr, length);
                 using var srcView = heapView.As<Uint8Array>();
                 dstUint8.Set(srcView);

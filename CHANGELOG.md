@@ -2,6 +2,14 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## 4.17.6 - Depend BlazorJS 3.5.25: heap-view re-attach replaces priming
+
+Bumps the SpawnDev.BlazorJS dependency to **3.5.25**, which replaces heap-view **priming** (pre-grow + forced compacting GC) with transparent **re-attach**: a JS view of the .NET heap that gets detached by a `memory.grow()` is re-created against the live `HEAPU8.buffer` on revive, and `HeapView.UsePrimer` now defaults **false**. The three browser backends' zero-copy host→GPU upload paths (`WasmMemoryBuffer` / `WebGLMemoryBuffer` / `WebGPUMemoryBuffer`, all `new HeapViewPtr(srcPtr, len).As<Uint8Array>()`) are unchanged in code - they simply no longer rely on priming for detach safety. No ILGPU logic/codegen change; the stale "HeapViewPtr PRIMES the heap" comments were corrected to describe re-attach.
+
+Also picks up BlazorJS 3.5.25's cross-origin-window safety fix (`_in`-based property probing in the heap-view tagger avoids a `SecurityError` when a cross-origin `Window` crosses the interop boundary) - this was the actual root of a browser-only interop failure surfaced while gating this bump.
+
+GATE: full 6-backend PMT sweep **4082 passed / 0 failed / 282 skipped** against BlazorJS 3.5.25's `lib.module.js` (all `ManyDispatches` / zero-copy `CopyFrom` upload paths green on Wasm/WebGL/WebGPU; the earlier "external Instance reference no longer exists" / "reading 'apply'" class no longer fires).
+
 ## 4.17.5 - Browser heap-view priming: fix detached-heap `CopyFrom` crash under managed-heap pressure
 
 The three browser backends' zero-copy host→GPU upload paths viewed the WASM heap source through the **unprimed** `HeapView.GetHeapBuffer()`. A `Uint8Array` view over WASM linear memory is only valid until the next `memory.grow()`, which **detaches** the backing ArrayBuffer — and Mono grows the heap on managed-allocation pressure. With no primed headroom, a managed allocation in the wrap→consume window (even the JSObject wrapper allocations) can trigger a grow that detaches the view mid-upload, surfacing as **"A valid external Instance reference no longer exists"**. This fired in production under real managed-heap pressure (a co-resident model + allocation-heavy inference), not on a lightly-loaded test page.
