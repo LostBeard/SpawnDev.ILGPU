@@ -17,6 +17,7 @@ Comprehensive documentation for SpawnDev.ILGPU — run ILGPU C# kernels on WebGP
 
 ### Advanced
 - **[Advanced Patterns](advanced-patterns.md)** — ILGPU Algorithms (RadixSort, Scan, Reduce), GPU device sharing, external buffers, rendering pipelines, canvas blitting
+- **[WebGPU Dispatch-Plan Capture / Replay](dispatch-plan-capture-replay.md)** - Record a fixed WebGPU dispatch sequence once and replay it with a single interop crossing (the browser twin of CUDA graph capture); parameterized replay for a moving loop variable, timing helpers, and the validity contract
 - **[Wasm SIMD128 (v128)](wasm-simd.md)** — Automatic WebAssembly SIMD vectorization of the Wasm backend: how `kernel_simd` is generated and selected, what vectorizes, cross-mode determinism, and the `ForceScalar`/`ForceSimd` knobs
 - **[Generic-Math f16 Kernels](generic-math-f16.md)** — One generic kernel over the numeric/weight type (`float` or `Half`): `INumber<Half>` operators + `NumericConvert.ToFloat32` for fp32 accumulation
 - **[CUDA Libraries](cuda-libraries.md)** — NVIDIA-specific libraries: nvJPEG (image encode/decode), cuRand (random numbers), cuBLAS (linear algebra), cuFFT (FFT), NVML (device monitoring)
