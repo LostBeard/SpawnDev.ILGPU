@@ -134,12 +134,21 @@ if (typeof window !== 'undefined') {
     self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));
 
     self.addEventListener('fetch', (event) => {
-        if (event.request.cache === 'only-if-cached' && event.request.mode !== 'same-origin') {
+        const url = new URL(event.request.url);
+
+        // Cross-origin requests pass through untouched (incl. only-if-cached probes).
+        if (url.origin !== self.location.origin) {
             return;
         }
 
-        const url = new URL(event.request.url);
-        if (url.origin !== self.location.origin) {
+        // WebTorrent streaming — ALWAYS handle /webtorrent/ paths, INCLUDING Chromium's media-cache
+        // `only-if-cached` range probes. Previously a top-of-handler guard returned (passthrough) for
+        // only-if-cached + non-same-origin requests; <video> media requests arrive exactly like that,
+        // the browser then failed them with net::ERR_CACHE_OPERATION_NOT_SUPPORTED, and the element
+        // never received a byte (readyState stuck at 0, video.error set). We answer with our own
+        // ReadableStream and never re-fetch the request, so responding here is safe.
+        if (url.pathname.includes('/webtorrent/')) {
+            event.respondWith(handleWebtorrentStreamFifo(event));
             return;
         }
 
@@ -156,9 +165,9 @@ if (typeof window !== 'undefined') {
             return;
         }
 
-        // WebTorrent streaming — intercept /webtorrent/ paths
-        if (url.pathname.includes('/webtorrent/')) {
-            event.respondWith(handleWebtorrentStream(event));
+        // COI passthrough path ONLY: leave only-if-cached non-same-origin requests to the browser
+        // (calling respondWith/fetch on them would throw). Safe here because /webtorrent/ already returned.
+        if (event.request.cache === 'only-if-cached' && event.request.mode !== 'same-origin') {
             return;
         }
 
@@ -183,13 +192,28 @@ if (typeof window !== 'undefined') {
     }
 
     // ── WebTorrent streaming ──
-    // Protocol (matches SpawnDev.BlazorJS.WebDesktop/service-worker-fs.js exactly):
+    // Protocol (matches SpawnDev.SpawnJS.WebDesktop/service-worker-fs.js exactly):
     // 1. SW posts request to client via MessageChannel port2
     // 2. Client wires up port.OnMessage, calls port.Start(), then port.PostMessage(response)
     // 3. If response.body === 'stream_pull': SW creates ReadableStream
     // 4. On pull: SW sends { eventType: 'pull', desiredSize: N } to client
     // 5. Client reads chunk, sends Uint8Array back. Falsy = done.
     // 6. On cancel: SW sends { eventType: 'cancel', desiredSize: 0 }
+
+    // Fulfill /webtorrent/ requests in FIFO order. A media element opens, abandons, and re-opens OVERLAPPING
+    // range requests (the front read, then the tail moov on seek, then playback ranges). Each still gets its
+    // OWN MessageChannel (created per call below) - we only serialize the client HANDSHAKE (StreamState setup
+    // + piece selection/critical marking) so they don't race for the picker's critical slots. Serving them
+    // concurrently made the moov's pieces arrive inconsistently (loadedmetadata stalled at random). The
+    // handshake is quick (the client replies with headers immediately), so this never blocks on a stream body
+    // - the bodies still pull concurrently after their handshakes complete.
+    let webtorrentFifoChain = Promise.resolve();
+    function handleWebtorrentStreamFifo(event) {
+        const result = webtorrentFifoChain.then(() => handleWebtorrentStream(event));
+        // Advance the queue once THIS request's handshake resolves (or fails) - never let one wedge the rest.
+        webtorrentFifoChain = result.then(() => { }, () => { });
+        return result;
+    }
 
     async function handleWebtorrentStream(event) {
         const allClients = await self.clients.matchAll({ type: 'window', includeUncontrolled: true });
@@ -222,12 +246,27 @@ if (typeof window !== 'undefined') {
         }
 
         if (data.body === 'stream_pull') {
-            // Pull-based streaming — matches service-worker-fs.js exactly
+            // Pull-based streaming (matches service-worker-fs.js). The <video> drives reads via pull(): each
+            // pull asks the .NET window client for the next chunk and PARKS until it replies. A non-faststart
+            // MP4 seeks to the tail moov, so reads frequently park while their pieces are still downloading -
+            // that is normal and must NOT be timed out (see the no-idle-drain note in pull below). cancel()
+            // aborts the in-flight .NET read via _cts so a seek doesn't leave it running.
+            let canceled = false;
             const stream = new ReadableStream({
                 pull(controller) {
                     const desiredSize = controller.desiredSize;
                     return new Promise((resolve) => {
+                        let settled = false;
+                        const finish = () => { if (settled) return; settled = true; resolve(); };
+                        // NO idle-drain timeout. A moov/seek read legitimately PARKS here while its pieces are
+                        // still downloading (the normal partial-download case) — the old 5s drain closed the
+                        // read mid-download and forced the <video> to re-request (thrash) the same range, so the
+                        // moov was never read through and loadedmetadata never fired. The reference SW
+                        // (service-worker-fs.js) has no such timeout. Cancellation is handled by cancel() below,
+                        // which aborts the in-flight .NET read via _cts; an abandoned read's parked promise is
+                        // harmless (its ReadableStream is already gone).
                         mc.port1.onmessage = (evt) => {
+                            if (canceled) { finish(); return; }
                             let done = !evt.data;
                             if (evt.data) {
                                 try {
@@ -241,12 +280,14 @@ if (typeof window !== 'undefined') {
                                 try { controller.close(); } catch {}
                                 mc.port1.onmessage = null;
                             }
-                            resolve();
+                            finish();
                         };
                         mc.port1.postMessage({ eventType: 'pull', desiredSize: desiredSize });
                     });
                 },
                 cancel() {
+                    canceled = true;
+                    mc.port1.onmessage = null;
                     mc.port1.postMessage({ eventType: 'cancel', desiredSize: 0 });
                 }
             });
