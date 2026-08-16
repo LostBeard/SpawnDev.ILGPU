@@ -1,9 +1,8 @@
-using Microsoft.Extensions.Logging;
-using SpawnDev.SpawnJS;
-using SpawnDev.SpawnJS.JSObjects;
 using SpawnDev.ILGPU.Wasm.Backend;
 using SpawnDev.ILGPU.WebGL;
 using SpawnDev.ILGPU.WebGPU.Backend;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
 
 namespace SpawnDev.ILGPU.Services;
 
