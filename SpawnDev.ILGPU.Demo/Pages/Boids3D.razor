@@ -6,8 +6,8 @@
 @using SpawnDev.ILGPU.WebGL.Backend
 @using SpawnDev.ILGPU.Wasm
 @using SpawnDev.ILGPU.Rendering
-@using SpawnDev.BlazorJS
-@using SpawnDev.BlazorJS.JSObjects
+@using SpawnDev.SpawnJS
+@using SpawnDev.SpawnJS.JSObjects
 @using ILGPU
 @using System.Diagnostics
 @using global::ILGPU
@@ -85,7 +85,7 @@
         <div class="card mb-3">
             <div class="card-header">Performance</div>
             <div class="card-body">
-                <canvas @ref="_fpsCanvas" width="220" height="80" style="width:100%; border:1px solid #444; border-radius:4px; background:#1a1a2e;"></canvas>
+                <canvas id="boidsFpsCanvas" width="220" height="80" style="width:100%; border:1px solid #444; border-radius:4px; background:#1a1a2e;"></canvas>
                 <div class="mt-2">
                     <small>
                         <div><strong>Backend:</strong> @_selectedBackend</div>
@@ -114,7 +114,7 @@
 
     <div class="col-md-9">
         <div class="text-center">
-            <canvas @ref="_mainCanvas"
+            <canvas id="boidsMainCanvas"
                     width="@_width"
                     height="@_height"
                     style="border: 1px solid #444; cursor: grab; border-radius: 4px; max-width: 100%;"
@@ -134,10 +134,8 @@
 
 @code {
     [Inject]
-    BlazorJSRuntime JS { get; set; } = default!;
+    SpawnJSRuntime JS { get; set; } = default!;
 
-    ElementReference _mainCanvas;
-    ElementReference _fpsCanvas;
 
     private int _width = 800;
     private int _height = 600;
@@ -336,7 +334,7 @@
 
         _canvasRenderer?.Dispose();
         _canvasRenderer = CanvasRendererFactory.Create(_ilgpuAccelerator);
-        using var mainCanvas = new HTMLCanvasElement(_mainCanvas);
+        using var mainCanvas = JS.Call<string, HTMLCanvasElement>("document.getElementById", "boidsMainCanvas");
         _canvasRenderer.AttachCanvas(mainCanvas);
 
         InitializeBoids();
@@ -506,7 +504,7 @@
         {
             if (_cachedFpsCtx == null)
             {
-                using var canvas = new HTMLCanvasElement(_fpsCanvas);
+                using var canvas = JS.Call<string, HTMLCanvasElement>("document.getElementById", "boidsFpsCanvas");
                 _cachedFpsCtx = canvas.GetContext<CanvasRenderingContext2D>("2d");
                 if (_cachedFpsCtx == null) return;
             }

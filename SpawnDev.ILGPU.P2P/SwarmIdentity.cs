@@ -10,13 +10,13 @@
 // ---------------------------------------------------------------------------------------
 
 using System.Text.Json;
-using SpawnDev.BlazorJS.Cryptography;
+using SpawnDev.SpawnJS.Cryptography;
 
 namespace SpawnDev.ILGPU.P2P
 {
     /// <summary>
     /// Represents a cryptographic identity for swarm ownership and role management.
-    /// Uses Ed25519 via SpawnDev.BlazorJS.Cryptography for cross-platform signing
+    /// Uses Ed25519 via SpawnDev.SpawnJS.Cryptography for cross-platform signing
     /// (browser SubtleCrypto with managed fallback + desktop managed Ed25519).
     /// </summary>
     public class SwarmIdentity : IAsyncDisposable

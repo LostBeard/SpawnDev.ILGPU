@@ -1,7 +1,7 @@
 using System;
 using System.Threading.Tasks;
 using ILGPU.Runtime;
-using SpawnDev.BlazorJS;
+using SpawnDev.SpawnJS;
 using SpawnDev.ILGPU.WebGPU;
 using SpawnDev.UnitTesting;
 
@@ -25,16 +25,16 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         {
             if (accelerator is not WebGPUAccelerator)
                 throw new UnsupportedTestException($"{accelerator.AcceleratorType}: WebGPU-only adapter probe");
-            var JS = SpawnDev.BlazorJS.BlazorJSRuntime.JS;
-            using var gpu = JS.Get<SpawnDev.BlazorJS.JSObject>("navigator.gpu");
+            var JS = SpawnJSRuntime.Instance;
+            using var gpu = JS.Get<SpawnDev.SpawnJS.SpawnJSObject>("navigator.gpu");
             if (gpu == null) throw new Exception("navigator.gpu missing");
-            using var adapter = await gpu.JSRef!.CallAsync<SpawnDev.BlazorJS.JSObject>("requestAdapter");
+            using var adapter = await gpu.JSRef!.CallAsync<SpawnDev.SpawnJS.SpawnJSObject>("requestAdapter");
             if (adapter == null) throw new Exception("requestAdapter returned null");
             string vendor = "?", arch = "?", device = "?", desc = "?";
             bool fallback = false;
             try
             {
-                using var info = adapter.JSRef!.Get<SpawnDev.BlazorJS.JSObject?>("info");
+                using var info = adapter.JSRef!.Get<SpawnDev.SpawnJS.SpawnJSObject?>("info");
                 if (info != null)
                 {
                     vendor = info.JSRef!.Get<string?>("vendor") ?? "?";

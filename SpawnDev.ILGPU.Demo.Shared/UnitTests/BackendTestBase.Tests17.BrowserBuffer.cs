@@ -1,6 +1,6 @@
 using ILGPU;
 using ILGPU.Runtime;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS.JSObjects;
 using SpawnDev.ILGPU.WebGPU.Backend;
 using SpawnDev.UnitTesting;
 

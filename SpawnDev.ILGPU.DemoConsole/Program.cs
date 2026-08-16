@@ -1,5 +1,5 @@
 using Microsoft.Extensions.DependencyInjection;
-using SpawnDev.BlazorJS.Cryptography;
+using SpawnDev.SpawnJS.Cryptography;
 using SpawnDev.ILGPU.Demo.Shared.UnitTests;   // P2PLogicTests (re-enable block below)
 using SpawnDev.ILGPU.DemoConsole.P2PTests;     // console P2P folder (re-enable block below)
 using SpawnDev.UnitTesting;

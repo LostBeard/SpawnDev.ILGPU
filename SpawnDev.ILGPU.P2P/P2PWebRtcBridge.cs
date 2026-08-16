@@ -1,4 +1,5 @@
 using SpawnDev.WebTorrent;
+using SpawnDev.SpawnJS;
 
 namespace SpawnDev.ILGPU.P2P;
 
@@ -87,7 +88,7 @@ public class P2PWebRtcBridge : IAsyncDisposable
                     Console.WriteLine($"[P2PWebRtcBridge][CLOSE-DIAG] #{ctr} peer={peerId} btPeer={wire.PeerId} destroyed={wire.Destroyed} stackTop={new System.Diagnostics.StackTrace(1, false).GetFrame(0)?.GetMethod()?.Name}");
                 try
                 {
-                    SpawnDev.BlazorJS.BlazorJSRuntime.JS.Set("__bridge_wire_onclose",
+                    SpawnJSRuntime.Instance.Set("__bridge_wire_onclose",
                         $"#{ctr} peer={peerId} btPeer={wire.PeerId} destroyed={wire.Destroyed}");
                 } catch { }
                 _extensions.TryRemove(peerId, out _);
@@ -142,7 +143,7 @@ public class P2PWebRtcBridge : IAsyncDisposable
                         }
                     }
                 }
-                try { SpawnDev.BlazorJS.BlazorJSRuntime.JS.Set("__bridge_wireset_dump",
+                try { SpawnJSRuntime.Instance.Set("__bridge_wireset_dump",
                     $"canonical={canonical} before={beforeFilter} after={afterFilter} dump=[{wireSetDump}]"); } catch { }
 
                 // If this wire was never tracked under any canonical, it didn't
@@ -166,7 +167,7 @@ public class P2PWebRtcBridge : IAsyncDisposable
                 // without the 100MB regression.
                 if (!wasTracked || !isLastWireForCanonical)
                 {
-                    try { SpawnDev.BlazorJS.BlazorJSRuntime.JS.Set("__bridge_short_circuit",
+                    try { SpawnJSRuntime.Instance.Set("__bridge_short_circuit",
                         $"wasTracked={wasTracked} isLastWire={isLastWireForCanonical} canonical={canonical} wirePeerId={wire.PeerId}"); } catch { }
                     return;
                 }
@@ -176,7 +177,7 @@ public class P2PWebRtcBridge : IAsyncDisposable
                 // _notified[canonical] never set). Nothing to unregister.
                 if (!_notified.ContainsKey(canonical!))
                 {
-                    try { SpawnDev.BlazorJS.BlazorJSRuntime.JS.Set("__bridge_short_circuit",
+                    try { SpawnJSRuntime.Instance.Set("__bridge_short_circuit",
                         $"notified-miss canonical={canonical}"); } catch { }
                     return;
                 }
@@ -240,7 +241,7 @@ public class P2PWebRtcBridge : IAsyncDisposable
                 // real) while absorbing transient cascades.
                 try
                 {
-                    SpawnDev.BlazorJS.BlazorJSRuntime.JS.Set("__bridge_schedule_unreg",
+                    SpawnJSRuntime.Instance.Set("__bridge_schedule_unreg",
                         $"canonical={canonical} wire={wire.PeerId} transient={peerId}");
                 } catch { }
                 ScheduleDeferredUnregister(canonical!, wire.PeerId, peerId);
@@ -417,7 +418,7 @@ public class P2PWebRtcBridge : IAsyncDisposable
 
             try
             {
-                SpawnDev.BlazorJS.BlazorJSRuntime.JS.Set("__bridge_unregister_fired",
+                SpawnJSRuntime.Instance.Set("__bridge_unregister_fired",
                     $"canonical={canonical} ids={string.Join(",", ids)}");
             } catch { }
             foreach (var id in ids)

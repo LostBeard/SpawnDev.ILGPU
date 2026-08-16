@@ -1,6 +1,6 @@
 @page "/tests"
 @using System.Reflection
-@using SpawnDev.UnitTesting.Blazor
+@using SpawnDev.UnitTesting.Browser
 @using SpawnDev.ILGPU.WebGPU.Backend
 @using SpawnDev.ILGPU.WebGL
 
@@ -77,7 +77,7 @@ else
     <p><em>No GLSL generated yet. Run a WebGL test first, then click Refresh.</em></p>
 } *@
 
-@inject SpawnDev.BlazorJS.BlazorJSRuntime JS
+@inject SpawnDev.SpawnJS.SpawnJSRuntime JS
 @inject SpawnDev.ILGPU.Services.ShaderDebugService _shaderDebug
 
 @code{
@@ -153,7 +153,7 @@ else
         }
         try
         {
-            using var navigator = JS.Get<SpawnDev.BlazorJS.JSObjects.Navigator>("navigator");
+            using var navigator = JS.Get<SpawnDev.SpawnJS.JSObjects.Navigator>("navigator");
             using var clipboard = navigator.Clipboard;
             await clipboard.WriteText(sb.ToString());
             _copyStatus = $"Copied {(registry.Count > 0 ? registry.Count : _allWGSL.Count)} shaders!";

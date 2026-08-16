@@ -6,8 +6,8 @@
 @using SpawnDev.ILGPU.WebGL.Backend
 @using SpawnDev.ILGPU.Wasm
 @using SpawnDev.ILGPU.Wasm.Backend
-@using SpawnDev.BlazorJS
-@using SpawnDev.BlazorJS.JSObjects
+@using SpawnDev.SpawnJS
+@using SpawnDev.SpawnJS.JSObjects
 @using SpawnDev.ILGPU.Demo.Shared.Benchmarks
 @using SpawnDev.ILGPU.Demo.Shared
 @using SpawnDev.ILGPU.Demo.Shared.Services
@@ -779,7 +779,7 @@
 
         try
         {
-            var js = BlazorJSRuntime.JS;
+            var js = SpawnJSRuntime.Instance;
             using var document = js.Get<Document>("document");
             using var canvasEl = document.GetElementById<HTMLCanvasElement>($"chart-{bench.Id}");
             if (canvasEl == null) return;

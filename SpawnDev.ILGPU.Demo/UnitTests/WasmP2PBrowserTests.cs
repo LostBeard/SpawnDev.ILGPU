@@ -1,6 +1,6 @@
 using System.Text.Json;
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
 using SpawnDev.UnitTesting;
 
 namespace SpawnDev.ILGPU.Demo.UnitTests
@@ -38,7 +38,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         [TestMethod(Timeout = 180_000)]
         public async Task ComputeSwarm_Benchmark_RoundTrips_BetweenTwoPopups()
         {
-            var JS = BlazorJSRuntime.JS;
+            var JS = SpawnJSRuntime.Instance;
 
             var coordId = "coord" + Guid.NewGuid().ToString("N")[..6];
             var workerId = "work" + Guid.NewGuid().ToString("N")[..6];
@@ -56,7 +56,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             string coordUrl = baseUri.TrimEnd('/')
                 + $"/compute?testId={Uri.EscapeDataString(coordId)}&autoCreate=true&autoBenchmark=true";
 
-            using var coordWin = JS.Call<Window>("window.open", coordUrl, "_blank", "width=420,height=520");
+            using var coordWin = JS.Call<string, string, string, Window>("window.open", coordUrl, "_blank", "width=420,height=520");
             if (coordWin == null)
                 throw new Exception("window.open returned null for coordinator - popup blocked?");
 
@@ -81,7 +81,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                 var workerUrl = joinLink + separator
                     + $"autojoin=1&testId={Uri.EscapeDataString(workerId)}";
 
-                workerWin = JS.Call<Window>("window.open", workerUrl, "_blank", "width=420,height=520");
+                workerWin = JS.Call<string, string, string, Window>("window.open", workerUrl, "_blank", "width=420,height=520");
                 if (workerWin == null)
                     throw new Exception("window.open returned null for worker - popup blocked?");
 
@@ -135,7 +135,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             long BenchmarkTotalTime,
             int DispatchCount);
 
-        private static ComputeState? GetState(BlazorJSRuntime js, string id)
+        private static ComputeState? GetState(SpawnJSRuntime js, string id)
         {
             try
             {
@@ -160,10 +160,10 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             }
         }
 
-        private static string? GetCoordJoinLink(BlazorJSRuntime js, string coordId)
+        private static string? GetCoordJoinLink(SpawnJSRuntime js, string coordId)
             => GetState(js, coordId)?.JoinLink;
 
-        private static string Ph(BlazorJSRuntime js, string id)
+        private static string Ph(SpawnJSRuntime js, string id)
         {
             var alive = js.Get<long?>($"computeSwarmAlive_{id}") != null ? "Alive" : "-";
             var s = GetState(js, id);
@@ -172,7 +172,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                 : $"{alive}/role={s.Role ?? "?"}/peers={s.PeerCount}/bench={(s.BenchmarkRunning ? "run" : s.BenchmarkComplete ? "done" : "idle")}";
         }
 
-        private static string Diag(BlazorJSRuntime js, string coordId, string workerId)
+        private static string Diag(SpawnJSRuntime js, string coordId, string workerId)
             => $"C[{coordId}] {Ph(js, coordId)} | W[{workerId}] {Ph(js, workerId)}";
 
         private static async Task WaitFor(Func<bool> predicate, int timeoutSeconds, string label, Func<string>? diagDump = null)

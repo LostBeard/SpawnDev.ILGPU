@@ -5,13 +5,13 @@
 @using SpawnDev.ILGPU.Demo.Shared
 @using SpawnDev.ILGPU.QR
 @using SpawnDev.ILGPU.Rendering
-@using SpawnDev.BlazorJS
-@using SpawnDev.BlazorJS.Cryptography
-@using SpawnDev.BlazorJS.JSObjects
+@using SpawnDev.SpawnJS
+@using SpawnDev.SpawnJS.Cryptography
+@using SpawnDev.SpawnJS.JSObjects
 @using global::ILGPU
 @using global::ILGPU.Runtime
 @inject NavigationManager Nav
-@inject BlazorJSRuntime JS
+@inject SpawnJSRuntime JS
 @inject IPortableCrypto Crypto
 @inject SpawnDev.WebTorrent.WebTorrentClient WebTorrentClient
 @inject SpawnDev.ILGPU.Demo.Shared.Services.P2PSwarmService SwarmService
@@ -206,7 +206,7 @@
                                 @if (_mandelbrotRunning) { <span>Rendering...</span> } else { <span>Render</span> }
                             </button>
                         </div>
-                        <canvas @ref="_mandelbrotCanvas" width="512" height="512" style="width: 100%; max-width: 512px; height: auto; border-radius: 4px; background: #0f172a; image-rendering: pixelated;"></canvas>
+                        <canvas id="swarmMandelbrotCanvas" width="512" height="512" style="width: 100%; max-width: 512px; height: auto; border-radius: 4px; background: #0f172a; image-rendering: pixelated;"></canvas>
                         @if (_mandelbrotTimeMs > 0)
                         {
                             <div style="margin-top: 8px; font-size: 12px; color: #94a3b8;">
@@ -763,7 +763,6 @@
     }
 
     // Mandelbrot state
-    private ElementReference _mandelbrotCanvas;
     private bool _mandelbrotRunning;
     private double _mandelbrotTimeMs;
 
@@ -823,7 +822,7 @@
             // HTMLCanvasElement wrapper after AttachCanvas — the renderer stores
             // the canvas's 2d context internally and the wrapper backs the JS-side
             // canvas reference for the renderer's lifetime.
-            _mandelbrotRenderer.AttachCanvas(new HTMLCanvasElement(_mandelbrotCanvas));
+            _mandelbrotRenderer.AttachCanvas(JS.Call<string, HTMLCanvasElement>("document.getElementById", "swarmMandelbrotCanvas"));
         }
 
         // Each strip's worker delivers display-ready packed RGBA uints (peer tint
@@ -1321,8 +1320,8 @@
         {
             try
             {
-                var savedMagnet = JS.Call<string>("localStorage.getItem", "p2p-swarm-magnet");
-                var savedRole = JS.Call<string>("localStorage.getItem", "p2p-swarm-role");
+                var savedMagnet = JS.Call<string, string>("localStorage.getItem", "p2p-swarm-magnet");
+                var savedRole = JS.Call<string, string>("localStorage.getItem", "p2p-swarm-role");
                 if (!string.IsNullOrEmpty(savedMagnet))
                 {
                     _state = SwarmPageState.Dashboard;
@@ -1360,7 +1359,7 @@
             bool autoJoin = Nav.Uri.Contains("autojoin=1", StringComparison.OrdinalIgnoreCase);
             try
             {
-                var consent = JS.Call<string>("localStorage.getItem", $"p2p-consent-{hash}");
+                var consent = JS.Call<string, string>("localStorage.getItem", $"p2p-consent-{hash}");
                 if (consent == "always") autoJoin = true;
             }
             catch { }
@@ -1419,8 +1418,8 @@
         try
         {
             // Try to load from localStorage
-            var pubB64 = JS.Call<string>("localStorage.getItem", "p2p-identity-pub");
-            var privB64 = JS.Call<string>("localStorage.getItem", "p2p-identity-priv");
+            var pubB64 = JS.Call<string, string>("localStorage.getItem", "p2p-identity-pub");
+            var privB64 = JS.Call<string, string>("localStorage.getItem", "p2p-identity-priv");
 
             if (!string.IsNullOrEmpty(pubB64) && !string.IsNullOrEmpty(privB64))
             {

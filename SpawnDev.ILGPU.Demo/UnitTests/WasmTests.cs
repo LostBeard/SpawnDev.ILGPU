@@ -2,7 +2,7 @@ using ILGPU;
 using ILGPU.Algorithms;
 using ILGPU.Algorithms.RadixSortOperations;
 using ILGPU.Runtime;
-using SpawnDev.BlazorJS.Cryptography;
+using SpawnDev.SpawnJS.Cryptography;
 using SpawnDev.UnitTesting;
 using SpawnDev.ILGPU.Demo.Shared.UnitTests;
 using SpawnDev.ILGPU.Wasm;
@@ -1886,7 +1886,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
 
         // Wasm per-dispatch MessageEvent leak guard (2026-06-15, Geordi). EnsurePersistentHandlers installs
         // persistent OnMessage/OnError handlers on each worker; every worker response delivers a MessageEvent
-        // JSObject that the handler OWNS — SpawnDev.BlazorJS ActionCallback<T1>.Invoke calls the delegate and
+        // SpawnJSObject that the handler OWNS — SpawnDev.SpawnJS ActionCallback<T1>.Invoke calls the delegate and
         // does NOT dispose the arg (verified ActionCallback.cs:59-63). Before the fix the handler never disposed
         // msg/err, so every (dispatch x worker) response left a MessageEvent reclaimable only by the finalizer.
         // This is correct disposal HYGIENE. NOTE (2026-06-15): it was initially suspected of driving the ML
@@ -1903,13 +1903,21 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         // DisposedProper in-handler, and objects created while the flag was off carry a null tracker so their
         // disposal short-circuits before the Console path. We never force GC inside the measured window.
         // With the fix: alive MessageEvents ≈ 0. Without it: ≈ dispatches * workerCount (hundreds).
+        // TODO(SpawnJS port): DISABLED for the BlazorJS->SpawnJS switch. This guard is built on BlazorJS
+        // `IDisposableTracker` (per-JSObject disposal tracking: JSObjectTraces / *VerboseMode), which SpawnJS
+        // has no equivalent for - SpawnJS crosses values as numeric object-table slots, not disposable JSObjects,
+        // so the MessageEvent-JSObject leak class this asserts against does not exist in the same form. Re-enable
+        // once SpawnJS exposes a slot-leak diagnostic (LiveSlotCount / a per-type slot-trace) and the guard is
+        // rewritten to count live worker-message slots instead of alive MessageEvent JSObjects. Tracked in the
+        // BlazorJS->SpawnJS cascade DevComms note.
+#if false
         [TestMethod(Timeout = 120000)]
         public async Task Wasm_DispatchResponse_DoesNotLeakMessageEvent()
         {
             const int count = 4096;
             const int dispatches = 40;
-            bool savedUndisposed = SpawnDev.BlazorJS.IDisposableTracker.UndisposedHandleVerboseMode;
-            bool savedCreated = SpawnDev.BlazorJS.IDisposableTracker.CreatedHandleVerboseMode;
+            bool savedUndisposed = SpawnDev.SpawnJS.IDisposableTracker.UndisposedHandleVerboseMode;
+            bool savedCreated = SpawnDev.SpawnJS.IDisposableTracker.CreatedHandleVerboseMode;
             var context = Context.Create().Wasm().ToContext();
             var accelerator = await context.CreateWasmAcceleratorAsync();
             try
@@ -1924,9 +1932,9 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                 }
 
                 // Enable tracking with the Console-safe flag only, then clear for a clean baseline.
-                SpawnDev.BlazorJS.IDisposableTracker.CreatedHandleVerboseMode = false;
-                SpawnDev.BlazorJS.IDisposableTracker.UndisposedHandleVerboseMode = true;
-                SpawnDev.BlazorJS.IDisposableTracker.JSObjectTraces.Clear();
+                SpawnDev.SpawnJS.IDisposableTracker.CreatedHandleVerboseMode = false;
+                SpawnDev.SpawnJS.IDisposableTracker.UndisposedHandleVerboseMode = true;
+                SpawnDev.SpawnJS.IDisposableTracker.JSObjectTraces.Clear();
 
                 var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>((i, v) => v[i] = i * 3);
                 for (int r = 0; r < dispatches; r++)
@@ -1939,7 +1947,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                 await Task.Yield();
 
                 long aliveMsgEvents = 0;
-                foreach (var t in SpawnDev.BlazorJS.IDisposableTracker.JSObjectTraces.Values)
+                foreach (var t in SpawnDev.SpawnJS.IDisposableTracker.JSObjectTraces.Values)
                     if (t.Type != null && t.Type.Contains("MessageEvent"))
                         aliveMsgEvents += t.AliveCount;
 
@@ -1953,12 +1961,13 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             }
             finally
             {
-                SpawnDev.BlazorJS.IDisposableTracker.UndisposedHandleVerboseMode = savedUndisposed;
-                SpawnDev.BlazorJS.IDisposableTracker.CreatedHandleVerboseMode = savedCreated;
-                SpawnDev.BlazorJS.IDisposableTracker.JSObjectTraces.Clear();
+                SpawnDev.SpawnJS.IDisposableTracker.UndisposedHandleVerboseMode = savedUndisposed;
+                SpawnDev.SpawnJS.IDisposableTracker.CreatedHandleVerboseMode = savedCreated;
+                SpawnDev.SpawnJS.IDisposableTracker.JSObjectTraces.Clear();
                 accelerator.Dispose(); context.Dispose();
             }
         }
+#endif
 
         // Wasm SIMD128 Stage-3a numerical gate (Phase 3 inc.2, 2026-06-16, Geordi). The CPU-oracle
         // correctness test for the WIRED v128 `kernel_simd` dispatch path. Compiles + dispatches a real

@@ -1,8 +1,8 @@
 using Microsoft.AspNetCore.Components.Web;
 using Microsoft.AspNetCore.Components.WebAssembly.Hosting;
 using SpawnDev;
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.Cryptography;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.Cryptography;
 using SpawnDev.ILGPU.Demo;
 using SpawnDev.ILGPU.Demo.Shared;
 using SpawnDev.ILGPU.Demo.UnitTests;
@@ -30,7 +30,7 @@ WebGPUBackend.VerboseLogging = false;
 // Production consumers leave this off (default) - the per-tick writes add JS
 // interop overhead and aren't needed unless investigating wire-close issues.
 SpawnDev.RTC.Browser.BrowserRTCPeerConnection.DiagnosticsEnabled = true;
-builder.Services.AddBlazorJSRuntime();
+builder.Services.AddSpawnJSRuntime();
 builder.Services.AddPlatformCrypto();
 
 // P2P: WebTorrent client
@@ -79,4 +79,4 @@ var host = builder.Build();
 
 await host.Services.StartBackgroundServices();
 
-await host.BlazorJSRunAsync();
+await host.RunAsync();

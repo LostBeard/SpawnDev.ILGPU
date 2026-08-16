@@ -4,7 +4,7 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.9.5-rc.8</Version>
+		<Version>5.0.0-local.1</Version>
 		<PackageReleaseNotes>v4.9.5-rc.8: P2PMemoryBuffer.CopyTo/CopyFrom semantics swapped to match the ILGPU contract — CopyTo is the READ path (buffer-&gt;CPU), CopyFrom is the WRITE path (CPU-&gt;buffer + dirty). Without this fix `view.CopyToCPU(...)` against a P2P-allocated buffer silently returned zeros (renderer-side ShadowData read never landed), and `view.CopyFromCPU(...)` left the shadow not-dirty. Unblocks zero-copy SpawnDev.ILGPU.Rendering.CanvasRendererFactory rendering on the P2P backend (ComputeSwarm Mandelbrot demo).</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
@@ -28,7 +28,7 @@
 
 	<ItemGroup>
 		<ProjectReference Include="..\SpawnDev.ILGPU\SpawnDev.ILGPU.csproj" />
-		<PackageReference Include="SpawnDev.WebTorrent" Version="3.2.4-rc.7" />
+		<PackageReference Include="SpawnDev.WebTorrent" Version="4.0.0-local.1" />
 	</ItemGroup>
 
 </Project>

@@ -3,8 +3,8 @@
 @using SpawnDev.ILGPU.Rendering
 @using SpawnDev.ILGPU.WebGPU
 @using SpawnDev.ILGPU.WebGPU.Backend
-@using SpawnDev.BlazorJS
-@using SpawnDev.BlazorJS.JSObjects
+@using SpawnDev.SpawnJS
+@using SpawnDev.SpawnJS.JSObjects
 @using ILGPU
 @using System.Diagnostics
 @using System.Runtime.InteropServices
@@ -92,7 +92,7 @@
 
 <div class="row">
     <div class="col-md-12 text-center">
-        <canvas @ref="mandelbrotCanvas" 
+        <canvas id="mandelbrotCanvas" 
                 width="@_width" 
                 height="@_height" 
                 style="border: 1px solid #ccc; cursor: crosshair;"
@@ -109,9 +109,8 @@
 
 @code {
     [Inject]
-    BlazorJSRuntime JS { get; set; } = default!;
+    SpawnJSRuntime JS { get; set; } = default!;
 
-    ElementReference mandelbrotCanvas;
 
     // Canvas size
     private int _width = 800;
@@ -341,7 +340,7 @@
         _ilgpuKernel = _ilgpuAccelerator.LoadAutoGroupedStreamKernel<Index2D, ArrayView2D<uint, Stride2D.DenseX>, int, int, int, double, double, double>(MandelbrotKernel);
         _ilgpuBuffer = _ilgpuAccelerator.Allocate2DDenseX<uint>(new Index2D(_width, _height));
         _ilgpuCanvasRenderer = CanvasRendererFactory.Create(_ilgpuAccelerator);
-        _ilgpuCanvasRenderer.AttachCanvas(new HTMLCanvasElement(mandelbrotCanvas));
+        _ilgpuCanvasRenderer.AttachCanvas(JS.Call<string, HTMLCanvasElement>("document.getElementById", "mandelbrotCanvas"));
     }
 
     private async Task ReloadKernel(bool enableF64 = false)
@@ -378,7 +377,7 @@
             _ilgpuKernel = _ilgpuAccelerator.LoadAutoGroupedStreamKernel<Index2D, ArrayView2D<uint, Stride2D.DenseX>, int, int, int, double, double, double>(MandelbrotKernel);
             _ilgpuBuffer = _ilgpuAccelerator.Allocate2DDenseX<uint>(new Index2D(_width, _height));
             _ilgpuCanvasRenderer = CanvasRendererFactory.Create(_ilgpuAccelerator);
-            _ilgpuCanvasRenderer.AttachCanvas(new HTMLCanvasElement(mandelbrotCanvas));
+            _ilgpuCanvasRenderer.AttachCanvas(JS.Call<string, HTMLCanvasElement>("document.getElementById", "mandelbrotCanvas"));
         }
         finally
         {
@@ -469,7 +468,7 @@
             int, int, int, float>(PerturbationKernel);
         _pertBuffer = _pertAccelerator.Allocate2DDenseX<uint>(new Index2D(_width, _height));
         _pertCanvasRenderer = CanvasRendererFactory.Create(_pertAccelerator);
-        _pertCanvasRenderer.AttachCanvas(new HTMLCanvasElement(mandelbrotCanvas));
+        _pertCanvasRenderer.AttachCanvas(JS.Call<string, HTMLCanvasElement>("document.getElementById", "mandelbrotCanvas"));
     }
 
     /// <summary>
@@ -643,7 +642,7 @@
 
     private async Task DrawToCanvas(uint[] pixels)
     {
-        using var canvas = new HTMLCanvasElement(mandelbrotCanvas);
+        using var canvas = JS.Call<string, HTMLCanvasElement>("document.getElementById", "mandelbrotCanvas");
         using var context = canvas.GetContext<CanvasRenderingContext2D>("2d");
         using var uint32Array = new Uint32Array(pixels);
         using var uint8ClampedArray = new Uint8ClampedArray(uint32Array.Buffer);

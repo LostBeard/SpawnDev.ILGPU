@@ -4,8 +4,8 @@ using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using ILGPU;
 using ILGPU.Runtime;
-using SpawnDev.BlazorJS.JSObjects;
-using SpawnDev.BlazorJS.Toolbox;
+using SpawnDev.SpawnJS.JSObjects;
+using SpawnDev.SpawnJS.Toolbox;
 using SpawnDev.UnitTesting;
 
 namespace SpawnDev.ILGPU.Demo.Shared.UnitTests

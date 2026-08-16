@@ -1,7 +1,7 @@
 @page "/gameoflife"
 @implements IDisposable
-@using SpawnDev.BlazorJS
-@using SpawnDev.BlazorJS.JSObjects
+@using SpawnDev.SpawnJS
+@using SpawnDev.SpawnJS.JSObjects
 @using global::ILGPU
 @using global::ILGPU.Runtime
 @using global::SpawnDev.ILGPU
@@ -135,7 +135,7 @@
             global::ILGPU.Index1D, global::ILGPU.ArrayView<int>, global::ILGPU.ArrayView<int>, int>(GameOfLifeKernel);
 
         // Get the canvas
-        using var document = BlazorJSRuntime.JS.Get<Document>("document");
+        using var document = SpawnJSRuntime.Instance.Get<Document>("document");
         canvasEl = document.GetElementById<HTMLCanvasElement>("golCanvas");
         ctx2d = canvasEl!.GetContext<CanvasRenderingContext2D>("2d");
     }

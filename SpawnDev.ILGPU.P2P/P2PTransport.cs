@@ -1,7 +1,8 @@
 using System.Collections.Concurrent;
+using SpawnDev.SpawnJS;
 using System.Text.Json;
 using System.Threading.Channels;
-using SpawnDev.BlazorJS.Cryptography;
+using SpawnDev.SpawnJS.Cryptography;
 using SpawnDev.WebTorrent;
 
 namespace SpawnDev.ILGPU.P2P;
@@ -99,7 +100,7 @@ public class P2PTransport : IAsyncDisposable
                 var stack = new System.Diagnostics.StackTrace(1, false).ToString();
                 var firstFew = string.Join(" | ", stack.Split('\n').Take(3).Select(l => l.Trim()));
                 Console.WriteLine($"[P2PTransport][UNREG-DIAG] peerId={peerId} stack=[{firstFew}]");
-                try { SpawnDev.BlazorJS.BlazorJSRuntime.JS.Set("__p2p_unregister_caller",
+                try { SpawnJSRuntime.Instance.Set("__p2p_unregister_caller",
                     $"peerId={peerId} stack=[{firstFew}]"); } catch { }
             } catch { }
         }

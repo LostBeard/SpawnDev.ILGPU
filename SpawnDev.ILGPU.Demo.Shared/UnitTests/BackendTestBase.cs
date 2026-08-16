@@ -1,6 +1,6 @@
 using ILGPU;
 using ILGPU.Runtime;
-using SpawnDev.BlazorJS.Cryptography;
+using SpawnDev.SpawnJS.Cryptography;
 using SpawnDev.UnitTesting;
 
 namespace SpawnDev.ILGPU.Demo.Shared.UnitTests

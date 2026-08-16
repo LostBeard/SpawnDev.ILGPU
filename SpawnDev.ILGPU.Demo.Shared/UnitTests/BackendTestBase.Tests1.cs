@@ -338,7 +338,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             // ONLY the BlazorJS TypedArray marshalling layer (no GPU
             // load/store, no Wasm worker dispatch, no compute path). If
             // this test passes on every backend, the bit-identity
-            // assumption SpawnDev.BlazorJS makes is sound for f32.
+            // assumption SpawnDev.SpawnJS makes is sound for f32.
             var values = new float[]
             {
                 0.0f,

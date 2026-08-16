@@ -9,7 +9,7 @@ using SpawnDev.ILGPU.Wasm.Backend;
 
 /// <summary>
 /// Offline (desktop, no browser) Wasm COMPILE harness for the H8 shared-memory
-/// alloca audit. WasmAccelerator.Create wraps the BlazorJSRuntime.JS lookup in a
+/// alloca audit. WasmAccelerator.Create wraps the SpawnJSRuntime.Instance lookup in a
 /// try/catch (defaults to 4 cores when JS is absent), and CreateRadixSort* compiles
 /// its kernels eagerly via LoadKernel BEFORE any dispatch - so the IL->wasm compile
 /// path runs fully on desktop. We never dispatch (that needs workers); we only

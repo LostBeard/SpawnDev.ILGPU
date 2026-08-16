@@ -12,7 +12,7 @@
 		<ProjectReference Include="..\SpawnDev.ILGPU.P2P\SpawnDev.ILGPU.P2P.csproj" />
 		<ProjectReference Include="..\ILGPU\ILGPU.csproj" />
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
-		<PackageReference Include="SpawnDev.UnitTesting.Blazor" Version="2.5.7-local.6" />
+		<PackageReference Include="SpawnDev.UnitTesting.Browser" Version="2.6.0" />
 	</ItemGroup>
 
 </Project>

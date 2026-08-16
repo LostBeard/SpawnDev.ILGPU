@@ -1,6 +1,7 @@
 using ILGPU;
+using SpawnDev.SpawnJS;
 using ILGPU.Runtime;
-using SpawnDev.BlazorJS.Cryptography;
+using SpawnDev.SpawnJS.Cryptography;
 using SpawnDev.RTC;
 using SpawnDev.RTC.Desktop;
 using SpawnDev.WebTorrent;
@@ -409,9 +410,9 @@ public class P2PCompute : IAsyncDisposable
         {
             if (!OperatingSystem.IsBrowser()) return null;
             // In Blazor WASM: window.location.origin + window.location.pathname
-            // Access via SpawnDev.BlazorJS if available, fallback to null
-            var origin = SpawnDev.BlazorJS.BlazorJSRuntime.JS?.Get<string>("window.location.origin");
-            var path = SpawnDev.BlazorJS.BlazorJSRuntime.JS?.Get<string>("window.location.pathname");
+            // Access via SpawnDev.SpawnJS if available, fallback to null
+            var origin = SpawnJSRuntime.Instance?.Get<string>("window.location.origin");
+            var path = SpawnJSRuntime.Instance?.Get<string>("window.location.pathname");
             if (!string.IsNullOrEmpty(origin))
                 return origin + (path ?? "");
         }

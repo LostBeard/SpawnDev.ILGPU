@@ -1,6 +1,6 @@
 using System.Security.Cryptography;
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
 
 namespace SpawnDev.ILGPU.P2P;
 
@@ -34,7 +34,7 @@ public class HardwareKeyProvider
         if (!OperatingSystem.IsBrowser()) return "localhost";
         try
         {
-            return BlazorJSRuntime.JS.Get<string>("window.location.hostname");
+            return SpawnJSRuntime.Instance.Get<string>("window.location.hostname");
         }
         catch { return "localhost"; }
     }
@@ -219,7 +219,7 @@ public class HardwareKeyProvider
     public async Task<bool> VerifyAssertionAsync(
         HardwareKeyAssertion assertion,
         byte[] publicKeySpki,
-        SpawnDev.BlazorJS.Cryptography.IPortableCrypto crypto)
+        SpawnDev.SpawnJS.Cryptography.IPortableCrypto crypto)
     {
         // 1. Reconstruct what was signed: authenticatorData || SHA-256(clientDataJSON)
         var clientDataHash = System.Security.Cryptography.SHA256.HashData(assertion.ClientDataJson);

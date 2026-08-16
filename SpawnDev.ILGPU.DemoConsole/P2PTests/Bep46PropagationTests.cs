@@ -31,9 +31,9 @@ namespace SpawnDev.ILGPU.DemoConsole.P2PTests;
 /// </summary>
 public class Bep46PropagationTests
 {
-    private readonly SpawnDev.BlazorJS.Cryptography.IPortableCrypto _crypto;
+    private readonly SpawnDev.SpawnJS.Cryptography.IPortableCrypto _crypto;
 
-    public Bep46PropagationTests(SpawnDev.BlazorJS.Cryptography.IPortableCrypto crypto) => _crypto = crypto;
+    public Bep46PropagationTests(SpawnDev.SpawnJS.Cryptography.IPortableCrypto crypto) => _crypto = crypto;
 
     private const int DiscoveryTimeoutMs = 60000;
 

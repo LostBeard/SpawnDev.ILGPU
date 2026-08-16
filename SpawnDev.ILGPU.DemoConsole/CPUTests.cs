@@ -1,7 +1,7 @@
 using ILGPU;
 using ILGPU.Runtime;
 using ILGPU.Runtime.CPU;
-using SpawnDev.BlazorJS.Cryptography;
+using SpawnDev.SpawnJS.Cryptography;
 using SpawnDev.ILGPU.Demo.Shared.UnitTests;
 
 public class CPUTests : BackendTestBase
