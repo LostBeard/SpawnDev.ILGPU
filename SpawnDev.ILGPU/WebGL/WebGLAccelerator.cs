@@ -8,9 +8,9 @@
 using global::ILGPU;
 using global::ILGPU.Backends;
 using global::ILGPU.Runtime;
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
-using GL = SpawnDev.BlazorJS.JSObjects.GL;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
+using GL = SpawnDev.SpawnJS.JSObjects.GL;
 using SpawnDev.ILGPU.WebGL.Backend;
 using System.Collections.Concurrent;
 using System.Reflection;
@@ -650,7 +650,7 @@ namespace SpawnDev.ILGPU.WebGL
         {
             try
             {
-                using var data = msg.GetData<JSObject>();
+                using var data = msg.GetData<SpawnJSObject>();
 
                 // Check if this is a readback result
                 var msgType = data.JSRef!.Get<string?>("type");
@@ -710,7 +710,7 @@ namespace SpawnDev.ILGPU.WebGL
         /// <summary>
         /// Handles a blitResult response from the GL worker, resolving the pending ImageBitmap TCS.
         /// </summary>
-        private void HandleBlitResponse(JSObject data)
+        private void HandleBlitResponse(SpawnJSObject data)
         {
             var requestId = data.JSRef!.Get<int>("requestId");
             if (!_pendingBlits.TryRemove(requestId, out var blit))
@@ -737,7 +737,7 @@ namespace SpawnDev.ILGPU.WebGL
         /// <summary>
         /// Handles a readback response from the GL worker.
         /// </summary>
-        private void HandleReadbackResponse(JSObject data)
+        private void HandleReadbackResponse(SpawnJSObject data)
         {
             var requestId = data.JSRef!.Get<int>("requestId");
             if (!_pendingReadbacks.TryRemove(requestId, out var pending))

@@ -1,5 +1,5 @@
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
 
 namespace SpawnDev.ILGPU.WebGPU;
 
@@ -34,7 +34,7 @@ public sealed class WebGPUDispatchPlan : IDisposable
 {
     private static Task? _helperLoad;
     private readonly WebGPUAccelerator _accelerator;
-    private readonly SpawnDev.BlazorJS.JSObjects.Array _plan;
+    private readonly SpawnDev.SpawnJS.JSObjects.Array _plan;
     private readonly List<GPUBuffer> _retainedScalarBuffers = new();
     private readonly List<GPUBuffer> _retainedCoalesceBuffers = new();
     private bool _disposed;
@@ -81,7 +81,7 @@ public sealed class WebGPUDispatchPlan : IDisposable
     internal WebGPUDispatchPlan(WebGPUAccelerator accelerator)
     {
         _accelerator = accelerator;
-        _plan = new SpawnDev.BlazorJS.JSObjects.Array();
+        _plan = new SpawnDev.SpawnJS.JSObjects.Array();
     }
 
     // Plan records are flat 7-element tagged groups (see wwwroot/webgpuDispatchPlan.js):
@@ -139,7 +139,7 @@ public sealed class WebGPUDispatchPlan : IDisposable
         if (entryIndices.Length != newDstOffsets.Length)
             throw new ArgumentException("entryIndices and newDstOffsets must have equal length");
         await EnsureHelperLoadedAsync();
-        BlazorJSRuntime.JS.CallVoid("ilgpuWebGPUPlan.patchCopyDst", _plan, entryIndices, newDstOffsets);
+        SpawnJSRuntime.Instance.CallVoid("ilgpuWebGPUPlan.patchCopyDst", _plan, entryIndices, newDstOffsets);
     }
 
     /// <summary>Record an encoder-level clearBuffer (zero-fill) - replays must re-zero, or kernels
@@ -170,9 +170,9 @@ public sealed class WebGPUDispatchPlan : IDisposable
         static async Task LoadAsync()
         {
             // Resolve against the app base so the import works regardless of the calling module's URL.
-            var baseUri = BlazorJSRuntime.JS.Get<string>("document.baseURI");
+            var baseUri = SpawnJSRuntime.Instance.Get<string>("document.baseURI");
             var url = new Uri(new Uri(baseUri), "_content/SpawnDev.ILGPU/webgpuDispatchPlan.js").ToString();
-            using var module = await BlazorJSRuntime.JS.CallAsync<JSObject>("import", url);
+            using var module = await SpawnJSRuntime.Instance.CallAsync<string, SpawnJSObject>("import", url);
         }
     }
 
@@ -198,7 +198,7 @@ public sealed class WebGPUDispatchPlan : IDisposable
         // frame's data (caught by the DA3 video-path stale-replay guard, 2026-07-03). writeBuffer
         // uploads (CopyFromCPU) were always safe - they are queue-ordered, not encoder-batched.
         _accelerator.FlushPendingCommands();
-        return BlazorJSRuntime.JS.Call<int>("ilgpuWebGPUPlan.replay", device, _plan);
+        return SpawnJSRuntime.Instance.Call<GPUDevice, SpawnDev.SpawnJS.JSObjects.Array, int>("ilgpuWebGPUPlan.replay", device, _plan);
     }
 
     /// <summary>
@@ -222,7 +222,7 @@ public sealed class WebGPUDispatchPlan : IDisposable
         var device = _accelerator.NativeAccelerator.NativeDevice
             ?? throw new InvalidOperationException("WebGPU device unavailable (lost or disposed).");
         _accelerator.FlushPendingCommands();   // same stale-input ordering contract as ReplayAsync
-        return await BlazorJSRuntime.JS.CallAsync<string>("ilgpuWebGPUPlan.replayTimed", device, _plan);
+        return await SpawnJSRuntime.Instance.CallAsync<GPUDevice, SpawnDev.SpawnJS.JSObjects.Array, string>("ilgpuWebGPUPlan.replayTimed", device, _plan);
     }
 
     /// <summary>
@@ -234,8 +234,8 @@ public sealed class WebGPUDispatchPlan : IDisposable
     /// </summary>
     public static (double EncodeMs, double SubmitMs) GetLastReplayTimings()
     {
-        var encode = BlazorJSRuntime.JS.Get<double?>("ilgpuWebGPUPlan.last.encodeMs") ?? -1;
-        var submit = BlazorJSRuntime.JS.Get<double?>("ilgpuWebGPUPlan.last.submitMs") ?? -1;
+        var encode = SpawnJSRuntime.Instance.Get<double?>("ilgpuWebGPUPlan.last.encodeMs") ?? -1;
+        var submit = SpawnJSRuntime.Instance.Get<double?>("ilgpuWebGPUPlan.last.submitMs") ?? -1;
         return (encode, submit);
     }
 

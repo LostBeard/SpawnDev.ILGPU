@@ -1,18 +1,18 @@
-﻿using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
+﻿using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
 
 namespace SpawnDev.ILGPU.Services
 {
     public class GPUAdapterReturnOverride
     {
         public GPUAdapter? Adapter { get; set; }
-        public JSObject? Options { get; set; }
+        public SpawnJSObject? Options { get; set; }
 
     }
     public class GPUDeviceReturnOverride
     {
         public GPUDevice? Device { get; set; }
-        public JSObject? Options { get; set; }
+        public SpawnJSObject? Options { get; set; }
     }
     /// <summary>
     /// gpuShareService intercepts navigator.gpu.requestAdapter calls to capture the GPUAdapter and GPUDevice created by ORT WebGPU. This allows ILGPU to share the same device for zero-copy buffers.
@@ -40,11 +40,11 @@ namespace SpawnDev.ILGPU.Services
         public event Func<GPUAdapterReturnOverride, Task> OnAdapterRequested = default!;
         public event Func<GPUAdapterHook, GPUAdapterReturnOverride, Task> OnAdapterCreated = default!;
         public List<GPUAdapterHook> GPUAdapterHooks { get; } = new List<GPUAdapterHook>();
-        private BlazorJSRuntime _js;
-        FuncCallback<JSObject?, Task<GPUAdapter>>? _requestAdapterHookCallback;
+        private SpawnJSRuntime _js;
+        FuncCallback<SpawnJSObject?, Task<GPUAdapter>>? _requestAdapterHookCallback;
         Function? _requestAdapterOrig;
         public bool Verbose { get; set; } = false;
-        public GpuShareService(BlazorJSRuntime js)
+        public GpuShareService(SpawnJSRuntime js)
         {
             _js = js;
             if (!_js.IsBrowser) return;
@@ -60,12 +60,12 @@ namespace SpawnDev.ILGPU.Services
                     // make the orignal requestAdapter available
                     gpu.JSRef!.Set("requestAdapterOrig", _requestAdapterOrig);
                     // set our hook as the new requestAdapter
-                    _requestAdapterHookCallback = new FuncCallback<JSObject?, Task<GPUAdapter>>(RequestAdapter_Hook);
+                    _requestAdapterHookCallback = new FuncCallback<SpawnJSObject?, Task<GPUAdapter>>(RequestAdapter_Hook);
                     gpu.JSRef!.Set("requestAdapter", _requestAdapterHookCallback);
                 }
             }
         }
-        private async Task<GPUAdapter> RequestAdapter_Hook(JSObject? options)
+        private async Task<GPUAdapter> RequestAdapter_Hook(SpawnJSObject? options)
         {
             if (Verbose) _js.Log("TT OnAdapterRequested called", options);
             if (ForceShare)
@@ -171,7 +171,7 @@ namespace SpawnDev.ILGPU.Services
     /// </summary>
     public class GPUAdapterHook : IDisposable
     {
-        FuncCallback<JSObject?, Task<GPUDevice>>? _requestDeviceHookCallback;
+        FuncCallback<SpawnJSObject?, Task<GPUDevice>>? _requestDeviceHookCallback;
         public GPUAdapter Adapter { get; }
         Function? _requestDeviceOrig;
         public List<GPUDevice> Devices { get; } = new List<GPUDevice>();
@@ -191,10 +191,10 @@ namespace SpawnDev.ILGPU.Services
             // make the orignal requestDevice available
             adapter.JSRef!.Set("requestDeviceOrig", _requestDeviceOrig);
             // set our hook as the new requestDevice
-            _requestDeviceHookCallback = new FuncCallback<JSObject?, Task<GPUDevice>>(RequestDevice_Hook);
+            _requestDeviceHookCallback = new FuncCallback<SpawnJSObject?, Task<GPUDevice>>(RequestDevice_Hook);
             adapter.JSRef!.Set("requestDevice", _requestDeviceHookCallback);
         }
-        private async Task<GPUDevice> RequestDevice_Hook(JSObject? options)
+        private async Task<GPUDevice> RequestDevice_Hook(SpawnJSObject? options)
         {
             var args = new GPUDeviceReturnOverride() { Device = null, Options = options };
             // fire OnDeviceRequested 

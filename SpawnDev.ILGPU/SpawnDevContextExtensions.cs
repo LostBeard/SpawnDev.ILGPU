@@ -11,7 +11,7 @@
 using global::ILGPU;
 using global::ILGPU.Runtime;
 using ILGPU.Runtime.CPU;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS.JSObjects;
 using SpawnDev.ILGPU.Wasm;
 using SpawnDev.ILGPU.Wasm.Algorithms;
 using SpawnDev.ILGPU.WebGL;

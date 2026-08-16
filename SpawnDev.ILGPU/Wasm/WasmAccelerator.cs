@@ -11,8 +11,8 @@
 using global::ILGPU;
 using global::ILGPU.Backends;
 using global::ILGPU.Runtime;
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
 using SpawnDev.ILGPU.Wasm.Backend;
 using System.Collections.Concurrent;
 using System.Reflection;
@@ -203,7 +203,7 @@ namespace SpawnDev.ILGPU.Wasm
         // accelerator in a group declares the same max).
         private sealed class SharedMemEntry
         {
-            public JSObject? Memory;
+            public SpawnJSObject? Memory;
             public SharedArrayBuffer? Buffer;
             public int Pages;
             public int CreateCount;
@@ -420,7 +420,7 @@ namespace SpawnDev.ILGPU.Wasm
         /// SharedArrayBuffer-backed memories reserve large virtual address space,
         /// so creating a new one every frame causes OOM.
         /// </summary>
-        private JSObject? _cachedWasmMemory;
+        private SpawnJSObject? _cachedWasmMemory;
         private SharedArrayBuffer? _cachedMemoryBuffer;
         private int _cachedWasmPages;
 
@@ -445,7 +445,7 @@ namespace SpawnDev.ILGPU.Wasm
         /// is serialized by its <see cref="SharedMemEntry.Gate"/>; the .NET side is single-threaded, so
         /// field access on the obtained entry needs no further lock (only the dictionary lookup locks).
         /// </summary>
-        private JSObject? CachedWasmMemory
+        private SpawnJSObject? CachedWasmMemory
         {
             get => UsesSharedMemory ? SharedEntry.Memory : _cachedWasmMemory;
             set { if (UsesSharedMemory) SharedEntry.Memory = value; else _cachedWasmMemory = value; }
@@ -815,7 +815,7 @@ namespace SpawnDev.ILGPU.Wasm
             SemaphoreSlim? heldSharedGate = null;
             try
             {
-                var js = BlazorJSRuntime.JS;
+                var js = SpawnJSRuntime.Instance;
                 var (gridDimX, gridDimY, gridDimZ) = GetGridDimensions(dimension);
                 int totalItems = gridDimX * gridDimY * gridDimZ;
 
@@ -1287,9 +1287,9 @@ namespace SpawnDev.ILGPU.Wasm
                 // they share the same SharedArrayBuffer and we'd corrupt their data.
                 // In that case, create a dedicated per-dispatch memory.
                 bool hasConcurrentWork = _activeDispatchCount > 1;
-                JSObject wasmMemory;
+                SpawnJSObject wasmMemory;
                 SharedArrayBuffer memoryBuffer;
-                JSObject? disposeWasmMemory = null;   // track per-dispatch memory for cleanup
+                SpawnJSObject? disposeWasmMemory = null;   // track per-dispatch memory for cleanup
                 SharedArrayBuffer? disposeBuffer = null;
 
                 if (!hasConcurrentWork && CachedWasmMemory != null && wasmPages <= CachedWasmPages)
@@ -1314,7 +1314,7 @@ namespace SpawnDev.ILGPU.Wasm
                         int initialPages = Math.Min(_maxLinearMemoryPages,
                             Math.Max(wasmPages, WasmBackend.PreGrowPages));
                         CachedWasmPages = initialPages;
-                        CachedWasmMemory = js.Call<JSObject>(
+                        CachedWasmMemory = js.Call<string, SpawnJSObject>(
                             "eval",
                             $"new WebAssembly.Memory({{ initial: {initialPages}, maximum: {_maxLinearMemoryPages}, shared: true }})");
                         CachedMemoryBuffer = CachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
@@ -1329,7 +1329,7 @@ namespace SpawnDev.ILGPU.Wasm
                         if (growBy > 0)
                         {
                             if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-MEM-GROW] disp={dispNum} from={CachedWasmPages} to={wasmPages} growBy={growBy} cap={_maxLinearMemoryPages}");
-                            int growResult = CachedWasmMemory.JSRef!.Call<int>("grow", growBy);
+                            int growResult = CachedWasmMemory.JSRef!.Call<int, int>("grow", growBy);
                             if (growResult == -1)
                                 throw new OutOfMemoryException($"WebAssembly.Memory.grow({growBy} pages) failed. Current: {CachedWasmPages} pages, requested: {wasmPages} pages ({wasmPages * 64}KB), cap: {_maxLinearMemoryPages} pages ({_maxLinearMemoryPages * 64}KB)");
                             CachedWasmPages = wasmPages;
@@ -1356,7 +1356,7 @@ namespace SpawnDev.ILGPU.Wasm
                         int initialPages = Math.Min(_maxLinearMemoryPages,
                             Math.Max(wasmPages, WasmBackend.PreGrowPages));
                         CachedWasmPages = initialPages;
-                        CachedWasmMemory = js.Call<JSObject>(
+                        CachedWasmMemory = js.Call<string, SpawnJSObject>(
                             "eval",
                             $"new WebAssembly.Memory({{ initial: {initialPages}, maximum: {_maxLinearMemoryPages}, shared: true }})");
                         CachedMemoryBuffer = CachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
@@ -1368,7 +1368,7 @@ namespace SpawnDev.ILGPU.Wasm
                     {
                         int growBy = wasmPages - CachedWasmPages;
                         if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-MEM-GROW-CC] disp={dispNum} from={CachedWasmPages} to={wasmPages} growBy={growBy} cap={_maxLinearMemoryPages}");
-                        int growResult = CachedWasmMemory.JSRef!.Call<int>("grow", growBy);
+                        int growResult = CachedWasmMemory.JSRef!.Call<int, int>("grow", growBy);
                         if (growResult == -1)
                             throw new OutOfMemoryException($"WebAssembly.Memory.grow({growBy} pages) failed. Current: {CachedWasmPages} pages, requested: {wasmPages} pages ({wasmPages * 64}KB), cap: {_maxLinearMemoryPages} pages ({_maxLinearMemoryPages * 64}KB)");
                         CachedWasmPages = wasmPages;
@@ -1937,9 +1937,9 @@ namespace SpawnDev.ILGPU.Wasm
 
             state.MsgHandler = new Action<MessageEvent>((msg) =>
             {
-                // The MessageEvent JSObject is created per worker-response by the SpawnDev.BlazorJS
+                // The MessageEvent SpawnJSObject is created per worker-response by the SpawnDev.SpawnJS
                 // callback marshaller and is OWNED by this handler: ActionCallback<T1>.Invoke calls
-                // the delegate and does NOT dispose the arg (verified in SpawnDev.BlazorJS/ActionCallback.cs).
+                // the delegate and does NOT dispose the arg (verified in SpawnDev.SpawnJS/ActionCallback.cs).
                 // Without disposing it, every (dispatch x worker) response pins a MessageEvent (and its
                 // .data graph) in the V8 JS heap until finalization - which JS-heap growth alone never
                 // triggers under a long Wasm dispatch lane -> the late-lane memory-pressure leak. Dispose
@@ -1975,7 +1975,7 @@ namespace SpawnDev.ILGPU.Wasm
 
             state.ErrHandler = new Action<Event>((err) =>
             {
-                // Same ownership rule as MsgHandler: the Event JSObject is handler-owned and must be
+                // Same ownership rule as MsgHandler: the Event SpawnJSObject is handler-owned and must be
                 // disposed on every path (rare - only fires on a worker-level error - but still leaks if not).
                 using var _errScope = err;
                 var tcs = state.CurrentTcs;
@@ -2013,7 +2013,7 @@ namespace SpawnDev.ILGPU.Wasm
             int realGroupDimY,
             List<string> flatArgs,
             byte[] wasmBytes,
-            JSObject wasmMemory,
+            SpawnJSObject wasmMemory,
             SharedArrayBuffer memoryBuffer,
             List<int> bufferOffsets,
             List<(WasmMemoryBuffer buffer, int byteOffset)> bufferInfos,

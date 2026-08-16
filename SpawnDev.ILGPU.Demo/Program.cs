@@ -1,6 +1,6 @@
 using Microsoft.AspNetCore.Components.Web;
 using Microsoft.AspNetCore.Components.WebAssembly.Hosting;
-
+using SpawnDev;
 using SpawnDev.BlazorJS;
 using SpawnDev.BlazorJS.Cryptography;
 using SpawnDev.ILGPU.Demo;
@@ -76,5 +76,7 @@ var host = builder.Build();
         Console.WriteLine("[Wasm-SIMD-Mode] PMT_WASM_SIMD=off -> WasmBackend.ForceScalar=true (scalar-mode sweep engaged)");
     }
 }
+
+await host.Services.StartBackgroundServices();
 
 await host.BlazorJSRunAsync();

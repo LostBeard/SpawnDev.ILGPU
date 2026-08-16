@@ -1,7 +1,7 @@
 using global::ILGPU;
 using global::ILGPU.Runtime;
-using SpawnDev.BlazorJS.JSObjects;
-using SpawnDev.BlazorJS.Toolbox;
+using SpawnDev.SpawnJS.JSObjects;
+using SpawnDev.SpawnJS.Toolbox;
 using System.Runtime.InteropServices;
 
 namespace SpawnDev.ILGPU.WebGPU.Backend

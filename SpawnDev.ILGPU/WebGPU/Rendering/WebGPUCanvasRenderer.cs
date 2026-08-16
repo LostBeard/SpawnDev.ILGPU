@@ -1,7 +1,7 @@
 using global::ILGPU;
 using global::ILGPU.Runtime;
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
 using SpawnDev.ILGPU.Rendering;
 using SpawnDev.ILGPU.WebGPU.Backend;
 
@@ -76,7 +76,7 @@ fn fs_main(@builtin(position) pos : vec4<f32>) -> @location(0) vec4<f32> {
             // Display canvas always uses 2d context — no context-type conflict when switching backends.
             _displayCtx = canvas.GetContext<CanvasRenderingContext2D>("2d");
 
-            using var navigator = BlazorJSRuntime.JS.Get<Navigator>("navigator");
+            using var navigator = SpawnJSRuntime.Instance.Get<Navigator>("navigator");
             using var gpu = navigator.Gpu;
             _canvasFormat = gpu?.GetPreferredCanvasFormat() ?? "bgra8unorm";
 

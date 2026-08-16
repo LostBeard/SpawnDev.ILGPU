@@ -5,7 +5,8 @@
 // File: WebGPUComputeShader.cs
 // ---------------------------------------------------------------------------------------
 
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
 
 namespace SpawnDev.ILGPU.WebGPU
 {
@@ -46,7 +47,7 @@ namespace SpawnDev.ILGPU.WebGPU
             // DEBUG: Store WGSL in a JS global for browser-side inspection (only when verbose logging is on)
             if (Backend.WebGPUBackend.VerboseLogging)
             {
-                try { BlazorJS.BlazorJSRuntime.JS.Set("wgslDebug", wgslSource); } catch { }
+                try { SpawnJSRuntime.Instance.Set("wgslDebug", wgslSource); } catch { }
             }
             // Push validation error scope BEFORE shader/pipeline creation to capture both
             device.PushErrorScope(GPUErrorFilter.Validation);

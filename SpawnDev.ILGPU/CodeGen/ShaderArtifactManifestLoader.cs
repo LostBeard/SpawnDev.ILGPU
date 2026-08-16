@@ -14,13 +14,13 @@ namespace SpawnDev.ILGPU;
 //
 // DESIGN (per TJ 2026-06-10):
 // - OPT-IN, NO STARTUP HOOK. Nothing fetches until a consumer calls Configure(...) AND then
-//   asks to warm. A SpawnDev.BlazorJS.WebWorkers worker (or service worker) that never runs a
+//   asks to warm. A SpawnDev.SpawnJS.WebWorkers worker (or service worker) that never runs a
 //   kernel never touches the network. Not configured == today's behavior (pure runtime transpile).
 // - LAZY. EnsureManifestAsync fetches the (small) manifest once, memoized. TryWarmAsync fetches
 //   and registers exactly ONE kernel's artifact, on demand, right before that kernel is loaded -
 //   so artifacts you never use are never downloaded. WarmAllAsync is an optional bulk preload.
 // - TRANSPORT-AGNOSTIC. `fetch` is a Func<url, Task<byte[]>> the consumer supplies (BlazorJS fetch
-//   in-browser, HttpClient on desktop), so the library core takes NO SpawnDev.BlazorJS dependency
+//   in-browser, HttpClient on desktop), so the library core takes NO SpawnDev.SpawnJS dependency
 //   and the whole thing is unit-testable with an in-memory fetch.
 // - The async kernel-load path (transparent lazy: await the warm inside an async LoadKernel on a
 //   miss) is built ON TOP of this mechanism - this type is what it calls.
@@ -51,7 +51,7 @@ public static class ShaderArtifactManifestLoader
     /// <summary>
     /// Opt in to precompiled-artifact loading. Stores the manifest URL and a transport delegate;
     /// performs NO fetch (lazy). Call once when wiring GPU work. <paramref name="fetch"/> maps a
-    /// URL to its bytes (e.g. a SpawnDev.BlazorJS fetch in-browser, or <c>HttpClient</c> on desktop).
+    /// URL to its bytes (e.g. a SpawnDev.SpawnJS fetch in-browser, or <c>HttpClient</c> on desktop).
     /// </summary>
     public static void Configure(string manifestUrl, Func<string, Task<byte[]>> fetch)
     {

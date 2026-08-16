@@ -5,9 +5,9 @@
 // File: WebGLDevice.cs
 // ---------------------------------------------------------------------------------------
 
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
-using GL = SpawnDev.BlazorJS.JSObjects.GL;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
+using GL = SpawnDev.SpawnJS.JSObjects.GL;
 using System.Collections.Immutable;
 
 namespace SpawnDev.ILGPU.WebGL
@@ -88,8 +88,8 @@ namespace SpawnDev.ILGPU.WebGL
             // Create a short-lived OffscreenCanvas + WebGL2 context to probe capabilities,
             // then explicitly destroy the WebGL context before returning.
             //
-            // Why explicit destruction: .NET `using` / `Dispose` on a SpawnDev.BlazorJS
-            // JSObject only releases the .NET-side IJSInProcessObjectReference. The
+            // Why explicit destruction: .NET `using` / `Dispose` on a SpawnDev.SpawnJS
+            // SpawnJSObject only releases the .NET-side IJSInProcessObjectReference. The
             // underlying JS OffscreenCanvas and its WebGL2 context survive until JS GC,
             // which on a long-lived SPA can take many page navigations. Browsers throttle
             // past ~16 live WebGL contexts per page; an app that registers WebGL devices

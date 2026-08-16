@@ -7,8 +7,8 @@
 
 using global::ILGPU;
 using global::ILGPU.Runtime;
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
 using SpawnDev.ILGPU.Wasm.Backend;
 
 namespace SpawnDev.ILGPU.Wasm
@@ -48,7 +48,7 @@ namespace SpawnDev.ILGPU.Wasm
         {
             try
             {
-                using var navigator = BlazorJSRuntime.JS.Get<Navigator>("navigator");
+                using var navigator = SpawnJSRuntime.Instance.Get<Navigator>("navigator");
                 return navigator.HardwareConcurrency ?? 4;
             }
             catch

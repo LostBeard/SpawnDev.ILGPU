@@ -4,23 +4,9 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>4.17.6</Version>
+		<Version>5.0.0-local.1</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>4.17.5: Browser heap-view priming fix — the zero-copy host-&gt;GPU `CopyFrom`/upload paths (WebGPU, Wasm, WebGL) now wrap the WASM heap source via `HeapViewPtr` (which primes the heap) instead of the unprimed `HeapView.GetHeapBuffer()`. Without priming, a managed allocation in the wrap-&gt;consume window can trigger a `memory.grow` that DETACHES the heap view mid-upload -&gt; "A valid external Instance reference no longer exists" under managed-heap pressure (e.g. a co-resident model + allocation-heavy inference). Also promotes 4.17.5-local.1 (WebGPU read-only Float16 weights skip atomicLoad, ~220x faster f16-weight kernels) + Cordic.Exp de-recursion. Forks unchanged at 2.2.0.
-
-4.17.2-local.9: Stream-upload timing diagnostics (measure the model-load transport). The browser IJSReadStream-&gt;GPU stream path is one loop of read-a-chunk (ReadUint8ArrayAsync) then write-a-chunk (CopyFromJS / queue.writeBuffer); when load is slow the time can be in the READ (torrent/OPFS-bound) or the WRITE (writeBuffer transport / chunk size). `BrowserBufferPolicy.TraceStreamUploadTiming` (default OFF) splits the two halves into `StreamReadMs`/`StreamWriteMs`/`StreamBytes`/`StreamChunks` (+ `ResetStreamUploadTiming()`) so a harness can attribute the cost to the right lever before tuning. Pure measurement, gated OFF - byte-identical behavior in production. Wrapper-only; forks unchanged at 2.2.0.
-
-4.17.2-local.8: Zero-copy host-&gt;GPU CopyFromCPU on ALL browser backends (WebGPU/WebGL/Wasm) + shared fail-loud host-copy guard. The host CopyFrom CPU branch on each browser backend dropped its `new byte[]`+`Marshal.Copy`+marshal - the CPU source already lives in WASM linear memory, so it is now viewed as `new Uint8Array(HEAPU8.buffer, srcPtr, len)` and handed JS-&gt;GPU directly (writeBuffer on WebGPU; JS-&gt;JS `.Set` into the backing Uint8Array on WebGL and the SharedArrayBuffer on Wasm). No bytes enter the .NET/WASM managed heap in transit; resolves the ~14ms/call CopyFromCPU wrapper cost. New `BrowserBufferPolicy.StrictHostCopyMaxBytes` (default -1=off) - set it around a model-load window and any host CopyFromCPU over the threshold THROWS on WHICHEVER browser backend runs, so a weight that regresses onto the .NET path fails loud in tests instead of silently taxing the main thread. PMT RoundTrip 198/0 (Wasm/WebGL/WebGPU bit-exact vs CPU oracle) + guard test green on all 3 browser backends. Wrapper-only; forks unchanged at 2.2.0.
-
-4.17.2-local.1: WebGL AsAligned16 struct-element load fixed - the GLSL parameter resolvers now trace through the AsAligned/AlignTo node (they walked SubView/Cast/etc. but not AsAligned), so a `view.AsAligned16()[i]` struct-of-4 load resolves to its param, binds an isampler2D, and loads via per-field texelFetch assembly instead of emitting invalid GLSL. `AsAligned16_StructOf4_SumsCorrectly` un-skipped on WebGL (PMT 9/0/0). Wrapper-only; forks unchanged at 2.2.0.
-
-4.17.1-local.1: WebGPU WGSL 128-bit vectorized load. A 16-byte 4xf32 struct element reached through AsAligned16() now binds as array&lt;vec4&lt;f32&gt;&gt; and loads in ONE 128-bit load (GetField 0..3 -&gt; .x/.y/.z/.w), opt-in via the AsAligned16() call so no unrelated 4xf32 struct is affected. Also folds in the a601957 AsAligned lowering fix (view was mis-declared with its element type then indexed -&gt; invalid WGSL) which never shipped in a package. Wrapper-only; forks unchanged at 2.2.0. See CHANGELOG.md.
-
-4.17.0: ArrayView&lt;T&gt;.CopyToStreamAsync - the GPU-&gt;Stream save primitive (save-side mirror of CopyFromStreamAsync). Chunked async readback -&gt; Stream.WriteAsync on all 6 backends; browser backends take a zero-copy fast path when the target is a SpawnDev.BlazorJS.Toolbox.IJSWriteStream (Uint8Array chunks stay JS-side). Forks bump to 2.2.0 (new public API). Requires SpawnDev.BlazorJS 3.5.14. See CHANGELOG.md.
-
-4.15.3-local.1: Device-LOCAL dynamically-indexed array codegen fix (Fork 2.0.44-local.1). A per-thread `new T[N]` (N&gt;32) written/read by a RUNTIME index in a loop threw InvalidCodeGenerationException ("No register allocated for PrimitiveValue 0") at kernel JIT. Root cause: the LowerArrays N&gt;32 zero-init loop created the counter-phi's initial 0 constant in the loop HEADER instead of the predecessor block (invalid SSA dominance). Fixed (result-neutral). Verified compile+correct on CUDA/OpenCL/CPU/WebGPU/WebGPU-no-subgroups/WebGL; one tracked Wasm-only follow-up (large dynamically-indexed local alloca with scratchOffset!=0). Unblocks register/local-memory accumulator kernels (flash-class per-query attention) on the GPU backends. Also includes 4.15.2-local CUDA graph capture API + Accelerator.WithDefaultStream + ShaderDebugService.AppLoadTimestamp.
-
-4.15.2-local.1: CUDA graph capture/replay API (Fork 2.0.43-local.1). New `CudaStream.BeginCapture(mode)`/`.EndCapture()`/`.CaptureStatus`/`.SupportsGraphCapture` + `CudaGraph.Instantiate()` -&gt; `CudaGraphExec.Launch(stream)`/`.Upload(stream)` capture a fixed-shape kernel sequence once and replay it with a single `cuGraphLaunch`, collapsing per-kernel host dispatch overhead (the lever for LLM decode, where ~25ms/token is CPU dispatch). Plus `Accelerator.WithDefaultStream(stream)` - a scoped swap of the default stream so the existing implicitly-grouped `*StreamKernel` launchers (which read DefaultStream at launch time) all reroute onto one capturable stream with no call-site changes. Note: the default (NULL) stream cannot be captured; create a dedicated `accelerator.CreateStream()`. Verified on RTX 4070: capture inert, replay bit-exact vs CPU reference, ~6.6-7x dispatch speedup. Full history: CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
+		<PackageReleaseNotes>v5.0.0 (BREAKING): The browser interop layer moves from SpawnDev.BlazorJS to SpawnDev.SpawnJS. No GPU-backend behavior changes. Forks unchanged at 2.2.0. Full history: CHANGELOG.md at https://github.com/LostBeard/SpawnDev.ILGPU/blob/master/CHANGELOG.md</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -44,7 +30,7 @@
 
 	<ItemGroup>
 		<PackageReference Include="Microsoft.AspNetCore.Components.Web" Version="10.0.2" />
-		<PackageReference Include="SpawnDev.BlazorJS" Version="3.5.25" />
+		<PackageReference Include="SpawnDev.SpawnJS" Version="2.0.7" />
 	</ItemGroup>
 
 	<ItemGroup>

@@ -1,5 +1,5 @@
 using ILGPU.Runtime;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS.JSObjects;
 using global::ILGPU;
 using global::ILGPU.Runtime;
 

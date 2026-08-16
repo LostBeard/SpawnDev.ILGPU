@@ -13,9 +13,9 @@
 
 using global::ILGPU;
 using global::ILGPU.Runtime;
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
-using SpawnDev.BlazorJS.Toolbox;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
+using SpawnDev.SpawnJS.Toolbox;
 
 namespace SpawnDev.ILGPU.Wasm
 {

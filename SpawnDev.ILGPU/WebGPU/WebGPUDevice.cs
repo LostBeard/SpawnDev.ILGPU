@@ -5,8 +5,8 @@
 // File: WebGPUDevice.cs
 // ---------------------------------------------------------------------------------------
 
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
 using System.Collections.Immutable;
 
 namespace SpawnDev.ILGPU.WebGPU
@@ -27,7 +27,7 @@ namespace SpawnDev.ILGPU.WebGPU
             {
                 try
                 {
-                    var navigator = BlazorJSRuntime.JS.Get<Navigator>("navigator");
+                    var navigator = SpawnJSRuntime.Instance.Get<Navigator>("navigator");
                     return navigator.Gpu != null;
                 }
                 catch
@@ -49,7 +49,7 @@ namespace SpawnDev.ILGPU.WebGPU
 
             try
             {
-                var navigator = BlazorJSRuntime.JS.Get<Navigator>("navigator");
+                var navigator = SpawnJSRuntime.Instance.Get<Navigator>("navigator");
                 var gpu = navigator.Gpu;
 
                 if (gpu == null)

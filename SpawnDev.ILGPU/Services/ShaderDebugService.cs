@@ -1,6 +1,6 @@
 using Microsoft.Extensions.Logging;
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
 using SpawnDev.ILGPU.Wasm.Backend;
 using SpawnDev.ILGPU.WebGL;
 using SpawnDev.ILGPU.WebGPU.Backend;
@@ -19,7 +19,7 @@ public class ShaderDebugService : IAsyncBackgroundService, IAsyncDisposable
     public Task Ready => _ready ??= TryRestoreAsync();
     private Task? _ready;
 
-    private readonly BlazorJSRuntime _js;
+    private readonly SpawnJSRuntime _js;
     private FileSystemDirectoryHandle? _debugDir;
     private FileSystemDirectoryHandle? _runDir;
     private FileSystemDirectoryHandle? _wgslDir;
@@ -45,7 +45,7 @@ public class ShaderDebugService : IAsyncBackgroundService, IAsyncDisposable
 
     private bool _restoreAttempted;
 
-    public ShaderDebugService(BlazorJSRuntime js)
+    public ShaderDebugService(SpawnJSRuntime js)
     {
         _js = js;
         // Hook into ALL backends for auto-dump

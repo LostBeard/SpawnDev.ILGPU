@@ -9,8 +9,8 @@
 // overhead of creating/destroying workers per kernel dispatch.
 // ---------------------------------------------------------------------------------------
 
-using SpawnDev.BlazorJS.JSObjects;
-using SpawnDev.BlazorJS.Toolbox;
+using SpawnDev.SpawnJS.JSObjects;
+using SpawnDev.SpawnJS.Toolbox;
 
 namespace SpawnDev.ILGPU
 {

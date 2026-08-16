@@ -1,5 +1,5 @@
-﻿using SpawnDev.BlazorJS.JSObjects;
-using SpawnDev.BlazorJS.Toolbox;
+﻿using SpawnDev.SpawnJS.JSObjects;
+using SpawnDev.SpawnJS.Toolbox;
 using System;
 using System.IO;
 using System.Threading;

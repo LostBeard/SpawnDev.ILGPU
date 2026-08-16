@@ -7,8 +7,8 @@
 // d.memory, etc.) without requiring [JsonPropertyName] attributes.
 // ---------------------------------------------------------------------------------------
 
-using SpawnDev.BlazorJS;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS;
+using SpawnDev.SpawnJS.JSObjects;
 
 namespace SpawnDev.ILGPU.Wasm
 {
@@ -36,7 +36,7 @@ namespace SpawnDev.ILGPU.Wasm
         /// accumulation that drives late-lane memory pressure (Tuvok trace 2026-06-14).</summary>
         public bool clearModuleCache { get; init; }
         /// <summary>SharedArrayBuffer-backed WebAssembly.Memory shared across all workers.</summary>
-        public JSObject memory { get; init; } = null!;
+        public SpawnJSObject memory { get; init; } = null!;
         /// <summary>Inclusive thread range start for this worker's fiber band.</summary>
         public int threadStart { get; init; }
         /// <summary>Exclusive thread range end for this worker's fiber band.</summary>
@@ -67,7 +67,7 @@ namespace SpawnDev.ILGPU.Wasm
         /// WasmBarrierDispatchMessage.clearModuleCache.</summary>
         public bool clearModuleCache { get; init; }
         /// <summary>SharedArrayBuffer-backed WebAssembly.Memory shared across all workers.</summary>
-        public JSObject memory { get; init; } = null!;
+        public SpawnJSObject memory { get; init; } = null!;
         /// <summary>Inclusive item index start for this worker's range.</summary>
         public int startIdx { get; init; }
         /// <summary>Exclusive item index end for this worker's range.</summary>

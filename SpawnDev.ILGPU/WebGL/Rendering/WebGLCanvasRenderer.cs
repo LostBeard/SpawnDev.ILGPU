@@ -1,6 +1,6 @@
 using global::ILGPU;
 using global::ILGPU.Runtime;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS.JSObjects;
 using SpawnDev.ILGPU.Rendering;
 using SpawnDev.ILGPU.WebGL.Backend;
 
