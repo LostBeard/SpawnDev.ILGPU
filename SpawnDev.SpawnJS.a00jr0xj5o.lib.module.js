@@ -1115,6 +1115,9 @@
             var found = this.#findAppBaseUri(dotnet);
             return found ? found.source : '';
         }
+        static import(src) {
+            return import(src);
+        }
         // Normalizes any URL that lives under the app's _framework/ folder (or the app root itself) to the
         // app root with a trailing slash: drops a trailing file name, then a trailing "_framework/" segment.
         static #appRootFromLoadUrl(raw) {
