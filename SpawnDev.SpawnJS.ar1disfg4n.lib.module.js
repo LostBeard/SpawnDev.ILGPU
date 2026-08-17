@@ -185,6 +185,7 @@
             } catch (ex) {
                 // call the exceptionCallbackId
                 error = SpawnJSInterop.errorToString(ex);
+                ret = null;
             }
             switch (returnType) {
                 case 0: // void
@@ -309,8 +310,10 @@
             return `${jsType} ${jsClass}`;
         }
 
+        // **************************************************************************************
         // SpawnJSObjectReference imports
         // Note: only `string key` imports shown. Also exists: `double key`, `int key`
+        // **************************************************************************************
 
         // property info
         // returns string or null if the property was not found
@@ -469,7 +472,10 @@
             if (shortCircuit) return;
             // create the heapView meta data
             var heapViewInfo = { dotnetId, viewType, offset, length, copy };
-            if (!heapViewInfo.viewType) heapViewInfo.viewType = 'Uint8Array';
+            // viewType is an INDEX into HeapViewCtors, and index 0 (BigInt64Array) is a real value - a
+            // falsy check would read it as "missing" and silently rewrite it. The default is the
+            // Uint8Array index, not its name: this value is used as an index, never as a lookup key.
+            if (heapViewInfo.viewType === undefined || heapViewInfo.viewType === null) heapViewInfo.viewType = 10;
             heapViewInfo.instance = SpawnJSInterop.getInstace(heapViewInfo.dotnetId);
             heapViewInfo.dotnet = SpawnJSInterop.spawnJSObjectGet(heapViewInfo.dotnetId);
             heapViewInfo.sizeHistory = [];
@@ -904,7 +910,11 @@
             promise.reject = _reject;
             return promise
         }
-        static stringToBigInt(value) {
+        // Reviver used by BigIntegerMarshaller: a BigInteger crosses as its decimal string, because a JS
+        // number cannot hold one exactly, and is revived into a real BigInt here.
+        // Revivers are called as (key, value, directCall, config) by propertySetWithReviver - a plain
+        // (value) signature would silently revive the PROPERTY NAME instead of the value.
+        static stringToBigInt(key, value) {
             if (!globalThis.BigInt) throw new Error('BigInt not supported on this platform');
             return value === undefined || value === null ? null : globalThis.BigInt(value);
         }
