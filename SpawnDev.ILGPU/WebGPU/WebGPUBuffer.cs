@@ -259,7 +259,9 @@ namespace SpawnDev.ILGPU.WebGPU
 
             // Map, read into caller's destination array, unmap
             await ProfiledMapReadAsync(_cachedStagingBuffer);
-            var mappedRange = _cachedStagingBuffer.GetMappedRange();
+            // The mapped-range ArrayBuffer wrapper holds a JS slot and must be released, or every
+            // readback leaks one (the sibling CopyToHostUint8ArrayAsync path already does this).
+            using var mappedRange = _cachedStagingBuffer.GetMappedRange();
             if (mappedRange != null)
             {
                 using var uint8Array = new Uint8Array(mappedRange);
@@ -332,7 +334,10 @@ namespace SpawnDev.ILGPU.WebGPU
                 {
                     // Must copy the data out of the mapped range before unmapping, as the mapped range becomes invalid after unmap
                     // Slice to actual requested size (paddedBytes may be larger for alignment)
-                    result = new Uint8Array(mappedRange.Slice(0, (int)copyBytes.Value));
+                    // Slice() returns a NEW ArrayBuffer holding its own JS slot; the Uint8Array copies
+                    // the reference, so the intermediate must be released or it leaks per readback.
+                    using var sliced = mappedRange.Slice(0, (int)copyBytes.Value);
+                    result = new Uint8Array(sliced);
                 }
             }
             finally

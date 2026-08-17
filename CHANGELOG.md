@@ -2,6 +2,39 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## Unreleased - WebGPU interop-handle leak fixes (depend SpawnJS 2.1.5-local.4)
+
+Fixes an unbounded growth of the SpawnJS object table (`SpawnJSInterop.spawnJSObjects`) during long
+WebGPU runs that ended in out-of-memory. Diagnosed by enabling `SpawnJSRuntime.EnableIDisposableWatcher`
+and capturing the finalizer alerts over CDP during a demo `/tests` run, then attributing each alert to
+its allocation stack.
+
+Two of the three root causes were in **SpawnDev.SpawnJS** and are fixed there (see its CHANGELOG):
+`PocoMarshaller`/`DictionaryMarshaller` leaking one slot per marshalled argument - which on this backend
+meant **one leaked `GPUBindGroupDescriptor` per kernel dispatch** - and `HeapView.Dispose()` being a no-op.
+The dependency is bumped to **2.1.5-local.4** to pick them up.
+
+ILGPU-side fixes in this repo:
+
+- `WebGPU/WebGPUBuffer.cs` `CopyToHostAsync` - the `ArrayBuffer` returned by `GPUBuffer.GetMappedRange()`
+  was never disposed, leaking one interop handle per GPU→CPU readback. Now `using`.
+- `WebGPU/WebGPUBuffer.cs` `CopyToHostUint8ArrayAsync` - `mappedRange.Slice(...)` allocates a NEW
+  `ArrayBuffer` whose handle was dropped once the `Uint8Array` was constructed from it. Now `using`.
+- `WebGPU/WebGPUDevice.cs` `GetDevicesAsync` - `adapter.Info` returns a fresh `GPUAdapterInfo` wrapper on
+  every access, and the high-performance-adapter comparison read it inline twice per call, leaking both.
+  Now hoisted into `using` locals.
+- `WebGPU/WebGPUDevice.cs` `GetDevicesAsync` - the **high-performance `GPUAdapter` itself** leaked on every
+  enumeration. On a single-GPU machine the `powerPreference: "high-performance"` request resolves to the
+  SAME physical device, so the "is it a different device?" check fails and the adapter is never adopted into
+  a `WebGPUDevice` - but nothing else owned that second handle. Now disposed when not adopted.
+- `WebGPU/WebGPUDevice.cs` `IsSupported` - `navigator` and `navigator.gpu` wrappers were read inline and
+  dropped on every capability check. Now `using`.
+- `SpawnDev.ILGPU.Demo/Program.cs` - `SpawnJSRuntime.EnableIDisposableWatcher` was unconditionally `true`.
+  It captures a full `System.Diagnostics.StackTrace(true)` on EVERY interop object construction. MEASURED on
+  `BFloat16_RadixSort_Descending_MinimalDump` (WebGPU, NVIDIA Lovelace, same session): **32,665 ms watcher-ON
+  (harness records "Test exceeded timeout of 30000ms") vs 4,326 ms watcher-OFF (Success)** - a 7.5x slowdown
+  turning passing tests into spurious timeouts. Now opt-in via `?watchdispose=1` on the URL.
+
 ## 4.17.6 - Depend BlazorJS 3.5.25: heap-view re-attach replaces priming
 
 Bumps the SpawnDev.BlazorJS dependency to **3.5.25**, which replaces heap-view **priming** (pre-grow + forced compacting GC) with transparent **re-attach**: a JS view of the .NET heap that gets detached by a `memory.grow()` is re-created against the live `HEAPU8.buffer` on revive, and `HeapView.UsePrimer` now defaults **false**. The three browser backends' zero-copy host→GPU upload paths (`WasmMemoryBuffer` / `WebGLMemoryBuffer` / `WebGPUMemoryBuffer`, all `new HeapViewPtr(srcPtr, len).As<Uint8Array>()`) are unchanged in code - they simply no longer rely on priming for detach safety. No ILGPU logic/codegen change; the stale "HeapViewPtr PRIMES the heap" comments were corrected to describe re-attach.

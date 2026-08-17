@@ -32,7 +32,16 @@ WebGPUBackend.VerboseLogging = false;
 SpawnDev.RTC.Browser.BrowserRTCPeerConnection.DiagnosticsEnabled = true;
 builder.Services.AddSpawnJSRuntime(out var JS);
 //JS.Verbose = true;
-SpawnJSRuntime.EnableIDisposableWatcher = true;
+// Opt-in via ?watchdispose=1 on the URL. This captures a full System.Diagnostics.StackTrace(true)
+// on EVERY SpawnJSObject / SpawnJSObjectReference / HeapView construction - invaluable for finding
+// undisposed interop handles, but heavy enough to push slow tests past the harness timeout
+// MEASURED on BFloat16_RadixSort_Descending_MinimalDump (WebGPU, same machine/session):
+//   watcher ON  -> 32,665 ms  => harness records "Test exceeded timeout of 30000ms"
+//   watcher OFF ->  4,326 ms  => Success
+// A 7.5x slowdown, enough to turn passing tests into spurious timeouts. Turn it on when hunting
+// a leak (?watchdispose=1), not by default.
+SpawnJSRuntime.EnableIDisposableWatcher =
+    JS.Get<string>("location.search")?.Contains("watchdispose=1", StringComparison.OrdinalIgnoreCase) ?? false;
 builder.Services.AddPlatformCrypto();
 
 // P2P: WebTorrent client

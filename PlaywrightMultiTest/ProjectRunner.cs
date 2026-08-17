@@ -56,6 +56,25 @@ namespace PlaywrightMultiTest
                 "--disable-features=FileSystemAccessPermissionPrompt",
                 "--allow-file-access-from-files"
             };
+            // Expose a TCP CDP endpoint so a run can be inspected WHILE it executes (live JS eval:
+            // interop slot-table census, heap stats, console capture, screenshots).
+            //
+            // Playwright drives this browser over --remote-debugging-pipe (inherited stdio handles
+            // owned by the testhost). A pipe admits exactly ONE client and cannot be joined, and Chrome
+            // cannot have the port enabled after launch - so WITHOUT this flag an in-flight PMT run is
+            // completely opaque to external tooling, and diagnosing a leak means throwing the run away
+            // and re-running under a hand-rolled browser (which then is NOT what PMT actually tests).
+            // Adding the port is additive: Playwright keeps using its pipe either way.
+            //
+            // PMT_CDP_PORT=off (or 0) disables. Default 9223 - deliberately NOT 9222, so this never
+            // collides with a hand-launched debug Chrome on the standard port.
+            var cdpPort = Environment.GetEnvironmentVariable("PMT_CDP_PORT");
+            if (!string.Equals(cdpPort, "off", StringComparison.OrdinalIgnoreCase) && cdpPort != "0")
+            {
+                var port = int.TryParse(cdpPort, out var p) ? p : 9223;
+                args.Add($"--remote-debugging-port={port}");
+                LogStatus($"[PMT_CDP] DevTools endpoint on http://127.0.0.1:{port} (PMT_CDP_PORT=off to disable)");
+            }
             if (Environment.GetEnvironmentVariable("PMT_DAWN_DUMP") == "1")
             {
                 var logFile = Environment.GetEnvironmentVariable("PMT_DAWN_LOG")

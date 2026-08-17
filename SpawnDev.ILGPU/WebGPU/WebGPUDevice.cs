@@ -27,8 +27,11 @@ namespace SpawnDev.ILGPU.WebGPU
             {
                 try
                 {
-                    var navigator = SpawnJSRuntime.Instance.Get<Navigator>("navigator");
-                    return navigator.Gpu != null;
+                    // Both wrappers hold JS slots and must be released; this property is polled
+                    // on every accelerator-capability check.
+                    using var navigator = SpawnJSRuntime.Instance.Get<Navigator>("navigator");
+                    using var gpu = navigator.Gpu;
+                    return gpu != null;
                 }
                 catch
                 {
@@ -49,8 +52,8 @@ namespace SpawnDev.ILGPU.WebGPU
 
             try
             {
-                var navigator = SpawnJSRuntime.Instance.Get<Navigator>("navigator");
-                var gpu = navigator.Gpu;
+                using var navigator = SpawnJSRuntime.Instance.Get<Navigator>("navigator");
+                using var gpu = navigator.Gpu;
 
                 if (gpu == null)
                     return devices.ToImmutable();
@@ -70,13 +73,25 @@ namespace SpawnDev.ILGPU.WebGPU
                 };
                 var highPerfAdapter = await gpu.RequestAdapter(highPerfOptions);
 
-                if (highPerfAdapter != null &&
-                    adapter != null &&
-                    highPerfAdapter.Info?.Device != adapter.Info?.Device)
+                // Each .Info access returns a NEW GPUAdapterInfo wrapper holding its own JS slot,
+                // so the two comparisons below must own and release them rather than read .Info inline.
+                var adoptedHighPerf = false;
+                using (var highPerfInfo = highPerfAdapter?.Info)
+                using (var baseInfo = adapter?.Info)
                 {
-                    var device = new WebGPUDevice(highPerfAdapter, devices.Count);
-                    devices.Add(device);
+                    if (highPerfAdapter != null &&
+                        adapter != null &&
+                        highPerfInfo?.Device != baseInfo?.Device)
+                    {
+                        var device = new WebGPUDevice(highPerfAdapter, devices.Count);
+                        devices.Add(device);
+                        adoptedHighPerf = true;
+                    }
                 }
+                // On a single-GPU machine the high-performance request resolves to the SAME physical
+                // device, so we don't adopt it - but it is still a second GPUAdapter handle that
+                // nothing else owns. Release it, or every enumeration leaks one.
+                if (!adoptedHighPerf) highPerfAdapter?.Dispose();
             }
             catch (Exception)
             {
@@ -147,7 +162,7 @@ namespace SpawnDev.ILGPU.WebGPU
             // Get adapter info safely
             try
             {
-                var info = adapter.Info;
+                using var info = adapter.Info;
                 Name = info?.Device ?? "WebGPU Device";
                 Vendor = info?.Vendor ?? "Unknown";
                 Architecture = info?.Architecture ?? "Unknown";
