@@ -30,7 +30,8 @@ WebGPUBackend.VerboseLogging = false;
 // Production consumers leave this off (default) - the per-tick writes add JS
 // interop overhead and aren't needed unless investigating wire-close issues.
 SpawnDev.RTC.Browser.BrowserRTCPeerConnection.DiagnosticsEnabled = true;
-builder.Services.AddSpawnJSRuntime();
+builder.Services.AddSpawnJSRuntime(out var JS);
+JS.Verbose = true;
 builder.Services.AddPlatformCrypto();
 
 // P2P: WebTorrent client

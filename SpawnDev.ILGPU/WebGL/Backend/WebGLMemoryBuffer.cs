@@ -122,9 +122,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // a memory.grow is transparently re-attached on revive (HeapView.UsePrimer now defaults false -
                 // no forced-GC priming). Verified detach-safe by the full ILGPU 6-backend PMT on BlazorJS 3.5.25
                 // (the old "external Instance reference no longer exists" class no longer fires).
-                using var heapView = new HeapViewPtr(srcPtr, length);
-                using var srcView = heapView.As<Uint8Array>();
-                _backingArray!.Set(srcView, (int)destContiguous.Index);
+                using var heapView = new HeapView<byte, Uint8Array>(srcPtr, length);
+                _backingArray!.Set(heapView.View, (int)destContiguous.Index);
 
                 // Mark CPU-dirty — needs upload to worker before next dispatch
                 NeedsUpload = true;

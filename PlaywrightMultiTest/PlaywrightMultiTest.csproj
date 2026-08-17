@@ -32,7 +32,7 @@
 		<PackageReference Include="NUnit.Analyzers" Version="4.7.0" />
 		<PackageReference Include="NUnit3TestAdapter" Version="5.0.0" />
 		<PackageReference Include="Microsoft.CodeAnalysis" Version="4.13.0" PrivateAssets="All" />
-		<PackageReference Include="SpawnDev.UnitTesting.Blazor" Version="2.5.3" />
+		<PackageReference Include="SpawnDev.UnitTesting.Browser" Version="2.7.0" />
 		<FrameworkReference Include="Microsoft.AspNetCore.App" />
 		
 	</ItemGroup>

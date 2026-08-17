@@ -79,19 +79,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 if ((length & 3) == 0)
                 {
                     // heap view as Uint8Array
-                    using var heapView = new HeapViewPtr(srcPtr, length);
-                    using var srcView = heapView.As<Uint8Array>();
-                    accelerator.NativeAccelerator.Queue!.WriteBuffer(_buffer!.NativeBuffer!, (long)destContiguous.Index, srcView);
+                    using var heapView = new HeapView<byte, Uint8Array>(srcPtr, length);
+                    accelerator.NativeAccelerator.Queue!.WriteBuffer(_buffer!.NativeBuffer!, (long)destContiguous.Index, heapView.View);
                 }
                 else
                 {
                     // create properly sized source
                     using var typedArray = new Uint8Array(WebGPUAlignment.AlignTo4(length));
                     // heap view as Uint8Array
-                    using var heapView = new HeapViewPtr(srcPtr, length);
-                    using var srcView = heapView.As<Uint8Array>();
+                    using var heapView = new HeapView<byte, Uint8Array>(srcPtr, length);
                     // copy heap view to into the properly sized Uint8Array
-                    typedArray.Set(srcView);
+                    typedArray.Set(heapView.View);
                     accelerator.NativeAccelerator.Queue!.WriteBuffer(_buffer!.NativeBuffer!, (long)destContiguous.Index, typedArray);
                 }
             }

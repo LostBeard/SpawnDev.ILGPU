@@ -542,15 +542,14 @@ namespace SpawnDev.ILGPU.Wasm
             // no Marshal.Copy, no WriteBytes marshal. The bytes never enter the managed heap in transit.
             unsafe
             {
-                var sourcePtr = sourceView.LoadEffectiveAddressAsPtr();
+                var srcPtr = sourceView.LoadEffectiveAddressAsPtr();
                 // HeapViewPtr wraps the CPU source's WASM-heap bytes; srcView is built against the live heap
                 // and consumed within this synchronous window. As of BlazorJS 3.5.22+ a heap view detached by
                 // a memory.grow is transparently re-attached on revive (HeapView.UsePrimer now defaults false -
                 // no forced-GC priming). Verified detach-safe by the full ILGPU 6-backend PMT on BlazorJS 3.5.25
                 // (the old "external Instance reference no longer exists" class no longer fires).
-                using var heapView = new HeapViewPtr(sourcePtr, length);
-                using var srcView = heapView.As<Uint8Array>();
-                dstUint8.Set(srcView);
+                using var heapView = new HeapView<byte, Uint8Array>(srcPtr, length);
+                dstUint8.Set(heapView.View);
             }
             NotifyHostWrite();
         }

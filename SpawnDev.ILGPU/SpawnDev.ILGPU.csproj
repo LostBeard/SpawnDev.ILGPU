@@ -4,9 +4,9 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.0.4</Version>
+		<Version>5.1.0</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>v5.0.4 - Switched document.baseURI usage to SpawnJSRuntime.AppBaseUri</PackageReleaseNotes>
+		<PackageReleaseNotes>v5.1.0 - Dependency update</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -29,7 +29,7 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<PackageReference Include="SpawnDev.SpawnJS" Version="2.0.15" />
+		<PackageReference Include="SpawnDev.SpawnJS" Version="2.1.0" />
 	</ItemGroup>
 
 	<ItemGroup>
