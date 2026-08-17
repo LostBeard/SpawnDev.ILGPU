@@ -28,7 +28,7 @@
 
 	<ItemGroup>
 		<ProjectReference Include="..\SpawnDev.ILGPU\SpawnDev.ILGPU.csproj" />
-		<PackageReference Include="SpawnDev.WebTorrent" Version="4.0.2" />
+		<PackageReference Include="SpawnDev.WebTorrent" Version="4.0.3" />
 	</ItemGroup>
 
 </Project>
