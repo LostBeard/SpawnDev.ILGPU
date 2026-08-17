@@ -170,7 +170,7 @@ public sealed class WebGPUDispatchPlan : IDisposable
         static async Task LoadAsync()
         {
             // Resolve against the app base so the import works regardless of the calling module's URL.
-            var baseUri = SpawnJSRuntime.Instance.Get<string>("document.baseURI");
+            var baseUri = SpawnJSRuntime.Instance.AppBaseUri;
             var url = new Uri(new Uri(baseUri), "_content/SpawnDev.ILGPU/webgpuDispatchPlan.js").ToString();
             // JS.Import() routes through SpawnJSInterop.import (dynamic import()); the runtime's CallAsync
             // would look up globalThis.import, which does not exist - import() is syntax, not a callable.
