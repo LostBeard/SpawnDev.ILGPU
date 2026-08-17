@@ -32,6 +32,7 @@ WebGPUBackend.VerboseLogging = false;
 SpawnDev.RTC.Browser.BrowserRTCPeerConnection.DiagnosticsEnabled = true;
 builder.Services.AddSpawnJSRuntime(out var JS);
 //JS.Verbose = true;
+SpawnJSRuntime.EnableIDisposableWatcher = true;
 builder.Services.AddPlatformCrypto();
 
 // P2P: WebTorrent client
