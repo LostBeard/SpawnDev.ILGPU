@@ -9,6 +9,7 @@
 // Source License. See LICENSE.txt for details.
 // ---------------------------------------------------------------------------------------
 using ILGPU.Util;
+using System.Diagnostics.CodeAnalysis;
 using System;
 using System.Reflection;
 
@@ -27,6 +28,8 @@ namespace ILGPU.IR.Types
         /// </summary>
         /// <param name="types">The generic type arguments of the value tuple.</param>
         /// <returns>Offsets for the fields of the value tuple.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2060",
+            Justification = TrimmingAnnotations.UnconstrainedGeneric)]
         public static int[] GetOffsets(Type[] types)
         {
             var methodInfo = types.Length switch
