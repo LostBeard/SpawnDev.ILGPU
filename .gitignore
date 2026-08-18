@@ -393,6 +393,6 @@ _research/fp8_oracle/oracle_float16.json
 Scripts/
 Research/
 _research/
-_*
 CLAUDE.md
 WGSL_REFERENCE.md
+SpawnDev.ILGPU/Wasm/repro
