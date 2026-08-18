@@ -11,7 +11,6 @@
 using ILGPU.Util;
 using System;
 using System.Reflection;
-using System.Diagnostics.CodeAnalysis;
 
 namespace ILGPU.IR.Types
 {
@@ -28,8 +27,6 @@ namespace ILGPU.IR.Types
         /// </summary>
         /// <param name="types">The generic type arguments of the value tuple.</param>
         /// <returns>Offsets for the fields of the value tuple.</returns>
-        [UnconditionalSuppressMessage("Trimming", "IL2060",
-            Justification = TrimmingAnnotations.UnconstrainedGeneric)]
         public static int[] GetOffsets(Type[] types)
         {
             var methodInfo = types.Length switch
