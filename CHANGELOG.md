@@ -14,6 +14,56 @@ Two of the three root causes were in **SpawnDev.SpawnJS** and are fixed there (s
 meant **one leaked `GPUBindGroupDescriptor` per kernel dispatch** - and `HeapView.Dispose()` being a no-op.
 The dependency is bumped to **2.1.5-local.4** to pick them up.
 
+### Added - shader-cache eviction (`ClearShaderCache()` + `WebGPUBackend.MaxCachedShaders`)
+
+The WebGPU compiled-shader cache holds a `GPUShaderModule` + `GPUComputePipeline` + `GPUBindGroupLayout`
+triple per distinct (WGSL, override-constants) pair, and was bound to the accelerator's **lifetime** - only
+emptied on `Dispose()`. Correct for a fixed-kernel app (compile once, flatline), but a long-lived accelerator
+that keeps minting kernels retains every pipeline it ever built, with no cap and no pressure valve. The
+`BackendTestBase` pattern of one cached accelerator per test class is exactly that shape: hundreds of
+one-off kernels, each permanently retaining a compiled pipeline plus its full WGSL source held as the key.
+
+- **`WebGPUAccelerator.ClearShaderCache()`** - releases the whole triple set plus the dispatch-path
+  resolution cache and bind-group cache, WITHOUT disposing the accelerator. Later dispatches recompile on
+  demand. **`CachedShaderCount`** exposes the current retention.
+- **`WebGPUBackend.MaxCachedShaders`** - `0` (default) = unlimited, preserving existing behaviour exactly.
+  A positive value caps the cache with **least-recently-used** eviction (a hit refreshes recency), so a
+  working set that fits under the cap still hits ~100%.
+
+**Correctness note:** the dispatch path's `_shaderResolveCache` stores RAW references to shaders owned by
+the native accelerator's cache. Evicting and disposing a shader without purging those would return a
+released pipeline on the next resolve hit - a use-after-dispose surfacing as an opaque WebGPU error far
+from its cause. Eviction therefore raises `WebGPUNativeAccelerator.ShaderEvicting` *before* disposing, and
+`WebGPUAccelerator` purges its matching resolve entries and clears the bind-group cache in lockstep (the
+bind-group key is buffer-identity based and cannot be mapped back to a shader, so it is cleared wholesale).
+
+Guards: `ShaderCache_ClearReleasesShaders_AndRedispatchStillCorrect` and
+`ShaderCache_LruCapBoundsGrowth_AndEvictedKernelStillCorrect` - both re-dispatch and verify real numeric
+output AFTER eviction, so a retained-disposed-shader regression fails loudly instead of only moving counters.
+
+### Test-harness / tooling
+
+- **`BackendTestBase.TestShaderCacheCap`** (default 64) sets `WebGPUBackend.MaxCachedShaders` for the suite,
+  bounding retention across a long run. Measured on the browser suite, Release, real NVIDIA adapter:
+  **611 live interop slots at test 668 (JS heap 17MB)** vs **1975 at test 585 uncapped (heap 140-180MB)**.
+  A first attempt used `ReleaseAcceleratorResourcesPerTest` (clear the WHOLE cache after every test); it
+  bounded growth harder (~32 slots) but discarded kernels the next test reused, so the suite recompiled
+  constantly and the browser went visibly unresponsive. That switch is kept, defaulted **false** - prefer
+  the LRU cap, which evicts only the cold tail.
+- **`PlaywrightMultiTest` now exposes a CDP endpoint** (`--remote-debugging-port`, default **9223**,
+  `PMT_CDP_PORT=off` to disable). Playwright drives the browser over `--remote-debugging-pipe`, which admits
+  exactly ONE client and cannot be joined, and Chrome cannot open the port after launch - so an in-flight PMT
+  run was previously opaque to external tooling. Diagnosing the leak above required a hand-launched browser,
+  which is NOT what PMT actually tests. Port 9223 (not 9222) avoids colliding with a manual debug Chrome.
+
+⚠ **Known, NOT fixed - invisible to PMT by construction:** `Debug.Assert(builderCompleted)` fires in
+`ILGPU.IR.Method.Builder.Dispose` via `ILFrontend.GenerateCode` → `DelegateSpecializationRouter.GetOrCreateKernel`
+for `DelegateSpecialization_FullBroadcast_Sub` **in Debug builds only** (verified: 0 occurrences in Release).
+A builder disposed without `Complete()` means an exception unwound out of IL→IR code generation - the assert
+is the symptom, the thrown exception is the cause, and it does not disappear in Release, only the assert does.
+Because PMT publishes `-c Release`, **every `Debug.Assert` in the fork is structurally invisible to the suite**,
+and Debug and Release emit different IL (hence different IR/WGSL) so this is a genuinely different code path.
+
 ILGPU-side fixes in this repo:
 
 - `WebGPU/WebGPUBuffer.cs` `CopyToHostAsync` - the `ArrayBuffer` returned by `GPUBuffer.GetMappedRange()`

@@ -137,6 +137,26 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public static bool EnableShaderCaching { get; set; } = true;
 
         /// <summary>
+        /// Upper bound on entries kept in a WebGPU accelerator's shader cache. <b>0 (default) = unlimited</b>,
+        /// which preserves the historical behaviour: the cache holds one GPUShaderModule + GPUComputePipeline
+        /// + GPUBindGroupLayout per distinct (WGSL, override-constants) pair for the accelerator's entire life,
+        /// and is only emptied on Dispose.
+        /// <para>
+        /// Unlimited is fine for an app with a FIXED kernel set - it compiles each kernel once and flatlines.
+        /// It is NOT fine for a workload that keeps minting new kernels (many lambda specializations, or ML
+        /// with many shapes): every distinct kernel permanently retains a compiled pipeline (GPU machine code)
+        /// plus its full WGSL source string held as the dictionary key, with no pressure valve.
+        /// </para>
+        /// <para>
+        /// Set a positive value to cap it. Eviction is least-recently-used - a cache HIT refreshes the entry -
+        /// so a working set that fits under the cap still hits ~100% of the time. Evicted shaders are disposed,
+        /// and every cache that holds a reference to them (the dispatch-path shader-resolution cache and the
+        /// bind-group cache) is invalidated in lockstep, so an eviction can never hand out a disposed pipeline.
+        /// </para>
+        /// </summary>
+        public static int MaxCachedShaders { get; set; } = 0;
+
+        /// <summary>
         /// Enables reflection metadata caching for parameter types.
         /// When enabled, PropertyInfo/FieldInfo lookups are cached to avoid per-call reflection.
         /// </summary>

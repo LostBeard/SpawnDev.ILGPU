@@ -373,6 +373,52 @@ namespace SpawnDev.ILGPU.WebGPU
             _shaderResolveCacheMisses = 0;
         }
 
+        /// <summary>
+        /// Drops every reference this accelerator holds to <paramref name="shader"/>. Called by the native
+        /// accelerator immediately BEFORE it disposes an evicted/cleared shader.
+        /// <para>
+        /// This cache stores raw references to shaders OWNED by the native accelerator's shader cache, so an
+        /// eviction that did not purge here would leave an entry pointing at a disposed shader and return a
+        /// released pipeline on its next hit - a use-after-dispose that would surface as an opaque WebGPU
+        /// error far from the cause. The bind-group cache is cleared wholesale rather than filtered: its key
+        /// is built from buffer identity, not shader identity, so entries cannot be mapped back to the
+        /// evicted shader, and rebuilding a bind group is cheap next to the correctness risk.
+        /// </para>
+        /// </summary>
+        private void OnShaderEvicting(WebGPUComputeShader shader)
+        {
+            List<ShaderResolveKey>? stale = null;
+            foreach (var kv in _shaderResolveCache)
+            {
+                if (ReferenceEquals(kv.Value, shader)) (stale ??= new()).Add(kv.Key);
+            }
+            if (stale != null)
+                foreach (var key in stale) _shaderResolveCache.Remove(key);
+
+            if (_bindGroupCache.Count > 0) ClearBindGroupCache();
+        }
+
+        /// <summary>
+        /// Releases all compiled-shader resources cached by this accelerator - the GPUShaderModule /
+        /// GPUComputePipeline / GPUBindGroupLayout triple per distinct kernel, plus the dispatch-path
+        /// resolution and bind-group caches that reference them - WITHOUT disposing the accelerator.
+        /// <para>
+        /// The shader cache is otherwise bound to the accelerator's lifetime, so a long-lived accelerator that
+        /// keeps compiling new kernels (a test class running hundreds of one-off kernels, or a workload that
+        /// specialises kernels per shape) holds every pipeline it ever built. Call this to reclaim that between
+        /// phases. Subsequent dispatches simply recompile on demand.
+        /// </para>
+        /// </summary>
+        public void ClearShaderCache()
+        {
+            ClearShaderResolveCache();
+            ClearBindGroupCache();
+            NativeAccelerator?.ClearShaderCache();
+        }
+
+        /// <summary>Number of compiled shaders currently retained by this accelerator (see <see cref="ClearShaderCache"/>).</summary>
+        public int CachedShaderCount => NativeAccelerator?.CachedShaderCount ?? 0;
+
         #endregion
 
         #region Dispatch Log
@@ -601,6 +647,9 @@ namespace SpawnDev.ILGPU.WebGPU
             var accelerator = new WebGPUAccelerator(context, device);
             accelerator.NativeAccelerator = await device.NativeDevice.CreateAcceleratorAsync();
             accelerator.NativeAccelerator.DeviceLost += (reason, msg) => accelerator.DeviceLost?.Invoke(reason, msg);
+            // Purge our references to a shader BEFORE the native accelerator disposes it (LRU eviction or an
+            // explicit ClearShaderCache), so no cache can hand back a released pipeline.
+            accelerator.NativeAccelerator.ShaderEvicting += accelerator.OnShaderEvicting;
             accelerator.Backend = new WebGPUBackend(context, options ?? WebGPUBackendOptions.Default, accelerator.NativeAccelerator.EnabledFeatures);
             accelerator.Backend.DefaultMaxWorkgroupSize = accelerator.MaxNumThreadsPerGroup;
             accelerator.Backend.DeviceWarpSize = accelerator.WarpSize;
@@ -641,6 +690,9 @@ namespace SpawnDev.ILGPU.WebGPU
             var accelerator = new WebGPUAccelerator(context, ilgpuDevice);
             accelerator.NativeAccelerator = WebGPUNativeAccelerator.CreateFromExternalDevice(externalDevice);
             accelerator.NativeAccelerator.DeviceLost += (reason, msg) => accelerator.DeviceLost?.Invoke(reason, msg);
+            // Purge our references to a shader BEFORE the native accelerator disposes it (LRU eviction or an
+            // explicit ClearShaderCache), so no cache can hand back a released pipeline.
+            accelerator.NativeAccelerator.ShaderEvicting += accelerator.OnShaderEvicting;
             accelerator.Backend = new WebGPUBackend(context, options ?? WebGPUBackendOptions.Default, accelerator.NativeAccelerator.EnabledFeatures);
             accelerator.Backend.DefaultMaxWorkgroupSize = accelerator.MaxNumThreadsPerGroup;
             accelerator.Backend.DeviceWarpSize = accelerator.WarpSize;

@@ -405,6 +405,79 @@ await nativeBuffer.CopyToHostAsync(cachedResult, 0, pixelCount);
 
 The `WebGPUBuffer<T>` internally maintains a cached staging buffer for readback operations. The first call creates it; subsequent calls reuse it (as long as the size doesn't increase).
 
+## Compiled-Shader Cache & Eviction (WebGPU)
+
+Buffers are not the only GPU memory an accelerator holds. The WebGPU backend caches every kernel it
+compiles, and that cache is **bound to the accelerator's lifetime** — it is emptied when the accelerator is
+disposed, and not before.
+
+Each distinct kernel retains three GPU objects plus its source:
+
+| Retained per distinct kernel | What it costs |
+|---|---|
+| `GPUShaderModule` | compiled WGSL |
+| `GPUComputePipeline` | compiled GPU machine code — the expensive one |
+| `GPUBindGroupLayout` | binding layout |
+| the WGSL source string | held as the cache key, one .NET string per entry |
+
+**"Distinct" means distinct (WGSL, override-constants).** The same C# kernel dispatched at a different
+auto-grouped size produces different WGSL (the dispatch size is baked into the range check), so it is a
+separate entry.
+
+### When the default is fine, and when it is not
+
+For an application with a **fixed kernel set** this is exactly what you want: each kernel compiles once,
+the cache reaches a small steady size, and every later dispatch hits it. Nothing needs tuning.
+
+It becomes a problem when a long-lived accelerator keeps **minting new kernels** — many lambda
+specializations, ML work specialized per tensor shape, or a test suite where every test defines its own
+kernel. There, every kernel ever compiled is retained for the life of the accelerator, and memory grows
+without bound.
+
+### Bounding it
+
+Two controls, and they compose:
+
+```csharp
+using SpawnDev.ILGPU.WebGPU.Backend;
+
+// 1. LRU cap. 0 (default) = unlimited. A positive value evicts the
+//    least-recently-used entry once the cache exceeds it; a cache HIT
+//    refreshes recency, so a working set that fits still hits ~100%.
+WebGPUBackend.MaxCachedShaders = 64;
+
+// 2. Explicit release, without disposing the accelerator.
+if (accelerator is WebGPUAccelerator webgpu)
+{
+    Console.WriteLine($"retained: {webgpu.CachedShaderCount}");
+    webgpu.ClearShaderCache();   // later dispatches recompile on demand
+}
+```
+
+**Prefer the cap over clearing.** A periodic full clear discards the hot working set as well as the cold
+tail, so the next dispatch of a kernel you are still using pays a full recompile. Measured on the browser
+test suite, a clear-after-every-test policy bounded memory but made the app visibly unresponsive from
+constant recompilation; an LRU cap gave the same ceiling at a fraction of the cost. Reach for
+`ClearShaderCache()` at genuine phase boundaries — finishing a workload, tearing down a scene — not on a
+timer.
+
+`ClearShaderCache()` also clears the dispatch-path shader-resolution cache and the bind-group cache, since
+both reference the shaders being released.
+
+### Eviction safety
+
+Eviction disposes real GPU objects, so anything still holding a reference to an evicted shader would be
+left pointing at a released pipeline. That is handled internally: the native accelerator raises
+`ShaderEvicting` **before** disposing, and the owning `WebGPUAccelerator` drops its matching
+shader-resolution entries and clears its bind-group cache in lockstep. An eviction can never hand back a
+disposed pipeline.
+
+If you build a cache of your own that stores `WebGPUComputeShader` references, it must do the same — a
+stale reference surfaces as an opaque WebGPU error far from its cause.
+
+> **Other backends:** this cache is WebGPU-only. `CachedShaderCount` reports `0` and `ClearShaderCache()`
+> is a no-op elsewhere, so the calls are safe to leave in cross-backend code.
+
 ## Memory Tips
 
 1. **Batch your uploads** — call `CopyFromCPU` before launching kernels, not inside render loops
@@ -412,3 +485,5 @@ The `WebGPUBuffer<T>` internally maintains a cached staging buffer for readback 
 3. **Avoid per-frame allocation** — pre-allocate host arrays and use the `CopyToHostAsync(destination)` overload
 4. **Use `IBrowserMemoryBuffer`** for Canvas rendering — it skips the .NET array entirely when possible
 5. **Buffer pooling is automatic** — the WebGPU backend pools scalar parameter buffers internally
+6. **Cap the shader cache if you generate kernels dynamically** — set `WebGPUBackend.MaxCachedShaders`; the
+   default is unlimited, which only suits a fixed kernel set (see [Compiled-Shader Cache & Eviction](#compiled-shader-cache--eviction-webgpu))

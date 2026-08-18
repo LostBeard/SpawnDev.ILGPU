@@ -1,5 +1,6 @@
 using ILGPU;
 using ILGPU.Runtime;
+using SpawnDev.ILGPU.WebGPU;
 using SpawnDev.SpawnJS.Cryptography;
 using SpawnDev.UnitTesting;
 
@@ -113,6 +114,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             finally
             {
                 if (loc) RadixCounterLocalizer.Uninstall();
+                ReleaseAcceleratorResources(accelerator);
             }
         }
 
@@ -128,6 +130,65 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             {
                 InvalidateEmulatedCache();
                 throw;
+            }
+            finally
+            {
+                ReleaseAcceleratorResources(accelerator);
+            }
+        }
+
+        /// <summary>
+        /// Cap on retained compiled shaders while the test suite runs. Bounds the run WITHOUT the recompile
+        /// storm a per-test full clear caused.
+        /// <para>
+        /// First attempt here was <see cref="ReleaseAcceleratorResourcesPerTest"/> = true (clear the whole
+        /// shader cache at the end of EVERY test). It did bound growth - live slots went from ~726 at test 241
+        /// to ~32 - but it also threw away kernels the NEXT test would reuse, so the suite recompiled
+        /// constantly and the browser became visibly unresponsive. An LRU cap keeps the hot working set and
+        /// evicts only the cold tail, which is the same memory guarantee at a fraction of the cost.
+        /// </para>
+        /// </summary>
+        public static int TestShaderCacheCap { get; set; } = 64;
+
+        static BackendTestBase()
+        {
+            // Bound retention for the whole suite. 64 triples = ~192 interop slots ceiling, versus the
+            // unbounded ~3-per-test growth that reached ~1975 live slots by test 585.
+            SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.MaxCachedShaders = TestShaderCacheCap;
+        }
+
+        /// <summary>
+        /// Clear the ENTIRE shader cache after every test. Default FALSE - it bounds growth but forces the
+        /// next test to recompile kernels it could have reused (measurably unresponsive UI). Prefer
+        /// <see cref="TestShaderCacheCap"/>. Kept for A/B and for a test that needs a guaranteed-cold cache.
+        /// </summary>
+        public static bool ReleaseAcceleratorResourcesPerTest { get; set; } = false;
+
+        /// <summary>
+        /// Returns a test's cached GPU/interop resources at test end instead of holding them for the life of
+        /// the accelerator.
+        /// <para>
+        /// The accelerator is cached per test CLASS, and the WebGPU compiled-shader cache is bound to the
+        /// accelerator's lifetime - so without this, every kernel a class ever compiles is retained until
+        /// teardown: one GPUShaderModule + GPUComputePipeline + GPUBindGroupLayout per distinct kernel, plus
+        /// its full WGSL source held as the cache key. Since ILGPU compiles each test's kernel to its own
+        /// WGSL, that is a cache MISS per test by construction, so retention grew ~3 interop slots per test
+        /// across the whole run (measured: ~1975 live slots by test 585) and the GPU-side pipelines with it.
+        /// Cross-test reuse was near zero anyway, so releasing here costs almost nothing and bounds the run.
+        /// </para>
+        /// Never allowed to fail a test: teardown swallows, and the accelerator may already be disposed on
+        /// the failure path (InvalidateCache) - clearing an emptied cache is a no-op.
+        /// </summary>
+        private static void ReleaseAcceleratorResources(Accelerator? accelerator)
+        {
+            if (!ReleaseAcceleratorResourcesPerTest || accelerator == null) return;
+            try
+            {
+                if (accelerator is WebGPUAccelerator webgpu) webgpu.ClearShaderCache();
+            }
+            catch
+            {
+                // Teardown must never turn a passing test red.
             }
         }
 

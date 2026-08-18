@@ -9,7 +9,35 @@ Transpiles ILGPU IR → WGSL shaders. Dispatches via `WebGPUAccelerator`.
 - `Backend/SharedMemoryResolver.cs` — alloca→workgroup var matching, WGSL emission
 - `Backend/UniformityAnalyzer.cs` — loop classification, PHI tracing, barrier detection
 - `WebGPUAccelerator.cs` — dispatch, bind groups (+ opt-in bind-group cache via `WebGPUBackend.EnableBindGroupCaching`), buffer management, device loss monitoring, and the nested `WebGPUStream` class (deferred encode + flush / batched submission — it is NOT a separate file)
-- `WebGPUBackend.cs` — WGSLRegistry, WGSLDiagnostics, WGSLDumpPath, pre-validation
+- `WebGPUBackend.cs` — WGSLRegistry, WGSLDiagnostics, WGSLDumpPath, pre-validation, `MaxCachedShaders`
+- `WebGPUNativeAccelerator.cs` — `_shaderCache` (the compiled-shader LRU), `ClearShaderCache()`, `ShaderEvicting`
+
+## Compiled-Shader Cache Retention + Eviction
+
+`_shaderCache` (in `WebGPUNativeAccelerator`) holds a `GPUShaderModule` + `GPUComputePipeline` +
+`GPUBindGroupLayout` per distinct **(WGSL, override-constants)** pair, keyed by the full WGSL source string,
+and is bound to the accelerator's LIFETIME — emptied only on `Dispose()`. Fine for a fixed kernel set;
+unbounded for a workload that keeps minting kernels (lambda specializations, ML per-shape, a test suite
+where each test defines its own kernel — measured ~3 interop slots/test growth, ~1975 live by test 585).
+
+- `WebGPUBackend.MaxCachedShaders` — `0` (default) = unlimited; positive = LRU cap (a HIT refreshes recency).
+- `WebGPUAccelerator.ClearShaderCache()` / `CachedShaderCount` — explicit release without disposing the accelerator.
+
+⚠ **Eviction invalidation is NOT optional.** `WebGPUAccelerator._shaderResolveCache` stores **raw references**
+to shaders owned by `_shaderCache`. Disposing an evicted shader without purging it returns a RELEASED pipeline
+on the next resolve hit — an opaque WebGPU error far from its cause. `WebGPUNativeAccelerator` therefore raises
+`ShaderEvicting` **before** disposing, and `WebGPUAccelerator.OnShaderEvicting` drops matching resolve entries
+and clears the bind-group cache (whose key is buffer-identity based and cannot be mapped back to a shader, so
+it is cleared wholesale). **Any new cache that stores a `WebGPUComputeShader` reference must subscribe too.**
+
+⚠ **Do NOT bound this by clearing the whole cache periodically.** Tried it in the test harness (clear after
+every test): it bounded memory but discarded the hot working set, so the suite recompiled constantly and the
+browser went visibly unresponsive. Use the LRU cap — evict the cold tail, keep the working set.
+
+Guards: `BackendTestBase.ShaderCacheEviction.cs` — both re-dispatch and verify REAL NUMERIC OUTPUT after
+eviction (a counters-only assertion would not catch a use-after-dispose), and the LRU guard asserts the cache
+sits exactly AT the cap so it cannot pass vacuously on an empty cache. User docs:
+[Docs/memory-and-buffers.md](../../Docs/memory-and-buffers.md#compiled-shader-cache--eviction-webgpu).
 
 ## Hard Constraints
 - **4-byte alignment** on ALL buffer ops: sizes, writeBuffer, copyBufferToBuffer, bind group entries. Use `WebGPUAlignment.AlignTo4()`.

@@ -13,7 +13,7 @@ Comprehensive documentation for SpawnDev.ILGPU — run ILGPU C# kernels on WebGP
 - **[Backends](backends.md)** — WebGPU, WebGL, Wasm (browser) and Cuda, OpenCL, CPU (desktop): setup, capabilities, and auto-selection
 - **[Capabilities & Backend Selection](capabilities-and-backend-selection.md)** — `AcceleratorRequirements` declarative gating, `UnsupportedKernelFeatureException`, choosing the right backend for a given kernel
 - **[Writing Kernels](kernels.md)** — Kernel fundamentals, index types, loading, launching, math functions, and kernel rules
-- **[Memory & Buffers](memory-and-buffers.md)** — Allocation, data transfer, async readback, and buffer lifecycle
+- **[Memory & Buffers](memory-and-buffers.md)** — Allocation, data transfer, async readback, buffer lifecycle, and the WebGPU compiled-shader cache (retention, `MaxCachedShaders` LRU cap, `ClearShaderCache()`)
 
 ### Advanced
 - **[Advanced Patterns](advanced-patterns.md)** — ILGPU Algorithms (RadixSort, Scan, Reduce), GPU device sharing, external buffers, rendering pipelines, canvas blitting

@@ -117,7 +117,60 @@ namespace SpawnDev.ILGPU.WebGPU
         // Shader cache: key is (WGSL source, override-constants signature), value is compiled shader.
         // The composite key avoids allocating a full-WGSL-length string copy per lookup (the old
         // $"{wgsl}\n__CONSTANTS__:..." concat ran on every dispatch).
-        private readonly Dictionary<(string Wgsl, string Constants), WebGPUComputeShader> _shaderCache = new();
+        // LRU-ordered: _shaderLru holds entries most-recently-used FIRST, the dictionary indexes into it, so
+        // both lookup and recency refresh are O(1) and eviction is O(1) off the tail. Only maintained as a
+        // list when a cap is set; with MaxCachedShaders == 0 the ordering work still runs but never evicts
+        // (a MoveToFirst on a LinkedList is two pointer writes - immaterial next to a dispatch).
+        private sealed class ShaderCacheEntry
+        {
+            public (string Wgsl, string Constants) Key;
+            public WebGPUComputeShader Shader = null!;
+        }
+        private readonly Dictionary<(string Wgsl, string Constants), LinkedListNode<ShaderCacheEntry>> _shaderCache = new();
+        private readonly LinkedList<ShaderCacheEntry> _shaderLru = new();
+
+        /// <summary>Number of compiled shaders currently held in this accelerator's shader cache.</summary>
+        public int CachedShaderCount => _shaderCache.Count;
+
+        /// <summary>
+        /// Raised just BEFORE a cached shader is disposed (LRU eviction or an explicit cache clear), so caches
+        /// holding a reference to it can drop that reference first. Without this, the dispatch path's
+        /// shader-resolution cache would keep pointing at a disposed shader and hand back a released pipeline
+        /// on its next hit. Subscribed by the owning <see cref="WebGPUAccelerator"/>.
+        /// </summary>
+        internal event Action<WebGPUComputeShader>? ShaderEvicting;
+
+        /// <summary>
+        /// Disposes every cached shader (module + pipeline + bind-group layout) and empties the cache,
+        /// releasing their GPU resources and interop handles without disposing the accelerator itself.
+        /// <see cref="ShaderEvicting"/> fires per shader so dependent caches invalidate in lockstep.
+        /// </summary>
+        public void ClearShaderCache()
+        {
+            foreach (var node in _shaderCache.Values)
+            {
+                ShaderEvicting?.Invoke(node.Value.Shader);
+                node.Value.Shader.Dispose();
+            }
+            _shaderCache.Clear();
+            _shaderLru.Clear();
+        }
+
+        // Drop least-recently-used entries until the cache is within MaxCachedShaders.
+        private void TrimShaderCache()
+        {
+            var cap = WebGPUBackend.MaxCachedShaders;
+            if (cap <= 0) return;
+            while (_shaderCache.Count > cap)
+            {
+                var lru = _shaderLru.Last;
+                if (lru == null) break;
+                _shaderLru.RemoveLast();
+                _shaderCache.Remove(lru.Value.Key);
+                ShaderEvicting?.Invoke(lru.Value.Shader);
+                lru.Value.Shader.Dispose();
+            }
+        }
 
         /// <summary>
         /// Constructs a new WebGPU accelerator from a WebGPUDevice (adapter-based, needs InitializeAsync).
@@ -489,15 +542,23 @@ namespace SpawnDev.ILGPU.WebGPU
             }
             var cacheKey = (wgslSource, constantsKey);
 
-            if (_shaderCache.TryGetValue(cacheKey, out var cached))
+            if (_shaderCache.TryGetValue(cacheKey, out var cachedNode))
             {
                 if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log("[WebGPU] Using cached shader");
-                return cached;
+                // Refresh recency so a hot kernel is never the eviction victim.
+                if (!ReferenceEquals(_shaderLru.First, cachedNode))
+                {
+                    _shaderLru.Remove(cachedNode);
+                    _shaderLru.AddFirst(cachedNode);
+                }
+                return cachedNode.Value.Shader;
             }
 
             if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log("[WebGPU] Creating and caching new shader");
             var shader = CreateComputeShader(wgslSource, entryPoint, overrideConstants, label);
-            _shaderCache[cacheKey] = shader;
+            var node = _shaderLru.AddFirst(new ShaderCacheEntry { Key = cacheKey, Shader = shader });
+            _shaderCache[cacheKey] = node;
+            TrimShaderCache();
             return shader;
         }
 
@@ -549,11 +610,7 @@ namespace SpawnDev.ILGPU.WebGPU
             _disposed = true;
 
             // Dispose cached shaders
-            foreach (var shader in _shaderCache.Values)
-            {
-                shader.Dispose();
-            }
-            _shaderCache.Clear();
+            ClearShaderCache();
 
             _gpuDevice?.Destroy();
             _gpuDevice?.Dispose();

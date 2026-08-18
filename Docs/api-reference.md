@@ -174,6 +174,11 @@ The main WebGPU accelerator — extends ILGPU's `KernelAccelerator`.
 | `NativeAccelerator` | `WebGPUNativeAccelerator` | Low-level WebGPU access |
 | `Backend` | `WebGPUBackend` | The WGSL transpiler backend |
 | `EnabledFeatures` | `HashSet<string>` | Detected WebGPU features (e.g., `subgroups`, `shader-f16`) |
+| `CachedShaderCount` | `int` | Compiled shaders currently retained (module + pipeline + bind-group layout each) |
+| `ClearShaderCache()` | `void` | Releases all cached shaders + the resolution and bind-group caches that reference them, **without** disposing the accelerator. Later dispatches recompile on demand. See [Memory & Buffers](memory-and-buffers.md#compiled-shader-cache--eviction-webgpu) |
+| `ClearShaderResolveCache()` | `void` | Clears only the per-(kernel, dispatch-config) resolution cache and its hit/miss counters |
+| `ShaderResolveCacheHits` / `ShaderResolveCacheMisses` | `long` | Resolution-cache counters |
+| `ClearBindGroupCache()` | `void` | Clears the opt-in bind-group cache |
 
 ### WebGPUBuffer\<T\>
 
@@ -229,6 +234,8 @@ WGSL transpiler backend.
 | `VerboseLogging` | `static bool` | Enable/disable debug output |
 | `EnableReflectionCaching` | `static bool` | Enable reflection metadata caching |
 | `EnableBufferPooling` | `static bool` | Enable scalar buffer pooling |
+| `EnableShaderCaching` | `static bool` | Cache compiled shaders across dispatches (default `true`) |
+| `MaxCachedShaders` | `static int` | Cap on retained compiled shaders per accelerator. **`0` (default) = unlimited**; a positive value enables LRU eviction (a hit refreshes recency). Unlimited suits a fixed kernel set; cap it if you generate kernels dynamically. See [Memory & Buffers](memory-and-buffers.md#compiled-shader-cache--eviction-webgpu) |
 | `LastGeneratedWGSL` | `static string?` | WGSL source of the most recently compiled kernel (set on every `LoadKernel` call) |
 
 ### WebGPUBackendOptions
