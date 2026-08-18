@@ -1,8 +1,0 @@
-{
-  "maxGroupSize": 256,
-  "kernels": [
-    { "index": 0, "name": "kernel_1", "wasm": "00_kernel_1.wasm", "bytes": 1003, "info": "Kernel params=14 (userParams=2), locals=65, code=574b, helpers=0, sharedMem=0, barriers=0, hasBarriers=False, dynSharedElemSize=0, scratchPerThread=0" },
-    { "index": 1, "name": "kernel_2", "wasm": "01_kernel_2.wasm", "bytes": 19312, "info": "Kernel params=20 (userParams=2), locals=138, code=15626b, helpers=1, sharedMem=5120, barriers=8, hasBarriers=True, dynSharedElemSize=0, scratchPerThread=2376" },
-    { "index": 2, "name": "kernel_3", "wasm": "02_kernel_3.wasm", "bytes": 1882, "info": "Kernel params=27 (userParams=6), locals=149, code=1434b, helpers=0, sharedMem=0, barriers=0, hasBarriers=False, dynSharedElemSize=0, scratchPerThread=0" }
-  ]
-}
