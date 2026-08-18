@@ -1,8 +1,29 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.2 - Restore the ValueTuples trim suppression lost to T4 regeneration (forks 2.3.1)
 
-## Unreleased - ILGPU is now TRIM SAFE (`PublishTrimmed=true` supported)
+`ILGPU/IR/Types/ValueTuples.cs` is generated from `ValueTuples.tt`, and the
+`[UnconditionalSuppressMessage("Trimming", "IL2060", ...)]` added to
+`ValueTuples.GetOffsets` in the 5.2.0 trim-safety pass had been written into the
+**generated file** instead of the template. A clean build regenerated the `.cs` and
+silently dropped it, so the shipped 5.2.0/5.2.1 packages emit one IL2060 trim-analysis
+warning at `ValueTuples.GetOffsets` for consumers building with `EnableTrimAnalyzer`.
+
+Runtime behaviour is unchanged - an `UnconditionalSuppressMessage` only affects trim
+analysis, never codegen - so this is a warning-cleanliness fix, not a correctness fix.
+It does restore the "0 trim-analysis warnings" property 5.2.0 advertised.
+
+The suppression and its `using` now live in `ValueTuples.tt`. Verified by forcing T4
+twice with `-p:TextTemplateTransformSkipUpToDate=false`: the regenerated file is
+byte-identical across runs and contains the attribute, which is exactly what the CI
+T4-drift check asserts. Caught by that CI check, not locally - a manual edit to a
+generated file leaves local builds, tests, and `git diff` all green.
+
+## 5.2.1 - Dependency updates
+
+
+## 5.2.0 - ILGPU is now TRIM SAFE (`PublishTrimmed=true` supported)
 
 `PublishTrimmed=true` now works. Previously a published build died at the first
 `Context.Create()` with
@@ -65,7 +86,7 @@ instructions, so trimming never threatened the IL frontend - only by-name lookup
 **`RunAOTCompilation=false` still stands**: `WasmStripILAfterAOT` removes IL outright,
 and ILGPU compiles kernels *from* IL. That one cannot be annotated away.
 
-## Unreleased - WebGPU interop-handle leak fixes (depend SpawnJS 2.1.5-local.4)
+## 5.2.0 - WebGPU interop-handle leak fixes (depend SpawnJS 2.1.5-local.4)
 
 Fixes an unbounded growth of the SpawnJS object table (`SpawnJSInterop.spawnJSObjects`) during long
 WebGPU runs that ended in out-of-memory. Diagnosed by enabling `SpawnJSRuntime.EnableIDisposableWatcher`
