@@ -390,8 +390,9 @@ _research/fp8_oracle/oracle_float16.json
 .agent/
 .claude/
 .cursor/
-.Scripts/
-.Research/
+Scripts/
+Research/
 _research/
 _*
 CLAUDE.md
+WGSL_REFERENCE.md
