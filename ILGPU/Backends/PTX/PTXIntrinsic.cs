@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2019-2024 ILGPU Project
 //                                    www.ilgpu.net
@@ -12,7 +12,9 @@
 using ILGPU.IR;
 using ILGPU.IR.Intrinsics;
 using ILGPU.Runtime.Cuda;
+using ILGPU.Util;
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 
 namespace ILGPU.Backends.PTX
@@ -117,7 +119,10 @@ namespace ILGPU.Backends.PTX
         /// </summary>
         /// <param name="handlerType">The associated target handler type.</param>
         /// <param name="mode">The code-generation mode.</param>
-        public PTXIntrinsic(Type handlerType, IntrinsicImplementationMode mode)
+        public PTXIntrinsic(
+            [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
+            Type handlerType,
+            IntrinsicImplementationMode mode)
             : base(
                   BackendType.PTX,
                   handlerType,
@@ -133,6 +138,7 @@ namespace ILGPU.Backends.PTX
         /// <param name="mode">The code-generation mode.</param>
         /// <param name="minArchitecture">The target/minimum architecture.</param>
         public PTXIntrinsic(
+            [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
             Type handlerType,
             IntrinsicImplementationMode mode,
             CudaArchitecture minArchitecture)
@@ -148,6 +154,7 @@ namespace ILGPU.Backends.PTX
         /// <param name="methodName">The target method name (or null).</param>
         /// <param name="mode">The code-generator mode.</param>
         public PTXIntrinsic(
+            [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
             Type handlerType,
             string methodName,
             IntrinsicImplementationMode mode)
@@ -166,6 +173,7 @@ namespace ILGPU.Backends.PTX
         /// <param name="mode">The code-generator mode.</param>
         /// <param name="minArchitecture">The target/minimum architecture.</param>
         public PTXIntrinsic(
+            [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
             Type handlerType,
             string methodName,
             IntrinsicImplementationMode mode,
@@ -188,6 +196,7 @@ namespace ILGPU.Backends.PTX
         /// <param name="minArchitecture">The min architecture (if any).</param>
         /// <param name="maxArchitecture">The max architecture (exclusive).</param>
         public PTXIntrinsic(
+            [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
             Type handlerType,
             string methodName,
             IntrinsicImplementationMode mode,
@@ -214,6 +223,7 @@ namespace ILGPU.Backends.PTX
         /// Indicates whether LibDevice is required.
         /// </param>
         public PTXIntrinsic(
+            [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
             Type handlerType,
             string methodName,
             IntrinsicImplementationMode mode,

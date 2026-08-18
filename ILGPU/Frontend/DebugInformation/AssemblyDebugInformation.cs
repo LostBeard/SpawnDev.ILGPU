@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2018-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -18,6 +18,7 @@ using System.Reflection;
 using System.Reflection.Metadata;
 using System.Reflection.Metadata.Ecma335;
 using System.Runtime.CompilerServices;
+using ILGPU.Util;
 
 namespace ILGPU.Frontend.DebugInformation
 {
@@ -134,6 +135,8 @@ namespace ILGPU.Frontend.DebugInformation
         /// <param name="method">The resolved method (or null).</param>
         /// <returns>True, if the given token could be resolved.</returns>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        [UnconditionalSuppressMessage("Trimming", "IL2026",
+            Justification = TrimmingAnnotations.ILFrontend)]
         public bool TryResolveMethod(
             int metadataToken,
             [NotNullWhen(true)] out MethodBase? method)

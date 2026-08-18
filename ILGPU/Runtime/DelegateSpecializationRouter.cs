@@ -13,6 +13,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Diagnostics.CodeAnalysis;
 
 namespace ILGPU.Runtime
 {
@@ -20,6 +21,15 @@ namespace ILGPU.Runtime
     /// Detects DelegateSpecialization&lt;T&gt; parameters at runtime and
     /// routes to the specialization dispatch path.
     /// </summary>
+    // TRIMMING: the TryRoute lambdas recover the wrapped delegate with
+    // typeof(Tn).GetField("_delegate", NonPublic). Annotating those generic
+    // parameters would push a DynamicallyAccessedMembers requirement out through
+    // every KernelLoaders.Load*Kernel overload and onto consumer kernel signatures,
+    // so the field is rooted here instead. It is in fact already preserved by the
+    // direct read in DelegateSpecializationHelper (spec._delegate.Method); the
+    // DynamicDependency keeps that guarantee from depending on an unrelated file.
+    [UnconditionalSuppressMessage("Trimming", "IL2090",
+        Justification = TrimmingAnnotations.SpecializedDelegate)]
     internal static class DelegateSpecializationRouter
     {
         // Cache: (accelerator, originalMethod, targetMethod) → kernel
@@ -27,6 +37,9 @@ namespace ILGPU.Runtime
             (int accelId, MethodInfo original, MethodInfo target),
             Kernel> _cache = new();
 
+        [DynamicDependency(
+            TrimmingAnnotations.SpecializedDelegateFields,
+            typeof(DelegateSpecialization<>))]
         private static Kernel GetOrCreateKernel(
             Accelerator accelerator,
             MethodInfo originalMethod,

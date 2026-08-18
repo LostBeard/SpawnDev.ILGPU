@@ -13,6 +13,7 @@ using ILGPU.Backends;
 using ILGPU.Resources;
 using ILGPU.Util;
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 
 namespace ILGPU.IR.Intrinsics
@@ -68,8 +69,17 @@ namespace ILGPU.IR.Intrinsics
         /// <param name="handlerType">The associated target handler type.</param>
         /// <param name="methodName">The target method name (or null).</param>
         /// <param name="mode">The code-generation mode.</param>
+        /// <remarks>
+        /// TRIMMING: <paramref name="handlerType"/> is searched by name, so the
+        /// trimmer is told to keep its methods. Without this the lookup returns
+        /// null under a trimmed publish and the base constructor throws
+        /// "Not supported intrinsic type '...'".
+        /// </remarks>
         protected IntrinsicImplementation(
             BackendType backendType,
+            [DynamicallyAccessedMembers(
+                DynamicallyAccessedMemberTypes.PublicMethods |
+                DynamicallyAccessedMemberTypes.NonPublicMethods)]
             Type handlerType,
             string? methodName,
             IntrinsicImplementationMode mode)

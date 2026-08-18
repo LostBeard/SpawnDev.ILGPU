@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2017-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -12,6 +12,8 @@
 using System;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using ILGPU.Util;
+using System.Diagnostics.CodeAnalysis;
 
 namespace ILGPU.Util
 {
@@ -37,6 +39,8 @@ namespace ILGPU.Util
         /// </summary>
         /// <param name="method">The method to check.</param>
         /// <returns>True, if the method is a non-capturing lambda.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2075",
+            Justification = TrimmingAnnotations.DisplayClass)]
         public static bool IsNotCapturingLambda(this MethodBase method)
         {
             if (method.IsStatic)
@@ -82,6 +86,8 @@ namespace ILGPU.Util
         /// </summary>
         /// <param name="method">The method to check.</param>
         /// <returns>True, if the method is a capturing lambda.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2075",
+            Justification = TrimmingAnnotations.DisplayClass)]
         public static bool IsCapturingLambda(this MethodBase method)
         {
             if (method.IsStatic)
@@ -109,6 +115,8 @@ namespace ILGPU.Util
         /// </summary>
         /// <param name="method">The capturing lambda method.</param>
         /// <returns>The captured fields sorted by metadata token.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2075",
+            Justification = TrimmingAnnotations.DisplayClass)]
         public static FieldInfo[] GetCapturedFields(this MethodBase method)
         {
             var fields = method.DeclaringType!.GetFields(

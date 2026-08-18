@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2019-2024 ILGPU Project
 //                                    www.ilgpu.net
@@ -17,12 +17,18 @@ using ILGPU.Util;
 using System;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Diagnostics.CodeAnalysis;
 
 namespace ILGPU.Backends.PTX
 {
     /// <summary>
     /// Implements and initializes PTX intrinsics.
     /// </summary>
+    // Suppressed on the type rather than the static constructor: that constructor is
+    // generated from the field initializers below, so there is no declaration to
+    // attribute without adding an explicit cctor and dropping beforefieldinit.
+    [UnconditionalSuppressMessage("Trimming", "IL2111",
+        Justification = TrimmingAnnotations.SelfRegistrar)]
     static partial class PTXIntrinsics
     {
         #region Specializers
@@ -30,11 +36,13 @@ namespace ILGPU.Backends.PTX
         /// <summary>
         /// The PTXIntrinsics type.
         /// </summary>
+        [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
         private static readonly Type PTXIntrinsicsType = typeof(PTXIntrinsics);
 
         /// <summary>
         /// The Half implementation type.
         /// </summary>
+        [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
         private static readonly Type HalfType = typeof(HalfExtensions);
 
         /// <summary>
@@ -117,6 +125,7 @@ namespace ILGPU.Backends.PTX
         /// <param name="types">The parameter types.</param>
         /// <returns>The resolved intrinsic representation.</returns>
         private static PTXIntrinsic CreateMathIntrinsic(
+            [DynamicallyAccessedMembers(TrimmingAnnotations.PublicMethods)]
             Type baseType,
             string name,
             params Type[] types)

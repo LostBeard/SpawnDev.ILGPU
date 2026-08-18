@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2018-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -12,6 +12,7 @@
 using ILGPU.Util;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 
 namespace ILGPU.Backends.PointerViews
@@ -24,6 +25,16 @@ namespace ILGPU.Backends.PointerViews
         /// <summary>
         /// The generic implementation type.
         /// </summary>
+        /// <remarks>
+        /// TRIMMING: every use closes this open generic with MakeGenericType over a
+        /// kernel element type, then resolves the constructor and fields by
+        /// signature. The trimmer cannot follow MakeGenericType, so the members of
+        /// the generic definition are rooted here - otherwise argument mapping fails
+        /// at kernel-load time with a null constructor.
+        /// </remarks>
+        [DynamicDependency(
+            DynamicallyAccessedMemberTypes.All,
+            typeof(ViewImplementation<>))]
         public static readonly Type ImplementationType = typeof(ViewImplementation<>);
 
         /// <summary>
@@ -31,6 +42,8 @@ namespace ILGPU.Backends.PointerViews
         /// </summary>
         /// <param name="elementType">The view element type.</param>
         /// <returns>The implement type.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2055",
+            Justification = TrimmingAnnotations.RootedViewImplementation)]
         public static Type GetImplementationType(Type elementType) =>
             ImplementationType.MakeGenericType(elementType);
 
@@ -51,6 +64,10 @@ namespace ILGPU.Backends.PointerViews
         /// </summary>
         /// <param name="implType">The view implementation type.</param>
         /// <returns>The resolved view constructor.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2055",
+            Justification = TrimmingAnnotations.RootedViewImplementation)]
+        [UnconditionalSuppressMessage("Trimming", "IL2070",
+            Justification = TrimmingAnnotations.RootedViewImplementation)]
         public static ConstructorInfo GetViewConstructor(Type implType) =>
             implType.GetConstructor(new Type[]
             {

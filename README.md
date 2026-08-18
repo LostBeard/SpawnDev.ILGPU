@@ -355,16 +355,28 @@ Per-backend, off by default: `WebGPUBackend.VerboseLogging = true;` (also `WebGL
 
 ## Blazor WebAssembly Configuration
 
-When publishing, specific MSBuild properties are required:
+When publishing, one MSBuild property is required:
 
 ```xml
 <PropertyGroup>
-  <!-- Disable IL trimming to preserve ILGPU kernel methods and reflection metadata -->
-  <PublishTrimmed>false</PublishTrimmed>
-  <!-- Disable AOT compilation - ILGPU requires IL reflection -->
+  <!-- AOT strips IL (WasmStripILAfterAOT), and ILGPU compiles kernels FROM IL -->
   <RunAOTCompilation>false</RunAOTCompilation>
 </PropertyGroup>
 ```
+
+**IL trimming is supported** - `PublishTrimmed=true` works and is the recommended
+default for browser apps, where download size matters. ILGPU roots the members it
+resolves reflectively (`ILGPU/Util/TrimmingAnnotations.cs`), so a consuming app needs
+no trimming configuration of its own and the trim analyzer stays clean.
+
+AOT is different, and the distinction matters: trimming only removes members nothing
+references, which annotations solve. AOT removes the IL itself - the very input
+ILGPU's frontend reads to build kernels - so it cannot be annotated away.
+
+> Older versions of this README told you to set `PublishTrimmed=false`. If you are
+> upgrading and hit a `MissingMethodException` or "Not supported intrinsic type" from
+> a published build, you are on a pre-trim-safe ILGPU; upgrade rather than disabling
+> trimming.
 
 ## In Development: P2P Distributed GPU Compute
 

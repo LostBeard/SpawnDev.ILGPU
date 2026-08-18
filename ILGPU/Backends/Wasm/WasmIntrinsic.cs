@@ -10,7 +10,9 @@
 
 using ILGPU.IR;
 using ILGPU.IR.Intrinsics;
+using ILGPU.Util;
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 
 namespace ILGPU.Backends.Wasm
@@ -40,7 +42,10 @@ namespace ILGPU.Backends.Wasm
         /// </summary>
         /// <param name="handlerType">The associated target handler type.</param>
         /// <param name="mode">The code-generation mode.</param>
-        public WasmIntrinsic(Type handlerType, IntrinsicImplementationMode mode)
+        public WasmIntrinsic(
+            [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
+            Type handlerType,
+            IntrinsicImplementationMode mode)
             : base(
                   BackendType.Wasm,
                   handlerType,
@@ -55,6 +60,7 @@ namespace ILGPU.Backends.Wasm
         /// <param name="methodName">The target method name (or null).</param>
         /// <param name="mode">The code-generator mode.</param>
         public WasmIntrinsic(
+            [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
             Type handlerType,
             string methodName,
             IntrinsicImplementationMode mode)

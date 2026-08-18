@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2018-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -20,6 +20,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Diagnostics.CodeAnalysis;
 
 namespace ILGPU.Frontend
 {
@@ -79,6 +80,8 @@ namespace ILGPU.Frontend
         /// <summary>
         /// Setups all parameter and local bindings.
         /// </summary>
+        [UnconditionalSuppressMessage("Trimming", "IL2026",
+            Justification = TrimmingAnnotations.ILFrontend)]
         private void SetupVariables()
         {
             var builder = EntryBlock.Builder;

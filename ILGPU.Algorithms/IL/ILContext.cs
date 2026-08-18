@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                   ILGPU Algorithms
 //                        Copyright (c) 2019-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -14,6 +14,7 @@ using ILGPU.Backends.IL;
 using ILGPU.IR.Intrinsics;
 using ILGPU.Util;
 using System;
+using System.Diagnostics.CodeAnalysis;
 
 namespace ILGPU.Algorithms.IL
 {
@@ -28,6 +29,7 @@ namespace ILGPU.Algorithms.IL
         sealed class ILIntrinsic : IntrinsicImplementation
         {
             public ILIntrinsic(
+                [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
                 Type handlerType,
                 string methodName,
                 IntrinsicImplementationMode mode)
@@ -42,11 +44,13 @@ namespace ILGPU.Algorithms.IL
         /// <summary>
         /// The <see cref="ILGroupExtensions"/> type.
         /// </summary>
+        [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
         internal static readonly Type CPUGroupExtensionsType = typeof(ILGroupExtensions);
 
         /// <summary>
         /// The <see cref="ILWarpExtensions"/> type.
         /// </summary>
+        [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
         internal static readonly Type CPUWarpExtensionsType = typeof(ILWarpExtensions);
 
         /// <summary>
@@ -58,7 +62,9 @@ namespace ILGPU.Algorithms.IL
         /// <param name="name">The method name to register.</param>
         private static void RegisterIntrinsicMapping(
             IntrinsicImplementationManager manager,
+            [DynamicallyAccessedMembers(TrimmingAnnotations.PublicMethods)]
             Type sourceType,
+            [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
             Type targetType,
             string name)
         {

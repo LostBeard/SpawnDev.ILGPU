@@ -1,5 +1,6 @@
 <Solution>
   <Project Path="ILGPU.Algorithms/ILGPU.Algorithms.csproj" />
+  <Project Path="ILGPU.TrimGate/ILGPU.TrimGate.csproj" />
   <Project Path="ILGPU/ILGPU.csproj" />
   <Project Path="PlaywrightMultiTest/PlaywrightMultiTest.csproj" Id="a670e3cb-371d-4d07-8907-42611a4962d7" />
   <Project Path="SpawnDev.ILGPU.Demo.Shared/SpawnDev.ILGPU.Demo.Shared.csproj" />

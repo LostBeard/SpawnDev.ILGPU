@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2017-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -14,6 +14,7 @@ using ILGPU.Util;
 using System;
 using System.Diagnostics;
 using System.Reflection;
+using System.Diagnostics.CodeAnalysis;
 
 namespace ILGPU.Runtime.CPU
 {
@@ -59,7 +60,9 @@ namespace ILGPU.Runtime.CPU
         /// </summary>
         /// <param name="taskType">The task type.</param>
         /// <returns>The constructor to create a new task instance.</returns>
-        public static ConstructorInfo GetTaskConstructor(Type taskType) =>
+        public static ConstructorInfo GetTaskConstructor(
+            [DynamicallyAccessedMembers(TrimmingAnnotations.Constructors)]
+            Type taskType) =>
             taskType.GetConstructor(
                 BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance,
                 null,
@@ -73,7 +76,9 @@ namespace ILGPU.Runtime.CPU
         /// </summary>
         /// <param name="taskType">The task type.</param>
         /// <returns>The getter method.</returns>
-        public static MethodInfo GetTotalUserDimGetter(Type taskType) =>
+        public static MethodInfo GetTotalUserDimGetter(
+            [DynamicallyAccessedMembers(TrimmingAnnotations.Properties)]
+            Type taskType) =>
             taskType.GetProperty(
                 nameof(TotalUserDim),
                 BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance)
@@ -87,7 +92,9 @@ namespace ILGPU.Runtime.CPU
         /// </summary>
         /// <param name="taskType">The task type.</param>
         /// <returns>The getter method.</returns>
-        public static MethodInfo GetTotalUserDimXYGetter(Type taskType) =>
+        public static MethodInfo GetTotalUserDimXYGetter(
+            [DynamicallyAccessedMembers(TrimmingAnnotations.Properties)]
+            Type taskType) =>
             taskType.GetProperty(
                 nameof(TotalUserDimXY),
                 BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance)

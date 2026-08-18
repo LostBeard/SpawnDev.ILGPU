@@ -10,7 +10,9 @@
 // ---------------------------------------------------------------------------------------
 
 using ILGPU.IR.Intrinsics;
+using ILGPU.Util;
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 
 namespace ILGPU.Backends.Velocity
@@ -44,6 +46,7 @@ namespace ILGPU.Backends.Velocity
         /// <param name="methodName">The target method name (or null).</param>
         /// <param name="mode">The code-generation mode.</param>
         public VelocityIntrinsic(
+            [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
             Type handlerType,
             string methodName,
             IntrinsicImplementationMode mode)

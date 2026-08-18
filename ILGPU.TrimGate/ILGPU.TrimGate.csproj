@@ -1,0 +1,44 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    ILGPU trim gate.
+
+    Regression gate for IL-trimming safety. ILGPU resolves large parts of its
+    intrinsic and remapping tables BY NAME at runtime; the trimmer cannot see those
+    lookups, so an unrooted member is removed and the failure only appears in a
+    PUBLISHED build. That is how SpawnDev.AI's worker died on 2026-08-17 with
+    MissingMethodException(System.Math, "Clamp") - System.Math.Clamp(double,double,
+    double) had been trimmed out of System.Private.CoreLib while every other Clamp
+    overload survived.
+
+    Run it:
+      dotnet publish ILGPU.TrimGate/ILGPU.TrimGate.csproj -c Release -o <dir>
+      <dir>/ILGPU.TrimGate.exe          # exit code 0 = pass
+
+    TrimMode=full plus EnableTrimAnalyzer means this project fails the build on any
+    new IL2xxx warning and fails at runtime on any newly-trimmed member. Keep both.
+  -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <IsPackable>false</IsPackable>
+
+    <PublishTrimmed>true</PublishTrimmed>
+    <TrimMode>full</TrimMode>
+    <SelfContained>true</SelfContained>
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+
+    <!-- A new trim-analysis warning is a regression, not a note. -->
+    <WarningsAsErrors>$(WarningsAsErrors);IL2026;IL2055;IL2060;IL2067;IL2070;IL2072;IL2075;IL2076;IL2080;IL2087;IL2090;IL2091;IL2111</WarningsAsErrors>
+    <NoWarn>$(NoWarn);CA1416</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\ILGPU\ILGPU.csproj" />
+    <ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
+  </ItemGroup>
+
+</Project>

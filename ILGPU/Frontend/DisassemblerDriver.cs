@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2018-2021 ILGPU Project
 //                                    www.ilgpu.net
@@ -32,6 +32,8 @@ namespace ILGPU.Frontend
     {
         [SuppressMessage("Microsoft.Maintainability", "CA1505:AvoidUnmaintainableCode")]
         [SuppressMessage("Microsoft.Maintainability", "CA1502:AvoidExcessiveComplexity")]
+        [UnconditionalSuppressMessage("Trimming", "IL2026",
+            Justification = TrimmingAnnotations.ILFrontend)]
         private bool TryDisasembleInstruction(ILOpCode opCode)
         {
             switch (opCode)

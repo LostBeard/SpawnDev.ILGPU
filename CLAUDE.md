@@ -11,7 +11,13 @@ dotnet run --project SpawnDev.ILGPU.DemoConsole       # Desktop tests (CUDA, Ope
 dotnet run --project SpawnDev.ILGPU.Demo              # Browser tests (Blazor WASM → /tests)
 ```
 
-Target: **net10.0**. `PublishTrimmed` and `RunAOTCompilation` must remain **false** — ILGPU relies on IL reflection at runtime.
+Target: **net10.0**.
+
+**`PublishTrimmed=true` is SUPPORTED.** ILGPU is trim safe as of the 2026-08-17 trim-annotation pass: the by-name intrinsic/remapping lookups are rooted with `DynamicDependency` / `DynamicallyAccessedMembers` (see `ILGPU/Util/TrimmingAnnotations.cs`), the trim analyzer reports **0 IL2xxx warnings**, and the gate in `ILGPU.TrimGate/` passes under `TrimMode=full` on desktop and in a real trimmed Blazor WASM publish. Do NOT reintroduce `<PublishTrimmed>false</PublishTrimmed>` into consumer projects as a bug workaround — if something breaks under trimming, that is a library bug: reproduce it in `ILGPU.TrimGate` and fix the root cause here.
+
+**`RunAOTCompilation` must still remain `false`.** That is a genuine, separate incompatibility: AOT's `WasmStripILAfterAOT` removes IL outright, and ILGPU's frontend compiles kernels *from* IL. Trimming only removes unreferenced members (which annotations solve); AOT deletes the input ILGPU needs.
+
+⚠ The old rule "trimming breaks ILGPU because it relies on IL reflection" was wrong about the mechanism. ILLink keeps the IL of methods it keeps, and a kernel's callees are reachable through ordinary call instructions. Only reflective **by-name** lookups were ever at risk.
 
 ## Context Map
 

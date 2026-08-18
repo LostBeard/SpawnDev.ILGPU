@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                   ILGPU Algorithms
 //                        Copyright (c) 2019-2024 ILGPU Project
 //                                    www.ilgpu.net
@@ -15,6 +15,7 @@ using ILGPU.Runtime.Cuda;
 using ILGPU.Util;
 using System;
 using System.Reflection;
+using System.Diagnostics.CodeAnalysis;
 
 namespace ILGPU.Algorithms.PTX
 {
@@ -26,11 +27,13 @@ namespace ILGPU.Algorithms.PTX
         /// <summary>
         /// The <see cref="PTXMath"/> type.
         /// </summary>
+        [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
         private static readonly Type PTXMathType = typeof(PTXMath);
 
         /// <summary>
         /// The <see cref="PTXMemory"/> type.
         /// </summary>
+        [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
         private static readonly Type PTXMemoryType = typeof(PTXMemory);
 
         /// <summary>
@@ -58,11 +61,13 @@ namespace ILGPU.Algorithms.PTX
         /// <summary>
         /// The <see cref="PTXGroupExtensions"/> type.
         /// </summary>
+        [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
         internal static readonly Type PTXGroupExtensionsType = typeof(PTXGroupExtensions);
 
         /// <summary>
         /// The <see cref="PTXWarpExtensions"/> type.
         /// </summary>
+        [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
         internal static readonly Type PTXWarpExtensionsType = typeof(PTXWarpExtensions);
 
         /// <summary>
@@ -109,7 +114,9 @@ namespace ILGPU.Algorithms.PTX
         /// <param name="name">The method name to register.</param>
         private static void RegisterIntrinsicMapping(
             IntrinsicImplementationManager manager,
+            [DynamicallyAccessedMembers(TrimmingAnnotations.PublicMethods)]
             Type sourceType,
+            [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
             Type targetType,
             string name)
         {
@@ -206,6 +213,7 @@ namespace ILGPU.Algorithms.PTX
         /// <param name="types">The argument types for the target method.</param>
         private static void RegisterXMathRedirect(
             IntrinsicImplementationManager manager,
+            [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
             Type targetType,
             string functionName,
             string replacementName,

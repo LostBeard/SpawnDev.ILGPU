@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2018-2024 ILGPU Project
 //                                    www.ilgpu.net
@@ -12,6 +12,8 @@
 using ILGPU.Backends;
 using System;
 using System.Diagnostics;
+using ILGPU.Util;
+using System.Diagnostics.CodeAnalysis;
 
 namespace ILGPU.IR.Types
 {
@@ -299,6 +301,8 @@ namespace ILGPU.IR.Types
         /// <summary>
         /// Creates a default managed view type.
         /// </summary>
+        [UnconditionalSuppressMessage("Trimming", "IL2076",
+            Justification = TrimmingAnnotations.RootedViewImplementation)]
         internal Type GetDefaultManagedViewType<TTypeProvider>(
             TTypeProvider typeProvider)
             where TTypeProvider : IManagedTypeProvider =>

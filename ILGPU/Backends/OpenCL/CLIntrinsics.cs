@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2020-2024 ILGPU Project
 //                                    www.ilgpu.net
@@ -17,6 +17,7 @@ using ILGPU.Util;
 using System;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Diagnostics.CodeAnalysis;
 
 namespace ILGPU.Backends.OpenCL
 {
@@ -30,6 +31,7 @@ namespace ILGPU.Backends.OpenCL
         /// <summary>
         /// The CLIntrinsics type.
         /// </summary>
+        [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
         private static readonly Type CLIntrinsicsType = typeof(CLIntrinsics);
 
         /// <summary>

@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2018-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -16,6 +16,7 @@ using System;
 using System.Collections.Immutable;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Diagnostics.CodeAnalysis;
 
 namespace ILGPU.Backends.IL
 {
@@ -41,6 +42,8 @@ namespace ILGPU.Backends.IL
         /// <summary>
         /// Generates the actual kernel invocation call.
         /// </summary>
+        [UnconditionalSuppressMessage("Trimming", "IL2075",
+            Justification = TrimmingAnnotations.EmittedType)]
         protected override void GenerateCode<TEmitter>(
             EntryPoint entryPoint,
             in BackendContext backendContext,

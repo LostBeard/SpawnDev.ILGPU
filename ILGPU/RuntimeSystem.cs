@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2020-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -192,6 +192,7 @@ namespace ILGPU
         /// <returns>The acquired scoped lock.</returns>
         private ScopedLock DefineRuntimeType(
             TypeAttributes attributes,
+            [DynamicallyAccessedMembers(TrimmingAnnotations.RuntimeSubclass)]
             Type baseClass,
             out TypeBuilder typeBuilder)
         {
@@ -212,6 +213,7 @@ namespace ILGPU
         /// <param name="typeBuilder">The type builder.</param>
         /// <returns>The acquired scoped lock.</returns>
         public ScopedLock DefineRuntimeClass(
+            [DynamicallyAccessedMembers(TrimmingAnnotations.RuntimeSubclass)]
             Type baseClass,
             out TypeBuilder typeBuilder) =>
             DefineRuntimeType(

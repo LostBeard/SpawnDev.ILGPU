@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2019-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -16,6 +16,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Diagnostics.CodeAnalysis;
 
 namespace ILGPU.IR.Intrinsics
 {
@@ -253,6 +254,8 @@ namespace ILGPU.IR.Intrinsics
         /// </param>
         /// <returns>The resolved target method (if any).</returns>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        [UnconditionalSuppressMessage("Trimming", "IL2060",
+            Justification = TrimmingAnnotations.UnconstrainedGeneric)]
         protected MethodInfo ResolveTarget<TResolver>(
             TResolver resolver,
             out Type[] genericArguments)

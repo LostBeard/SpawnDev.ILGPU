@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2018-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -347,6 +347,8 @@ namespace ILGPU.IR.Types
         /// </summary>
         /// <param name="type">The base .Net type.</param>
         /// <returns>The created type information object.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2070",
+            Justification = TrimmingAnnotations.StructureLayout)]
         private TypeInformation CreateCompoundTypeInfo(Type type)
         {
             var fieldArray = type.GetFields(

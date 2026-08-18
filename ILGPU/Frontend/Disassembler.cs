@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2018-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -18,6 +18,7 @@ using System.Collections.Immutable;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
+using System.Diagnostics.CodeAnalysis;
 
 namespace ILGPU.Frontend
 {
@@ -87,6 +88,8 @@ namespace ILGPU.Frontend
         /// The associated sequence-point enumerator.
         /// </param>
         /// <param name="compilationStackLocation">The source location (optional).</param>
+        [UnconditionalSuppressMessage("Trimming", "IL2026",
+            Justification = TrimmingAnnotations.ILFrontend)]
         public Disassembler(
             MethodBase methodBase,
             SequencePointEnumerator sequencePointEnumerator,
@@ -317,6 +320,8 @@ namespace ILGPU.Frontend
         /// </summary>
         /// <param name="token">The token of the type to resolve.</param>
         /// <returns>The resolved type.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2026",
+            Justification = TrimmingAnnotations.ILFrontend)]
         private Type ResolveType(int token) =>
             AssociatedModule.ResolveType(
                 token,
@@ -329,6 +334,8 @@ namespace ILGPU.Frontend
         /// </summary>
         /// <param name="token">The token of the method to resolve.</param>
         /// <returns>The resolved method.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2026",
+            Justification = TrimmingAnnotations.ILFrontend)]
         private MethodBase? ResolveMethod(int token) =>
             AssociatedModule.ResolveMethod(
                 token,
@@ -341,6 +348,8 @@ namespace ILGPU.Frontend
         /// </summary>
         /// <param name="token">The token of the field to resolve.</param>
         /// <returns>The resolved field.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2026",
+            Justification = TrimmingAnnotations.ILFrontend)]
         private FieldInfo? ResolveField(int token) =>
             AssociatedModule.ResolveField(
                 token,

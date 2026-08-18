@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                   ILGPU Algorithms
 //                        Copyright (c) 2019-2024 ILGPU Project
 //                                    www.ilgpu.net
@@ -18,6 +18,7 @@ using ILGPU.IR.Values;
 using ILGPU.Util;
 using System;
 using System.Runtime.CompilerServices;
+using System.Diagnostics.CodeAnalysis;
 
 namespace ILGPU.Algorithms.CL
 {
@@ -29,11 +30,13 @@ namespace ILGPU.Algorithms.CL
         /// <summary>
         /// The <see cref="CLGroupExtensions"/> type.
         /// </summary>
+        [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
         internal static readonly Type CLGroupExtensionsType = typeof(CLGroupExtensions);
 
         /// <summary>
         /// The <see cref="CLWarpExtensions"/> type.
         /// </summary>
+        [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
         internal static readonly Type CLWarpExtensionsType = typeof(CLWarpExtensions);
 
         /// <summary>
@@ -45,7 +48,9 @@ namespace ILGPU.Algorithms.CL
         /// <param name="name">The method name to register.</param>
         private static void RegisterIntrinsicMapping(
             IntrinsicImplementationManager manager,
+            [DynamicallyAccessedMembers(TrimmingAnnotations.PublicMethods)]
             Type sourceType,
+            [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
             Type targetType,
             string name)
         {
@@ -70,7 +75,9 @@ namespace ILGPU.Algorithms.CL
         /// </param>
         private static void RegisterIntrinsicCodeGenerator(
             IntrinsicImplementationManager manager,
+            [DynamicallyAccessedMembers(TrimmingAnnotations.PublicMethods)]
             Type sourceType,
+            [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
             Type targetType,
             string name,
             string codeGeneratorName)
@@ -99,6 +106,7 @@ namespace ILGPU.Algorithms.CL
         /// <param name="types">The argument types for the target method.</param>
         private static void RegisterXMathCodeGenerator(
             IntrinsicImplementationManager manager,
+            [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
             Type targetType,
             string functionName,
             string codeGeneratorName,

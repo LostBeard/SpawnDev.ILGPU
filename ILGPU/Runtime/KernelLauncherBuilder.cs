@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2017-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -18,6 +18,7 @@ using System.Diagnostics;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
+using System.Diagnostics.CodeAnalysis;
 
 namespace ILGPU.Runtime
 {
@@ -42,6 +43,8 @@ namespace ILGPU.Runtime
         /// <param name="manipulateIdx">
         /// A callback to manipulate the loaded index of a given dimension.
         /// </param>
+        [UnconditionalSuppressMessage("Trimming", "IL2070",
+            Justification = TrimmingAnnotations.EmittedType)]
         private static void EmitLoadDimensions<TEmitter>(
             Type indexType,
             in TEmitter emitter,

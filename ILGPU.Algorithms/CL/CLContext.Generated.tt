@@ -31,11 +31,15 @@ using ILGPU.Backends.OpenCL;
 using ILGPU.IR;
 using ILGPU.IR.Intrinsics;
 using ILGPU.IR.Values;
+using ILGPU.Util;
+using System.Diagnostics.CodeAnalysis;
 
 namespace ILGPU.Algorithms.CL
 {
     partial class CLContext
     {
+        [UnconditionalSuppressMessage("Trimming", "IL2111",
+            Justification = TrimmingAnnotations.SelfRegistrar)]
         public static void EnableCLAlgorithms(IntrinsicImplementationManager manager)
         {
             // Register math intrinsics

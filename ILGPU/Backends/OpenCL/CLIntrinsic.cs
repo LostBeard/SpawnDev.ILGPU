@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2019-2021 ILGPU Project
 //                                    www.ilgpu.net
@@ -11,7 +11,9 @@
 
 using ILGPU.IR;
 using ILGPU.IR.Intrinsics;
+using ILGPU.Util;
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 
 namespace ILGPU.Backends.OpenCL
@@ -56,7 +58,10 @@ namespace ILGPU.Backends.OpenCL
         /// </summary>
         /// <param name="handlerType">The associated target handler type.</param>
         /// <param name="mode">The code-generation mode.</param>
-        public CLIntrinsic(Type handlerType, IntrinsicImplementationMode mode)
+        public CLIntrinsic(
+            [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
+            Type handlerType,
+            IntrinsicImplementationMode mode)
             : base(
                   BackendType.OpenCL,
                   handlerType,
@@ -71,6 +76,7 @@ namespace ILGPU.Backends.OpenCL
         /// <param name="methodName">The target method name (or null).</param>
         /// <param name="mode">The code-generator mode.</param>
         public CLIntrinsic(
+            [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
             Type handlerType,
             string methodName,
             IntrinsicImplementationMode mode)

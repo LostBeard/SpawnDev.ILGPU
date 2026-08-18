@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2017-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -15,6 +15,7 @@ using System;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Diagnostics.CodeAnalysis;
 
 namespace ILGPU
 {
@@ -97,6 +98,8 @@ namespace ILGPU
         /// <param name="type">The target type</param>
         /// <remarks>Only supports unmanaged types.</remarks>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        [UnconditionalSuppressMessage("Trimming", "IL2060",
+            Justification = TrimmingAnnotations.UnconstrainedGeneric)]
         public static int SizeOf(Type type)
         {
             // Interop.SizeOf<T>() has an 'unmanaged' constraint, so MakeGenericMethod fails

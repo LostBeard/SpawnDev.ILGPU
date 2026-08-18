@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2020-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -15,6 +15,7 @@ using ILGPU.Util;
 using System;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Diagnostics.CodeAnalysis;
 
 namespace ILGPU.Backends.IL
 {
@@ -329,6 +330,8 @@ namespace ILGPU.Backends.IL
         /// <param name="typeBuilder">The type builder to use.</param>
         /// <param name="fieldsToUse">All fields to use to compute the hash code.</param>
         /// <returns>The created hash code function.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2075",
+            Justification = TrimmingAnnotations.EmittedType)]
         public static MethodInfo GenerateHashCode(
             this TypeBuilder typeBuilder,
             FieldInfo[] fieldsToUse)
@@ -390,6 +393,8 @@ namespace ILGPU.Backends.IL
         /// <param name="typeBuilder">The type builder to use.</param>
         /// <param name="fieldsToUse">All fields to use to compute the hash code.</param>
         /// <returns>The created equals function.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2075",
+            Justification = TrimmingAnnotations.EmittedType)]
         public static MethodInfo GenerateEquals(
             this TypeBuilder typeBuilder,
             FieldInfo[] fieldsToUse)

@@ -2,6 +2,69 @@
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 
+## Unreleased - ILGPU is now TRIM SAFE (`PublishTrimmed=true` supported)
+
+`PublishTrimmed=true` now works. Previously a published build died at the first
+`Context.Create()` with
+
+```
+TypeInitializationException: ILGPU.AlgorithmContext
+ -> TypeInitializationException: ILGPU.Frontend.Intrinsic.RemappedIntrinsics
+ -> MissingMethodException: System.Math, Clamp
+```
+
+**Root cause.** ILGPU resolves its intrinsic and remapping tables by NAME
+(`Type.GetMethod`). The trimmer cannot see those lookups, so it removed any member the
+app never called statically. In the reported case exactly one member was lost -
+`System.Math.Clamp(double, double, double)` - while all twelve other `Clamp` overloads
+survived, because nothing in the app referenced the `double` overload directly.
+Confirmed by dumping the metadata of the app's linked `System.Private.CoreLib.dll`.
+
+Reported from SpawnDev.AI, whose model-server worker calls `MLContext.Create()` on
+startup; it reproduced in both Debug and Release *publish* and never under `dotnet run`,
+because the WebAssembly SDK only runs ILLink on publish.
+
+**Five distinct trimming defects were found and fixed**, each surfacing only after the
+previous one was cleared:
+
+1. `System.Math` / `MathF` / `BitConverter` / `BitOperations` / `Interlocked` remap
+   tables (`RemappedIntrinsics`, `AlgorithmContext`) - the reported crash
+2. Intrinsic **handler types** (`PTXIntrinsic`, `CLIntrinsic`, `ILIntrinsic`,
+   `WasmIntrinsic`, `WebGPUIntrinsic`, `VelocityIntrinsic`) - surfaced as
+   `NotSupportedException: Not supported intrinsic type '...'`
+3. `CPUAcceleratorTask`'s constructor and property getters, reached only from emitted
+   IL - surfaced as `ArgumentNullException (Parameter 'con')` during kernel compile
+4. `RuntimeSystem.DefineRuntimeClass`'s base class, which Reflection.Emit subclasses
+5. `ViewImplementation<>`, closed via `MakeGenericType` - argument mapping failed with
+   a null view constructor at kernel load
+
+**Approach.** `DynamicDependency` / `DynamicallyAccessedMembers` rather than an
+`ILLink.Descriptors.xml`: every target is nameable with `typeof()`, so the compiler
+type-checks it, it survives renames, it avoids hard-coding BCL assembly names, and -
+unlike a descriptor - it also satisfies the trim analyzer. Shared member sets and the
+justification text live in the new **`ILGPU/Util/TrimmingAnnotations.cs`**.
+
+**Trim analyzer: 86 warnings -> 0.** Every remaining reflective site carries an
+`UnconditionalSuppressMessage` with a specific written guarantee (IL-frontend token
+resolution, Reflection.Emit types, lambda display classes, unconstrained generics),
+not a blanket silence.
+
+**New regression gate: `ILGPU.TrimGate/`.** Publishes under `TrimMode=full` with the
+trim analyzer promoted to errors, then verifies against CPU references: `Math.Clamp`
+remapping, `XMath`/`MathF`, a **struct kernel parameter containing a field the host
+never reads** (the silent layout-corruption class), a **captured-scalar lambda kernel**
+(Lambda Kernels' display-class fields), and an `ILGPU.Algorithms` Scan. Also verified in
+a real trimmed Blazor WASM publish driven by headless Chrome over CDP.
+
+### Changed - documentation
+
+The long-standing rule "`PublishTrimmed` and `RunAOTCompilation` must remain false" was
+**wrong about trimming** and is corrected in `CLAUDE.md` and `README.md`. ILLink keeps
+the IL of methods it keeps, and a kernel's callees are reachable through ordinary call
+instructions, so trimming never threatened the IL frontend - only by-name lookups.
+**`RunAOTCompilation=false` still stands**: `WasmStripILAfterAOT` removes IL outright,
+and ILGPU compiles kernels *from* IL. That one cannot be annotated away.
+
 ## Unreleased - WebGPU interop-handle leak fixes (depend SpawnJS 2.1.5-local.4)
 
 Fixes an unbounded growth of the SpawnJS object table (`SpawnJSInterop.spawnJSObjects`) during long

@@ -15,6 +15,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
 using System.Reflection.Emit;
+using System.Diagnostics.CodeAnalysis;
 
 namespace ILGPU.Runtime
 {
@@ -36,6 +37,8 @@ namespace ILGPU.Runtime
         /// <returns>
         /// A MethodInfo for the synthetic method that can be compiled by ILGPU.
         /// </returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2026",
+            Justification = TrimmingAnnotations.ILFrontend)]
         public static MethodInfo RewriteKernel(
             MethodInfo originalMethod,
             Dictionary<int, MethodInfo> targetMethods)
@@ -521,6 +524,8 @@ namespace ILGPU.Runtime
             };
         }
 
+        [UnconditionalSuppressMessage("Trimming", "IL2026",
+            Justification = TrimmingAnnotations.ILFrontend)]
         private static void EmitInstruction(ILGenerator il, OpCode opcode,
             byte[] ilBytes, ref int pos, Module module)
         {

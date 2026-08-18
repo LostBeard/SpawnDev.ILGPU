@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2018-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -24,6 +24,7 @@ using System.Collections.Immutable;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Runtime.CompilerServices;
+using System.Diagnostics.CodeAnalysis;
 
 namespace ILGPU.Backends.IL
 {
@@ -328,6 +329,10 @@ namespace ILGPU.Backends.IL
         /// and dynamically-sized shared-memory-variable-length specifications to fields
         /// in the task class.
         /// </param>
+        [UnconditionalSuppressMessage("Trimming", "IL2111",
+            Justification = TrimmingAnnotations.SelfRegistrar)]
+        [UnconditionalSuppressMessage("Trimming", "IL2070",
+            Justification = TrimmingAnnotations.EmittedType)]
         private Type GenerateAcceleratorTask(
             in ParameterCollection parameters,
             out ConstructorInfo taskConstructor,
@@ -410,6 +415,8 @@ namespace ILGPU.Backends.IL
         /// <param name="taskType">The created task.</param>
         /// <param name="task">The created strongly typed task local.</param>
         /// <param name="index">The index dimension local (for implicit kernels).</param>
+        [UnconditionalSuppressMessage("Trimming", "IL2067",
+            Justification = TrimmingAnnotations.EmittedType)]
         private static void GenerateStartupCode<TEmitter>(
             EntryPoint entryPoint,
             TEmitter emitter,

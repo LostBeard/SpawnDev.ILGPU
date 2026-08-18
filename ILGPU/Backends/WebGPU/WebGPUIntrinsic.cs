@@ -11,7 +11,9 @@
 
 using ILGPU.IR;
 using ILGPU.IR.Intrinsics;
+using ILGPU.Util;
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 
 namespace ILGPU.Backends.WebGPU
@@ -58,7 +60,10 @@ namespace ILGPU.Backends.WebGPU
         /// </summary>
         /// <param name="handlerType">The associated target handler type.</param>
         /// <param name="mode">The code-generation mode.</param>
-        public WebGPUIntrinsic(Type handlerType, IntrinsicImplementationMode mode)
+        public WebGPUIntrinsic(
+            [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
+            Type handlerType,
+            IntrinsicImplementationMode mode)
             : base(
                   BackendType.WebGPU,
                   handlerType,
@@ -73,6 +78,7 @@ namespace ILGPU.Backends.WebGPU
         /// <param name="methodName">The target method name (or null).</param>
         /// <param name="mode">The code-generator mode.</param>
         public WebGPUIntrinsic(
+            [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
             Type handlerType,
             string methodName,
             IntrinsicImplementationMode mode)

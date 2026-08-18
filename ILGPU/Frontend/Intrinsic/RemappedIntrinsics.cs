@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2018-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -11,8 +11,10 @@
 
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using ILGPU.Util;
 
 namespace ILGPU.Frontend.Intrinsic
 {
@@ -26,11 +28,13 @@ namespace ILGPU.Frontend.Intrinsic
         /// <summary>
         /// The global <see cref="IntrinsicMath"/> type.
         /// </summary>
+        [DynamicallyAccessedMembers(TrimmingAnnotations.PublicMethods)]
         public static readonly Type MathType = typeof(IntrinsicMath);
 
         /// <summary>
         /// The global <see cref="IntrinsicMath.CPUOnly"/> type.
         /// </summary>
+        [DynamicallyAccessedMembers(TrimmingAnnotations.PublicMethods)]
         public static readonly Type CPUMathType = typeof(IntrinsicMath.CPUOnly);
 
         /// <summary>
@@ -45,6 +49,55 @@ namespace ILGPU.Frontend.Intrinsic
             FunctionRemappers =
             new Dictionary<MethodBase, DeviceFunctionRemapper>();
 
+        // ------------------------------------------------------------------
+        // TRIMMING (IL Linker / ILLink)
+        //
+        // Every remapping below is resolved by NAME at runtime via
+        // Type.GetMethod. The trimmer cannot see those lookups, so without
+        // these DynamicDependency roots it removes any overload the app never
+        // calls statically and this cctor throws MissingMethodException on the
+        // first Context.Create - e.g. System.Math.Clamp(double,double,double)
+        // was the single casualty in a trimmed Blazor WASM publish while every
+        // other Clamp overload happened to survive.
+        //
+        // DynamicDependency is used rather than an ILLink descriptor because
+        // every target is nameable with typeof(): the compiler type-checks it,
+        // it survives renames, and it does not hard-code BCL assembly names
+        // (System.Private.CoreLib vs System.Runtime). It also satisfies the
+        // trim analyzer, which never reads descriptors.
+        //
+        // Keep this list in sync with the Register* methods, including the
+        // T4-generated ones in RemappedIntrinsics.Generated.cs.
+        // ------------------------------------------------------------------
+
+        // Sources: BCL types remapped to device intrinsics.
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicMethods, typeof(Math))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicMethods, typeof(MathF))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicMethods, typeof(float))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicMethods, typeof(double))]
+        [DynamicDependency(
+            DynamicallyAccessedMemberTypes.PublicMethods,
+            typeof(System.BitConverter))]
+        [DynamicDependency(
+            DynamicallyAccessedMemberTypes.PublicMethods,
+            typeof(System.Numerics.BitOperations))]
+        [DynamicDependency(
+            DynamicallyAccessedMemberTypes.PublicMethods,
+            typeof(System.Threading.Interlocked))]
+        // Targets: the device-side replacements the sources are remapped onto.
+        [DynamicDependency(
+            DynamicallyAccessedMemberTypes.PublicMethods,
+            typeof(IntrinsicMath))]
+        [DynamicDependency(
+            DynamicallyAccessedMemberTypes.PublicMethods,
+            typeof(IntrinsicMath.CPUOnly))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicMethods, typeof(Atomic))]
+        [DynamicDependency(
+            DynamicallyAccessedMemberTypes.PublicMethods,
+            typeof(BitConverter))]
+        [DynamicDependency(
+            DynamicallyAccessedMemberTypes.PublicMethods,
+            typeof(Interlocked))]
         static RemappedIntrinsics()
         {
             AddRemapping(
@@ -114,7 +167,9 @@ namespace ILGPU.Frontend.Intrinsic
         /// </param>
         /// <param name="paramTypes">The parameter types of both functions.</param>
         public static void AddRemapping(
+            [DynamicallyAccessedMembers(TrimmingAnnotations.PublicMethods)]
             Type sourceType,
+            [DynamicallyAccessedMembers(TrimmingAnnotations.PublicMethods)]
             Type targetType,
             string functionName,
             params Type[] paramTypes) =>
@@ -136,7 +191,9 @@ namespace ILGPU.Frontend.Intrinsic
         /// <param name="required">Indicates if the mapping is optional.</param>
         /// <param name="paramTypes">The parameter types of both functions.</param>
         private static void AddRemapping(
+            [DynamicallyAccessedMembers(TrimmingAnnotations.PublicMethods)]
             Type sourceType,
+            [DynamicallyAccessedMembers(TrimmingAnnotations.PublicMethods)]
             Type targetType,
             string functionName,
             bool required,

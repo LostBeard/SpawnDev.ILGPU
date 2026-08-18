@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2018-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -16,6 +16,7 @@ using ILGPU.Resources;
 using ILGPU.Util;
 using System;
 using System.Reflection;
+using System.Diagnostics.CodeAnalysis;
 using ValueList = ILGPU.Util.InlineList<ILGPU.IR.Values.ValueReference>;
 
 namespace ILGPU.Frontend
@@ -102,6 +103,12 @@ namespace ILGPU.Frontend
         /// The constrained type of the virtual call.
         /// </param>
         /// <returns>The resolved call target.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2060",
+            Justification = TrimmingAnnotations.UnconstrainedGeneric)]
+        [UnconditionalSuppressMessage("Trimming", "IL2070",
+            Justification = TrimmingAnnotations.UnconstrainedGeneric)]
+        [UnconditionalSuppressMessage("Trimming", "IL2072",
+            Justification = TrimmingAnnotations.UnconstrainedGeneric)]
         private MethodInfo ResolveVirtualCallTarget(
             MethodInfo target,
             Type? constrainedType)

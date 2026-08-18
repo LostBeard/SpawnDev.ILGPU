@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                   ILGPU Algorithms
 //                        Copyright (c) 2018-2021 ILGPU Project
 //                                    www.ilgpu.net
@@ -15,7 +15,9 @@ using ILGPU.Algorithms.IL;
 using ILGPU.Algorithms.PTX;
 using ILGPU.IR;
 using System;
+using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
+using ILGPU.Util;
 
 namespace ILGPU
 {
@@ -35,16 +37,19 @@ namespace ILGPU
         /// <summary>
         /// The global <see cref="XMath"/> type.
         /// </summary>
+        [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
         internal static readonly Type XMathType = typeof(XMath);
 
         /// <summary>
         /// The global <see cref="GroupExtensions"/> type.
         /// </summary>
+        [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
         internal static readonly Type GroupExtensionsType = typeof(GroupExtensions);
 
         /// <summary>
         /// The global <see cref="WarpExtensions"/> type.
         /// </summary>
+        [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
         internal static readonly Type WarpExtensionsType = typeof(WarpExtensions);
 
         #endregion
@@ -54,6 +59,25 @@ namespace ILGPU
         /// <summary>
         /// Initializes a static instance.
         /// </summary>
+        /// <remarks>
+        /// TRIMMING: <see cref="RegisterMathRemappings"/> (T4-generated in
+        /// AlgorithmContextMappings.cs) resolves every mapping by name via
+        /// <see cref="Type.GetMethod(string, BindingFlags, Binder, Type[],
+        /// ParameterModifier[])"/>. The trimmer cannot see those lookups, so
+        /// the source and target types are rooted explicitly here - otherwise
+        /// an overload the app never calls statically is removed and this
+        /// cctor throws MissingMethodException on the first Context.Create.
+        /// See the matching block on the RemappedIntrinsics cctor.
+        /// </remarks>
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicMethods, typeof(XMath))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicMethods, typeof(Math))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicMethods, typeof(MathF))]
+        [DynamicDependency(
+            DynamicallyAccessedMemberTypes.PublicMethods,
+            typeof(IntrinsicMath))]
+        [DynamicDependency(
+            DynamicallyAccessedMemberTypes.PublicMethods,
+            typeof(IntrinsicMath.CPUOnly))]
         static AlgorithmContext()
         {
             RegisterMathRemappings();

@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2020-2024 ILGPU Project
 //                                    www.ilgpu.net
@@ -18,6 +18,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.CompilerServices;
+using System.Diagnostics.CodeAnalysis;
 
 namespace ILGPU.IR
 {
@@ -527,6 +528,8 @@ namespace ILGPU.IR
         /// </summary>
         /// <param name="method">The method to verify.</param>
         /// <returns>The created verification result object.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2087",
+            Justification = TrimmingAnnotations.EmittedType)]
         public static VerificationResult ApplyVerification(Method method)
         {
             var result = new VerificationResult();

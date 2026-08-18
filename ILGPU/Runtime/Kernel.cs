@@ -1,4 +1,4 @@
-﻿// ---------------------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------------
 //                                        ILGPU
 //                        Copyright (c) 2017-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -49,6 +49,8 @@ namespace ILGPU.Runtime
         /// </summary>
         /// <param name="typeBuilder">The target type builder to use.</param>
         /// <param name="fields">The source fields used for implementation.</param>
+        [UnconditionalSuppressMessage("Trimming", "IL2076",
+            Justification = TrimmingAnnotations.EmittedType)]
         private static void ImplementSpecializationCacheArgs(
             TypeBuilder typeBuilder,
             FieldInfo[] fields)
@@ -112,6 +114,8 @@ namespace ILGPU.Runtime
         /// <returns>
         /// A dynamic kernel launcher that automatically specializes kernels.
         /// </returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2076",
+            Justification = TrimmingAnnotations.EmittedType)]
         public static TDelegate CreateSpecializedLauncher<TDelegate, TLoader>(
             Accelerator accelerator,
             in EntryPointDescription entry,
@@ -164,6 +168,12 @@ namespace ILGPU.Runtime
         /// <param name="keyStruct">The key struct.</param>
         /// <param name="cacheType">The parent cache type.</param>
         /// <returns>The specialized launcher method.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2070",
+            Justification = TrimmingAnnotations.EmittedType)]
+        [UnconditionalSuppressMessage("Trimming", "IL2075",
+            Justification = TrimmingAnnotations.EmittedType)]
+        [UnconditionalSuppressMessage("Trimming", "IL2090",
+            Justification = TrimmingAnnotations.EmittedType)]
         private static MethodInfo CreateSpecializedLauncherMethod<TDelegate>(
             RuntimeSystem runtimeSystem,
             in EntryPointDescription entry,
