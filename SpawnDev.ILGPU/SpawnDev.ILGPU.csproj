@@ -98,6 +98,42 @@
 		</ItemGroup>
 	</Target>
 
+	<!-- =================================================================================================
+	     THIS TARGET IS THE REASON _publish-nuget.bat USES `pack`. DO NOT "FIX" THAT TO `build`.
+	     =================================================================================================
+	     TargetsForTfmSpecificContentInPackage is a PACK-time extension point. Under
+	     GeneratePackageOnBuild the target above still RUNS - it publishes the tool into
+	     obj\...\precompiler-tool and the DLLs are sitting right there - but its files never reach the
+	     package. MEASURED 2026-09-01, same property, same configuration:
+
+	         dotnet build -c Release -p:PackPrecompilerTool=true  ->  1,529,731 bytes,  0 tools\ entries
+	         dotnet pack  -c Release -p:PackPrecompilerTool=true  ->  6,659,041 bytes, 15 tools\ entries
+
+	     SpawnDev.ILGPU/_publish-nuget.bat is the ONLY publish bat of 247 in the workspace that packs, which
+	     reads like an agent's mistake and is not. Converting it to `build` ships a package with no
+	     precompiler worker, silently - both verbs exit 0 and both write a correctly-versioned nupkg.
+	     Hooking the target to _GetPackageFiles instead was also tried, and also produced 0 tools\ entries.
+
+	     ⚠️ AND THE PAYLOAD IS ONLY REGENERATED WHEN THE VERSION CHANGES. Packaging is incremental:
+	         GenerateNuspec: Skipping target "GenerateNuspec" because all output files are up-to-date
+	     Re-packing an already-packed version yields the 1.5 MB tool-less package, and deleting
+	     bin\Release\*.nupkg AND obj\Release\*.nuspec does NOT change that - only an unseen version does.
+	     That is why this works in practice (a release bumps the version) and why re-publishing the same
+	     version would quietly not. The bat verifies the artifact and aborts on an empty tools\ rather than
+	     trusting the exit code.
+
+	     ⚠️ When it does run fully the glob OVER-collects: the Precompiler's publish drags in this project's
+	     own WebGPU\, WebGL\ and Wasm\ asset folders (72 DLLs / 105 MB uncompressed -> a 47.7 MB nupkg).
+	     6.6 MB is the intended shape, so narrow the glob before changing the invalidation behaviour.
+
+	     PROPER FIX, for whoever has the time: SpawnDev.SpawnJS.WebWorkers bundles its rollup tooling with a
+	     STATIC <Content Include="tasks\**" Pack="true" PackagePath="tasks"> over PRE-BUILT, COMMITTED
+	     files. Static items exist at project evaluation, so GeneratePackageOnBuild packs them and no pack
+	     step is needed at all. Adopting that here means deciding how the precompiler's output is produced
+	     and whether it gets committed - a real design call, not a mechanical swap. See
+	     _DevComms/2026-09-01-tuvok-TO-geordi-ilgpu-publish-bat-is-the-last-pack-based-one.md -->
+
+
 	<ItemGroup>
 		<Content Remove="wwwroot\icon-128.png" />
 		<!-- Wasm/repro/ is tracked debugging-repro scratch (V8 barrier bug repros, .wasm/.wat/.json
