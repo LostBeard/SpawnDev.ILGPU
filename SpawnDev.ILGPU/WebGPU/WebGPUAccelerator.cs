@@ -1660,9 +1660,19 @@ namespace SpawnDev.ILGPU.WebGPU
                         ulong padding = rawOffset - alignedOffset;
                         ulong bindingSize = (ulong)WebGPUAlignment.AlignTo4((long)(padding + (ulong)contiguous.LengthInBytes));
                         // Clamp to actual GPU buffer size (which was allocated with AlignTo4)
-                        ulong bufferSize = (ulong)WebGPUAlignment.AlignTo4(nativeBuffer.LengthInBytes);
+                        ulong bufferSize = (ulong)Math.Max(4L, WebGPUAlignment.AlignTo4(nativeBuffer.LengthInBytes));
                         if (alignedOffset + bindingSize > bufferSize)
                             bindingSize = bufferSize - alignedOffset;
+                        // ⚠️ NEVER bind zero bytes. An EMPTY view is legal (an ONNX Slice that selects
+                        // nothing, a "no padding" tensor), but WebGPU rejects a zero-sized storage binding
+                        // against minBindingSize: 4 and invalidates the entire CommandBuffer - so one
+                        // legitimately empty tensor takes down the whole dispatch.
+                        // MEASURED 2026-09-01: ZipVoice's decoder at 2054 frames died at node 896 ReduceSum
+                        // with "Binding size for [Buffer (unlabeled)] is zero" on WebGPU, while the same
+                        // graph produced correct values on OpenCL, which tolerates it silently.
+                        // Binding the 4-byte floor is safe: the view's length is still 0, so nothing reads it.
+                        if (bindingSize == 0)
+                            bindingSize = Math.Min(4UL, bufferSize - alignedOffset);
                         
                         resource = new GPUBufferBinding
                         {

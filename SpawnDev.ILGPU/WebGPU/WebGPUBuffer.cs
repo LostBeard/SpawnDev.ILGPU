@@ -1,3 +1,4 @@
+using System;
 // ---------------------------------------------------------------------------------------
 //                               SpawnDev.ILGPU.WebGPU
 //                 WebGPU Compute Library for Blazor WebAssembly
@@ -38,8 +39,14 @@ namespace SpawnDev.ILGPU.WebGPU
             if (device == null)
                 throw new InvalidOperationException("GPU device not initialized");
 
-            // Create GPU buffer (WebGPU requires size multiple of 4)
-            var gpuSize = WebGPUAlignment.AlignTo4(LengthInBytes);
+            // Create GPU buffer (WebGPU requires size multiple of 4).
+            // ⚠️ And a MINIMUM of 4 bytes, even for a zero-length allocation. An EMPTY tensor is legal -
+            // ONNX uses one to say "no padding here", and a Slice can legitimately select nothing - but
+            // WebGPU refuses to bind a zero-sized storage buffer ("Binding size for [Buffer] is zero",
+            // against minBindingSize: 4) and the whole CommandBuffer becomes invalid. A 4-byte floor costs
+            // nothing, keeps the buffer bindable, and changes no semantics: the VIEW still has length 0, so
+            // no kernel reads or writes an element of it.
+            var gpuSize = Math.Max(4L, WebGPUAlignment.AlignTo4(LengthInBytes));
             var descriptor = new GPUBufferDescriptor
             {
                 Size = (ulong)gpuSize,
