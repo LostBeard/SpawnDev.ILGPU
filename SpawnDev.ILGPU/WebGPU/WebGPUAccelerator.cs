@@ -1671,6 +1671,18 @@ namespace SpawnDev.ILGPU.WebGPU
                         // with "Binding size for [Buffer (unlabeled)] is zero" on WebGPU, while the same
                         // graph produced correct values on OpenCL, which tolerates it silently.
                         // Binding the 4-byte floor is safe: the view's length is still 0, so nothing reads it.
+                        // ⚠️ Math.Min can never yield 0 here, and the reason is an ILGPU invariant rather
+                        // than luck - worth writing down, because "what if the empty view sits at the very
+                        // END of its buffer, leaving nothing ahead of the offset to bind?" is the obvious
+                        // objection and it costs an hour to re-derive.
+                        // `StrideTypes.ComputeElementIndexChecked` asserts `index < extent`, with ONE
+                        // exemption for `index == 0 && extent == 0`. So a view at index == Length does not
+                        // exist: SubView(Length, 0) trips "X index out of bounds" (MEASURED - a test that
+                        // tried to build one died there, and on WASM an unhandled assert EXITS the runtime
+                        // and takes every later test on the page with it). Therefore alignedOffset is
+                        // either 0 (the zero-length allocation, whose bufferSize is the 4-byte floor) or
+                        // strictly less than bufferSize. Both are multiples of 4, so the remainder is a
+                        // positive multiple of 4 - at least 4.
                         if (bindingSize == 0)
                             bindingSize = Math.Min(4UL, bufferSize - alignedOffset);
                         

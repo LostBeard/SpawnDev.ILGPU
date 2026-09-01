@@ -1,6 +1,39 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.5 - WebGPU: an EMPTY view is legal, so stop binding zero bytes
+
+WebGPU refuses a zero-sized storage binding - *"Binding size for [Buffer (unlabeled)] is
+zero"*, validated against `minBindingSize: 4` - and the failure does not stop at that
+binding. The BindGroup becomes invalid, then the CommandEncoder, then the CommandBuffer,
+so **one legitimately empty tensor takes down every dispatch batched with it**.
+
+Empty is legitimate and common. ONNX uses a zero-length tensor to say "no padding here",
+and a `Slice` can correctly select nothing.
+
+MEASURED 2026-09-01: ZipVoice's flow-matching decoder at 2054 frames died at node 896
+(`ReduceSum`) with exactly that error on WebGPU, while the SAME graph produced values
+matching onnxruntime on OpenCL (encoder 1.0E-7, decoder 3.4E-4). **OpenCL tolerates a
+zero-length binding silently**, which is why this survived: every desktop lane was green
+and only a browser lane could see it. A more permissive backend hides a portability bug
+rather than proving correctness.
+
+Two floors, both 4 bytes:
+
+- `WebGPUBuffer` allocates at least 4 bytes, so a zero-length allocation still has
+  something bindable.
+- The storage-buffer binding size is clamped up from 0.
+
+Neither changes semantics: the **view still reports `Length` 0**, so no kernel reads or
+writes an element of it. `EmptyViewCanBeBoundToAKernelTest` asserts that explicitly, and
+asserts the OTHER buffer's contents rather than merely that nothing threw - on WebGPU an
+invalid bind group poisons the whole CommandBuffer, so the observable symptom is that the
+buffer with nothing wrong with it comes back unwritten.
+
+## 5.2.4 - Dependency update
+
+## 5.2.3 - Dependency update
+
 ## 5.2.2 - Restore the ValueTuples trim suppression lost to T4 regeneration (forks 2.3.1)
 
 `ILGPU/IR/Types/ValueTuples.cs` is generated from `ValueTuples.tt`, and the

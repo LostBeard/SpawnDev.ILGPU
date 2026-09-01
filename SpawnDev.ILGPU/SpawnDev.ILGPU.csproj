@@ -4,9 +4,9 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.2.5-local.1</Version>
+		<Version>5.2.5</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>v5.2.4 - Dependency update</PackageReleaseNotes>
+		<PackageReleaseNotes>v5.2.5 - WebGPU: an EMPTY view is legal, so stop binding zero bytes. A zero-length storage binding invalidated the whole CommandBuffer, so one legitimately empty tensor (ONNX uses them for "no padding"; a Slice can select nothing) killed every dispatch batched with it. 4-byte floors on allocation and binding; the view still reports Length 0.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
