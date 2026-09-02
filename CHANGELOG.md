@@ -1,7 +1,32 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.2.8 - Context.Dispose releases browser device handles (fork 2.3.2)
+## 5.2.8 - Disposal releases the IR graph, the type universe and browser device handles (fork 2.3.2)
+
+🔴 **A disposed Context kept everything it ever built.** `IRContext.Dispose` and
+`IRTypeContext.Dispose` disposed only their LOCKS - every `Method`, the whole value graph hanging off it,
+and the entire interned type universe stayed referenced by the disposed object. `Accelerator` disposal
+released no kernel cache either.
+
+On desktop this is invisible: the Context is collected moments later (MEASURED: 0/10 alive, heap flat at
+0.1 MiB). In a browser the Context is **rooted** - `ctxAlive=N/N` on WebGPU, WebGL and Wasm, proven a real
+reference against both a weight-matched 1 MiB control and a finalizable one, each of which collects - so
+that graph is pinned for the life of the page. It is what exhausts the Wasm managed heap with
+`Garbage collector could not allocate 16384u bytes of memory for major heap section`.
+
+Disposal now routes through ILGPU's own `ClearCache(ClearCacheMode.Everything)`, which also reaches
+`DebugInformationManager`, `DefautltILBackend` and `RuntimeSystem`.
+
+MEASURED over the same eight tests, steady-state growth per Context: **0.73 MiB -> 0.20 MiB, a 3.6x
+reduction**. At the ~800 tests where the Wasm lane used to die that is ~160 MiB rather than ~700 MiB.
+
+⚠️ **This does NOT find the root, and is not a substitute for finding it.** The Context is still rooted;
+it now costs bytes instead of a megabyte. Do not read a green sweep as "the retention is fixed". The
+reproducer is three lines and needs no GPU: `Context.Create(_ => {})`, `Dispose()`, force a collect - the
+Context survives on every browser lane and is collected on every desktop one. What has been ELIMINATED by
+measurement: conservative GC, finalization, the accelerator/adapter/backend, every static registry across
+16 assemblies (353 fields and delegates, including Mono's JS-interop assembly), ILFrontend worker threads
+(WASM refuses `Thread.Start`), and a dangling `Accelerator.Current`.
 
 🔴 **Every `Context.Create()` abandoned a `GPUAdapter`.** WebGPU device enumeration calls
 `RequestAdapter`, and the resulting adapter is held by the registered ILGPU `Device` for the life of the
