@@ -1,6 +1,36 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.6 - consume SpawnJS 2.1.9, so browser consumers get the app-root fix
+
+Dependency-only release. `SpawnDev.SpawnJS` moves **2.1.8 -> 2.1.9**.
+
+⚠️ **Why this needs a release rather than nothing.** The fix is in SpawnJS, but a consumer of
+`SpawnDev.ILGPU` 5.2.5 transitively resolves SpawnJS **2.1.8** and never sees it. A published nuspec
+dependency is not advice, it is the version that consumer gets - so a stale one silently withholds a fix
+from everybody downstream of us. Nothing reports this: the build succeeds, the tests pass, and NuGet's job
+is to resolve what you asked for rather than to ask whether you asked for the right thing.
+
+What 2.1.9 fixes, and why it matters to an ILGPU consumer specifically: `SpawnJSInterop` normalised a
+runtime artifact's load URL back to the app root by stripping a literal trailing `_framework/`. A published
+app is allowed to rename that folder - `SpawnJSWebWorkersFrameworkFolderName` does exactly that, because a
+browser extension may not have a root folder whose name starts with `_`. The match then failed silently and
+`AppBaseUri` came back as **the framework folder itself**, so every URL built on it resolved one level too
+deep. A worker script requested one level too deep 404s, and a 404 worker presents as a **crashed
+renderer** rather than a clean error.
+
+Found by a new cross-repo audit (`_tools/audit-spawndev-refs.cs`) that compares every `PackageReference`
+to one of our own packages against what the local feed can actually serve and what that package's source
+declares. It reports those two separately on purpose: bumping a consumer to a version that exists only as a
+`<Version>` in somebody's working tree breaks a build that was fine.
+
+No ILGPU code changed, so the four-package fork bundle (`SpawnDev.ILGPU.Fork` /
+`SpawnDev.ILGPU.Algorithms.Fork`) is deliberately NOT bumped - see the note in
+`SpawnDev.ILGPU/SpawnDev.ILGPU.csproj`.
+
+`Examples/01-04` moved from `SpawnDev.ILGPU` **4.10.0** to 5.2.6 in the same change. An example is first
+contact for a new user, and one pinned a full major version behind teaches the wrong API.
+
 ## 5.2.5 - WebGPU: an EMPTY view is legal, so stop binding zero bytes
 
 WebGPU refuses a zero-sized storage binding - *"Binding size for [Buffer (unlabeled)] is

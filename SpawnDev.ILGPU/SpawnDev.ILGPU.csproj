@@ -4,9 +4,9 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.2.5</Version>
+		<Version>5.2.6</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>v5.2.5 - WebGPU: an EMPTY view is legal, so stop binding zero bytes. A zero-length storage binding invalidated the whole CommandBuffer, so one legitimately empty tensor (ONNX uses them for "no padding"; a Slice can select nothing) killed every dispatch batched with it. 4-byte floors on allocation and binding; the view still reports Length 0.</PackageReleaseNotes>
+		<PackageReleaseNotes>v5.2.6 - Consume SpawnDev.SpawnJS 2.1.9 so browser consumers get the app-root fix. A consumer of 5.2.5 transitively resolved SpawnJS 2.1.8 and never saw it: SpawnJSInterop normalized a load URL back to the app root by stripping a literal trailing "_framework/", so an app that renames that folder (a browser extension may not have a root folder starting with "_") got AppBaseUri = the framework folder itself, and every URL built on it - worker entrypoints above all - resolved one level too deep. A 404 worker presents as a crashed renderer, not a clean error. No ILGPU code changed; the fork packages are deliberately unchanged.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -29,7 +29,7 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<PackageReference Include="SpawnDev.SpawnJS" Version="2.1.8" />
+		<PackageReference Include="SpawnDev.SpawnJS" Version="2.1.9" />
 	</ItemGroup>
 
 	<ItemGroup>
