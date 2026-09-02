@@ -219,6 +219,21 @@ namespace ILGPU
         private readonly Dictionary<AcceleratorType, List<Device>> deviceMapping;
 
         /// <summary>
+        /// Log what <c>Dispose</c> does with the registered devices. Off by default.
+        /// </summary>
+        /// <remarks>
+        /// A browser Device owns a live JS handle (a GPUAdapter, a WebGL context) and must be released;
+        /// a desktop Device owns nothing and is not IDisposable. This says which happened, because
+        /// "the fix is in the build" and "the fix ran" are different claims.
+        /// </remarks>
+        /// <remarks>
+        /// ⚠️ Turn this on before theorising about Context lifetime. It is what proved the device-release
+        /// fix below had never executed: the trace printed NOTHING, which ruled out "the loop ran and the
+        /// release no-opped" and pointed at the assembly actually loaded in the browser.
+        /// </remarks>
+        public static bool ContextDisposeTrace { get; set; }
+
+        /// <summary>
         /// Constructs a new ILGPU main context
         /// </summary>
         /// <param name="builder">The parent builder instance.</param>
@@ -554,16 +569,27 @@ namespace ILGPU
         {
             if (disposing)
             {
-                CPUAccelerator.Dispose();
+                // ⚠️ Traces each step so a THROW is attributable. The caller in a test harness is
+                // `try { context.Dispose(); } catch { }`, so a failure in any step here is silent and
+                // every later step - including the device release below - is simply skipped. The last
+                // line printed names the step that threw.
+                void Step(string name)
+                {
+                    if (ContextDisposeTrace) Console.WriteLine("[ILGPU] Context.Dispose: " + name);
+                }
 
-                codeGenerationSemaphore.Dispose();
-                IRContext.Dispose();
+                Step("enter");
+                Step("CPUAccelerator"); CPUAccelerator.Dispose();
 
-                ILFrontend.Dispose();
-                DefautltILBackend.Dispose();
+                Step("codeGenerationSemaphore"); codeGenerationSemaphore.Dispose();
+                Step("IRContext"); IRContext.Dispose();
 
-                DebugInformationManager.Dispose();
-                TypeContext.Dispose();
+                Step("ILFrontend"); ILFrontend.Dispose();
+                Step("DefautltILBackend"); DefautltILBackend.Dispose();
+
+                Step("DebugInformationManager"); DebugInformationManager.Dispose();
+                Step("TypeContext"); TypeContext.Dispose();
+                Step("devices");
 
                 // ⚠️ RELEASE THE REGISTERED DEVICES. ILGPU's Device is not IDisposable upstream because a
                 // desktop device is a description - a CUDA ordinal, a CL device id - that owns nothing. A
@@ -575,11 +601,21 @@ namespace ILGPU
                 // resources for the life of the page. Every Context.Create().AllAccelerators() leaked one.
                 //
                 // Devices that own nothing simply do not implement IDisposable and are unaffected.
+                // ⚠️ Reports what it actually did. Claiming this fixes a leak without watching it run is
+                // how the first attempt shipped believing it worked while the adapter count kept climbing.
+                int deviceCount = 0, disposedCount = 0, failedCount = 0;
                 foreach (var device in Devices)
                 {
+                    deviceCount++;
                     if (device is IDisposable disposableDevice)
-                        try { disposableDevice.Dispose(); } catch { }
+                    {
+                        try { disposableDevice.Dispose(); disposedCount++; }
+                        catch { failedCount++; }
+                    }
                 }
+                if (ContextDisposeTrace)
+                    Console.WriteLine($"[ILGPU] Context.Dispose: {deviceCount} device(s), "
+                                    + $"{disposedCount} disposed, {failedCount} threw");
             }
             base.Dispose(disposing);
         }
