@@ -1,7 +1,7 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.2.6 - consume SpawnJS 2.1.9, so browser consumers get the app-root fix
+## 5.2.7 - consume SpawnJS 2.1.9, so browser consumers get the app-root fix
 
 Dependency-only release. `SpawnDev.SpawnJS` moves **2.1.8 -> 2.1.9**.
 
@@ -24,11 +24,22 @@ to one of our own packages against what the local feed can actually serve and wh
 declares. It reports those two separately on purpose: bumping a consumer to a version that exists only as a
 `<Version>` in somebody's working tree breaks a build that was fine.
 
+⚠️ **This shipped as 5.2.7, not 5.2.6, and the reason is a trap worth knowing.** The `tools/` precompiler
+payload is contributed through a PACK-time extension point and packaging is INCREMENTAL - it regenerates
+only for a version the project has not packed before. I ran an ordinary `dotnet build` at 5.2.6 while
+verifying the dependency bump; under `GeneratePackageOnBuild` that wrote a **1,529,648-byte, zero-`tools/`**
+nupkg and marked 5.2.6's nuspec outputs up to date, so every subsequent `pack` at that version would have
+silently shipped a package with no precompiler worker. Deleting the nupkg does not undo it, and deleting
+`obj/Release` outright breaks pack (the StaticWebAssets manifest lives there). Bumping the version is the
+reliable invalidation. **Do not `dotnet build` this project at the version you intend to release.**
+Verified on the artifact rather than the exit code: 15 `tools/` entries, and the packed
+`lib/net10.0/SpawnDev.ILGPU.dll` SHA256 equal to `bin/Release`'s.
+
 No ILGPU code changed, so the four-package fork bundle (`SpawnDev.ILGPU.Fork` /
 `SpawnDev.ILGPU.Algorithms.Fork`) is deliberately NOT bumped - see the note in
 `SpawnDev.ILGPU/SpawnDev.ILGPU.csproj`.
 
-`Examples/01-04` moved from `SpawnDev.ILGPU` **4.10.0** to 5.2.6 in the same change. An example is first
+`Examples/01-04` moved from `SpawnDev.ILGPU` **4.10.0** to 5.2.7 in the same change. An example is first
 contact for a new user, and one pinned a full major version behind teaches the wrong API.
 
 ## 5.2.5 - WebGPU: an EMPTY view is legal, so stop binding zero bytes
