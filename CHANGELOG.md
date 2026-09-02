@@ -1,6 +1,45 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.8 - Context.Dispose releases browser device handles (fork 2.3.2)
+
+🔴 **Every `Context.Create()` abandoned a `GPUAdapter`.** WebGPU device enumeration calls
+`RequestAdapter`, and the resulting adapter is held by the registered ILGPU `Device` for the life of the
+`Context`. Nothing ever released it, so each context left a live adapter behind, pinning real GPU driver
+resources for the life of the page.
+
+The reason it went unnoticed is that upstream `Device` is deliberately not `IDisposable`: a DESKTOP device
+is a *description* - a CUDA ordinal, an OpenCL device id - that owns nothing at all, so there has never
+been anything to release. A BROWSER device is not a description. It owns a live JS handle. `Context.Dispose`
+now disposes any registered device that implements `IDisposable`; `WebGPUILGPUDevice` and
+`WebGLILGPUDevice` do, and every desktop device is unaffected because it still does not.
+
+MEASURED over CDP against the live SpawnDev.ILGPU.ML demo, reading SpawnJS's interop slot table
+(`SpawnJSInterop.spawnJSObjects`): **+1 rooted `GPUAdapter` per test, surviving a forced GC**, before the
+fix. After it, six WebGPU test runs return the table to its **startup baseline of 5 slots with zero
+adapters**. The new ML gate `Context_Dispose_ReleasesBrowserDeviceHandles` reads WebGPU -0.17, Wasm -0.17,
+WebGL 0.00 slots per Context.
+
+This is a large part of what the Wasm lane's `Garbage collector could not allocate 16384u bytes of memory
+for major heap section` was made of - a browser test run creates a context per test.
+
+**New:** `Context.ContextDisposeTrace` (default off) traces each step of `Dispose` and reports how many
+registered devices it released. Turn it on before theorising about Context lifetime.
+
+⚠️ **THE TRAP THAT HID THIS, which will catch the next person editing `ILGPU/`.** The fix was written,
+committed, packed, shipped and *version-verified* - the consumed DLL read
+`ProductVersion=5.2.8-local.2+44ba3a5`, the exact commit - and it had never executed. `Context` compiles
+into **`SpawnDev.ILGPU.Fork`**; the package being rebuilt was the **`SpawnDev.ILGPU`** wrapper, which does
+not contain `Context` at all. Both assemblies are built from this repo and therefore carry the same commit
+hash, so every version check agreed while the assembly holding the change sat three days stale in the
+consumer's `_framework/`.
+
+A repo commit hash says "this build came from that source tree", never "this assembly contains that
+change". What finally settled it was the trace printing **nothing at all**, not even its entry line - a
+no-op release would still have printed. When you touch anything under `ILGPU/` or `ILGPU.Algorithms/`, run
+`_check-fork-version-sync.bat` and confirm the fingerprinted filename and timestamp of the consumer's
+`ILGPU.*.wasm`, not the wrapper's version string.
+
 ## 5.2.7 - consume SpawnJS 2.1.9, so browser consumers get the app-root fix
 
 Dependency-only release. `SpawnDev.SpawnJS` moves **2.1.8 -> 2.1.9**.
