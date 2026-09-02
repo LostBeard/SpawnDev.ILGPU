@@ -564,6 +564,22 @@ namespace ILGPU
 
                 DebugInformationManager.Dispose();
                 TypeContext.Dispose();
+
+                // ⚠️ RELEASE THE REGISTERED DEVICES. ILGPU's Device is not IDisposable upstream because a
+                // desktop device is a description - a CUDA ordinal, a CL device id - that owns nothing. A
+                // BROWSER device is not: it holds a live JS handle (a GPUAdapter, a WebGL context) obtained
+                // during enumeration, and nothing else ever releases it.
+                //
+                // MEASURED 2026-09-02 by dumping SpawnJS's object table from the demo console mid-run:
+                // ~36 live GPUAdapter objects, ONE PER CONTEXT created, each pinning real GPU driver
+                // resources for the life of the page. Every Context.Create().AllAccelerators() leaked one.
+                //
+                // Devices that own nothing simply do not implement IDisposable and are unaffected.
+                foreach (var device in Devices)
+                {
+                    if (device is IDisposable disposableDevice)
+                        try { disposableDevice.Dispose(); } catch { }
+                }
             }
             base.Dispose(disposing);
         }

@@ -4,7 +4,7 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.2.7</Version>
+		<Version>5.2.8-local.1</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
 		<PackageReleaseNotes>v5.2.7 - Consume SpawnDev.SpawnJS 2.1.9 so browser consumers get the app-root fix. A consumer of 5.2.5 transitively resolved SpawnJS 2.1.8 and never saw it: SpawnJSInterop normalized a load URL back to the app root by stripping a literal trailing "_framework/", so an app that renames that folder (a browser extension may not have a root folder starting with "_") got AppBaseUri = the framework folder itself, and every URL built on it - worker entrypoints above all - resolved one level too deep. A 404 worker presents as a crashed renderer, not a clean error. No ILGPU code changed; the fork packages are deliberately unchanged.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>

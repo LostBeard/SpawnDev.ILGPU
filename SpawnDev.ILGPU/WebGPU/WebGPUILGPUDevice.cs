@@ -16,7 +16,7 @@ namespace SpawnDev.ILGPU.WebGPU
     /// Represents an ILGPU Device implementation for WebGPU.
     /// </summary>
     [DeviceType(WebGPUILGPUDevice.WebGPUAcceleratorType)]
-    public sealed class WebGPUILGPUDevice : Device
+    public sealed class WebGPUILGPUDevice : Device, IDisposable
     {
         /// <summary>
         /// The accelerator type constant for WebGPU devices.
@@ -232,5 +232,16 @@ namespace SpawnDev.ILGPU.WebGPU
         }
 
         #endregion
-    }
+    
+        /// <summary>Releases the underlying browser handle.</summary>
+        /// <remarks>
+        /// ⚠️ ILGPU's <c>Device</c> is not IDisposable and <c>Context</c> never disposed its registry, so
+        /// the <c>WebGPUDevice</c> created during device enumeration - and the JS handle it owns - was
+        /// never released. MEASURED 2026-09-02 by dumping SpawnJS's object table from the demo console
+        /// mid-run: ~36 live GPUAdapter objects, one per Context created, each holding real GPU driver
+        /// resources. The fork's Context.Dispose now disposes every registered device that implements
+        /// IDisposable; this is the other half of that fix.
+        /// </remarks>
+        public void Dispose() => nativeDevice?.Dispose();
+}
 }
