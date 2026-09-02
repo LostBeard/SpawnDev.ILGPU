@@ -601,6 +601,14 @@ namespace ILGPU
                 // resources for the life of the page. Every Context.Create().AllAccelerators() leaked one.
                 //
                 // Devices that own nothing simply do not implement IDisposable and are unaffected.
+                //
+                // ⚠️ OWNERSHIP: a Context owns the devices its builder registered. ToContext() snapshots the
+                // builder's registry, so calling it TWICE on one builder hands both Contexts the SAME Device
+                // instances and the first disposal releases the shared handle. Build one Context per builder.
+                // Verified 2026-09-02 that every ToContext() call in these repos has its own Context.Create()
+                // (49/49 in WasmTests, 7/7 in Example 04). A device adopted from OUTSIDE - see
+                // WebGPUAccelerator.CreateAsync(externalDevice) - is not registered here and stays the
+                // caller's to release, which is correct: we did not open that handle.
                 // ⚠️ Reports what it actually did. Claiming this fixes a leak without watching it run is
                 // how the first attempt shipped believing it worked while the adapter count kept climbing.
                 int deviceCount = 0, disposedCount = 0, failedCount = 0;
