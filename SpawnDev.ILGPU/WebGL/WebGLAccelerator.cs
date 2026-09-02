@@ -230,8 +230,23 @@ namespace SpawnDev.ILGPU.WebGL
             // Attach message handler now (not on first dispatch) so readback
             // responses are received even before any kernel has been dispatched.
             _workerMessageHandlerAttached = true;
-            _glWorker.OnMessage += (msg) => HandleWorkerResponse(msg);
-            _glWorker.OnError += (_) =>
+
+            // ⚠️ HELD IN FIELDS, NOT WRITTEN INLINE. Every `+=` on an interop event needs an equal `-=`, or
+            // it leaks: these are SpawnJS ActionEvents, so `+=` stores the delegate in EventTarget's STATIC
+            // CallBackInfos dictionary keyed by that delegate, and only RemoveEventListener takes it out.
+            // Both closures capture `this`, so a missing `-=` pins this accelerator - and its Context, and
+            // everything they reach - for the life of the page.
+            //
+            // ⚠️ Written inline as `+= (msg) => ...` the leak was not merely forgotten, it was IMPOSSIBLE to
+            // fix at the call site: a lambda creates a fresh delegate instance every time, so there is no
+            // reference left to pass to `-=`. Storing them is what makes detaching possible at all.
+            //
+            // MEASURED 2026-09-02 (live-object census in MLTestBase.RunTest - weak refs taken after Dispose,
+            // with a negative control that DID collect): accelAlive=682/682 on WebGL. Not one collected
+            // across a full sweep, climbing until the browser lane died on "Garbage collector could not
+            // allocate 16384u bytes of memory for major heap section".
+            _workerMessageHandler = (msg) => HandleWorkerResponse(msg);
+            _workerErrorHandler = (_) =>
             {
                 foreach (var kvp in _pendingDispatches)
                 {
@@ -239,6 +254,8 @@ namespace SpawnDev.ILGPU.WebGL
                         p.Tcs.TrySetException(new Exception("[WebGL] GL Worker error during kernel execution"));
                 }
             };
+            _glWorker.OnMessage += _workerMessageHandler;
+            _glWorker.OnError += _workerErrorHandler;
 
             if (VerboseLogging) Log("[WebGL] GL Worker initialized and OffscreenCanvas transferred");
         }
@@ -1258,10 +1275,26 @@ namespace SpawnDev.ILGPU.WebGL
         protected override void OnBind() { }
         protected override void OnUnbind() { }
 
+        /// <summary>The worker listeners, kept so they can be detached. See where they are attached.</summary>
+        private Action<SpawnDev.SpawnJS.JSObjects.MessageEvent>? _workerMessageHandler;
+        private Action<SpawnDev.SpawnJS.JSObjects.Event>? _workerErrorHandler;
+
         protected override void DisposeAccelerator_SyncRoot(bool disposing)
         {
             if (disposing)
             {
+                // ⚠️ DETACH FIRST. Every `+=` on an interop event needs an equal `-=`: the listener lives in
+                // EventTarget's STATIC CallBackInfos, keyed by the delegate, and both of these close over
+                // `this`. Terminating the worker does NOT remove them - the static dictionary outlives it,
+                // so without this the accelerator and its Context stay reachable for the life of the page.
+                if (_glWorker != null)
+                {
+                    try { if (_workerMessageHandler != null) _glWorker.OnMessage -= _workerMessageHandler; } catch { }
+                    try { if (_workerErrorHandler != null) _glWorker.OnError -= _workerErrorHandler; } catch { }
+                }
+                _workerMessageHandler = null;
+                _workerErrorHandler = null;
+
                 // Terminate the GL worker
                 _glWorker?.Terminate();
                 _glWorker?.Dispose();

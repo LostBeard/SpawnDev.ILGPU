@@ -208,7 +208,7 @@ namespace SpawnDev.ILGPU.WebGPU
             catch { }
 
             // Listen for uncaptured GPU errors
-            _gpuDevice.OnUncapturedError += OnGPUUncapturedError;
+            SubscribeUncapturedError();
 
             // Monitor device loss (resolves once when the device becomes invalid)
             _ = MonitorDeviceLostAsync();
@@ -320,7 +320,7 @@ namespace SpawnDev.ILGPU.WebGPU
             EnabledFeatures = new HashSet<string>(requestedFeatures, StringComparer.OrdinalIgnoreCase);
 
             // Listen for uncaptured GPU errors (e.g., Invalid ComputePipeline, validation errors)
-            _gpuDevice.OnUncapturedError += OnGPUUncapturedError;
+            SubscribeUncapturedError();
 
             // Monitor device loss (resolves once when the device becomes invalid)
             _ = MonitorDeviceLostAsync();
@@ -603,11 +603,51 @@ namespace SpawnDev.ILGPU.WebGPU
                     "Accelerator not initialized. Call InitializeAsync first.");
         }
 
+        /// <summary>Whether this accelerator's uncaptured-error listener is currently attached.</summary>
+        private bool _uncapturedErrorSubscribed;
+
+        /// <summary>
+        /// Attach the uncaptured-error listener exactly once, so <see cref="Dispose"/> can detach it.
+        /// </summary>
+        /// <remarks>
+        /// ⚠️ THIS IS A MANAGED LEAK IF IT IS NOT DETACHED, and it leaked every accelerator in the process.
+        /// <c>OnUncapturedError</c> is a SpawnJS <c>ActionEvent</c>, so <c>+=</c> routes into
+        /// <c>EventTarget</c>'s <b>static</b> <c>CallBackInfos</c> dictionary, keyed by the listener
+        /// delegate. <see cref="OnGPUUncapturedError"/> is an INSTANCE method, so that delegate holds
+        /// <c>this</c>. With no matching <c>-=</c> the static dictionary pins every WebGPU accelerator ever
+        /// created, and through it the Context and everything they reach.
+        ///
+        /// MEASURED 2026-09-02 by the live-object census in <c>MLTestBase.RunTest</c> (weak refs taken after
+        /// Dispose, with a negative control that DID collect): <c>ctxAlive=683/683 accelAlive=683/683</c> on
+        /// WebGPU - not one collected across a full sweep - climbing until the Wasm lane died on
+        /// "Garbage collector could not allocate 16384u bytes of memory for major heap section".
+        ///
+        /// ⚠️ It was also subscribed on BOTH initialization paths, so a device that took the second path
+        /// registered twice and would have needed two removals. Routing both through here makes the
+        /// subscription idempotent as well as reversible.
+        /// </remarks>
+        private void SubscribeUncapturedError()
+        {
+            if (_uncapturedErrorSubscribed || _gpuDevice == null) return;
+            _gpuDevice.OnUncapturedError += OnGPUUncapturedError;
+            _uncapturedErrorSubscribed = true;
+        }
+
         /// <inheritdoc/>
         public void Dispose()
         {
             if (_disposed) return;
             _disposed = true;
+
+            // ⚠️ DETACH BEFORE DESTROYING THE DEVICE. This is not tidiness - see SubscribeUncapturedError:
+            // the listener lives in a STATIC dictionary keyed by the delegate, and that delegate holds this
+            // accelerator. Skipping it leaks the accelerator, its Context, and their whole object graph for
+            // the life of the page.
+            if (_uncapturedErrorSubscribed && _gpuDevice != null)
+            {
+                try { _gpuDevice.OnUncapturedError -= OnGPUUncapturedError; } catch { }
+                _uncapturedErrorSubscribed = false;
+            }
 
             // Dispose cached shaders
             ClearShaderCache();
