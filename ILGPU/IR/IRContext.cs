@@ -564,7 +564,22 @@ namespace ILGPU.IR
         protected override void Dispose(bool disposing)
         {
             if (disposing)
+            {
+                // ⚠️ RELEASE THE IR GRAPH, not just the lock. Disposing only `irLock` left every Method
+                // this context ever built - and the whole value graph hanging off it - referenced by a
+                // disposed object. On desktop that is harmless because the Context itself is collected
+                // moments later. In a browser the Context is ROOTED (MEASURED 2026-09-02: ctxAlive=N/N on
+                // WebGPU, WebGL and Wasm, while an identical desktop probe collects 0/10), so the graph is
+                // pinned for the life of the page and costs ~0.9 MiB per Context - which is what exhausts
+                // the Wasm managed heap: "Garbage collector could not allocate 16384u bytes of memory for
+                // major heap section" at roughly 800 tests.
+                //
+                // This does not find that root, and is not a substitute for finding it. It makes a
+                // disposed Context cost bytes instead of a megabyte, which is correct on its own terms:
+                // a disposed object has no business still holding its graph.
+                methods.Clear();
                 irLock.Dispose();
+            }
             base.Dispose(disposing);
         }
 

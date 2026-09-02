@@ -1041,6 +1041,14 @@ namespace ILGPU.Runtime
                 // Bind the current instance
                 Bind();
 
+                // ⚠️ RELEASE THE CACHES, using ILGPU's own API. An Accelerator holds a compiled-kernel
+                // cache and its Backend holds more; disposal released neither, so a disposed Accelerator
+                // still owned every kernel it ever compiled. On desktop that is invisible - the object is
+                // collected immediately - but a BROWSER Accelerator is rooted (MEASURED 2026-09-02:
+                // accelAlive=N/N on all three browser lanes, 0/10 on desktop), so those caches are pinned
+                // for the life of the page. Before the Backend is torn down, or clearing it would fault.
+                try { ClearCache(ClearCacheMode.Everything); } catch { }
+
                 // Dispose all child objects
                 DisposeChildObjects_SyncRoot(disposing);
 

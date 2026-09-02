@@ -707,7 +707,14 @@ namespace ILGPU.IR.Types
         protected override void Dispose(bool disposing)
         {
             if (disposing)
+            {
+                // ⚠️ Same reasoning as IRContext.Dispose: releasing the lock alone left the entire unified
+                // type universe alive behind a disposed object. Every TypeNode this context interned is
+                // reachable only from here, so clearing these two maps is what actually frees them.
+                unifiedTypes.Clear();
+                typeMapping.Clear();
                 typeLock.Dispose();
+            }
             base.Dispose(disposing);
         }
 
