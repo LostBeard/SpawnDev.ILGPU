@@ -11,7 +11,7 @@
   <ItemGroup>
     <!-- The whole library is one package. On the desktop it brings ILGPU's native CUDA/OpenCL/CPU
          backends; in a Blazor WASM host it adds WebGPU/WebGL/Wasm. This console app uses the desktop ones. -->
-    <PackageReference Include="SpawnDev.ILGPU" Version="5.2.6" />
+    <PackageReference Include="SpawnDev.ILGPU" Version="5.2.7" />
   </ItemGroup>
 
 </Project>
