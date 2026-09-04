@@ -75,6 +75,47 @@ public sealed class WebGPUDispatchPlan : IDisposable
         _pendingScalarBytes = (byte[])bytes.Clone();
     }
 
+    /// <summary>
+    /// CPU-&gt;GPU <c>queue.writeBuffer</c> calls that happened while this plan was recording.
+    /// </summary>
+    /// <remarks>
+    /// 🔴 A HOST WRITE IS NOT REPLAYABLE, and it is invisible in the plan. A plan records dispatches,
+    /// copyBufferToBuffer and clearBuffer - all three are command-encoder work. <c>queue.writeBuffer</c> is
+    /// not: it moves bytes the CPU is holding. On replay it simply does not happen, so the destination keeps
+    /// whatever the capture pass last left there. If those bytes were constant that is harmless; if they
+    /// depended on this call's inputs, the replay is confidently wrong and nothing about the output looks
+    /// broken.
+    /// <para>
+    /// MEASURED 2026-09-03 on ZipVoice's fm_decoder: a replay of the captured plan did not reproduce the
+    /// forward it recorded AT THE EXACT INPUTS IT CAPTURED - 16,900 of 16,900 values differ, worst 0.711702
+    /// (<c>Pipeline_ZipVoice_CaptureReplayFidelity</c>). "At the captured inputs" rules out every
+    /// input-plumbing explanation and says the plan is missing WORK. Counting host writes inside the window
+    /// is how that stops being a deduction and becomes a number.
+    /// </para>
+    /// </remarks>
+    public int HostWriteCount { get; private set; }
+
+    /// <summary>Total bytes of the host writes counted by <see cref="HostWriteCount"/>.</summary>
+    public long HostWriteBytes { get; private set; }
+
+    /// <summary>
+    /// The plan currently recording, if any - reachable from the buffer layer.
+    /// </summary>
+    /// <remarks>
+    /// ⚠️ Static because the CPU-&gt;GPU upload path lives on <c>WebGPUNativeAccelerator</c>, which has no
+    /// reference to the <c>WebGPUAccelerator</c> that owns the capture. Capture is a single-threaded,
+    /// one-at-a-time operation (<c>BeginDispatchCapture</c> throws if one is already active), so one slot
+    /// is exact rather than approximate.
+    /// </remarks>
+    internal static WebGPUDispatchPlan? Recording { get; set; }
+
+    /// <summary>Called from the CPU-&gt;GPU upload paths while a plan is recording. See <see cref="HostWriteCount"/>.</summary>
+    internal void NoteHostWrite(long bytes)
+    {
+        HostWriteCount++;
+        HostWriteBytes += bytes;
+    }
+
     /// <summary>True once <see cref="WebGPUAccelerator.EndDispatchCapture"/> sealed this plan.</summary>
     public bool IsSealed { get; internal set; }
 

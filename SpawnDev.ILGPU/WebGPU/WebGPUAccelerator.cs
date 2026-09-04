@@ -2460,6 +2460,7 @@ namespace SpawnDev.ILGPU.WebGPU
                     "cache hit rewrites its owned scalar buffer, which would retroactively corrupt earlier " +
                     "plan entries. Disable caching for the capture pass.");
             _activeDispatchPlan = new WebGPUDispatchPlan(this);
+            WebGPUDispatchPlan.Recording = _activeDispatchPlan;
             return _activeDispatchPlan;
         }
 
@@ -2472,6 +2473,7 @@ namespace SpawnDev.ILGPU.WebGPU
             var plan = _activeDispatchPlan
                 ?? throw new InvalidOperationException("No dispatch capture is active.");
             _activeDispatchPlan = null;
+            WebGPUDispatchPlan.Recording = null;
             plan.IsSealed = true;
             return plan;
         }

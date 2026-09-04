@@ -128,6 +128,8 @@ namespace SpawnDev.ILGPU.WebGPU
             using var uint8Array = new Uint8Array((int)paddedBytes);
             uint8Array.Write(sourceArray);
             queue.WriteBuffer(_buffer, (long)(targetOffset * ElementSize), uint8Array);
+            // A host write cannot be replayed from a dispatch plan - see WebGPUDispatchPlan.HostWriteCount.
+            WebGPUDispatchPlan.Recording?.NoteHostWrite(paddedBytes);
         }
 
         /// <summary>
@@ -148,6 +150,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 throw new InvalidOperationException("GPU queue not available");
 
             queue.WriteBuffer(_buffer, targetByteOffset, source);
+            WebGPUDispatchPlan.Recording?.NoteHostWrite(source.ByteLength);
         }
 
         /// <summary>
@@ -168,6 +171,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 throw new InvalidOperationException("GPU queue not available");
 
             queue.WriteBuffer(_buffer, targetByteOffset, source);
+            WebGPUDispatchPlan.Recording?.NoteHostWrite(source.ByteLength);
         }
 
         /// <summary>

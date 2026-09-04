@@ -159,13 +159,22 @@ namespace SpawnDev.ILGPU.WebGPU
             _adapter = adapter ?? throw new ArgumentNullException(nameof(adapter));
             _deviceIndex = deviceIndex;
 
-            // Get adapter info safely
+            // Get adapter info safely.
+            // ⚠️ `info.device` IS EMPTY IN CHROME by default - it is the most identifying field and the spec
+            // lets a browser withhold it. Taking it verbatim made every log line read `accelerator:  (WebGPU)`,
+            // which is worse than useless: it looks like a failed lookup, and it cannot distinguish a
+            // discrete GPU from a fallback adapter - the one thing anyone reads this name to find out
+            // (MEASURED 2026-09-03: a browser lane suspected of running on the wrong adapter could not be
+            // cleared or convicted from its own logs). Vendor and architecture ARE populated, so fall back
+            // to them and say plainly when the adapter is a software fallback.
             try
             {
                 using var info = adapter.Info;
-                Name = info?.Device ?? "WebGPU Device";
-                Vendor = info?.Vendor ?? "Unknown";
-                Architecture = info?.Architecture ?? "Unknown";
+                Vendor = string.IsNullOrWhiteSpace(info?.Vendor) ? "Unknown" : info!.Vendor;
+                Architecture = string.IsNullOrWhiteSpace(info?.Architecture) ? "Unknown" : info!.Architecture;
+                Name = !string.IsNullOrWhiteSpace(info?.Device) ? info!.Device
+                     : Vendor != "Unknown" || Architecture != "Unknown" ? $"{Vendor} {Architecture}".Trim()
+                     : "WebGPU Device";
             }
             catch
             {
@@ -182,6 +191,10 @@ namespace SpawnDev.ILGPU.WebGPU
             {
                 IsFallbackAdapter = false;
             }
+            // Carried IN THE NAME, because the name is what gets logged. A software fallback adapter is the
+            // difference between a benchmark worth quoting and one that is meaningless, and nothing else in
+            // a typical log line reveals it.
+            if (IsFallbackAdapter) Name = $"{Name} (fallback/software)";
 
             // Detect supported features from the adapter
             SupportedFeatures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
