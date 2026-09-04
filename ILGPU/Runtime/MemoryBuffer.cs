@@ -217,11 +217,36 @@ namespace ILGPU.Runtime
             if (lengthInBytes == 0)
                 return result;
 
-            using var cpuBuffer = CPUMemoryBuffer.Create(
-                Accelerator,
-                ref result[0],
-                lengthInBytes);
-            CopyTo(stream, sourceOffsetInBytes, cpuBuffer.AsRawArrayView());
+            // 🔴 PIN THE DESTINATION. `CPUMemoryBuffer.Create(Accelerator, ref result[0], ...)` resolves the
+            // address with `Unsafe.AsPointer(ref value)`, which does NOT pin - and `result` is an ordinary
+            // movable managed array. The OpenCL readback is enqueued NON-BLOCKING
+            // (CLMemoryBuffer.CLCopy -> clEnqueueReadBuffer with blocking_read = CL_FALSE), so the DMA is
+            // still in flight while this method awaits below - and an await is exactly where a GC can run
+            // and COMPACT the heap. The transfer then lands on the old address and `result` is returned
+            // untouched: a clean run of zeros.
+            //
+            // MEASURED on OpenCL: Tensor_CopyToStreamAsync_RoundTrip, 5,000 floats in 4 KiB chunks -
+            //   "1024 of 5000 values wrong (1024 of them ZERO), first [2048] (chunk 2), last [3071]
+            //    (chunk 2), chunks affected [2] of 5"
+            // EXACTLY ONE chunk zeroed, with the chunks AFTER it correct. That shape is the proof: an
+            // unfinished queue would corrupt the tail, and a bad offset would corrupt deterministically.
+            // Only "the destination moved out from under one transfer" produces one clean zeroed chunk
+            // surrounded by good ones.
+            //
+            // ⚠️ Both halves are required, and adding only the second made it WORSE. Awaiting the copy
+            // without pinning widens the window in which the GC may move the buffer; pinning without
+            // awaiting frees the pin while the DMA is still running. Pin, copy, wait, then unpin.
+            var pin = System.Runtime.InteropServices.GCHandle.Alloc(
+                result,
+                System.Runtime.InteropServices.GCHandleType.Pinned);
+            try
+            {
+                using var cpuBuffer = CPUMemoryBuffer.Create(
+                    Accelerator,
+                    pin.AddrOfPinnedObject(),
+                    lengthInBytes,
+                    sizeof(byte));
+                CopyTo(stream, sourceOffsetInBytes, cpuBuffer.AsRawArrayView());
 
             // 🔴 WAIT FOR THE COPY ITSELF. The drain above is a PRE-copy drain: it flushes work queued
             // before this readback and says nothing about this readback. On CUDA / OpenCL a CopyTo issued
@@ -241,9 +266,15 @@ namespace ILGPU.Runtime
             // failure mode that gets waved away as "a flake" - and it silently truncates any GPU->stream
             // save (a model export to OPFS, SpawnScene's tensor dump) with no error anywhere.
             //
-            // The await must come BEFORE the return so it also precedes cpuBuffer's disposal: unpinning
-            // memory that an in-flight DMA still targets is the same hazard one step further on.
-            await stream.SynchronizeAsync().ConfigureAwait(false);
+            // The await must come BEFORE the return so it also precedes cpuBuffer's disposal and the pin
+            // being freed: releasing memory that an in-flight DMA still targets is the same hazard one
+            // step further on.
+                await stream.SynchronizeAsync().ConfigureAwait(false);
+            }
+            finally
+            {
+                pin.Free();
+            }
             return result;
         }
 
