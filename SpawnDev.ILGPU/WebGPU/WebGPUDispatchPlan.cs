@@ -70,6 +70,30 @@ public sealed class WebGPUDispatchPlan : IDisposable
     /// NEXT recorded dispatch (upload always precedes Record in the dispatch flow).</summary>
     internal void NoteScalarUpload(GPUBuffer buffer, byte[] bytes)
     {
+        // 🔴 COUNT IT FIRST, AND UNCONDITIONALLY. The packed scalar-params upload is a
+        // `queue.writeBuffer` - a HOST WRITE - issued once per dispatch, and it is exactly the kind of
+        // work a replayed plan cannot reproduce (see HostWriteCount). It used to be counted nowhere: this
+        // method returned immediately unless the caller had opted into snapshots, and the NoteHostWrite
+        // census only hooked WebGPUBuffer's own upload paths.
+        //
+        // ⚠️ SO "host writes inside the capture window: 0" WAS NEVER PROOF - it was a census that did not
+        // look at the busiest CPU->GPU path in the engine. That number was reported on 2026-09-03 as
+        // evidence the plan was complete, while ZipVoice's captured decoder disagreed with the forward it
+        // had just recorded in 16,900 of 16,900 values. An instrument that cannot see the suspect returns
+        // zero and reads like an alibi.
+        //
+        // The counter is deliberately independent of CaptureScalarSnapshots: the snapshot list is an
+        // opt-in debugging surface, whereas whether the window contains unreplayable host writes is a
+        // property of the capture itself and must be true every time.
+        //
+        // ⚠️ COUNTED IS NOT CONDEMNED. These particular writes are benign - RetainScalarBuffers moves each
+        // dispatch's scalar buffer into the plan, so it is never recycled and the recorded bind group
+        // keeps its own parameters. The point of counting them is that HostWriteCount minus
+        // ScalarParamWriteCount is the number that was always meant to be zero, and nobody could compute
+        // it while this path was invisible.
+        NoteHostWrite(bytes.Length);
+        ScalarParamWriteCount++;
+
         if (!CaptureScalarSnapshots) return;
         _pendingScalarBuf = buffer;
         _pendingScalarBytes = (byte[])bytes.Clone();
@@ -92,11 +116,46 @@ public sealed class WebGPUDispatchPlan : IDisposable
     /// input-plumbing explanation and says the plan is missing WORK. Counting host writes inside the window
     /// is how that stops being a deduction and becomes a number.
     /// </para>
+    /// <para>
+    /// ⚠️ SUBTRACT <see cref="ScalarParamWriteCount"/> BEFORE DRAWING A CONCLUSION. Measured 2026-09-04,
+    /// that same capture contains 8,141 host writes and ALL 8,141 are the benign per-dispatch scalar-params
+    /// upload, whose buffers the plan retains. The unreplayable-work total for ZipVoice is therefore ZERO,
+    /// and the replay divergence is NOT explained by this counter. It is also not a replay problem at all:
+    /// the same test reports <c>observe pass: 0 differ | CAPTURE pass: 16,900 differ</c>, and both of those
+    /// are ordinary forwards - the pass being recorded already computed the wrong answer.
+    /// </para>
     /// </remarks>
     public int HostWriteCount { get; private set; }
 
     /// <summary>Total bytes of the host writes counted by <see cref="HostWriteCount"/>.</summary>
     public long HostWriteBytes { get; private set; }
+
+    /// <summary>
+    /// The subset of <see cref="HostWriteCount"/> that is the PER-DISPATCH packed scalar-params upload.
+    /// </summary>
+    /// <remarks>
+    /// Split out because the two kinds of host write have completely different meanings. A TENSOR upload
+    /// inside the window is unreplayable work: the plan does not carry it, so a replay leaves the
+    /// destination holding whatever the capture pass left there. A SCALAR-PARAMS write is normally
+    /// BENIGN, and it is worth being precise about why, because the count is alarming and the conclusion
+    /// is not:
+    /// <para>
+    /// ⚠️ While a plan is recording, <c>RetainScalarBuffers</c> MOVES each dispatch's scalar buffer into
+    /// the plan and CLEARS the caller's list, so it is never handed back to the pool and no later
+    /// dispatch can overwrite it. Each recorded bind group therefore keeps its own parameters and a
+    /// replay needs no re-upload. I initially wrote the opposite here - that the bind groups reference
+    /// recycled pooled buffers - and it is wrong; the retention is deliberate and correct
+    /// (see the ownership comment at the <c>capturePlan.Record</c> call site).
+    /// </para>
+    /// <para>
+    /// So what is this number FOR? Two things. (1) The census that was supposed to find unreplayable work
+    /// could not see the busiest CPU-&gt;GPU path in the engine, so its "0 host writes" was not evidence of
+    /// anything and was cited as though it were. (2) It bounds the cost: 8,141 writes of 117.1 KiB per
+    /// ZipVoice decoder capture, one per dispatch. A non-zero count here is expected; a non-zero
+    /// <see cref="HostWriteCount"/> MINUS this value is the alarming case.
+    /// </para>
+    /// </remarks>
+    public int ScalarParamWriteCount { get; private set; }
 
     /// <summary>
     /// The plan currently recording, if any - reachable from the buffer layer.

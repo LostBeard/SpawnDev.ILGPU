@@ -4,7 +4,7 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.2.9</Version>
+		<Version>5.2.9-local.5</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
 		<PackageReleaseNotes>v5.2.8 - TWO disposal fixes. (1) A disposed Context kept everything it ever built: IRContext.Dispose and IRTypeContext.Dispose disposed only their LOCKS, so every Method, the whole value graph hanging off it, and the entire interned type universe stayed referenced by the disposed object, and Accelerator disposal released no kernel cache. Harmless on desktop, where the Context is collected moments later; in a browser the Context is rooted, so that graph is pinned for the life of the page and is what exhausts the Wasm managed heap. Disposal now routes through ClearCache(Everything). MEASURED: steady-state growth per Context 0.73 MiB -> 0.20 MiB, a 3.6x reduction. Note this mitigates rather than removes the underlying browser-only rooting, which is still under investigation. (2) Context.Dispose now releases BROWSER device handles. WebGPU device enumeration calls RequestAdapter and the resulting GPUAdapter is held by the registered ILGPU Device for the life of the Context; nothing released it, so every Context.Create() abandoned one adapter and pinned real GPU driver resources for the life of the page. It went unnoticed because upstream Device is deliberately not IDisposable - a DESKTOP device is a description (a CUDA ordinal, an OpenCL device id) that owns nothing, while a BROWSER device owns a live JS handle. Dispose now releases any registered device that implements IDisposable; WebGPUILGPUDevice and WebGLILGPUDevice do, desktop devices do not and are unaffected. MEASURED against the live SpawnDev.ILGPU.ML demo via SpawnJS's interop slot table: +1 rooted GPUAdapter per test surviving a forced GC before, and a return to the startup baseline of 5 slots with zero adapters after. This is a large part of what the Wasm lane's "Garbage collector could not allocate 16384u bytes" heap exhaustion was made of, since a browser test run creates a Context per test. NEW Context.ContextDisposeTrace (default off) traces each step of Dispose and reports how many devices it released - turn it on before theorising about Context lifetime. Fork bundle moves to 2.3.2 because the change is in the fork assembly, not this wrapper.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
@@ -64,8 +64,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.3.3" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.3.3" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.3.3-local.3" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.3.3-local.3" />
 	</ItemGroup>
 
 	<ItemGroup>
