@@ -1,6 +1,47 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.9 - Two readback correctness fixes, and every WebGPU buffer now has a NAME (fork 2.3.3)
+
+### Fixed - `CopyToRawAsync` never waited for its own copy
+
+The async raw readback issued its `CopyBufferToBuffer` and mapped without draining the copy it had just
+queued, so a caller could read the destination before the GPU had written it.
+
+### Fixed - a moving GC heap silently zeroed whole chunks of a readback
+
+The readback destination was not pinned. A collection during the copy relocated the managed destination
+and the bytes landed in the old location - whole chunks of the result came back as zeros, with no error
+anywhere. The destination is now pinned for the duration.
+
+### Added - every WebGPU buffer carries a LABEL
+
+Dawn reports a use-after-destroy as `[Buffer (unlabeled)] used in submit while destroyed`. Pooled scalar
+buffers (`PooledScalar`) and coalesced param buffers (`Coalesce-<binding>`) were already labelled; the
+main storage allocation and the readback staging buffer were not - so the message named neither the
+buffer nor even the KIND of buffer. Both are now labelled (`Storage#<serial>:<bytes>B`,
+`Staging#<serial>:<bytes>B`).
+
+MEASURED 2026-09-04: this turned an eight-hour "which buffer?" hunt in the SpawnDev.AI demo into a single
+name, `Storage#5888:2676B`, which identified the tensor immediately.
+
+### Added - `WebGPUBackend.TraceBufferDestroy`
+
+Prints a .NET stack trace when a buffer whose label contains the given substring is destroyed (`"*"` for
+all); also settable via `ILGPU_TRACE_BUFFER_DESTROY`. Default off.
+
+⚠️ **The destroy site is the only useful stack.** Dawn validates asynchronously: a buffer used after
+destruction is reported at the NEXT `queue.submit`, so the throwing stack belongs to whichever caller
+happened to synchronise next - an innocent one. Labels say WHICH buffer; this says WHO freed it. It is
+what identified the defect fixed in SpawnDev.ILGPU.ML 5.2.9, where a shared per-accelerator param arena
+disposed a slot that another pipeline's recorded dispatch plan still bound.
+
+### Added - capture-window diagnostics
+
+`WebGPUDispatchPlan.ScalarParamWriteCount` and a usefully-named WebGPU adapter string. The per-dispatch
+packed scalar-params `queue.writeBuffer` was invisible to the host-write census, so a capture window
+containing one write per dispatch reported "0 host writes".
+
 ## 5.2.8 - Disposal releases the IR graph, the type universe and browser device handles (fork 2.3.2)
 
 🔴 **A disposed Context kept everything it ever built.** `IRContext.Dispose` and

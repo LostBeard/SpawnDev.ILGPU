@@ -171,6 +171,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public static bool EnableBufferPooling { get; set; } = false;
 
         /// <summary>
+        /// DIAGNOSTIC: print a .NET stack trace whenever a buffer whose LABEL contains this substring is
+        /// destroyed ("*" = every buffer). Null/empty (default) disables it entirely.
+        /// </summary>
+        /// <remarks>
+        /// 🔴 WHY A DESTROY TRACE IS THE ONLY USEFUL ONE. Dawn validates asynchronously: a buffer used
+        /// after destruction is reported at the next <c>queue.submit</c>, as
+        /// "[Buffer &lt;label&gt;] used in submit while destroyed", and the .NET stack at that point belongs
+        /// to whoever happened to synchronize next - an innocent caller. MEASURED 2026-09-04 in the
+        /// SpawnDev.AI demo: the error surfaced inside Whisper's captured-plan replay while the buffer had
+        /// been destroyed elsewhere entirely. Labels name WHICH buffer; this names WHO freed it.
+        /// Settable from a consumer, e.g. <c>WebGPUBackend.TraceBufferDestroy = "Storage#5888"</c>.
+        /// </remarks>
+        public static string? TraceBufferDestroy { get; set; }
+            = Environment.GetEnvironmentVariable("ILGPU_TRACE_BUFFER_DESTROY");
+
+        /// <summary>
         /// When true, kernel dispatches with an identical (pipeline + data-buffer bindings)
         /// signature reuse a cached <c>GPUBindGroup</c> instead of recreating and disposing one
         /// every dispatch. The cache entry owns a stable scalar/lock buffer set whose 256-byte

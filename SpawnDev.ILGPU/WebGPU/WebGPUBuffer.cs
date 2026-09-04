@@ -20,6 +20,13 @@ namespace SpawnDev.ILGPU.WebGPU
         #region Instance
 
         private static readonly GPUCommandBuffer[] _submitArray = new GPUCommandBuffer[1];
+
+        /// <summary>Serial for buffer labels. Per closed generic, which is why the label carries T's name.</summary>
+        private static int _labelSerial;
+
+        /// <summary>This buffer's WebGPU label, so a destroy trace can name it. See WebGPUBackend.TraceBufferDestroy.</summary>
+        private readonly string? _label;
+
         private GPUBuffer? _buffer;
         private bool _disposed;
         private readonly bool _ownsBuffer;
@@ -47,8 +54,17 @@ namespace SpawnDev.ILGPU.WebGPU
             // nothing, keeps the buffer bindable, and changes no semantics: the VIEW still has length 0, so
             // no kernel reads or writes an element of it.
             var gpuSize = Math.Max(4L, WebGPUAlignment.AlignTo4(LengthInBytes));
+            // ⚠️ LABEL EVERY BUFFER. Dawn reports a use-after-destroy as
+            // "[Buffer (unlabeled)] used in submit while destroyed", which names neither the buffer nor
+            // the kind of buffer, and the error arrives asynchronously at submit - long after the call
+            // that destroyed it. A label is the ONLY identity that survives into that message. Pooled
+            // scalar and coalesced param buffers were already labelled; the main storage allocation and
+            // the readback staging buffer were not, which is exactly why the 2026-09-04 hunt for
+            // "[Buffer (unlabeled)]" could not say which of them it was.
+            _label = $"Storage#{System.Threading.Interlocked.Increment(ref _labelSerial)}:{gpuSize}B";
             var descriptor = new GPUBufferDescriptor
             {
+                Label = _label,
                 Size = (ulong)gpuSize,
                 Usage = GPUBufferUsage.Storage | GPUBufferUsage.CopySrc | GPUBufferUsage.CopyDst,
                 MappedAtCreation = false
@@ -250,6 +266,7 @@ namespace SpawnDev.ILGPU.WebGPU
 
                 var stagingDescriptor = new GPUBufferDescriptor
                 {
+                    Label = $"Staging#{System.Threading.Interlocked.Increment(ref _labelSerial)}:{paddedBytes}B",
                     Size = (ulong)paddedBytes,
                     Usage = GPUBufferUsage.CopyDst | GPUBufferUsage.MapRead,
                     MappedAtCreation = false
@@ -317,6 +334,7 @@ namespace SpawnDev.ILGPU.WebGPU
 
                 var stagingDescriptor = new GPUBufferDescriptor
                 {
+                    Label = $"Staging#{System.Threading.Interlocked.Increment(ref _labelSerial)}:{paddedBytes}B",
                     Size = (ulong)paddedBytes,
                     Usage = GPUBufferUsage.CopyDst | GPUBufferUsage.MapRead,
                     MappedAtCreation = false
@@ -398,6 +416,7 @@ namespace SpawnDev.ILGPU.WebGPU
 
                 var stagingDescriptor = new GPUBufferDescriptor
                 {
+                    Label = $"Staging#{System.Threading.Interlocked.Increment(ref _labelSerial)}:{paddedBytes}B",
                     Size = (ulong)paddedBytes,
                     Usage = GPUBufferUsage.CopyDst | GPUBufferUsage.MapRead,
                     MappedAtCreation = false
@@ -455,6 +474,17 @@ namespace SpawnDev.ILGPU.WebGPU
             // Non-owning instances (wrapping external buffers) must not destroy the buffer.
             if (_ownsBuffer)
             {
+                // DIAGNOSTIC: WHO destroyed it. Dawn reports a use-after-destroy asynchronously, at the
+                // next submit, so the throwing stack belongs to an innocent caller - the destroy site is
+                // the fact worth having, and nothing else records it. Set
+                // WebGPUBackend.TraceBufferDestroy to a label substring (or "*") to print it.
+                var trace = WebGPUBackend.TraceBufferDestroy;
+                if (!string.IsNullOrEmpty(trace))
+                {
+                    var lbl = _label ?? "(unlabeled)";
+                    if (trace == "*" || lbl.Contains(trace, StringComparison.Ordinal))
+                        Console.WriteLine($"[WebGPUBuffer] DESTROY {lbl}\n{Environment.StackTrace}");
+                }
                 _buffer?.Destroy();
                 _buffer?.Dispose();
             }
