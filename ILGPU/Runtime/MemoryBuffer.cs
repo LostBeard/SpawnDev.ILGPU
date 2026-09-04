@@ -180,10 +180,20 @@ namespace ILGPU.Runtime
         /// <returns>A task producing the copied bytes.</returns>
         /// <remarks>
         /// This is the overridable async GPU-&gt;CPU readback hook. The default
-        /// implementation awaits <see cref="AcceleratorStream.SynchronizeAsync"/>
-        /// (the real drain on backends that override it) and then performs the
+        /// implementation drains with <see cref="AcceleratorStream.SynchronizeAsync"/>,
+        /// performs the
         /// synchronous <see cref="CopyTo(AcceleratorStream, long, in ArrayView{byte})"/>,
-        /// which is correct for CUDA / OpenCL / CPU. Browser backends MUST override
+        /// and then drains AGAIN before returning.
+        /// <para>
+        /// ⚠️ The second drain is the load-bearing one and it was missing. The first is a PRE-copy drain -
+        /// it flushes what was already queued and says nothing about this readback - while a
+        /// <c>CopyTo</c> issued on a stream is an asynchronous DMA on CUDA and OpenCL. Without the second
+        /// the method handed back a still-zeroed array and unpinned the CPU buffer under an in-flight
+        /// transfer. MEASURED on OpenCL: a 5,000-float stream in 4,096-byte chunks returned correct data
+        /// for chunks 1-3 and zeros from the fourth on, intermittently and only under load. See the
+        /// comment at the call site.
+        /// </para>
+        /// Browser backends MUST override
         /// this because their synchronous <see cref="CopyTo"/> either reads stale data
         /// before worker kernels finish (Wasm) or throws because synchronous GPU-&gt;CPU
         /// readback is impossible (WebGPU / WebGL); each provides a true async readback
@@ -212,6 +222,28 @@ namespace ILGPU.Runtime
                 ref result[0],
                 lengthInBytes);
             CopyTo(stream, sourceOffsetInBytes, cpuBuffer.AsRawArrayView());
+
+            // 🔴 WAIT FOR THE COPY ITSELF. The drain above is a PRE-copy drain: it flushes work queued
+            // before this readback and says nothing about this readback. On CUDA / OpenCL a CopyTo issued
+            // on a stream is an asynchronous DMA, so without this the method returned `result` - and
+            // `using` unpinned the CPU buffer the DMA is still writing into - while the transfer was in
+            // flight. The caller then read a freshly allocated, still-zeroed array.
+            //
+            // MEASURED 2026-09-03, OpenCL under full-sweep load:
+            //   Tensor_CopyToStreamAsync_RoundTrip - "byte mismatch at [3072]: got 0, expected -55.31856"
+            // 5,000 floats streamed in 4,096-byte chunks is 1,024 floats per chunk, and 3,072 is exactly
+            // the start of the FOURTH chunk: chunks 1-3 won the race, 4-5 returned zeros. It passes when
+            // run scoped, which is what an unsynchronised DMA looks like - it fails only when the device
+            // is busy enough to still be working when the method returns.
+            //
+            // ⚠️ Zeros, not garbage, is the tell: the destination is a brand-new byte[], so a copy that
+            // never landed reads as a clean run of 0 rather than as corruption. That is precisely the
+            // failure mode that gets waved away as "a flake" - and it silently truncates any GPU->stream
+            // save (a model export to OPFS, SpawnScene's tensor dump) with no error anywhere.
+            //
+            // The await must come BEFORE the return so it also precedes cpuBuffer's disposal: unpinning
+            // memory that an in-flight DMA still targets is the same hazard one step further on.
+            await stream.SynchronizeAsync().ConfigureAwait(false);
             return result;
         }
 
