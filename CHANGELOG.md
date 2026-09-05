@@ -1,6 +1,31 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.10 - A null buffer never reaches JS, and a destroy site can now be named (fork 2.3.3)
+
+### Fixed - binding a DISPOSED buffer produced an opaque DOM error
+
+`WebGPUBuffer.NativeBuffer` returns null once disposed, and the dispatch path bound it behind a `!`.
+The result was `Failed to execute 'createBindGroup' on 'GPUDevice': Failed to convert value to
+'GPUBuffer'` - which names neither the argument, nor the buffer, nor the fact that the real problem is a
+USE-AFTER-DISPOSE. The bind path now throws with the argument index, the buffer's label, its size and
+its offset, and prints the DESTROY stack when one was recorded.
+
+### Added - `WebGPUBuffer.DestroyStack`, `Label` and `IsDisposed`
+
+`WebGPUBackend.TraceBufferDestroy` now RECORDS the disposing stack on the buffer rather than printing
+it, so whoever DISCOVERS a use-after-dispose reports whoever CAUSED it, in one message.
+
+⚠️ **This is the only useful stack for this bug class.** Dawn validates asynchronously: a buffer used
+after destruction is reported at the next `queue.submit`, from whichever caller happened to synchronize
+next - an innocent bystander. A printed trace has to be correlated by eye against every other destroy in
+the run; carried on the object, both halves of the bug arrive together.
+
+MEASURED 2026-09-04: a 250-character ZipVoice utterance bound a disposed 4-byte constant
+(`Storage#24903:4B`) inside the relative-position else branch. One run with this armed named the owner -
+a subgraph plan cached on the registry whose pool an executor eviction had disposed - and the fix landed
+in SpawnDev.ILGPU.ML 5.2.10.
+
 ## 5.2.9 - Two readback correctness fixes, and every WebGPU buffer now has a NAME (fork 2.3.3)
 
 ### Fixed - `CopyToRawAsync` never waited for its own copy
