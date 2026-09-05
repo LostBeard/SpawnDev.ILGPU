@@ -104,6 +104,27 @@ namespace SpawnDev.ILGPU.WebGPU
         public GPUBuffer? NativeBuffer => _buffer;
 
         /// <summary>
+        /// This buffer's WebGPU label, or null for a non-owning wrapper. Survives disposal, so a
+        /// use-after-dispose can still name the buffer it is talking about.
+        /// </summary>
+        public string? Label => _label;
+
+        /// <summary>True once <see cref="Dispose"/> has run and the native buffer is gone.</summary>
+        public bool IsDisposed => _disposed;
+
+        /// <summary>
+        /// The stack that disposed this buffer, captured only when its label matched
+        /// <see cref="WebGPUBackend.TraceBufferDestroy"/> at disposal time. Null otherwise.
+        /// </summary>
+        /// <remarks>
+        /// RECORDED ON THE BUFFER rather than printed, so whoever DISCOVERS the use-after-dispose can
+        /// report whoever CAUSED it, in the same message. A printed trace has to be correlated by eye
+        /// against every other destroy in the run; carried on the object, the two halves of the bug
+        /// arrive together.
+        /// </remarks>
+        public string? DestroyStack { get; private set; }
+
+        /// <summary>
         /// Returns the number of elements.
         /// </summary>
         public long Length { get; }
@@ -483,7 +504,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 {
                     var lbl = _label ?? "(unlabeled)";
                     if (trace == "*" || lbl.Contains(trace, StringComparison.Ordinal))
-                        Console.WriteLine($"[WebGPUBuffer] DESTROY {lbl}\n{Environment.StackTrace}");
+                        DestroyStack = Environment.StackTrace;   // recorded, not printed - see DestroyStack
                 }
                 _buffer?.Destroy();
                 _buffer?.Dispose();

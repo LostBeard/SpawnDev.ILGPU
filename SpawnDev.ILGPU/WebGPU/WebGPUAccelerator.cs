@@ -1639,7 +1639,26 @@ namespace SpawnDev.ILGPU.WebGPU
                         if (contiguous == null) throw new Exception($"Argument {i} is not a contiguous WebGPU buffer");
 
                         var nativeBuffer = contiguous.Buffer as WebGPUMemoryBuffer;
-                        var gpuBuffer = nativeBuffer!.NativeBuffer.NativeBuffer!;
+                        var wrapper = nativeBuffer!.NativeBuffer;
+                        var gpuBuffer = wrapper.NativeBuffer;
+
+                        // 🔴 NEVER HAND JS A NULL BUFFER. A disposed WebGPUBuffer returns null here, and
+                        // binding it surfaces as an opaque DOM error - "Failed to execute
+                        // 'createBindGroup' on 'GPUDevice': Failed to convert value to 'GPUBuffer'" -
+                        // which names neither the buffer, the argument, nor the fact that the real problem
+                        // is a USE-AFTER-DISPOSE. MEASURED 2026-09-04 on a 250-character ZipVoice
+                        // utterance (2076 frames), inside the relative-position If's else branch. The
+                        // label survives disposal precisely so this message can say which buffer it was.
+                        if (gpuBuffer == null)
+                            throw new InvalidOperationException(
+                                $"Argument {i} binds a DISPOSED WebGPU buffer "
+                                + $"({wrapper.Label ?? "(unlabeled)"}, disposed={wrapper.IsDisposed}, "
+                                + $"{contiguous.LengthInBytes} bytes at offset {contiguous.IndexInBytes}). "
+                                + "Something freed it while a dispatch still referenced it."
+                                + (wrapper.DestroyStack is { } ds
+                                    ? $"\nIT WAS DISPOSED HERE:\n{ds}"
+                                    : "\nSet WebGPUBackend.TraceBufferDestroy to this buffer's label "
+                                      + "substring (e.g. \":4B\") and re-run to capture the destroy site."));
 
                         if (WebGPUBackend.VerboseLogging)
                             WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Binding Buffer. Size={contiguous.LengthInBytes}, Offset={contiguous.IndexInBytes}");
