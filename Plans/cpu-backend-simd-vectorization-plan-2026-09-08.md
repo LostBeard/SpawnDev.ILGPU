@@ -1,7 +1,15 @@
 # CPU backend SIMD vectorization
 
-**Status: PLANNED.** Captain 2026-09-08: *"CPU backend vectorization is a good feature to add, but I agree
-not right now so log it as planned where we will not miss it... and we'll do it soon."*
+**Status: PLANNED, ON HOLD.** Captain 2026-09-08: *"CPU backend vectorization is a good feature to add, but
+I agree not right now so log it as planned where we will not miss it... and we'll do it soon."*
+
+**Reaffirmed 2026-09-09** when it came up again as the next available piece of work. Captain: *"CPU Simd is
+on hold simply because we have more important things to work on but it is an important feature."* So this
+is deliberately parked, not forgotten and not deprioritised on merit - do not start it opportunistically
+just because the GPU is busy or a gate is running. Verified while it was on hold that step 1 below is
+sound: `WasmSimdAnalysis` is 175 lines reasoning purely over ILGPU IR (`Method`, `Parameter`, `Value`,
+`ValueKind`, `ConditionalBranch`) with nothing Wasm-specific in it, so it genuinely lifts to a shared
+analysis rather than needing a second implementation.
 
 ## The gap, measured
 
