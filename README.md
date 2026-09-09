@@ -393,6 +393,23 @@ A 7th backend - **AcceleratorType.P2P** ([SpawnDev.ILGPU.P2P](SpawnDev.ILGPU.P2P
 
 **The vision:** Every device in your home contributing to one shared compute pool - phone, laptop, tablet, desktop, old gaming PC. The living room becomes a compute cluster. Same C# kernel code, same `LoadAutoGroupedStreamKernel` API. The developer writes one kernel, it runs on 1 GPU or 10 GPUs across a household.
 
+## Planned: CPU backend SIMD vectorization
+
+The CPU accelerator is currently the **only backend with no vectorization**. The Wasm backend emits 4-wide
+`v128` SIMD (`WasmSimdAnalysis` + `WasmSimdKernelEmitter`); the CPU accelerator runs scalar IL per
+work-item on managed threads.
+
+MEASURED 2026-09-08 on RMBG-1.4 at 256x256 versus its native 1024x1024 (16x the pixels): Wasm grows
+**1.2x** (74 s -> 89 s, so its cost is mostly the fixed model load and graph compile) while CPU grows
+**12.4x** (27 s -> 336 s, i.e. compute-bound and linear in element count). The ranking between the two
+inverts with resolution, so never compare them at a single size.
+
+The plan is to lift `WasmSimdAnalysis` into a shared component and have the IL backend emit
+`System.Runtime.Intrinsics.Vector128<T>` for the kernels it accepts, keeping the scalar path as the
+fallback. Full write-up, including what was already ruled out (the `CPUDevice` presets are 1-multiprocessor
+debug simulators and would be slower, and `CPUDevice.Default` is already tuned):
+[`Plans/cpu-backend-simd-vectorization-plan-2026-09-08.md`](Plans/cpu-backend-simd-vectorization-plan-2026-09-08.md).
+
 ## Support This Project
 
 If SpawnDev.ILGPU has been useful to you, please consider [**sponsoring me on GitHub**](https://github.com/sponsors/LostBeard)! Your support directly helps me continue developing and maintaining this library and my other open-source projects.
