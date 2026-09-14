@@ -4,9 +4,9 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.2.10</Version>
+		<Version>5.2.11</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>v5.2.10 - A null buffer never reaches JS, and a destroy site can now be named. WebGPUBuffer.NativeBuffer returns null once disposed and the dispatch path bound it behind a `!`, so a use-after-dispose surfaced as "Failed to execute 'createBindGroup' on 'GPUDevice': Failed to convert value to 'GPUBuffer'" - naming neither the argument, nor the buffer, nor the real problem. The bind path now throws with the argument index, the buffer's label, its size and offset, and prints the DESTROY stack when one was recorded. NEW WebGPUBuffer.DestroyStack / Label / IsDisposed: WebGPUBackend.TraceBufferDestroy now RECORDS the disposing stack on the buffer instead of printing it, so whoever DISCOVERS a use-after-dispose reports whoever CAUSED it, in one message. This is the only useful stack for the bug class - Dawn validates asynchronously, so a buffer used after destruction is reported at the next queue.submit from whichever caller happened to synchronize next, an innocent bystander. MEASURED 2026-09-04: one run with this armed named the owner of a use-after-free inside a ZipVoice utterance, and the fix landed in SpawnDev.ILGPU.ML. v5.2.9 - Two readback correctness fixes plus buffer names. CopyToRawAsync issued its CopyBufferToBuffer and mapped WITHOUT draining the copy it had just queued, so a caller could read the destination before the GPU had written it. And the readback destination was not pinned, so a collection during the copy relocated the managed destination and whole chunks of the result came back as ZEROS with no error anywhere; it is now pinned for the duration. Every WebGPU buffer also carries a LABEL, because Dawn reports a use-after-destroy as "[Buffer (unlabeled)] used in submit while destroyed".</PackageReleaseNotes>
+		<PackageReleaseNotes>v5.2.11 - Dependency update</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -29,7 +29,7 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<PackageReference Include="SpawnDev.SpawnJS" Version="2.1.10" />
+		<PackageReference Include="SpawnDev.SpawnJS" Version="2.1.17" />
 	</ItemGroup>
 
 	<ItemGroup>
