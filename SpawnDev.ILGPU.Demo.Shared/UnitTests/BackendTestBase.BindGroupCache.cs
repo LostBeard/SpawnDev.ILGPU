@@ -205,5 +205,94 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 WebGPUBackend.EnableBindGroupCaching = false;
             }
         });
+
+        // output[idx] += input[idx] * mul + add  -- ACCUMULATES, so two dispatches over the SAME buffers
+        // both leave a trace. With a plain assignment the second dispatch overwrites the first and the
+        // corruption under test is invisible.
+        static void BindGroupCache_AccumScaleAddKernel(
+            Index1D idx, ArrayView<float> input, ArrayView<float> output, float mul, float add)
+        {
+            output[idx] += input[idx] * mul + add;
+        }
+
+        // 🔴 THE CASE THE OTHER TESTS DO NOT COVER: dispatches BATCHED, with no Synchronize between them.
+        //
+        // BindGroupCache_HitReusesGroup_AndMatchesUncached syncs between every dispatch, and says why:
+        // "Sync between dispatches so the owned scalar buffer is safe to rewrite (mirrors the fixed-shape
+        // decode loop's per-step Synchronize)." That is the GGUF decode loop's shape - one dispatch, one
+        // submit. It is NOT the shape of a graph: SpawnDev.ILGPU.ML runs Kokoro as 1,850 nodes with THREE
+        // drains, so hundreds of dispatches are recorded into one command encoder before anything is
+        // submitted.
+        //
+        // A cached entry OWNS one scalar buffer and rewrites it per hit via queue.writeBuffer. writeBuffer
+        // executes in QUEUE order at call time; the dispatches sit in the encoder until submit(). So for
+        // two batched dispatches sharing an entry the real order is
+        //
+        //     writeBuffer(scalars#1), writeBuffer(scalars#2), submit(dispatch#1, dispatch#2)
+        //
+        // and BOTH dispatches read scalars#2. The first dispatch silently computes with the wrong
+        // constants. MEASURED consequence on 2026-09-15: enabling the cache under SpawnDev.ILGPU.ML's
+        // Kokoro produced "[WebGPU] 330 GPU error(s) during dispatch" and the graph failed at node 1238
+        // 'ReduceSum' - because a corrupted scalar is often a COUNT or an offset, and a wrong count is an
+        // out-of-bounds access rather than a merely wrong number.
+        //
+        // This test must FAIL before the fix and pass after. It is the red-check for the whole diagnosis.
+        [TestMethod]
+        public async Task BindGroupCache_BatchedDispatches_DoNotShareStaleScalars() => await RunEmulatedTest(async accelerator =>
+        {
+            const int N = 256;
+            var src = new float[N];
+            for (int i = 0; i < N; i++) src[i] = i * 0.125f - 2f;
+            const float mul1 = 3.0f, add1 = 1.0f;
+            const float mul2 = -2.0f, add2 = 5.0f;
+
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, float, float>(
+                BindGroupCache_AccumScaleAddKernel);
+
+            var webgpu = accelerator as WebGPUAccelerator;
+            WebGPUBackend.EnableBindGroupCaching = true;
+            try
+            {
+                using var input = accelerator.Allocate1D(src);
+                using var output = accelerator.Allocate1D<float>(new float[N]);
+
+                // Warm the signature into the cache the way recur-only requires (1st sight records,
+                // 2nd caches), syncing here so this preparation is not itself the thing under test.
+                k((Index1D)N, input.View, output.View, 0f, 0f);
+                await accelerator.SynchronizeAsync();
+                k((Index1D)N, input.View, output.View, 0f, 0f);
+                await accelerator.SynchronizeAsync();
+
+                // Zero the accumulator, then BATCH two dispatches with DIFFERENT scalars and NO sync
+                // between them - the graph-executor shape.
+                output.View.CopyFromCPU(new float[N]);
+                k((Index1D)N, input.View, output.View, mul1, add1);
+                k((Index1D)N, input.View, output.View, mul2, add2);   // <-- no Synchronize before this
+                await accelerator.SynchronizeAsync();
+
+                var got = await output.CopyToHostAsync<float>();
+                for (int i = 0; i < N; i++)
+                {
+                    float expected = (src[i] * mul1 + add1) + (src[i] * mul2 + add2);
+                    float ifStale  = (src[i] * mul2 + add2) * 2f;   // what the bug produces
+                    if (MathF.Abs(got[i] - expected) > MathF.Abs(expected) * 1e-5f + 1e-4f)
+                        throw new Exception(
+                            $"BindGroupCache batched dispatches at {i}: expected {expected} got {got[i]}" +
+                            (MathF.Abs(got[i] - ifStale) < MathF.Abs(ifStale) * 1e-5f + 1e-4f
+                                ? " - which is EXACTLY both dispatches using the SECOND dispatch's scalars. " +
+                                  "The cached entry's owned scalar buffer was rewritten before the first " +
+                                  "dispatch had been submitted. queue.writeBuffer runs at call time; the " +
+                                  "dispatch waits for submit()."
+                                : " - the cached bind group produced a result matching neither the correct " +
+                                  "value nor the stale-scalar value."));
+                }
+            }
+            finally
+            {
+                await accelerator.SynchronizeAsync();
+                webgpu?.ClearBindGroupCache();
+                WebGPUBackend.EnableBindGroupCaching = false;
+            }
+        });
     }
 }

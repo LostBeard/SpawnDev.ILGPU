@@ -155,6 +155,17 @@ namespace SpawnDev.ILGPU.WebGPU
         /// </summary>
         public int BindGroupCacheEntryCount => _bindGroupCache.Count;
 
+        /// <summary>Called by the stream immediately after a Submit: every recorded dispatch is now on the
+        /// queue, so no cached entry's scalar buffer can still be referenced by unexecuted work and each
+        /// becomes rewritable again. Cheap - the cache is small and this runs once per flush, not per
+        /// dispatch. See <c>BindGroupCacheEntry.UsedSinceFlush</c> for why it exists.</summary>
+        internal void MarkBindGroupCacheFlushed()
+        {
+            if (_bindGroupCache.Count == 0) return;
+            foreach (var entry in _bindGroupCache.Values)
+                entry.UsedSinceFlush = false;
+        }
+
         /// <summary>
         /// One binding slot in a cached bind group's signature: which slot, which buffer (by the
         /// REFERENCE IDENTITY of its backing memory-buffer object), and the bound sub-range.
@@ -241,8 +252,29 @@ namespace SpawnDev.ILGPU.WebGPU
         private sealed class BindGroupCacheEntry
         {
             public GPUBindGroup BindGroup = null!;
-            public GPUBuffer? ScalarBuffer;          // cache-owned _scalar_params (256B), rewritten per hit
+            public GPUBuffer? ScalarBuffer;          // cache-owned _scalar_params (256B)
             public List<GPUBuffer>? LockBuffers;     // cache-owned i64-spinlock buffers (256B each), zeroed per hit
+
+            // 🔴 THE TWO FIELDS THAT MAKE REWRITING THE SCALAR BUFFER SAFE.
+            //
+            // A bind group binds BUFFERS, not their contents, so the original design rewrote this entry's
+            // 256B scalar buffer on every hit. That is only correct when the previous dispatch has already
+            // been SUBMITTED. queue.writeBuffer executes in queue order at CALL time, while a dispatch sits
+            // in the command encoder until submit() - so for two batched dispatches sharing this entry the
+            // real order is writeBuffer(#1), writeBuffer(#2), submit(#1,#2) and BOTH read #2's scalars.
+            //
+            // The cache's own tests never caught it because every one of them synchronizes between
+            // dispatches ("mirrors the fixed-shape decode loop's per-step Synchronize"). A GRAPH does not:
+            // SpawnDev.ILGPU.ML runs Kokoro as 1,850 nodes with three drains. Enabling the cache there gave
+            // "[WebGPU] 330 GPU error(s) during dispatch" - a corrupted scalar is frequently a COUNT, and a
+            // wrong count is an out-of-bounds access rather than merely a wrong number.
+            //
+            // ScalarBytes  = what is currently IN ScalarBuffer, so an identical-scalar hit can skip the
+            //                write entirely (always safe, and the common case for a fixed-shape graph).
+            // UsedSinceFlush = a dispatch has referenced this entry since the last submit, so the buffer
+            //                may be read by work that has not run yet and MUST NOT be rewritten.
+            public byte[]? ScalarBytes;
+            public bool UsedSinceFlush;
 
             public void DisposeResources()
             {
@@ -1149,6 +1181,9 @@ namespace SpawnDev.ILGPU.WebGPU
                 bool bgWillCache = bgUseCache;
                 BindGroupCacheEntry? bgCachedEntry = null;
                 GPUBuffer? bgOwnedScalarBuffer = null;
+                // The scalar bytes written into bgOwnedScalarBuffer, carried out of the packing block so the
+                // cache store below can record them on the entry (see BindGroupCacheEntry.ScalarBytes).
+                byte[]? packedDataForCache = null;
                 List<GPUBuffer>? bgOwnedLockBuffers = null;
                 if (bgUseCache)
                 {
@@ -2041,8 +2076,41 @@ namespace SpawnDev.ILGPU.WebGPU
                     // we rewrite on each hit; otherwise use the normal per-dispatch pooled/fresh
                     // buffer. (A bind group binds buffers, not their contents.)
                     GPUBuffer packedBuffer;
+                    bool skipScalarWrite = false;
                     if (bgCacheHit)
-                        packedBuffer = bgCachedEntry!.ScalarBuffer!;
+                    {
+                        var hitEntry = bgCachedEntry!;
+                        // (a) Same scalars as the buffer already holds -> reuse with NO write at all. Always
+                        //     safe, whatever is in flight, and it is the common case for a fixed-shape graph
+                        //     re-dispatching the same nodes with the same constants every pass.
+                        if (hitEntry.ScalarBytes != null
+                            && packedData.AsSpan().SequenceEqual(hitEntry.ScalarBytes))
+                        {
+                            packedBuffer = hitEntry.ScalarBuffer!;
+                            skipScalarWrite = true;
+                        }
+                        // (b) Different scalars, but nothing has used this entry since the last submit, so
+                        //     no recorded-and-unsubmitted dispatch can read the buffer -> rewriting is safe.
+                        //     This is the fixed-shape decode loop (one dispatch, one Synchronize per step),
+                        //     which is what the cache was built for and must keep.
+                        else if (!hitEntry.UsedSinceFlush)
+                        {
+                            packedBuffer = hitEntry.ScalarBuffer!;
+                            hitEntry.ScalarBytes = (byte[])packedData.Clone();
+                        }
+                        // (c) Different scalars AND the entry is already referenced by pending work.
+                        //     Rewriting would corrupt that dispatch. Downgrade to a throwaway bind group for
+                        //     this one dispatch; the entry is left intact and becomes usable again after the
+                        //     next flush. bgWillCache is cleared so the store below cannot overwrite (and
+                        //     leak) the live entry.
+                        else
+                        {
+                            bgCacheHit = false;
+                            bgWillCache = false;
+                            packedBuffer = GetPooledScalarBuffer(device);
+                            scalarBuffersToReturn.Add(packedBuffer);
+                        }
+                    }
                     else if (bgWillCache)
                         packedBuffer = bgOwnedScalarBuffer = CreateScalarBuffer(device);
                     else
@@ -2050,7 +2118,9 @@ namespace SpawnDev.ILGPU.WebGPU
                         packedBuffer = GetPooledScalarBuffer(device);
                         scalarBuffersToReturn.Add(packedBuffer);
                     }
-                    device.Queue.WriteBuffer(packedBuffer, 0, packedData);
+                    if (!skipScalarWrite)
+                        device.Queue.WriteBuffer(packedBuffer, 0, packedData);
+                    packedDataForCache = packedData;
                     // Snapshot the scalar upload for the dispatch plan's patch surface (attached to
                     // the Record() below; no-op unless the plan opted into snapshots).
                     webGpuAccel._activeDispatchPlan?.NoteScalarUpload(packedBuffer, packedData);
@@ -2219,8 +2289,12 @@ namespace SpawnDev.ILGPU.WebGPU
                 GPUBindGroup bindGroup;
                 if (bgCacheHit)
                 {
-                    // Reuse the cached bind group; its owned scalar buffer was rewritten above.
+                    // Reuse the cached bind group; its owned scalar buffer was either left alone (identical
+                    // scalars) or rewritten above only because nothing pending referenced it.
                     bindGroup = bgCachedEntry!.BindGroup;
+                    // This dispatch is about to be RECORDED, not executed. Until the next submit the
+                    // entry's scalar buffer must be treated as live.
+                    bgCachedEntry.UsedSinceFlush = true;
                     webGpuAccel._bindGroupCacheHits++;
                 }
                 else
@@ -2244,7 +2318,13 @@ namespace SpawnDev.ILGPU.WebGPU
                         {
                             BindGroup = bindGroup,
                             ScalarBuffer = bgOwnedScalarBuffer,
-                            LockBuffers = bgOwnedLockBuffers
+                            LockBuffers = bgOwnedLockBuffers,
+                            // Record what was just written into the owned buffer, so the NEXT sighting can
+                            // recognise identical scalars and skip the write. Without this every hit would
+                            // take the rewrite path and stay unsafe under batching.
+                            ScalarBytes = bgOwnedScalarBuffer != null ? (byte[])packedDataForCache!.Clone() : null,
+                            // The dispatch being recorded right now already references it.
+                            UsedSinceFlush = true
                         };
                     }
                 }
@@ -2606,6 +2686,13 @@ namespace SpawnDev.ILGPU.WebGPU
                 _webGpuAccelerator.NativeAccelerator.Queue!.Submit(new[] { cmd });
                 _encoder.Dispose();
                 _encoder = null;
+
+                // 🔴 THE SUBMIT IS WHAT MAKES A CACHED SCALAR BUFFER REWRITABLE AGAIN. Everything recorded
+                // has now been handed to the queue, so no unexecuted dispatch can still be holding one.
+                // Clearing these marks here - at the ONE place dispatches are submitted - is what lets the
+                // fixed-shape decode loop keep rewriting its scalars every step while a batched graph
+                // cannot corrupt an in-flight dispatch. See BindGroupCacheEntry.UsedSinceFlush.
+                _webGpuAccelerator.MarkBindGroupCacheFlushed();
 
                 // Clean up deferred resources
                 foreach (var bg in _pendingBindGroups)
