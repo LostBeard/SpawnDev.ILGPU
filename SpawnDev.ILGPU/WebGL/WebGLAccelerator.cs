@@ -336,11 +336,25 @@ namespace SpawnDev.ILGPU.WebGL
         /// </summary>
         internal void EnsureBufferInWorker(WebGLMemoryBuffer memBuffer, string glslType)
         {
+            // 🔴 NAMED, NOT `!`. `_glWorker` is set to null by DisposeAccelerator_SyncRoot, so the
+            // null-forgiving operator that used to stand here was an assertion the field's own lifetime
+            // contradicts - and when it was wrong the only thing the caller got was a bare
+            // NullReferenceException inside this method, with no way to tell WHICH dereference produced it.
+            // That is precisely what the 2026-09-15 overnight sweep reported for
+            // WebGLTests.Vad_Reset_ReproducesTheStreamExactly, and the reason it could not be actioned from
+            // the log. The sibling entry points (WorkerCopyBuffer, WorkerScatter) ALREADY threw this exact
+            // InvalidOperationException and then called straight into this unguarded method - one job, two
+            // paths, a guard on only one of them.
+            if (_glWorker == null)
+                throw new InvalidOperationException(
+                    $"GL worker not initialized (or already disposed) while binding buffer {memBuffer.WorkerBufferId} " +
+                    $"({memBuffer.LengthInBytes} bytes, glslType '{glslType}') for dispatch.");
+
             if (!memBuffer.IsAllocatedInWorker)
             {
                 memBuffer.GlslType = glslType;
                 // Allocate in worker
-                _glWorker!.PostMessage(new
+                _glWorker.PostMessage(new
                 {
                     type = "allocBuffer",
                     bufferId = memBuffer.WorkerBufferId,
@@ -365,11 +379,29 @@ namespace SpawnDev.ILGPU.WebGL
         {
             if (memBuffer.BackingArray == null) return;
 
+            if (_glWorker == null)
+                throw new InvalidOperationException(
+                    $"GL worker not initialized (or already disposed) while uploading buffer {memBuffer.WorkerBufferId} " +
+                    $"({memBuffer.LengthInBytes} bytes).");
+
             // Create a copy to transfer (original stays intact on main thread)
             using var dataCopy = memBuffer.BackingArray.Slice();
+            // Slice() over a DETACHED ArrayBuffer (one already transferred to the worker) hands back a view
+            // with nothing behind it, and `dataCopy.Buffer` was dereferenced unchecked - the second candidate
+            // for the same bare NullReferenceException this method used to raise. Both are declared
+            // non-nullable and both come back across interop, which is exactly where a declared type stops
+            // being a guarantee. Say which one it was.
+            if (dataCopy is null)
+                throw new InvalidOperationException(
+                    $"backing array for buffer {memBuffer.WorkerBufferId} could not be sliced " +
+                    $"({memBuffer.LengthInBytes} bytes) - detached ArrayBuffer?");
             var copyBuffer = dataCopy.Buffer;
+            if (copyBuffer is null)
+                throw new InvalidOperationException(
+                    $"backing array for buffer {memBuffer.WorkerBufferId} has no ArrayBuffer to transfer " +
+                    $"(detached?) while uploading {memBuffer.LengthInBytes} bytes.");
 
-            _glWorker!.PostMessage(new
+            _glWorker.PostMessage(new
             {
                 type = "uploadBuffer",
                 bufferId = memBuffer.WorkerBufferId,
