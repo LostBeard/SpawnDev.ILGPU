@@ -321,6 +321,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// While <see cref="EnableDispatchProfiling"/> is on.</summary>
         public static double ProfileCpuBindGroupMs;
 
+        /// <summary>Cumulative ms in the RAW <c>device.CreateBindGroup</c> call only - a SUBSET of
+        /// <see cref="ProfileCpuBindGroupMs"/>. While <see cref="EnableDispatchProfiling"/> is on.</summary>
+        /// <remarks>
+        /// "Bind group" names a PHASE, not a cause, and the two halves have completely different fixes.
+        /// The remainder (<c>ProfileCpuBindGroupMs - ProfileCpuBindGroupCreateMs</c>) is descriptor and
+        /// entry-array churn on the .NET/interop side, which pooling can remove; this counter is the
+        /// driver call, which can only be avoided by caching the group or issuing fewer dispatches.
+        /// Splitting them is what stops "the bind-group phase is slow" turning into a guess about which.
+        /// </remarks>
+        public static double ProfileCpuBindGroupCreateMs;
+
         /// <summary>Cumulative ms in the per-dispatch ENCODE phase (compute-pass encode + dispatch-record bookkeeping).
         /// While <see cref="EnableDispatchProfiling"/> is on.</summary>
         public static double ProfileCpuEncodeMs;

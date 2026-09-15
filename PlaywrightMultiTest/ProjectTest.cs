@@ -91,12 +91,30 @@ public class ProjectTest
             // Capture console messages (errors + warnings) during the test
             var consoleErrors = new List<string>();
             var consoleWarnings = new List<string>();
+
+            // ⚠️ WITHOUT THIS, A BROWSER TEST'S OWN Console.WriteLine IS THROWN AWAY. Only errors and
+            // warnings were kept, so a benchmark or diagnostic line printed by a WebGPU/WebGL/Wasm test
+            // appeared NOWHERE - the test passed and its numbers vanished, which reads as "the test
+            // printed nothing" rather than "the harness dropped it". Hit 2026-09-15 by
+            // BindGroupCost_WhereDoesCreateBindGroupGo, whose entire purpose is the line it prints.
+            // Off by default because a full sweep's log volume is enormous.
+            //   PMT_CONSOLE_LOG=<substring>   keep only matching lines
+            //   PMT_CONSOLE_LOG=1 (or *)      keep everything, for one scoped run
+            // Ported from SpawnDev.ILGPU.ML, which has had it since 2026-09-03.
+            var logFilter = Environment.GetEnvironmentVariable("PMT_CONSOLE_LOG");
+            var wantAllLogs = logFilter is "1" or "*";
+            var captureLogs = !string.IsNullOrEmpty(logFilter);
+            var consoleLogs = new List<string>();
+
             void OnConsole(object? sender, IConsoleMessage msg)
             {
                 if (msg.Type == "error")
                     consoleErrors.Add(msg.Text);
                 else if (msg.Type == "warning")
                     consoleWarnings.Add(msg.Text);
+                else if (captureLogs && msg.Text != null
+                         && (wantAllLogs || msg.Text.Contains(logFilter!, StringComparison.OrdinalIgnoreCase)))
+                    consoleLogs.Add(msg.Text);
             }
             page.Console += OnConsole;
 
@@ -138,14 +156,17 @@ public class ProjectTest
             //  check for error  class
             var unsupported = await row.EvaluateAsync<bool>("el => el.classList.contains('test-unsupported')");
 
-            // Log console errors/warnings to stderr for diagnostics
-            if (consoleErrors.Count > 0 || consoleWarnings.Count > 0)
+            // Log console errors/warnings/matched logs to stderr for diagnostics
+            if (consoleErrors.Count > 0 || consoleWarnings.Count > 0 || consoleLogs.Count > 0)
             {
-                Console.Error.WriteLine($"[{Name}] Console: {consoleErrors.Count} error(s), {consoleWarnings.Count} warning(s)");
+                Console.Error.WriteLine($"[{Name}] Console: {consoleErrors.Count} error(s), {consoleWarnings.Count} warning(s)"
+                                        + (consoleLogs.Count > 0 ? $", {consoleLogs.Count} matched log(s)" : ""));
                 foreach (var err in consoleErrors)
                     Console.Error.WriteLine($"  ERROR: {err}");
                 foreach (var warn in consoleWarnings)
                     Console.Error.WriteLine($"  WARN: {warn}");
+                foreach (var log in consoleLogs)
+                    Console.Error.WriteLine($"  LOG: {log}");
             }
 
             ResultMessage = stateMessage;

@@ -2406,7 +2406,18 @@ namespace SpawnDev.ILGPU.WebGPU
                         Entries = entries.ToArray()
                     };
 
+                    // Split out the RAW CreateBindGroup call from the descriptor construction around it.
+                    // The bind-group phase is the largest host cost of an uncaptured graph pass (2,467 ms
+                    // of a 9,485 ms Kokoro pass on WebGPU, MEASURED 2026-09-15) and "bind group" names a
+                    // phase, not a cause: descriptor + entries.ToArray() are .NET/interop object churn that
+                    // could be pooled, while CreateBindGroup is a driver call that can only be avoided by
+                    // caching it or issuing fewer dispatches. Those are completely different fixes.
+                    long _profTsBgCreate = _prof ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
                     bindGroup = device.CreateBindGroup(bindGroupDesc);
+                    if (_prof)
+                        WebGPUBackend.ProfileCpuBindGroupCreateMs +=
+                            (System.Diagnostics.Stopwatch.GetTimestamp() - _profTsBgCreate)
+                            * (1000.0 / System.Diagnostics.Stopwatch.Frequency);
 
                     // Count every active-cache miss for accurate hit-rate telemetry, but only STORE
                     // the group on a recurring signature (recur-only eviction) - a first-sight miss

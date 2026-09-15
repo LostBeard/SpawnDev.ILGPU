@@ -21,6 +21,18 @@
         // onSubmittedWorkDone / SynchronizeAsync for that). Reading performance.now() is ~free,
         // so this records unconditionally; .NET fetches it on demand only.
         last: { ops: 0, encodeMs: 0, submitMs: 0 },
+        // ── Interop cost probes ─────────────────────────────────────────────────────────────────
+        // These do NOTHING on purpose. device.createBindGroup measured 1.14 ms per call in a Kokoro
+        // pass (2,117 ms of 2,128 ms of the whole bind-group phase), and "1.14 ms" has three possible
+        // owners with three different fixes: the .NET->JS crossing itself, MARSHALLING the descriptor
+        // (its members are walked and rebuilt as a JS object per call - a layout reference, an entries
+        // array, and a nested resource object per entry - so the cost scales with members), or Dawn's
+        // own validation. A no-op crossing brackets the first; a no-op crossing that still marshals the
+        // descriptor brackets the first two; whatever the real call costs beyond that is Dawn's.
+        // noopDescriptor touches .entries.length so the marshalled object cannot be optimised away.
+        noop(x) { return x | 0; },
+        noopDescriptor(desc) { return desc && desc.entries ? desc.entries.length : 0; },
+
         // Rewrite the dstOffset (slot [i*7+4]) of copy entries in place - the patch surface for
         // parameterized replay (e.g. a KV-cache append whose destination row advances per decode
         // token). Entries must be tag-1 copies; throws otherwise (a wrong index would silently
