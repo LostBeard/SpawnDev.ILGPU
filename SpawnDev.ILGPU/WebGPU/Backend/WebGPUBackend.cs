@@ -199,6 +199,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public static int MaxPooledScalarBuffers { get; set; } = 8192;
 
         /// <summary>
+        /// Compute passes per <c>queue.submit</c> when replaying a captured dispatch plan. 0 or less =
+        /// submit the whole plan as one command buffer (the old behaviour).
+        /// </summary>
+        /// <remarks>
+        /// 🔴 A SINGLE COMMAND BUFFER FOR A LARGE PLAN LOSES THE DEVICE. MEASURED 2026-09-15: Kokoro
+        /// replaying at <c>input_ids[1,360]</c> returned "WebGPU device has been lost and cannot accept
+        /// commands" - the GPU watchdog killing one command buffer that ran too long. A 35-token Kokoro
+        /// plan is already 3,155 dispatches. The uncaptured path never hit this because WebGPUStream
+        /// flushes as it encodes; replay was the one path that did not.
+        /// <para>
+        /// Ordering is unaffected: command buffers execute in submission order on the same queue.
+        /// </para>
+        /// </remarks>
+        public static int MaxReplayPassesPerSubmit { get; set; } = 512;
+
+        /// <summary>
         /// DIAGNOSTIC: print a .NET stack trace whenever a buffer whose LABEL contains this substring is
         /// destroyed ("*" = every buffer). Null/empty (default) disables it entirely.
         /// </summary>

@@ -16,8 +16,11 @@ namespace SpawnDev.ILGPU.WebGPU;
 /// otherwise be destroyed at flush).
 ///
 /// <see cref="ReplayAsync"/> re-encodes the whole plan with a SINGLE .NET-&gt;JS interop crossing:
-/// a JS loop (see wwwroot/webgpuDispatchPlan.js) writes one command encoder - one compute pass per
-/// dispatch, preserving WebGPU's inter-pass ordering guarantees - and submits one command buffer.
+/// a JS loop (see wwwroot/webgpuDispatchPlan.js) writes one compute pass per dispatch, preserving
+/// WebGPU's inter-pass ordering guarantees, and submits them in batches of
+/// <c>WebGPUBackend.MaxReplayPassesPerSubmit</c> passes. It submitted ONE command buffer for the whole
+/// plan until 2026-09-15, when that was measured to LOSE THE DEVICE on a large graph - see that
+/// property's remarks.
 /// This removes the per-dispatch interop cost (the dominant term of a graph-executor forward on
 /// WebGPU) exactly like <c>cuGraphLaunch</c> removes per-kernel launch prep on CUDA.
 ///
@@ -300,7 +303,10 @@ public sealed class WebGPUDispatchPlan : IDisposable
         // frame's data (caught by the DA3 video-path stale-replay guard, 2026-07-03). writeBuffer
         // uploads (CopyFromCPU) were always safe - they are queue-ordered, not encoder-batched.
         _accelerator.FlushPendingCommands();
-        return SpawnJSRuntime.Instance.Call<GPUDevice, SpawnDev.SpawnJS.JSObjects.Array, int>("ilgpuWebGPUPlan.replay", device, _plan);
+        // Batched submits - see the replay() comment in webgpuDispatchPlan.js. One command buffer for
+        // the whole plan loses the device on a large graph.
+        return SpawnJSRuntime.Instance.Call<GPUDevice, SpawnDev.SpawnJS.JSObjects.Array, int, int>(
+            "ilgpuWebGPUPlan.replay", device, _plan, SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.MaxReplayPassesPerSubmit);
     }
 
     /// <summary>
