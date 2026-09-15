@@ -62,7 +62,38 @@ Buffers are returned at flush, so a batch of D dispatches returns D at once. The
 excess straight to `Destroy` - the exact per-dispatch churn pooling exists to remove, moved to the flush.
 At 256 bytes each the default costs 2 MB of GPU memory.
 
-### Changed - PlaywrightMultiTest gains `PMT_LANES` and comma-separated `PMT_FILTER`
+### Added - `WebGPUBackend.ProfileCpuBindGroupCreateMs`, and a diagnostic that names the cost
+
+The bind-group phase is the largest host cost of an uncaptured graph pass, and "bind group" names a PHASE,
+not a cause. This splits the raw `device.CreateBindGroup` call out of it: in a Kokoro pass that call is
+**2,117 ms of 2,128 ms** (99.5%) - descriptor construction is 11 ms, so there is nothing to pool .NET-side.
+
+`BackendTestBase.BindGroupCost_WhereDoesCreateBindGroupGo` then separates the three possible owners over
+the SAME real descriptor (real layout, real buffers - a probe full of nulls marshals nothing and
+under-reports the very thing being measured):
+
+```
+crossing                19 us  /   4 us
+crossing + marshal     265 us  / 188 us
+real createBindGroup   210 us  / 167 us
+```
+
+A bare crossing is negligible; merely marshalling the descriptor costs the same order as the real call. The
+cost is walking the descriptor's members - a layout reference, an entries array, a nested resource object
+per entry - not the crossing and not Dawn.
+
+⚠️ The test deliberately does NOT report `Dawn = real - marshal`: that came out NEGATIVE, so the probes are
+not cleanly nested and the subtraction is unsound. Only the magnitude comparison is reported. It also
+records that it UNDERSTATES production - it reuses three buffers per call (the marshaller's best case)
+while Kokoro binds different buffers per dispatch and up to ten of them, at ~1,140 us.
+
+### Changed - PlaywrightMultiTest gains `PMT_LANES`, `PMT_CONSOLE_LOG` and comma-separated `PMT_FILTER`
+
+`PMT_CONSOLE_LOG` was missing entirely here: only console errors and warnings were kept, so a browser
+test's own `Console.WriteLine` went nowhere - a diagnostic could pass and print nothing, which reads as
+"the test printed nothing" rather than "the harness dropped it".
+
+### Changed - PlaywrightMultiTest `PMT_LANES` detail
 
 `PMT_LANES=WebGPU,Cuda` scopes a run to backend lanes (matched against the test CLASS name), applied at
 BOTH enumeration sites - browser and desktop. Ported from SpawnDev.ILGPU.ML, where wiring only the browser

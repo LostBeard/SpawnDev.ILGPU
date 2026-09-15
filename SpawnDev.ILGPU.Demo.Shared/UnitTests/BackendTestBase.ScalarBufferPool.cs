@@ -53,9 +53,26 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             output[idx] += input[idx] * mul + add;
         }
 
+        // 🔴 WEBGPU-ONLY, AND NOT AS A WAY TO DODGE A RED. The scalar pool IS a WebGPU backend feature -
+        // WebGPUBackend.EnableBufferPooling, WebGPUAccelerator's per-device pool - so on any other backend
+        // these tests toggle a flag nothing reads and then verify the same kernel twice. MEASURED on the
+        // full six-backend sweep 2026-09-15: they passed vacuously on CPU/CUDA/OpenCL/Wasm and FAILED on
+        // WebGL, because GpuTestVerify.CompareBuffers uses Atomic.Max and WebGL has no atomics at all.
+        // Scoping a test to the backend whose feature it tests is not gating a failure; running it
+        // everywhere was the bug, and it hid four vacuous passes behind two honest reds.
+        private static void RequireWebGPUForScalarPool(Accelerator accelerator)
+        {
+            if (accelerator is not WebGPUAccelerator)
+                throw new UnsupportedTestException(
+                    "the scalar-params buffer pool is a WebGPU backend feature (WebGPUBackend."
+                  + "EnableBufferPooling); on other backends this would assert nothing");
+        }
+
         [TestMethod]
         public async Task ScalarBufferPool_RecycledAcrossSubmits_MatchesUnpooled() => await RunEmulatedTest(async accelerator =>
         {
+            RequireWebGPUForScalarPool(accelerator);
+
             // Big enough that a dispatch is still executing on the GPU while the host is already
             // renting the recycled buffer and writing the NEXT round's scalars into it. A 256-element
             // dispatch finishes before the host gets back around and would hide the race.
@@ -170,6 +187,8 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task ScalarBufferPool_BatchedDispatches_MatchesUnpooled() => await RunEmulatedTest(async accelerator =>
         {
+            RequireWebGPUForScalarPool(accelerator);
+
             const int N = 1 << 18;          // 256K floats
             const int Batches = 4;
             const int PerBatch = 24;        // 96 dispatches, 4 submits: the many-per-flush shape
