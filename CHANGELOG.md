@@ -1,6 +1,73 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.12 - Capture replay stops losing the device, and the scalar pool is per-device (fork 2.3.3)
+
+### Fixed - a large captured plan LOST THE WEBGPU DEVICE on replay
+
+`WebGPUDispatchPlan.ReplayAsync` encoded the entire recorded plan into ONE command encoder and issued a
+single `queue.submit()`. Fine for a small plan; fatal for a large one.
+
+MEASURED 2026-09-15, Kokoro TTS on WebGPU / RTX 4070 - replaying at `input_ids[1,360]`:
+
+```
+WebGPU device has been lost and cannot accept commands
+  at WebGPUGraphCapture.ReplayAsync
+```
+
+reproducibly, on the third chunk of a streaming reply. A 35-token Kokoro plan is already **3,155
+dispatches**; the 360-token plan is several times that, in one command buffer, with no point at which the
+driver can preempt - the GPU watchdog kills it.
+
+The uncaptured path never hit this because `WebGPUStream` flushes as it encodes; this library's own
+documented rule is "if dispatching many kernels (>50), call `Flush()` every 16-32 dispatches". Capture
+replay was the one path that ignored it.
+
+`replay()` now closes the encoder and submits every `WebGPUBackend.MaxReplayPassesPerSubmit` compute
+passes (default **512**), counting passes only BETWEEN operations so a pass is never split. Ordering is
+unaffected - command buffers execute in submission order on the same queue, and WebGPU's implicit
+inter-pass synchronization is per-queue, not per-buffer.
+
+⚠️ `replayTimed()` (the diagnostic timestamp path) still submits once and has the same exposure on a
+large plan.
+
+### Fixed - the scalar-buffer pool was shared across DEVICES, which is why it shipped disabled
+
+`WebGPUBackend.EnableBufferPooling` defaulted to false with the note "Pooled buffers may be reused before
+the GPU finishes reading from them". That was never what happened. The pool was one flat `[ThreadStatic]`
+list shared by every device - the field's own comment said so ("per-device pools would require instance
+field") - so a second accelerator rented another device's buffer and Dawn refused the bind group:
+
+```
+[Buffer "PooledScalar"] is associated with [Device], and cannot be used with [Device].
+```
+
+The pool is keyed by `GPUDevice` now, `ReturnPooledScalarBuffer` takes the device, and an accelerator
+drops its pool on `Dispose`. The reuse-too-early hazard was then tested for rather than assumed: buffers
+return to the pool in `WebGPUStream.FlushPending`, i.e. AFTER `Queue.Submit`, so a reuse issues its
+`queue.writeBuffer` behind the submit that consumed the previous contents.
+
+**Enabled by default**, gated by two new tests that run the identical dispatch sequence with pooling off
+and on and require BIT-IDENTICAL results - `ScalarBufferPool_RecycledAcrossSubmits_MatchesUnpooled`
+(16 submits, one dispatch each - the tightest recycle) and `ScalarBufferPool_BatchedDispatches_MatchesUnpooled`
+(96 dispatches over 4 submits - the graph-executor shape). Red-checked: perturbing one round's scalar by
+1e-3 fails both WebGPU lanes.
+
+⚠️ Honest accounting: this removes 15,450 GPU buffer create/destroy pairs from one Kokoro pass and bought
+**~0.7%** (1,808 -> 1,796 ms). It is a correctness fix that makes pooling usable at all, not a speedup.
+
+### Added - `WebGPUBackend.MaxPooledScalarBuffers` (default 8192)
+
+Buffers are returned at flush, so a batch of D dispatches returns D at once. The old cap of 64 sent the
+excess straight to `Destroy` - the exact per-dispatch churn pooling exists to remove, moved to the flush.
+At 256 bytes each the default costs 2 MB of GPU memory.
+
+### Changed - PlaywrightMultiTest gains `PMT_LANES` and comma-separated `PMT_FILTER`
+
+`PMT_LANES=WebGPU,Cuda` scopes a run to backend lanes (matched against the test CLASS name), applied at
+BOTH enumeration sites - browser and desktop. Ported from SpawnDev.ILGPU.ML, where wiring only the browser
+site left the desktop lane running unfiltered, which reads exactly like the filter not working.
+
 ## 5.2.10 - A null buffer never reaches JS, and a destroy site can now be named (fork 2.3.3)
 
 ### Fixed - binding a DISPOSED buffer produced an opaque DOM error
