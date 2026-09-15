@@ -180,6 +180,11 @@ namespace PlaywrightMultiTest
             filter ??= Environment.GetEnvironmentVariable("PMT_FILTER");
             if (!string.IsNullOrEmpty(filter)) LogStatus($"Test filter active: '{filter}' (substring match)");
 
+            // Backend scoping, independent of the name filter - see LaneFilter().
+            var laneFilter = LaneFilter();
+            if (laneFilter != null)
+                LogStatus($"PMT_LANES active: only [{string.Join(", ", laneFilter)}] lanes are scheduled.");
+
 
             LogStatus("Discovering projects...");
             var projects = ProjectDiscovery.GetWorkspaceRoot();
@@ -368,6 +373,13 @@ namespace PlaywrightMultiTest
                             var methodName = row.GetProperty("methodName").GetString() ?? "";
                             var rowTest = new ProjectTest(testableProject, typeName, methodName, testPageUrl);
 
+                            // Backend scoping (PMT_LANES) - applied like the name filter, before the
+                            // test is ever scheduled.
+                            if (!MatchesLane(laneFilter, typeName))
+                            {
+                                continue;
+                            }
+
                             if (filter != null && !MatchesFilter(filter, rowTest))
                             {
                                 continue;
@@ -427,6 +439,15 @@ namespace PlaywrightMultiTest
                         if (string.IsNullOrWhiteSpace(methodName)) continue;
 
                         var rowTest = new ProjectTest(testableProject, typeName!, methodName!);
+
+                        // ⚠️ THE SECOND ENUMERATION SITE. PMT_LANES was first applied only at the
+                        // browser site; the desktop lane then still ran unfiltered, which looks exactly
+                        // like the filter not working.
+                        if (!MatchesLane(laneFilter, typeName))
+                        {
+                            continue;
+                        }
+
                         if (filter != null && !MatchesFilter(filter, rowTest))
                         {
                             continue;
@@ -1085,10 +1106,58 @@ namespace PlaywrightMultiTest
         private static bool IsWasm(ProjectTest t) => (t.TestTypeName ?? "").Contains("Wasm", StringComparison.OrdinalIgnoreCase);
 
         // Substring, case-insensitive match against a test's full name / type / method.
-        private static bool MatchesFilter(string filter, ProjectTest t) =>
-            (t.Name?.Contains(filter, StringComparison.OrdinalIgnoreCase) ?? false)
-            || (t.TestTypeName?.Contains(filter, StringComparison.OrdinalIgnoreCase) ?? false)
-            || (t.TestMethodName?.Contains(filter, StringComparison.OrdinalIgnoreCase) ?? false);
+        // ── PMT_LANES: run only the named backend lanes ────────────────────────────────────────────
+        //
+        // 🔴 WHY THIS EXISTS. The standing rule is FAST BACKENDS FIRST - CUDA (desktop) + WebGPU
+        // (browser) for iteration, with the full six-backend sweep saved for the release gate. PMT had
+        // PMT_FILTER (by test NAME) but no way to scope by BACKEND, so a one-question check on WebGPU
+        // still ran the same test on CPU, WebGL and Wasm. TJ, 2026-09-15: "FUCK CPU AND EVERYTHING ELSE
+        // RIGHT NOW UNTIL YOU GET THE 2 MAIN BACKENDS WORKING PERFECTLY ... that way we are not wasting
+        // time testing shit code on shit backends that takes forever."
+        //
+        //   PMT_LANES=WebGPU,Cuda     iterate on the two that matter
+        //   (unset)                   every lane, which is what a release gate wants
+        //
+        // Matched against the TEST CLASS name (WebGPUTests, CudaTests, OpenCLTests, CPUTests,
+        // WebGLTests, WasmTests, ...), substring, case-insensitive - so "WebGPU" also selects
+        // WebGPUNoSubgroupsTests, which is what you want when scoping to a backend.
+        //
+        // ⚠️ APPLY IT AT BOTH ENUMERATION SITES. Ported from SpawnDev.ILGPU.ML, where it was first
+        // wired into the browser site only - the desktop lane then still ran unfiltered and pegged all
+        // 12 cores, which reads exactly like the filter not working at all.
+        private static string[]? LaneFilter()
+        {
+            var env = Environment.GetEnvironmentVariable("PMT_LANES");
+            if (string.IsNullOrWhiteSpace(env)) return null;
+            return env.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+        }
+
+        private static bool MatchesLane(string[]? lanes, string? testTypeName)
+        {
+            if (lanes == null) return true;
+            if (testTypeName == null) return false;
+            foreach (var lane in lanes)
+                if (testTypeName.Contains(lane, StringComparison.OrdinalIgnoreCase)) return true;
+            return false;
+        }
+
+        // Comma-separated = OR. A single substring cannot select two unrelated suites (say a feature
+        // and its regression guard) without also dragging in everything whose name happens to share a
+        // prefix; the alternative was two full PMT invocations, each paying the publish + static-server
+        // + Chromium-launch cost again. Ported from SpawnDev.ILGPU.ML.
+        private static bool MatchesFilter(string filter, ProjectTest t)
+        {
+            foreach (var term in filter.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+            {
+                if ((t.Name?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false)
+                    || (t.TestTypeName?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false)
+                    || (t.TestMethodName?.Contains(term, StringComparison.OrdinalIgnoreCase) ?? false))
+                {
+                    return true;
+                }
+            }
+            return false;
+        }
 
         private static string DesktopLaneOf(string? typeName) => (typeName ?? "") switch
         {

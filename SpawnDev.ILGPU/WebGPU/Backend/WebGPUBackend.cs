@@ -163,12 +163,40 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public static bool EnableReflectionCaching { get; set; } = true;
 
         /// <summary>
-        /// Enables scalar buffer pooling.
-        /// WARNING: Disabled by default because WebGPU Queue.Submit is asynchronous.
-        /// Pooled buffers may be reused before the GPU finishes reading from them.
-        /// Enable only if you implement explicit synchronization.
+        /// Enables recycling of the 256-byte <c>_scalar_params</c> buffer every dispatch with scalar
+        /// kernel parameters needs, instead of creating and destroying one per dispatch.
         /// </summary>
-        public static bool EnableBufferPooling { get; set; } = false;
+        /// <remarks>
+        /// Buffers are returned to the pool in <c>WebGPUStream.FlushPending</c>, immediately AFTER
+        /// <c>Queue.Submit</c> - never while a dispatch is still only recorded in the command
+        /// encoder. Reuse therefore issues its <c>queue.writeBuffer</c> after the submit that
+        /// consumed the previous contents.
+        /// <para>
+        /// This shipped disabled with the note "Pooled buffers may be reused before the GPU finishes
+        /// reading from them." MEASURED 2026-09-15, that is not what was happening: the pool was one
+        /// flat list shared by EVERY device, so a second accelerator rented another device's buffer and
+        /// Dawn refused the bind group ("[Buffer "PooledScalar"] is associated with [Device], and
+        /// cannot be used with [Device]"). The pool is per-device now. The reuse-too-early hazard was
+        /// then tested for directly and does not occur, because buffers go back to the pool only in
+        /// <c>WebGPUStream.FlushPending</c>, after the submit.
+        /// </para>
+        /// <para>
+        /// The gates are <c>BackendTestBase.ScalarBufferPool_RecycledAcrossSubmits_MatchesUnpooled</c>
+        /// (one dispatch per submit - the tightest recycle) and
+        /// <c>ScalarBufferPool_BatchedDispatches_MatchesUnpooled</c> (96 dispatches over 4 submits - the
+        /// graph-executor shape). Both run the sequence with pooling off and on and require
+        /// BIT-IDENTICAL results. Do not change this default without both green - the failure mode is
+        /// silent wrong arithmetic, not an error.
+        /// </para>
+        /// </remarks>
+        public static bool EnableBufferPooling { get; set; } = true;
+
+        /// <summary>
+        /// Maximum scalar buffers parked in the pool. Must exceed the peak number of dispatches in a
+        /// single batch, or the excess is destroyed at flush and pooling buys nothing (see
+        /// <c>WebGPUAccelerator.ReturnPooledScalarBuffer</c>). 256 bytes each.
+        /// </summary>
+        public static int MaxPooledScalarBuffers { get; set; } = 8192;
 
         /// <summary>
         /// DIAGNOSTIC: print a .NET stack trace whenever a buffer whose LABEL contains this substring is

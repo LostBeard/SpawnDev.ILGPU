@@ -97,9 +97,26 @@ namespace SpawnDev.ILGPU.WebGPU
         // Reflection cache: caches PropertyInfo/FieldInfo for dimension extraction per type
         private static readonly ConcurrentDictionary<Type, ReflectionMetadataCache> _reflectionCache = new();
 
-        // Buffer pool for scalar arguments (per-device pools would require instance field)
+        // 🔴 THE SCALAR POOL IS PER-DEVICE, AND THAT IS NOT OPTIONAL. It used to be one flat
+        // [ThreadStatic] list with the comment "per-device pools would require instance field" - which
+        // made every buffer in it reachable from ANY accelerator. Rent one on a second device and
+        // Dawn rejects the bind group outright:
+        //
+        //   [Buffer "PooledScalar"] is associated with [Device], and cannot be used with [Device].
+        //
+        // Any app or test run that creates more than one WebGPU accelerator hits it, which is why
+        // EnableBufferPooling had to ship disabled. Keyed on the GPUDevice wrapper instance (one per
+        // accelerator) so a device's pool dies with the device rather than outliving it.
         [ThreadStatic]
-        private static List<GPUBuffer>? _scalarBufferPool;
+        private static Dictionary<GPUDevice, List<GPUBuffer>>? _scalarBufferPools;
+
+        private static List<GPUBuffer> PoolFor(GPUDevice device)
+        {
+            _scalarBufferPools ??= new Dictionary<GPUDevice, List<GPUBuffer>>();
+            if (!_scalarBufferPools.TryGetValue(device, out var pool))
+                _scalarBufferPools[device] = pool = new List<GPUBuffer>();
+            return pool;
+        }
 
         // Reusable lists to avoid per-dispatch allocations
         [ThreadStatic]
@@ -290,6 +307,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 try { BindGroup?.Dispose(); } catch { }
                 if (ScalarBuffer != null)
                 {
+                    ScalarDestroyedByCacheEntry++;
                     try { ScalarBuffer.Destroy(); ScalarBuffer.Dispose(); } catch { }
                 }
                 if (LockBuffers != null)
@@ -654,13 +672,12 @@ namespace SpawnDev.ILGPU.WebGPU
             if (!WebGPUBackend.EnableBufferPooling)
                 return CreateScalarBuffer(device);
 
-            _scalarBufferPool ??= new List<GPUBuffer>();
-
-            // Try to find a reusable buffer
-            if (_scalarBufferPool.Count > 0)
+            // This device's pool only - a buffer from another device is rejected by the driver.
+            var pool = PoolFor(device);
+            if (pool.Count > 0)
             {
-                var buffer = _scalarBufferPool[_scalarBufferPool.Count - 1];
-                _scalarBufferPool.RemoveAt(_scalarBufferPool.Count - 1);
+                var buffer = pool[pool.Count - 1];
+                pool.RemoveAt(pool.Count - 1);
                 return buffer;
             }
 
@@ -668,23 +685,62 @@ namespace SpawnDev.ILGPU.WebGPU
         }
 
         // internal: WebGPUDispatchPlan returns its retained scalar buffers here on Dispose.
-        internal static void ReturnPooledScalarBuffer(GPUBuffer buffer)
+        /// <summary>Scalar buffers destroyed because pooling is OFF.</summary>
+        public static long ScalarDestroyedByPoolingOff;
+        /// <summary>Scalar buffers destroyed because the pool was already full.</summary>
+        /// <remarks>
+        /// 🔴 WHY THESE COUNTERS EXIST. Enabling the bind-group cache on Kokoro gives 330 GPU errors, every
+        /// one of them [Buffer "PooledScalar"] used in submit while destroyed. Two genuine causes were found
+        /// and fixed (stale scalars under batching; destroying cached buffers while a batch is open) and
+        /// NEITHER was this one. There are exactly three places a buffer with that label can be destroyed,
+        /// and guessing between them by inspection has already failed twice - so each counts itself.
+        /// </remarks>
+        public static long ScalarDestroyedByPoolOverflow;
+        /// <summary>Scalar buffers destroyed with a bind-group cache entry.</summary>
+        public static long ScalarDestroyedByCacheEntry;
+
+        /// <summary>Scalar buffers currently parked across every device's pool, available for reuse.</summary>
+        public static int PooledScalarBufferCount
+        {
+            get
+            {
+                if (_scalarBufferPools == null) return 0;
+                int n = 0;
+                foreach (var kv in _scalarBufferPools) n += kv.Value.Count;
+                return n;
+            }
+        }
+
+        /// <summary>
+        /// Returns a scalar buffer to <paramref name="device"/>'s pool. The device is REQUIRED: a
+        /// GPUBuffer belongs to exactly one device and reusing it on another is a driver error, not a
+        /// performance question. See the <c>_scalarBufferPools</c> note.
+        /// </summary>
+        internal static void ReturnPooledScalarBuffer(GPUBuffer buffer, GPUDevice device)
         {
             if (!WebGPUBackend.EnableBufferPooling)
             {
+                ScalarDestroyedByPoolingOff++;
                 buffer.Destroy();
                 buffer.Dispose();
                 return;
             }
 
-            _scalarBufferPool ??= new List<GPUBuffer>();
-            // Limit pool size to prevent memory bloat (increased for batching headroom)
-            if (_scalarBufferPool.Count < 64)
+            var pool = PoolFor(device);
+            // 🔴 THE CAP MUST EXCEED THE PEAK PER-FLUSH DISPATCH COUNT OR POOLING BUYS NOTHING.
+            // Buffers are returned in FlushPending, so a batch of D dispatches returns D buffers at
+            // once. A cap below D sends the excess straight to Destroy - the exact per-dispatch
+            // driver churn pooling exists to remove, just moved to the flush. MEASURED: one Kokoro
+            // TTS pass on WebGPU is ~15,450 scalar buffers across THREE drains, i.e. thousands per
+            // flush, so the old cap of 64 would have overflowed on ~99% of them. At 256 bytes each
+            // the cap costs 256 * MaxPooledScalarBuffers bytes of GPU memory - 2 MB at the default.
+            if (pool.Count < WebGPUBackend.MaxPooledScalarBuffers)
             {
-                _scalarBufferPool.Add(buffer);
+                pool.Add(buffer);
             }
             else
             {
+                ScalarDestroyedByPoolOverflow++;
                 buffer.Destroy();
                 buffer.Dispose();
             }
@@ -2528,7 +2584,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 // Return any scalar buffers not deferred (error path)
                 foreach (var buffer in scalarBuffersToReturn)
                 {
-                    ReturnPooledScalarBuffer(buffer);
+                    ReturnPooledScalarBuffer(buffer, device);
                 }
             }
         }
@@ -2565,7 +2621,28 @@ namespace SpawnDev.ILGPU.WebGPU
 
         protected override void OnBind() { }
         protected override void OnUnbind() { }
-        protected override void DisposeAccelerator_SyncRoot(bool disposing) { if (disposing) NativeAccelerator.Dispose(); }
+        protected override void DisposeAccelerator_SyncRoot(bool disposing)
+        {
+            if (!disposing) return;
+            // Drop this device's scalar pool BEFORE the device goes away. Leaving it behind would
+            // retain the GPUDevice wrapper as a dictionary key and park buffers that can never be
+            // rented again (their device is gone).
+            ReleaseScalarPool(NativeAccelerator.NativeDevice);
+            NativeAccelerator.Dispose();
+        }
+
+        /// <summary>
+        /// Destroys and forgets every pooled scalar buffer belonging to <paramref name="device"/>.
+        /// </summary>
+        internal static void ReleaseScalarPool(GPUDevice? device)
+        {
+            if (device == null || _scalarBufferPools == null) return;
+            if (!_scalarBufferPools.Remove(device, out var pool)) return;
+            foreach (var buf in pool)
+            {
+                try { buf.Destroy(); buf.Dispose(); } catch { /* device may already be gone */ }
+            }
+        }
         public override TExtension CreateExtension<TExtension, TExtensionProvider>(TExtensionProvider provider) => default;
         protected override PageLockScope<T> CreatePageLockFromPinnedInternal<T>(IntPtr ptr, long numElements) => throw new NotSupportedException();
         protected override int EstimateGroupSizeInternal(Kernel kernel, int dynamicSharedMemorySize, int maxGridSize, out int groupSize) { groupSize = 64; return 64; }
@@ -2750,8 +2827,9 @@ namespace SpawnDev.ILGPU.WebGPU
                     bg.Dispose();
                 _pendingBindGroups.Clear();
 
+                var poolDevice = _webGpuAccelerator.NativeAccelerator.NativeDevice!;
                 foreach (var buf in _pendingScalarBuffers)
-                    ReturnPooledScalarBuffer(buf);
+                    ReturnPooledScalarBuffer(buf, poolDevice);
                 _pendingScalarBuffers.Clear();
 
                 foreach (var buf in _pendingCoalesceBuffers)

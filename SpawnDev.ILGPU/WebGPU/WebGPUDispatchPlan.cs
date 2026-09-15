@@ -350,9 +350,17 @@ public sealed class WebGPUDispatchPlan : IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        var poolDevice = _accelerator.NativeAccelerator.NativeDevice;
         foreach (var buf in _retainedScalarBuffers)
         {
-            try { WebGPUAccelerator.ReturnPooledScalarBuffer(buf); } catch { }
+            // No device (accelerator already torn down) -> destroy rather than park it somewhere it
+            // could be rented by a different device later.
+            try
+            {
+                if (poolDevice != null) WebGPUAccelerator.ReturnPooledScalarBuffer(buf, poolDevice);
+                else { buf.Destroy(); buf.Dispose(); }
+            }
+            catch { }
         }
         _retainedScalarBuffers.Clear();
         foreach (var buf in _retainedCoalesceBuffers)
