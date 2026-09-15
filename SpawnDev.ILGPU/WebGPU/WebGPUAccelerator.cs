@@ -161,6 +161,15 @@ namespace SpawnDev.ILGPU.WebGPU
         /// dispatch. See <c>BindGroupCacheEntry.UsedSinceFlush</c> for why it exists.</summary>
         internal void MarkBindGroupCacheFlushed()
         {
+            // Entries retired by a mid-batch ClearBindGroupCache are safe to free now: the Submit that just
+            // happened handed every dispatch referencing them to the queue.
+            if (_retiredBindGroupEntries.Count > 0)
+            {
+                foreach (var entry in _retiredBindGroupEntries)
+                    entry.DisposeResources();
+                _retiredBindGroupEntries.Clear();
+            }
+
             if (_bindGroupCache.Count == 0) return;
             foreach (var entry in _bindGroupCache.Values)
                 entry.UsedSinceFlush = false;
@@ -302,13 +311,49 @@ namespace SpawnDev.ILGPU.WebGPU
         /// </summary>
         public void ClearBindGroupCache()
         {
-            foreach (var entry in _bindGroupCache.Values)
-                entry.DisposeResources();
+            // 🔴 RETIRE, DO NOT DISPOSE, WHILE A BATCH IS OPEN.
+            //
+            // This used to destroy every entry's scalar/lock buffers immediately. That is correct only under
+            // the contract in the summary above - "AFTER a Synchronize" - and ONE caller does not honour it:
+            // OnShaderEvicting. A shader eviction happens mid-run, driven by cache pressure, with dispatches
+            // already recorded into the open command encoder. Destroying the buffers those dispatches bind
+            // makes the NEXT submit fail, and Dawn reports it against the buffer rather than the eviction:
+            //
+            //     [Buffer "PooledScalar"] used in submit while destroyed.
+            //      - While calling [Queue].Submit([[CommandBuffer]])
+            //
+            // MEASURED 2026-09-15: 330 of those in one Kokoro pass with the cache enabled (1,850 nodes,
+            // three drains, so hundreds of dispatches per encoder), surfacing as a failure at node 1238
+            // 'ReduceSum' - a node with nothing wrong with it. That is why bind-group caching shipped
+            // opt-in and off, and why bind-group creation is still the largest WebGPU dispatch phase.
+            //
+            // So: if nothing is batched, free now; otherwise hand the entries to the retired list and let
+            // the next flush free them AFTER its Submit. Same shape as the retired-plan lists elsewhere in
+            // the stack - a captured/batched plan's resources outlive the object that owned them.
+            if (HasPendingBatch)
+            {
+                foreach (var entry in _bindGroupCache.Values)
+                    _retiredBindGroupEntries.Add(entry);
+            }
+            else
+            {
+                foreach (var entry in _bindGroupCache.Values)
+                    entry.DisposeResources();
+            }
             _bindGroupCache.Clear();
             _bindGroupSeen.Clear();
             _bindGroupCacheHits = 0;
             _bindGroupCacheMisses = 0;
         }
+
+        /// <summary>Entries pulled out of the cache while a command batch was still open. Their GPU
+        /// resources are referenced by recorded-but-unsubmitted dispatches, so they are freed after the
+        /// next Submit instead of immediately. See <see cref="ClearBindGroupCache"/>.</summary>
+        private readonly List<BindGroupCacheEntry> _retiredBindGroupEntries = new();
+
+        /// <summary>True when the default stream holds a command encoder with recorded work that has not
+        /// been submitted yet - i.e. destroying a GPU resource it references would be a use-after-free.</summary>
+        private bool HasPendingBatch => ((WebGPUStream)DefaultStream).HasOpenEncoder;
 
         #endregion
 
@@ -2628,6 +2673,12 @@ namespace SpawnDev.ILGPU.WebGPU
         {
             private readonly WebGPUAccelerator _webGpuAccelerator;
             private GPUCommandEncoder? _encoder;
+
+            /// <summary>True while a command encoder holds recorded work that has not been submitted.
+            /// Destroying a GPU resource such work references is a use-after-free that Dawn reports at the
+            /// NEXT Submit, blaming the buffer rather than whatever freed it. See
+            /// WebGPUAccelerator.ClearBindGroupCache.</summary>
+            internal bool HasOpenEncoder => _encoder != null;
             private readonly List<GPUBindGroup> _pendingBindGroups = new();
             private readonly List<GPUBuffer> _pendingScalarBuffers = new();
             private readonly List<GPUBuffer> _pendingCoalesceBuffers = new();
