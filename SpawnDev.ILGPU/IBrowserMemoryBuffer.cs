@@ -37,8 +37,45 @@ namespace SpawnDev.ILGPU
         /// exceeds it. Called from each browser backend's host→device <c>CopyFrom</c> CPU branch.
         /// <paramref name="backend"/> names the backend in the message.
         /// </summary>
+        // ── ALWAYS-ON CENSUS OF BULK DATA CROSSING INTO .NET ────────────────────────────────────
+        //
+        // 🔴 THE GUARD ABOVE ONLY FIRES WHERE SOMEONE REMEMBERED TO ARM IT, and that is exactly one
+        // window (weight upload). Everywhere else a bulk CopyFromCPU is silent - it costs seconds on
+        // the single-threaded WASM heap and nothing says so, so the violation is found days later by
+        // someone chasing a performance number. TJ 2026-09-15: "maybe we can stop foot gunning
+        // ourselves with big failures instead of us fighting for performance only to find out at least
+        // once a week you wrote shit code that claims to be performant and literally is NOT AND
+        // violates our rules about pulling data into .net needlessly."
+        //
+        // ⭐ COUNTING IS FREE AND NEEDS NO ONE TO PREDICT WHERE THE BUG WILL BE. This method is already
+        // called on EVERY host->device copy on all three browser backends, armed or not, so it is the
+        // one chokepoint every violation must pass through. A run can now simply ASK how many bytes it
+        // pulled through the managed heap, and a production path that should be zero-copy can assert
+        // zero instead of hoping.
+        //
+        // ⚠️ Counts every host copy, including the legitimate small ones (a <=64 KB scalar or shape
+        // constant is correct and expected). LargestHostCopyBytes is what separates "a few hundred
+        // bytes of constants" from "a weight regressed onto the .NET path".
+
+        /// <summary>Host-&gt;device CPU copies seen on a browser backend since the last reset.</summary>
+        public static long HostCopyCount;
+        /// <summary>Total bytes those copies moved through the managed heap since the last reset.</summary>
+        public static long HostCopyBytes;
+        /// <summary>Largest single host-&gt;device CPU copy since the last reset.</summary>
+        public static long LargestHostCopyBytes;
+
+        /// <summary>Zero the host-copy census (call before a window you intend to assert on).</summary>
+        public static void ResetHostCopyCensus()
+        {
+            HostCopyCount = 0; HostCopyBytes = 0; LargestHostCopyBytes = 0;
+        }
+
         public static void CheckHostCopy(long byteLength, string backend)
         {
+            HostCopyCount++;
+            HostCopyBytes += byteLength;
+            if (byteLength > LargestHostCopyBytes) LargestHostCopyBytes = byteLength;
+
             var max = StrictHostCopyMaxBytes;
             if (max >= 0 && byteLength > max)
                 throw new System.InvalidOperationException(
