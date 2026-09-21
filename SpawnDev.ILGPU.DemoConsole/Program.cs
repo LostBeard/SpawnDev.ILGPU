@@ -6,6 +6,11 @@ using SpawnDev.UnitTesting;
 
 try
 {
+    // Autolykos2 (Ergo) throughput benchmark - see Autolykos2Bench.cs header for options and
+    // why the number it prints must come from a published Release build, not `dotnet run`.
+    if (args.Length > 0 && args[0] == "autolykos2-bench")
+        return await Autolykos2Bench.Run(args);
+
     // CPU per-launch latency probe (GGUFDecodeKVCache slowness). No browser, no ML.
     if (args.Length > 0 && args[0] == "cpu-launch-lat")
         return await CpuLaunchLatencyProbe.Run(args);
