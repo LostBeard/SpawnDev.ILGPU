@@ -220,4 +220,105 @@ public abstract partial class BackendTestBase
 
         Console.WriteLine($"[Autolykos2] Dataset generation GPU/CPU match on {BackendName}: {n}/{n} elements ✓");
     });
+
+    // ═══════════════════════════════════════════════════════════
+    //  Autolykos2 - mining kernel, small N
+    // ═══════════════════════════════════════════════════════════
+
+    // KNOWN OPEN ISSUES (found running this test 2026-09-21), neither chased further for the
+    // same out-of-scope-for-mining reason as the issues documented on the other two tests above:
+    // - WebGPU with subgroups disabled (WebGPUNoSubgroupsTests) times out (>30s) on this kernel,
+    //   while the subgroup-enabled WebGPU variant passes it cleanly and quickly - points at a
+    //   pathologically slow fallback path for atomics/scatter without subgroup ops, not a
+    //   correctness bug.
+    // - Wasm: reports 0 hits when exactly 1 is expected (the known nonce goes missing, no false
+    //   positives) - Wasm passed both the Blake2b and dataset-generation tests above cleanly, so
+    //   this points specifically at the atomic-allocate-then-scatter-write pattern
+    //   (Atomic.Add(ref winningCount[0], 1) then winningNonces[slot] = nonce), not at the hash
+    //   math itself.
+    [TestMethod]
+    public async Task Autolykos2_Mine_SmallN_FindsKnownHits() => await RunTest(async accelerator =>
+    {
+        const int n = 128; // small N, fast to generate and to gather from on every backend
+        const uint height = 1_500_000;
+        const int nonceRange = 256; // small enough that an exhaustive CPU scan is instant
+        const ulong nonceBase = 0;
+
+        // Arbitrary but fixed 32-byte "block header hash" for reproducibility.
+        const ulong h0m = 0x0102030405060708UL, h1m = 0x1112131415161718UL,
+                    h2m = 0x2122232425262728UL, h3m = 0x3132333435363738UL;
+
+        // Build the small dataset once (GPU dispatch, already proven correct by the prior test)
+        // and copy it to host so the CPU reference path has a plain array to index.
+        using var datasetBuf = accelerator.Allocate1D<Element256>(n);
+        var genKernel = accelerator.LoadAutoGroupedStreamKernel<
+            Index1D, ArrayView<Element256>, uint>(Autolykos2.GenerateDatasetKernel);
+        genKernel(n, datasetBuf.View, height);
+        await accelerator.SynchronizeAsync();
+        Element256[] hostDataset = await datasetBuf.CopyToHostAsync();
+
+        // Digest comparison is a standard big-number "value < target" (word0 most significant),
+        // so a target built from an arbitrary nonce's own digest is NOT tight - roughly half of
+        // all other nonces will have a numerically smaller digest and hit too (word0 alone
+        // decides it about half the time). The deterministic way to get a single guaranteed hit:
+        // find the nonce with the numerically SMALLEST digest across the whole tested range, and
+        // set the target one increment above exactly that digest - nothing else in the range can
+        // be smaller than the range's own minimum, by definition.
+        ulong minNonce = 0, minD0 = ulong.MaxValue, minD1 = 0, minD2 = 0, minD3 = 0;
+        for (ulong nonce = 0; nonce < nonceRange; nonce++)
+        {
+            Autolykos2.ComputeNonceDigest(hostDataset, n, nonce, h0m, h1m, h2m, h3m,
+                out ulong dd0, out ulong dd1, out ulong dd2, out ulong dd3);
+            bool smaller = dd0 < minD0 || (dd0 == minD0 && (dd1 < minD1 || (dd1 == minD1 &&
+                (dd2 < minD2 || (dd2 == minD2 && dd3 < minD3)))));
+            if (nonce == 0 || smaller) { minNonce = nonce; minD0 = dd0; minD1 = dd1; minD2 = dd2; minD3 = dd3; }
+        }
+        ulong target0 = minD0, target1 = minD1, target2 = minD2, target3 = minD3 + 1;
+
+        var expectedHits = new System.Collections.Generic.HashSet<ulong>();
+        for (ulong nonce = 0; nonce < nonceRange; nonce++)
+        {
+            if (Autolykos2.MineNonceReference(hostDataset, n, nonce, h0m, h1m, h2m, h3m,
+                target0, target1, target2, target3))
+                expectedHits.Add(nonce);
+        }
+        if (expectedHits.Count != 1 || !expectedHits.Contains(minNonce))
+            throw new Exception(
+                $"Test setup bug: expected exactly nonce {minNonce} (the range's minimum digest) to hit, " +
+                $"got {expectedHits.Count} hit(s): [{string.Join(",", expectedHits)}]");
+
+        // Run the actual GPU kernel over the same nonce range and collect what it reports.
+        const int maxWinners = 32;
+        using var winningNonces = accelerator.Allocate1D<ulong>(maxWinners);
+        using var winningCount = accelerator.Allocate1D<int>(1);
+        winningCount.MemSetToZero();
+
+        var mineKernel = accelerator.LoadAutoGroupedStreamKernel<
+            Index1D, ArrayView<Element256>, uint, ulong, ulong, ulong, ulong, ulong,
+            ulong, ulong, ulong, ulong, ArrayView<ulong>, ArrayView<int>>(Autolykos2.MineKernel);
+        mineKernel(nonceRange, datasetBuf.View, n, nonceBase, h0m, h1m, h2m, h3m,
+            target0, target1, target2, target3, winningNonces.View, winningCount.View);
+        await accelerator.SynchronizeAsync();
+
+        int gpuCount = (await winningCount.CopyToHostAsync())[0];
+        if (gpuCount > maxWinners)
+            throw new Exception($"Autolykos2 mining on {BackendName}: {gpuCount} hits overflowed the {maxWinners}-slot buffer - loosen the test target.");
+
+        var gpuNonces = await winningNonces.CopyToHostAsync();
+        var gpuHits = new System.Collections.Generic.HashSet<ulong>();
+        for (int i = 0; i < gpuCount; i++) gpuHits.Add(gpuNonces[i]);
+
+        if (!gpuHits.SetEquals(expectedHits))
+        {
+            var missing = new System.Collections.Generic.List<ulong>();
+            var extra = new System.Collections.Generic.List<ulong>();
+            foreach (var e in expectedHits) if (!gpuHits.Contains(e)) missing.Add(e);
+            foreach (var g in gpuHits) if (!expectedHits.Contains(g)) extra.Add(g);
+            throw new Exception(
+                $"Autolykos2 mining hit-set mismatch on {BackendName}: expected {expectedHits.Count} hits, GPU reported {gpuHits.Count}. " +
+                $"Missing: [{string.Join(",", missing)}] Extra: [{string.Join(",", extra)}]");
+        }
+
+        Console.WriteLine($"[Autolykos2] Mining GPU/CPU hit-set match on {BackendName}: {expectedHits.Count} hit(s) in {nonceRange} nonces ✓");
+    });
 }

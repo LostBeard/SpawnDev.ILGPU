@@ -12,6 +12,7 @@
 
 using System.Runtime.CompilerServices;
 using ILGPU;
+using ILGPU.Runtime;
 
 namespace SpawnDev.ILGPU.Crypto
 {
@@ -139,6 +140,190 @@ namespace SpawnDev.ILGPU.Crypto
         {
             GenerateDatasetElement((uint)index, height, out ulong e0, out ulong e1, out ulong e2, out ulong e3);
             dataset[index] = new Element256(e0, e1, e2, e3);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static ulong AddWithCarry(ulong a, ulong b, ulong carryIn, out ulong carryOut)
+        {
+            ulong sum = a + b;
+            ulong c1 = sum < a ? 1UL : 0UL;
+            ulong result = sum + carryIn;
+            ulong c2 = result < sum ? 1UL : 0UL;
+            carryOut = c1 | c2;
+            return result;
+        }
+
+        /// <summary>
+        /// Extracts one big-endian byte (0..31) from a conceptual 32-byte buffer made of 4
+        /// big-endian-ordered 64-bit words (word0's byte0 is its most significant byte). Word
+        /// selection is a ternary chain, not array indexing, so it stays register-only.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static byte ByteOfBE(ulong w0, ulong w1, ulong w2, ulong w3, int byteIndex)
+        {
+            int wordSel = byteIndex >> 3;
+            ulong word = wordSel == 0 ? w0 : wordSel == 1 ? w1 : wordSel == 2 ? w2 : w3;
+            int shift = 56 - ((byteIndex & 7) << 3);
+            return (byte)((word >> shift) & 0xFFUL);
+        }
+
+        /// <summary>
+        /// Derives one of the K sliding-window indices (0..K-1) from the 32-byte second-stage
+        /// hash, mod <paramref name="datasetLength"/>. A 4-byte big-endian window starting at
+        /// byte offset <paramref name="k"/>, wrapping mod 32 (equivalent to the reference's
+        /// duplicate-first-4-bytes trick, without needing an extended buffer).
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static uint DeriveIndex(ulong sh0, ulong sh1, ulong sh2, ulong sh3, int k, uint datasetLength)
+        {
+            uint idxWord = 0;
+            for (int b = 0; b < 4; b++)
+            {
+                int byteIndex = (k + b) & 31;
+                idxWord = (idxWord << 8) | ByteOfBE(sh0, sh1, sh2, sh3, byteIndex);
+            }
+            return idxWord % datasetLength;
+        }
+
+        /// <summary>
+        /// Core per-nonce computation, shared conceptually (not literally, see remarks below on
+        /// why) between <see cref="MineKernel"/> (GPU, <c>ArrayView</c>-backed dataset) and
+        /// <see cref="MineNonceReference"/> (CPU test reference, plain-array-backed dataset).
+        /// </summary>
+        /// <remarks>
+        /// Deliberate simplification vs. the reference miner, documented rather than silently
+        /// diverging: the reference reads only 31 of a dataset element's 32 bytes at this stage
+        /// (dropping one specific byte per its own internal storage-order convention). Since this
+        /// implementation's dataset elements already carry a structurally-forced zero byte from
+        /// generation (<see cref="GenerateDatasetElement"/>'s low byte of e0), using the full 32
+        /// bytes here achieves the same "one fixed byte" design property without needing a second,
+        /// differently-positioned byte-drop whose exact reference byte-order this implementation
+        /// hasn't independently verified. This changes the second-stage message length (72 bytes
+        /// here vs. 71 in the reference) but not the computational shape (same hash count, same
+        /// random-access memory pattern) - see the class remarks on internal-consistency-over-live-
+        /// network-fidelity for why that tradeoff is acceptable for this PoC.
+        /// </remarks>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static void ComputeFinalHash(
+            ulong acc0, ulong acc1, ulong acc2, ulong acc3,
+            out ulong d0, out ulong d1, out ulong d2, out ulong d3)
+        {
+            Blake2b.Hash256(acc0, acc1, acc2, acc3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 32,
+                out d0, out d1, out d2, out d3);
+        }
+
+        /// <summary>
+        /// GPU kernel: one thread per nonce candidate in this launch batch. On a hit (final digest
+        /// below target), atomically allocates a slot and records the winning nonce.
+        /// <see cref="AcceleratorRequirements"/>: RequiresInt64, RequiresAtomics, RequiresScatterStores.
+        /// Deliberately no shared memory: the whole point of the K=32 gather is that indices are
+        /// pseudorandom across the full dataset (the ASIC-resistance property), so there is no
+        /// reusable tile to stage - this kernel is bound by raw random-access memory throughput.
+        /// </summary>
+        public static void MineKernel(
+            Index1D nonceOffset,
+            ArrayView<Element256> dataset, uint datasetLength,
+            ulong nonceBase,
+            ulong h0m, ulong h1m, ulong h2m, ulong h3m,
+            ulong target0, ulong target1, ulong target2, ulong target3,
+            ArrayView<ulong> winningNonces, ArrayView<int> winningCount)
+        {
+            ulong nonce = nonceBase + (ulong)nonceOffset;
+            ulong nonceBE = Bswap64(nonce);
+
+            // Stage 1: seed hash of (header || nonce), reduced mod N to pick one dataset element.
+            Blake2b.Hash256(h0m, h1m, h2m, h3m, nonceBE, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 40,
+                out ulong sa0, out ulong sa1, out ulong sa2, out ulong sa3);
+            uint seedIndex = (uint)(Bswap64(sa3) % (ulong)datasetLength);
+            Element256 seed = dataset[(long)seedIndex];
+
+            // Stage 2: second hash of (seed element || header || nonce) - see ComputeFinalHash's
+            // remarks for why this is 32+32+8=72 bytes here rather than the reference's 71.
+            Blake2b.Hash256(seed.W0, seed.W1, seed.W2, seed.W3, h0m, h1m, h2m, h3m, nonceBE,
+                0, 0, 0, 0, 0, 0, 0, 72,
+                out ulong sh0, out ulong sh1, out ulong sh2, out ulong sh3);
+
+            // Stage 3: derive K=32 indices from the second hash, gather + sum (mod 2^256) the
+            // corresponding dataset elements. Combined into one loop - no local array of indices
+            // is ever materialized, avoiding the local-array dynamic-index PTX bug class.
+            ulong acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
+            for (int k = 0; k < K; k++)
+            {
+                uint idx = DeriveIndex(sh0, sh1, sh2, sh3, k, datasetLength);
+                Element256 e = dataset[(long)idx];
+                ulong c;
+                acc0 = AddWithCarry(acc0, e.W0, 0, out c);
+                acc1 = AddWithCarry(acc1, e.W1, c, out c);
+                acc2 = AddWithCarry(acc2, e.W2, c, out c);
+                acc3 = AddWithCarry(acc3, e.W3, c, out c);
+            }
+
+            // Stage 4: final hash of the sum, compare to target (both treated as big-endian
+            // 256-bit numbers, word0 most significant).
+            ComputeFinalHash(acc0, acc1, acc2, acc3,
+                out ulong d0, out ulong d1, out ulong d2, out ulong d3);
+
+            bool hit = d0 < target0 || (d0 == target0 && (d1 < target1 || (d1 == target1 &&
+                (d2 < target2 || (d2 == target2 && d3 < target3)))));
+            if (hit)
+            {
+                int slot = Atomic.Add(ref winningCount[0], 1);
+                if (slot < winningNonces.IntLength) winningNonces[slot] = nonce;
+            }
+        }
+
+        /// <summary>
+        /// CPU-only mirror of <see cref="MineKernel"/>'s per-nonce hash chain (stages 1-4, no
+        /// target compare), over a plain array instead of an <see cref="ArrayView{T}"/>, for
+        /// direct use in test code (not a compiled kernel dispatch). Kept as a real second copy
+        /// of the orchestration rather than forced into one generic method shared with the kernel,
+        /// since <c>ArrayView</c> and a managed array aren't unifiable here without complexity
+        /// this PoC doesn't need - see the plan file's note on keeping the reference physically
+        /// separate. The actual hash/math (<see cref="Blake2b"/>, <see cref="AddWithCarry"/>,
+        /// <see cref="DeriveIndex"/>, <see cref="ComputeFinalHash"/>) is shared, not duplicated.
+        /// </summary>
+        public static void ComputeNonceDigest(
+            Element256[] dataset, uint datasetLength, ulong nonce,
+            ulong h0m, ulong h1m, ulong h2m, ulong h3m,
+            out ulong d0, out ulong d1, out ulong d2, out ulong d3)
+        {
+            ulong nonceBE = Bswap64(nonce);
+
+            Blake2b.Hash256(h0m, h1m, h2m, h3m, nonceBE, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 40,
+                out ulong sa0, out ulong sa1, out ulong sa2, out ulong sa3);
+            uint seedIndex = (uint)(Bswap64(sa3) % (ulong)datasetLength);
+            Element256 seed = dataset[(long)seedIndex];
+
+            Blake2b.Hash256(seed.W0, seed.W1, seed.W2, seed.W3, h0m, h1m, h2m, h3m, nonceBE,
+                0, 0, 0, 0, 0, 0, 0, 72,
+                out ulong sh0, out ulong sh1, out ulong sh2, out ulong sh3);
+
+            ulong acc0 = 0, acc1 = 0, acc2 = 0, acc3 = 0;
+            for (int k = 0; k < K; k++)
+            {
+                uint idx = DeriveIndex(sh0, sh1, sh2, sh3, k, datasetLength);
+                Element256 e = dataset[(long)idx];
+                ulong c;
+                acc0 = AddWithCarry(acc0, e.W0, 0, out c);
+                acc1 = AddWithCarry(acc1, e.W1, c, out c);
+                acc2 = AddWithCarry(acc2, e.W2, c, out c);
+                acc3 = AddWithCarry(acc3, e.W3, c, out c);
+            }
+
+            ComputeFinalHash(acc0, acc1, acc2, acc3, out d0, out d1, out d2, out d3);
+        }
+
+        /// <summary>Returns true if <paramref name="nonce"/>'s digest is below the given target.</summary>
+        public static bool MineNonceReference(
+            Element256[] dataset, uint datasetLength, ulong nonce,
+            ulong h0m, ulong h1m, ulong h2m, ulong h3m,
+            ulong target0, ulong target1, ulong target2, ulong target3)
+        {
+            ComputeNonceDigest(dataset, datasetLength, nonce, h0m, h1m, h2m, h3m,
+                out ulong d0, out ulong d1, out ulong d2, out ulong d3);
+
+            return d0 < target0 || (d0 == target0 && (d1 < target1 || (d1 == target1 &&
+                (d2 < target2 || (d2 == target2 && d3 < target3)))));
         }
     }
 }
