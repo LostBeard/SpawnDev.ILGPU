@@ -164,4 +164,60 @@ public abstract partial class BackendTestBase
 
         Console.WriteLine($"[Autolykos2] Blake2b GPU/CPU match on {BackendName}: {n}/{n} ✓");
     });
+
+    // ═══════════════════════════════════════════════════════════
+    //  Autolykos2 - dataset (N-table) generation, small N
+    // ═══════════════════════════════════════════════════════════
+
+    // KNOWN OPEN ISSUE (found running this test 2026-09-21): WebGPU (both subgroup variants)
+    // fails at exactly element index 128, the first index where Bswap32(index) has bit 31 set
+    // (Bswap32(127)=0x7F000000, Bswap32(128)=0x80000000) - elements 0..127 all match CPU exactly.
+    // Autolykos2.GenerateDatasetElement's only per-index-dependent value is
+    // `m0 = ((ulong)height << 32) | Bswap32(index)`, a uint widened to ulong via C#'s implicit
+    // conversion inside a bitwise-or. This is a strong signal of a SpawnDev.ILGPU WGSL codegen bug:
+    // sign-extending a uint->ulong widening conversion instead of zero-extending it, specifically
+    // when the uint's top bit is set. Distinct from the WebGL Blake2b bug above (WebGPU passed that
+    // test cleanly) and from the WebGL GLSL compile error below - three separate, precisely-isolated
+    // backend bugs found by this one PoC. Not chased further here: doesn't block CUDA/OpenCL/CPU,
+    // which is what this PoC's actual throughput question depends on; WebGPU is correctness-tier-only
+    // for mining anyway per the plan file (buffer-size ceilings rule it out at production scale
+    // regardless of this bug). Worth a dedicated SpawnDev.ILGPU WGSL-codegen investigation later.
+    //
+    // WebGL fails this test too, but earlier and differently: a vertex shader COMPILE error
+    // ("cannot convert from highp 2-component vector of uint to flat out highp uint"), not a
+    // wrong-answer at runtime. This is on top of the separate WebGL Blake2b runtime-correctness
+    // bug above - a second, distinct WebGL backend issue, most likely in how a ulong (uvec2)
+    // value computed inside this method's loop gets wired to a GLSL "flat out" varying. Also not
+    // chased further here for the same out-of-scope-for-mining reason.
+    [TestMethod]
+    public async Task Autolykos2_DatasetGeneration_SmallN_GPU_CPUMatch() => await RunTest(async accelerator =>
+    {
+        const int n = 2000; // small N for fast cross-backend iteration, not real mainnet scale (tier 2)
+        const uint height = 1_500_000; // arbitrary plausible Ergo mainnet height, fixed for reproducibility
+
+        using var datasetBuf = accelerator.Allocate1D<Element256>(n);
+        var kernel = accelerator.LoadAutoGroupedStreamKernel<
+            Index1D, ArrayView<Element256>, uint>(Autolykos2.GenerateDatasetKernel);
+        kernel(n, datasetBuf.View, height);
+        await accelerator.SynchronizeAsync();
+
+        var gpuDataset = await datasetBuf.CopyToHostAsync();
+
+        int mismatches = 0;
+        for (int i = 0; i < n; i++)
+        {
+            Autolykos2.GenerateDatasetElement((uint)i, height, out ulong e0, out ulong e1, out ulong e2, out ulong e3);
+            var gpu = gpuDataset[i];
+            if (gpu.W0 != e0 || gpu.W1 != e1 || gpu.W2 != e2 || gpu.W3 != e3)
+            {
+                if (mismatches < 5)
+                    throw new Exception(
+                        $"Autolykos2 dataset element {i} mismatch on {BackendName}: " +
+                        $"GPU={gpu.W0:x16}{gpu.W1:x16}{gpu.W2:x16}{gpu.W3:x16} CPU={e0:x16}{e1:x16}{e2:x16}{e3:x16}");
+                mismatches++;
+            }
+        }
+
+        Console.WriteLine($"[Autolykos2] Dataset generation GPU/CPU match on {BackendName}: {n}/{n} elements ✓");
+    });
 }

@@ -37,19 +37,22 @@ namespace SpawnDev.ILGPU.Crypto
     /// </remarks>
     public static class Blake2b
     {
-        // RFC 7693 initialization vector.
-        private const ulong IV0 = 0x6a09e667f3bcc908UL;
-        private const ulong IV1 = 0xbb67ae8584caa73bUL;
-        private const ulong IV2 = 0x3c6ef372fe94f82bUL;
-        private const ulong IV3 = 0xa54ff53a5f1d36f1UL;
-        private const ulong IV4 = 0x510e527fade682d1UL;
-        private const ulong IV5 = 0x9b05688c2b3e6c1fUL;
-        private const ulong IV6 = 0x1f83d9abfb41bd6bUL;
-        private const ulong IV7 = 0x5be0cd19137e2179UL;
+        // RFC 7693 initialization vector. Internal (not private): callers that need to run
+        // Compress across MORE than one block (e.g. Autolykos2's dataset generation, which
+        // chains 65 compressions per element) initialize h0..h7 from these directly instead
+        // of going through the single-block Hash256 convenience wrapper.
+        internal const ulong IV0 = 0x6a09e667f3bcc908UL;
+        internal const ulong IV1 = 0xbb67ae8584caa73bUL;
+        internal const ulong IV2 = 0x3c6ef372fe94f82bUL;
+        internal const ulong IV3 = 0xa54ff53a5f1d36f1UL;
+        internal const ulong IV4 = 0x510e527fade682d1UL;
+        internal const ulong IV5 = 0x9b05688c2b3e6c1fUL;
+        internal const ulong IV6 = 0x1f83d9abfb41bd6bUL;
+        internal const ulong IV7 = 0x5be0cd19137e2179UL;
 
         // Parameter block for the no-key, 32-byte-digest case: h0 ^= 0x01010000 | (kk << 8) | nn,
         // with kk = 0 (no key) and nn = 32 (BLAKE2b-256 digest length in bytes).
-        private const ulong Param0 = 0x0000000001010020UL;
+        internal const ulong Param0 = 0x0000000001010020UL;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static ulong Rotr(ulong x, int n) => (x >> n) | (x << (64 - n));
