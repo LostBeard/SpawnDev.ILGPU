@@ -350,18 +350,32 @@ uvec2 i64_new(uint lo, uint hi) {
     return uvec2(lo, hi);
 }
 
-// emu_i64/emu_u64 addition with carry
+// emu_i64/emu_u64 addition with carry. The carry bit is computed with the bitwise
+// generate/propagate identity `(a & b) | ((a | b) & ~sum)` (top bit only) instead of the
+// textbook `sum < a` unsigned-overflow comparison: on WebGL/ANGLE (observed on Chrome/Windows,
+// D3D backend, 2026-09-22) a `uint` `<` comparison feeding a carry into a SECOND uvec2 add a
+// few calls later in the same shader was empirically found to drop the carry bit for specific
+// operand values - bit-exact in a pure C# port of this exact algorithm, wrong on the actual
+// GPU. Root-caused via NoInliningBlakeShapedRawVPerCallBisectTest (Bug #5): a chain of 8
+// NoInlining Blake2b-G-shaped calls reusing the same 16 ulong locals was correct, and the 9th
+// call (first call of a second round reusing v0/v4/v8/v12) produced a v0 wrong by exactly
+// 1 bit at position 32 - the lo/hi carry boundary. Reproduced identically whether G takes
+// ref/inout params, returns a struct by value, or uses varying vs. constant x/y - ruled out
+// codegen shape, ruled in a driver-level `<` comparison miscompilation. This bitwise formula
+// avoids emitting `<` for carry/borrow detection entirely, sidestepping the bug family.
 uvec2 i64_add(uvec2 a, uvec2 b) {
     uint lo = a.x + b.x;
-    uint carry = lo < a.x ? 1u : 0u;
+    uint carry = ((a.x & b.x) | ((a.x | b.x) & ~lo)) >> 31u;
     uint hi = a.y + b.y + carry;
     return uvec2(lo, hi);
 }
 
-// emu_i64/emu_u64 subtraction with borrow
+// emu_i64/emu_u64 subtraction with borrow. See i64_add's comment: borrow uses the same
+// bitwise generate/propagate identity (applied to a - b = a + ~b + 1) instead of a `<`
+// comparison, for the same ANGLE-miscompilation defense.
 uvec2 i64_sub(uvec2 a, uvec2 b) {
-    uint borrow = a.x < b.x ? 1u : 0u;
     uint lo = a.x - b.x;
+    uint borrow = ((~a.x & b.x) | ((~a.x | b.x) & lo)) >> 31u;
     uint hi = a.y - b.y - borrow;
     return uvec2(lo, hi);
 }

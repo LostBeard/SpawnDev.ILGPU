@@ -1214,7 +1214,7 @@ namespace PlaywrightMultiTest
             {
                 var nonWasm = blazor.Tests.Where(t => t.TestTypeName != null && !IsWasm(t)).ToList();
                 LogStatus($"Phase A browser non-Wasm lane: {nonWasm.Count} tests (sequential on shared page)");
-                phaseA.Add(RunLaneSequentialAsync(nonWasm, blazor.Page));
+                phaseA.Add(RunLaneSequentialAsync(nonWasm, blazor));
             }
 
             await Task.WhenAll(phaseA).ConfigureAwait(false);
@@ -1223,18 +1223,76 @@ namespace PlaywrightMultiTest
             // ── Phase B: Wasm lane alone (no other CPU-heavy lane running) ──────────
             if (blazor?.Page != null)
             {
+                // Recycle the page before Phase B: Phase A just ran ~4000 sequential
+                // WebGPU/WebGL dispatches (shader compiles, GPU buffers, JS closures) on this
+                // ONE long-lived tab. Left unrecycled, a full sweep occasionally crashes the
+                // renderer partway through Phase B with "Target page, context or browser has
+                // been closed", cascading a false "Fail" onto every remaining Wasm test even
+                // though none of them are actually broken (2026-09-22, TJ's manual full-suite
+                // run: 671 Wasm tests all failed with that exact message once the crash hit).
+                // A fresh page for the isolated, memory-heavy Wasm phase gives it a clean heap.
+                //
+                // ONLY recycle here, at this one natural quiescent point (all of Phase A's work
+                // is fully drained) - NOT periodically mid-lane. A first attempt recycled every
+                // 500 tests DURING Phase A and that made things categorically worse: recycling
+                // while WebGPU resources from the immediately-preceding dispatches are still
+                // live crashed the browser CONTEXT itself (not just the page), and because that
+                // exception was unhandled it killed OneTimeSetUp entirely - all 4489 tests
+                // reported Failed instead of just the tail. RecyclePageAsync is defensive
+                // (never throws) as a second line of defense, but the real fix is simply not
+                // disturbing the page while Phase A is still mid-flight.
+                await RecyclePageAsync(blazor).ConfigureAwait(false);
                 var wasm = blazor.Tests.Where(t => t.TestTypeName != null && IsWasm(t)).ToList();
                 LogStatus($"Phase B Wasm lane: {wasm.Count} tests (isolated, sequential)");
-                await RunLaneSequentialAsync(wasm, blazor.Page).ConfigureAwait(false);
+                await RunLaneSequentialAsync(wasm, blazor).ConfigureAwait(false);
             }
 
             LogStatus($"All scheduled tests complete in {swAll.Elapsed:hh\\:mm\\:ss} ({_outcomes.Count} outcomes cached).");
         }
 
-        private async Task RunLaneSequentialAsync(List<ProjectTest> tests, IPage page)
+        private async Task RunLaneSequentialAsync(List<ProjectTest> tests, TestableBlazorWasm blazor)
         {
             foreach (var t in tests)
-                await ExecuteAndCaptureAsync(t, page).ConfigureAwait(false);
+                await ExecuteAndCaptureAsync(t, blazor.Page).ConfigureAwait(false);
+        }
+
+        /// <summary>
+        /// Closes the shared Blazor WASM test page and opens a fresh one at the same test URL,
+        /// re-waiting for the test table to render, then updates <paramref name="blazor"/>.Page
+        /// so subsequent dispatches use it. See the Phase-A/B boundary call site's comment for
+        /// why this exists (bounding a single page's memory growth across thousands of
+        /// sequential WebGPU/WebGL/Wasm dispatches). The context-level console hook registered
+        /// once in Init() (<c>BrowserContext.Page += ...</c>) fires for this new page too, so
+        /// diagnostic console capture keeps working across a recycle with no extra wiring.
+        ///
+        /// Never throws: this runs inside NUnit's OneTimeSetUp (StartUp -> RunScheduledAsync),
+        /// which has no per-test exception boundary - an unhandled exception here previously
+        /// took down the ENTIRE sweep (all 4489 tests reported Failed) instead of just the
+        /// tests that actually depend on a working page. If the recycle itself fails (the
+        /// browser/context is already in a bad state), log it and leave
+        /// <paramref name="blazor"/>.Page as whatever it was - callers then fail individually
+        /// and recoverably through ExecuteAndCaptureAsync's own try/catch, same as before this
+        /// method existed.
+        /// </summary>
+        private async Task RecyclePageAsync(TestableBlazorWasm blazor)
+        {
+            try
+            {
+                var oldPage = blazor.Page;
+                var newPage = await blazor.BrowserContext.NewPageAsync().ConfigureAwait(false);
+                var testPageUrl = new Uri(new Uri("https://localhost:5451/"), blazor.TestPage).ToString();
+                if (string.Equals(Environment.GetEnvironmentVariable("PMT_WASM_SIMD"), "off", StringComparison.OrdinalIgnoreCase))
+                    testPageUrl += (testPageUrl.Contains('?') ? "&" : "?") + "wasmsimd=off";
+                LogStatus($"Recycling browser page (memory hygiene) -> {testPageUrl}");
+                await newPage.GotoAsync(testPageUrl).ConfigureAwait(false);
+                await newPage.WaitForSelectorAsync("table.unit-test-ready", new() { Timeout = 30000 }).ConfigureAwait(false);
+                blazor.Page = newPage;
+                try { await oldPage.CloseAsync().ConfigureAwait(false); } catch { }
+            }
+            catch (Exception ex)
+            {
+                LogStatus($"Page recycle failed, continuing with the existing page: {ex.Message}");
+            }
         }
 
         private async Task RunLaneConcurrentAsync(List<ProjectTest> tests, int cap, IPage? page)

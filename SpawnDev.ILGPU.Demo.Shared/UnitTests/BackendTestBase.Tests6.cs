@@ -2377,6 +2377,207 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     throw new Exception($"NoInliningBlakeShapedRawV[v{j}] expected {expected[j]:x16}, got {result[j]:x16}");
         });
 
+        // Bug #5 (WebGL i64/uvec2 emulation reuse bug) support types - see
+        // NoInliningBlakeShapedTripleCallTest below for the minimal repro and the current
+        // state of this investigation. G takes its 4 mixed values BY VALUE and returns them
+        // in a struct (ruling out ref/inout GLSL parameter handling as a factor - the same
+        // bug reproduces identically with the ref/inout-based BlakeShapedGKernel above).
+        private struct ShapedV4U64
+        {
+            public ulong A, B, C, D;
+        }
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private static ShapedV4U64 BlakeShapedGValueKernel(ulong a, ulong b, ulong c, ulong d, ulong x, ulong y)
+        {
+            a = a + b + x;
+            d = ShapedRotrCpu(d ^ a, 32);
+            c = c + d;
+            b = ShapedRotrCpu(b ^ c, 24);
+            a = a + b + y;
+            d = ShapedRotrCpu(d ^ a, 16);
+            c = c + d;
+            b = ShapedRotrCpu(b ^ c, 63);
+            return new ShapedV4U64 { A = a, B = b, C = c, D = d };
+        }
+
+        // Locks in the GLSLKernelFunctionGenerator Shr-dispatch fix (2026-09-22): calls 1-8
+        // run through the real NoInlining G function (real Blake2b shape), but call 9's own
+        // body is INLINED directly into the kernel (no function call) with each of its 8
+        // internal steps (a/b/c/d after each mix) written to a separate output slot. Before
+        // the fix, `x >> n` on an unsigned emu-i64 value emitted directly in a KERNEL body
+        // (as opposed to inside a standalone NoInlining GLSL function) unconditionally routed
+        // through `i64_shr` (arithmetic/signed shift) instead of `u64_shr` (logical), so
+        // Rotr(x, 24)'s shr sign-extended instead of zero-filling whenever x's high word had
+        // its top bit set - this test's call 9 hit exactly that at step s4. Fixed in
+        // GLSLKernelFunctionGenerator.GenerateCode(BinaryArithmeticValue).
+        static void BlakeShapedCall9InlineTraceKernel(Index1D index, ArrayView<ulong> outBuf)
+        {
+            ulong v0 = 100, v1 = 0, v2 = 0, v3 = 0, v4 = 0, v5 = 0, v6 = 0, v7 = 0;
+            ulong v8 = 1, v9 = 2, v10 = 3, v11 = 4, v12 = 5, v13 = 6, v14 = 7, v15 = 8;
+            ShapedV4U64 r;
+            r = BlakeShapedGValueKernel(v0, v4, v8, v12, 1, 2); v0 = r.A; v4 = r.B; v8 = r.C; v12 = r.D;
+            r = BlakeShapedGValueKernel(v1, v5, v9, v13, 3, 4); v1 = r.A; v5 = r.B; v9 = r.C; v13 = r.D;
+            r = BlakeShapedGValueKernel(v2, v6, v10, v14, 5, 6); v2 = r.A; v6 = r.B; v10 = r.C; v14 = r.D;
+            r = BlakeShapedGValueKernel(v3, v7, v11, v15, 7, 8); v3 = r.A; v7 = r.B; v11 = r.C; v15 = r.D;
+            r = BlakeShapedGValueKernel(v0, v5, v10, v15, 9, 10); v0 = r.A; v5 = r.B; v10 = r.C; v15 = r.D;
+            r = BlakeShapedGValueKernel(v1, v6, v11, v12, 11, 12); v1 = r.A; v6 = r.B; v11 = r.C; v12 = r.D;
+            r = BlakeShapedGValueKernel(v2, v7, v8, v13, 13, 14); v2 = r.A; v7 = r.B; v8 = r.C; v13 = r.D;
+            r = BlakeShapedGValueKernel(v3, v4, v9, v14, 15, 16); v3 = r.A; v4 = r.B; v9 = r.C; v14 = r.D;
+
+            // Call 9 = G(v0, v4, v8, v12, 1, 2), inlined step by step.
+            ulong a = v0, b = v4, c = v8, d = v12, x = 1, y = 2;
+            a = a + b + x;               ulong s1 = a;
+            d = ShapedRotrCpu(d ^ a, 32); ulong s2 = d;
+            c = c + d;                    ulong s3 = c;
+            b = ShapedRotrCpu(b ^ c, 24); ulong s4 = b;
+            a = a + b + y;                ulong s5 = a;
+            d = ShapedRotrCpu(d ^ a, 16); ulong s6 = d;
+            c = c + d;                    ulong s7 = c;
+            b = ShapedRotrCpu(b ^ c, 63); ulong s8 = b;
+
+            int off = (int)index * 8;
+            outBuf[off + 0] = s1; outBuf[off + 1] = s2; outBuf[off + 2] = s3; outBuf[off + 3] = s4;
+            outBuf[off + 4] = s5; outBuf[off + 5] = s6; outBuf[off + 6] = s7; outBuf[off + 7] = s8;
+        }
+
+        [TestMethod]
+        public async Task NoInliningBlakeShapedCall9InlineTraceTest() => await RunTest(async accelerator =>
+        {
+            // CPU oracle: identical call1-8 sequence, then call 9 traced step by step.
+            ulong v0 = 100, v1 = 0, v2 = 0, v3 = 0, v4 = 0, v5 = 0, v6 = 0, v7 = 0;
+            ulong v8 = 1, v9 = 2, v10 = 3, v11 = 4, v12 = 5, v13 = 6, v14 = 7, v15 = 8;
+            (ulong, ulong, ulong, ulong) G(ulong a2, ulong b2, ulong c2, ulong d2, ulong x2, ulong y2)
+            {
+                a2 = a2 + b2 + x2; d2 = ShapedRotrCpu(d2 ^ a2, 32); c2 = c2 + d2; b2 = ShapedRotrCpu(b2 ^ c2, 24);
+                a2 = a2 + b2 + y2; d2 = ShapedRotrCpu(d2 ^ a2, 16); c2 = c2 + d2; b2 = ShapedRotrCpu(b2 ^ c2, 63);
+                return (a2, b2, c2, d2);
+            }
+            (v0, v4, v8, v12) = G(v0, v4, v8, v12, 1, 2);
+            (v1, v5, v9, v13) = G(v1, v5, v9, v13, 3, 4);
+            (v2, v6, v10, v14) = G(v2, v6, v10, v14, 5, 6);
+            (v3, v7, v11, v15) = G(v3, v7, v11, v15, 7, 8);
+            (v0, v5, v10, v15) = G(v0, v5, v10, v15, 9, 10);
+            (v1, v6, v11, v12) = G(v1, v6, v11, v12, 11, 12);
+            (v2, v7, v8, v13) = G(v2, v7, v8, v13, 13, 14);
+            (v3, v4, v9, v14) = G(v3, v4, v9, v14, 15, 16);
+
+            ulong a = v0, b = v4, c = v8, d = v12, x = 1, y = 2;
+            a = a + b + x;               ulong e1 = a;
+            d = ShapedRotrCpu(d ^ a, 32); ulong e2 = d;
+            c = c + d;                    ulong e3 = c;
+            b = ShapedRotrCpu(b ^ c, 24); ulong e4 = b;
+            a = a + b + y;                ulong e5 = a;
+            d = ShapedRotrCpu(d ^ a, 16); ulong e6 = d;
+            c = c + d;                    ulong e7 = c;
+            b = ShapedRotrCpu(b ^ c, 63); ulong e8 = b;
+            ulong[] expected = { e1, e2, e3, e4, e5, e6, e7, e8 };
+
+            using var outBuf = accelerator.Allocate1D<ulong>(8);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<ulong>>(BlakeShapedCall9InlineTraceKernel);
+            kernel(1, outBuf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await outBuf.CopyToHostAsync<ulong>();
+            string[] names = { "s1(a=a+b+x)", "s2(d=rotr32)", "s3(c=c+d)", "s4(b=rotr24)",
+                "s5(a=a+b+y)", "s6(d=rotr16)", "s7(c=c+d)", "s8(b=rotr63)" };
+            for (int j = 0; j < 8; j++)
+                if (result[j] != expected[j])
+                    throw new Exception($"NoInliningBlakeShapedCall9InlineTrace[{names[j]}] expected {expected[j]:x16}, got {result[j]:x16}");
+        });
+
+        // Bug #5 - WebGL i64/uvec2 emulation reuse bug. STILL OPEN as of 2026-09-22, after the
+        // GLSLKernelFunctionGenerator Shr-dispatch bug above was found and fixed (that fix is
+        // real, verified, and shipped - it is NOT this bug; NoInliningBlakeShapedCall9InlineTraceTest
+        // above locks it in). This is the SMALLEST known repro: 3 CONSECUTIVE calls to the
+        // Blake2b-G-shaped NoInlining function, chaining the SAME 4 ulong locals through each
+        // call's output back into the next call's input. Call 3's result is wrong by exactly
+        // 1 bit, always at bit 32 (the emulated uvec2 lo/hi word boundary).
+        //
+        // Extensively bisected and NOT explained by any of the following (each independently
+        // ruled out by a dedicated test, since removed from the suite - see git history
+        // 2026-09-22 for the full scaffold if this needs revisiting):
+        //   - The emulation MATH itself: a bit-for-bit C# port of GLSLEmulationLibrary's
+        //     i64_add/i64_shl/u64_shr/i64_xor, run against the exact same value sequence,
+        //     matches the real ulong ground truth with zero mismatches.
+        //   - ref/inout vs. struct-by-value calling convention (both shapes fail identically).
+        //   - Constant vs. round-varying message words (both fail).
+        //   - Loop vs. fully-unrolled straight-line code (both fail; a genuinely fresh,
+        //     never-before-touched set of locals passed through this SAME function as its
+        //     literal 9th call in the shader is CORRECT - ruling out raw call count/shader
+        //     position entirely. The trigger needs a data-dependent CHAIN of 3, not merely
+        //     3 occurrences of the function).
+        //   - GLSL `<`-based unsigned carry/borrow detection in i64_add/i64_sub (rewritten to
+        //     the branch-free bitwise generate/propagate identity - see i64_add's own comment
+        //     in GLSLEmulationLibrary.cs - with zero change in the wrong output).
+        //   - Compiler constant-folding/CSE across identical call sites (defeated by XOR-ing
+        //     every intermediate value against a genuine runtime kernel parameter, always 0
+        //     but opaque to the compiler at compile time - the same "u_one" anti-optimization
+        //     technique already used for f64 emulation - with zero change in the wrong output).
+        //   - The SAME compiled GLSL function object being reused 3x (defeated by alternating
+        //     between two byte-for-byte identical but separately-named function copies for
+        //     calls 1/2/3 - still fails identically).
+        //   - Register/ALU-level value corruption fixable by forcing a genuine GPU memory
+        //     round-trip (store to and load back from a real ArrayView<ulong> buffer between
+        //     calls 2 and 3) - this changed the wrong answer to something DIFFERENT rather
+        //     than fixing it, suggesting the memory-buffer readback path has its own,
+        //     separate correctness issue worth a fresh investigation of its own.
+        //
+        // Working theory (not yet confirmed): the corrupted word's correct value exceeds
+        // 2^24 in every failing case observed, and the corruption always rounds an ODD value
+        // down to the nearest EVEN one - the exact signature of a 32-bit integer being
+        // silently routed through a 24-bit-mantissa float intermediate somewhere in the
+        // driver's compiled code, once accumulated Blake2b mixing pushes a word's magnitude
+        // past that threshold. This would be consistent with GLSLEmulationLibrary.cs's
+        // existing documented ANGLE/D3D11 f64 precision-collapse bug (see the F64Functions
+        // "ANTI-OPTIMIZATION" comment above) manifesting in the i64 path instead - but the
+        // f64 fix's mitigation (a fake-dynamic-but-always-1.0 float multiply) does not
+        // obviously translate to an all-integer computation, and the runtime-XOR probe here
+        // (the closest integer analogue) did not fix it. NOT YET FIXED. If this needs
+        // picking up again: reproduce via the smallest test below, then try (a) forcing every
+        // intermediate through an actual `int`/`uint`-typed uniform read (not just XOR
+        // against one) to rule out int-vs-float ALU routing more directly, and (b) capturing
+        // an ANGLE HLSL disassembly (chrome://gpu / `--use-angle=d3d11 --show-fps-counter`
+        // shader dump flags) of fn_BlakeShapedGValueKernel's 3rd call site to inspect actual
+        // register allocation directly instead of black-box GLSL-source bisection.
+        static void BlakeShapedTripleCallKernel(Index1D index, ArrayView<ulong> outBuf)
+        {
+            ulong w0 = 10, w1 = 11, w2 = 12, w3 = 13;
+            ShapedV4U64 r;
+            r = BlakeShapedGValueKernel(w0, w1, w2, w3, 1, 2); w0 = r.A; w1 = r.B; w2 = r.C; w3 = r.D;
+            r = BlakeShapedGValueKernel(w0, w1, w2, w3, 3, 4); w0 = r.A; w1 = r.B; w2 = r.C; w3 = r.D;
+            r = BlakeShapedGValueKernel(w0, w1, w2, w3, 5, 6); w0 = r.A; w1 = r.B; w2 = r.C; w3 = r.D;
+            int off = (int)index * 4;
+            outBuf[off + 0] = w0; outBuf[off + 1] = w1; outBuf[off + 2] = w2; outBuf[off + 3] = w3;
+        }
+
+        [TestMethod]
+        public async Task NoInliningBlakeShapedTripleCallTest() => await RunTest(async accelerator =>
+        {
+            (ulong, ulong, ulong, ulong) G(ulong a, ulong b, ulong c, ulong d, ulong x, ulong y)
+            {
+                a = a + b + x; d = ShapedRotrCpu(d ^ a, 32); c = c + d; b = ShapedRotrCpu(b ^ c, 24);
+                a = a + b + y; d = ShapedRotrCpu(d ^ a, 16); c = c + d; b = ShapedRotrCpu(b ^ c, 63);
+                return (a, b, c, d);
+            }
+            ulong w0 = 10, w1 = 11, w2 = 12, w3 = 13;
+            (w0, w1, w2, w3) = G(w0, w1, w2, w3, 1, 2);
+            (w0, w1, w2, w3) = G(w0, w1, w2, w3, 3, 4);
+            (w0, w1, w2, w3) = G(w0, w1, w2, w3, 5, 6);
+            ulong[] expected = { w0, w1, w2, w3 };
+
+            using var outBuf = accelerator.Allocate1D<ulong>(4);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<ulong>>(BlakeShapedTripleCallKernel);
+            kernel(1, outBuf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await outBuf.CopyToHostAsync<ulong>();
+            string[] names = { "w0(A)", "w1(B)", "w2(C)", "w3(D)" };
+            for (int j = 0; j < 4; j++)
+                if (result[j] != expected[j])
+                    throw new Exception($"NoInliningBlakeShapedTripleCall[{names[j]}] expected {expected[j]:x16}, got {result[j]:x16}");
+        });
+
         [TestMethod]
         public async Task NoInliningRefULong8LoopMultiCallBitExactTest() => await RunTest(async accelerator =>
         {

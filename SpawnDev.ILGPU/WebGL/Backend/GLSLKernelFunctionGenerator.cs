@@ -4071,7 +4071,20 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     BinaryArithmeticKind.Or => "i64_or",
                     BinaryArithmeticKind.Xor => "i64_xor",
                     BinaryArithmeticKind.Shl => "i64_shl",
-                    BinaryArithmeticKind.Shr => "i64_shr",
+                    // NOT resolved for Shr here - `>>` on an unsigned emu-i64 value must
+                    // route through `u64_shr` (logical shift), not `i64_shr` (arithmetic,
+                    // sign-extends from the high word's top bit). Handled explicitly below
+                    // instead of via this table, matching GLSLCodeGenerator.GenerateCode
+                    // (BinaryArithmeticValue)'s `value.IsUnsigned ? "u64_shr" : "i64_shr"`.
+                    // Bug #5 (2026-09-22): this table unconditionally picked i64_shr for
+                    // BOTH signed and unsigned right shifts when the shift was emitted
+                    // directly in the kernel body (as opposed to inside a standalone
+                    // NoInlining GLSL function, which already went through the correct
+                    // base-class path) - Rotr(x, n) = u64_shr(x,n) | i64_shl(x,64-n)
+                    // silently sign-extended instead of zero-filling whenever the shifted
+                    // value's high word had its top bit set, corrupting the result. Found
+                    // via NoInliningBlakeShapedCall9InlineTraceTest.
+                    BinaryArithmeticKind.Shr => value.IsUnsigned ? "u64_shr" : "i64_shr",
                     _ => null
                 };
                 if (emulFunc != null)
