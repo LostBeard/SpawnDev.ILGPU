@@ -85,6 +85,18 @@ namespace SpawnDev.ILGPU.Crypto
         /// bytes hashed so far (including this block); for the single-block callers this
         /// primitive targets, <paramref name="t1"/> is always 0.
         /// </summary>
+        // TRIED NoInlining here too (2026-09-22) and REVERTED. It does fix the ANGLE compile/
+        // runtime hang that G-alone-NoInlining didn't fully resolve for GenerateDatasetKernel's
+        // 63-iteration Compress loop (confirmed: all 3 WebGL Autolykos2 tests ran in ~100ms, no
+        // 30s timeout) - but it broke Compress's OWN ref h0..h7 write-back: the GPU digest came
+        // back as the untouched INITIAL IV values (e.g. h0==IV0 unchanged) across all 65 calls,
+        // not just the 63 made inside the loop. G's 4-ref-param write-back is proven correct
+        // (NoInliningOutParamHelperBitExactTest, and G-alone-NoInlining passes a full 638-test
+        // WebGL regression sweep); Compress's 8-ref-param write-back through multiple call sites
+        // (one before a loop, 63 inside it, one after) is NOT - a real, distinct bug in the
+        // WebGL fn-def call mechanism's ref-argument aliasing, not yet root-caused. Do not
+        // re-enable without fixing that first - it silently drops the chaining state instead of
+        // erroring loud, which is worse than the hang it replaces.
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static void Compress(
             ref ulong h0, ref ulong h1, ref ulong h2, ref ulong h3,

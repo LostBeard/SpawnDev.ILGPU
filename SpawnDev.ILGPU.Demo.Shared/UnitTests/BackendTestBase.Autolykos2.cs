@@ -257,16 +257,30 @@ public abstract partial class BackendTestBase
     // bug was invisible before tonight because nothing on WebGL had ever hit the fn-def path with
     // an emulated-64-bit ref/out parameter - Idct16Row-shape precedent tests all use int/ref int.
     //
-    // STILL OPEN: with both fixes landed the shader compiles (small, fast) but the test still
-    // times out at the harness's 30s watchdog - confirmed via CDP this is NOT a compile hang this
-    // time (no console output at all during the wait, vs. the earlier fast, loud compile-error
-    // case) and NOT purely a thread-count effect (Autolykos2_Mine_SmallN_FindsKnownHits's own
-    // genKernel call at n=128 times out the same way as this test's n=2000). The generated GLSL
-    // has exactly one `for` loop, capped at a 100,000-iteration safety bound with an internal
-    // break condition - worth checking first whether that break condition is actually firing.
-    // Likely a THIRD, independent, previously-undiscovered bug: this kernel's runtime control flow
-    // has never actually executed on WebGL before tonight (it never got past the compile-error
-    // stage until now), so nothing here has ever been exercised on this backend.
+    // STILL OPEN, precisely bisected (2026-09-22): with both fixes above landed the shader
+    // compiles (small, fast) but still times out at the harness's 30s watchdog - confirmed via
+    // CDP this is NOT a compile hang this time (silent, no console output, vs. the earlier fast
+    // loud compile-error case) and NOT purely thread-count driven (Autolykos2_Mine_SmallN's own
+    // genKernel call at n=128 times out identically to this test's n=2000). The generated GLSL's
+    // one `for` loop (GenerateDatasetElement's real, correct 63-iteration Blake2b block-chaining
+    // loop, `blk <= 63` - NOT a broken break condition; traced and ruled out) still fully inlines
+    // Compress (96 G() call statements + v0..v15 setup) INSIDE that loop body on every one of its
+    // 63 iterations. Marking Compress NoInlining too (mirroring G) DOES eliminate the hang - all
+    // 3 WebGL Autolykos2 tests ran in ~100ms instead of timing out - confirming the hang is ANGLE
+    // itself still struggling with Compress's body duplicated 63x inside a real runtime loop, not
+    // the loop's own control flow. But it introduced a worse, different bug and was REVERTED
+    // (see Blake2b.cs Compress's own comment): Compress's `ref h0..h7` write-back doesn't
+    // propagate AT ALL when Compress itself is non-inlined and called from multiple sites (once
+    // before the loop, 63x inside it, once after) - the GPU digest comes back as the untouched
+    // initial IV state. G's own 4-ref-param write-back is proven correct at the same call-count
+    // scale (638-test WebGL regression sweep, zero regressions); Compress's 8-ref-param write-
+    // back through multiple call sites including one inside a loop is not, and fails SILENTLY
+    // (wrong answer, not a compile/link error) - worse than the hang it would replace, so not
+    // shipped. This is now the precise remaining blocker: root-cause and fix the WebGL fn-def
+    // call mechanism's ref-argument aliasing for a method called from more than one call site,
+    // at least one of them inside a loop - almost certainly the same class of cross-scope
+    // variable-name-collision bug already seen and fixed once tonight in EmitHoistedDeclarations,
+    // but in the call-site argument-aliasing code instead of the hoisting pre-pass.
     [TestMethod]
     public async Task Autolykos2_DatasetGeneration_SmallN_GPU_CPUMatch() => await RunTest(async accelerator =>
     {
