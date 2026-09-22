@@ -680,7 +680,59 @@ function dispatchKernel(msg) {
             const destView = entry.data;
             const writeOffset = out.writeByteOffset;
 
-            if (out.isEmulated && out.emulatedSuffix === 'lo') {
+            if (out.fieldIndex >= 0) {
+                // Struct field output - either a plain scalar field, or the 'lo' half of a
+                // 64-bit emulated field ('hi' halves were already skipped above). Checked
+                // BEFORE the plain isEmulated/'lo' branch below because a struct field's
+                // lo varying also has isEmulated=true, but must NOT go through the flat
+                // (non-struct) 8-bytes-per-vertex reconstruction - it's one field of a
+                // larger per-vertex struct record, at its own byte offset within it.
+                //
+                // Run the whole-struct reconstruction exactly once, triggered by the first
+                // (lowest outputIndex) struct-field varying for this param.
+                const structVaryings = outputs.filter(o => o.paramIndex === out.paramIndex && o.fieldIndex >= 0);
+                if (structVaryings[0].outputIndex !== out.outputIndex) continue;
+
+                // One representative varying per logical field (its 'lo' half for an
+                // emulated 64-bit field, the field itself otherwise), in field order, each
+                // carrying its own byte width - 8 for an emulated field's lo+hi pair, 4 for
+                // a plain scalar field. Byte offsets are the running sum of prior widths
+                // (Element256-style tight packing - no general C# struct padding support).
+                const maxFieldIndex = Math.max(...structVaryings.map(o => o.fieldIndex));
+                const fieldsInOrder = [];
+                for (let f = 0; f <= maxFieldIndex; f++) {
+                    const forField = structVaryings.filter(o => o.fieldIndex === f);
+                    fieldsInOrder.push(forField.find(o => o.emulatedSuffix === 'lo') || forField[0]);
+                }
+                const fieldByteWidths = fieldsInOrder.map(o => o.isEmulated ? 8 : 4);
+                const structElemSize = fieldByteWidths.reduce((a, b) => a + b, 0);
+                const fieldByteOffsets = [];
+                for (let f = 0, running = 0; f < fieldByteWidths.length; f++) {
+                    fieldByteOffsets.push(running);
+                    running += fieldByteWidths[f];
+                }
+
+                const elemCount = Math.min(totalVertices, Math.floor(out.writeLengthBytes / structElemSize));
+                for (let v = 0; v < elemCount; v++) {
+                    for (let fi = 0; fi < fieldsInOrder.length; fi++) {
+                        const fieldOut = fieldsInOrder[fi];
+                        const dstOff = writeOffset + v * structElemSize + fieldByteOffsets[fi];
+                        const srcOff = v * strideBytes + fieldOut.outputIndex * 4;
+                        if (srcOff + 4 > readbackBytes.length) continue;
+                        destView[dstOff] = readbackBytes[srcOff];
+                        destView[dstOff + 1] = readbackBytes[srcOff + 1];
+                        destView[dstOff + 2] = readbackBytes[srcOff + 2];
+                        destView[dstOff + 3] = readbackBytes[srcOff + 3];
+                        if (fieldByteWidths[fi] === 8) {
+                            const hiSrc = v * strideBytes + (fieldOut.outputIndex + 1) * 4;
+                            destView[dstOff + 4] = readbackBytes[hiSrc];
+                            destView[dstOff + 5] = readbackBytes[hiSrc + 1];
+                            destView[dstOff + 6] = readbackBytes[hiSrc + 2];
+                            destView[dstOff + 7] = readbackBytes[hiSrc + 3];
+                        }
+                    }
+                }
+            } else if (out.isEmulated && out.emulatedSuffix === 'lo') {
                 const hiOutIdx = out.outputIndex + 1;
                 const elemCount = Math.min(totalVertices, Math.floor(out.writeLengthBytes / 8));
                 for (let v = 0; v < elemCount; v++) {
@@ -695,25 +747,6 @@ function dispatchKernel(msg) {
                     destView[dst + 5] = readbackBytes[hiSrc + 1];
                     destView[dst + 6] = readbackBytes[hiSrc + 2];
                     destView[dst + 7] = readbackBytes[hiSrc + 3];
-                }
-            } else if (out.fieldIndex >= 0 && out.fieldIndex === 0) {
-                const structFields = outputs.filter(o => o.paramIndex === out.paramIndex && o.fieldIndex >= 0)
-                    .sort((a, b) => a.fieldIndex - b.fieldIndex);
-                const fieldCount = structFields.length;
-                const structElemSize = fieldCount * 4;
-                const elemCount = Math.min(totalVertices, Math.floor(out.writeLengthBytes / structElemSize));
-                for (let v = 0; v < elemCount; v++) {
-                    for (let fi = 0; fi < fieldCount; fi++) {
-                        const fieldOut = structFields[fi];
-                        const srcOff = v * strideBytes + fieldOut.outputIndex * 4;
-                        const dstOff = writeOffset + v * structElemSize + fi * 4;
-                        if (srcOff + 4 <= readbackBytes.length) {
-                            destView[dstOff] = readbackBytes[srcOff];
-                            destView[dstOff + 1] = readbackBytes[srcOff + 1];
-                            destView[dstOff + 2] = readbackBytes[srcOff + 2];
-                            destView[dstOff + 3] = readbackBytes[srcOff + 3];
-                        }
-                    }
                 }
             } else if (out.fieldIndex < 0) {
                 const storeCount = out.storeCount || 1;

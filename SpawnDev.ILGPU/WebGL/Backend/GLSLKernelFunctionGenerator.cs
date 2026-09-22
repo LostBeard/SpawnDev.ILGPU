@@ -94,8 +94,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         // Struct buffer field counts: paramIndex → number of flattened scalar fields
         private readonly Dictionary<int, int> _structFieldCounts = new();
-        // Struct buffer field GLSL types: paramIndex → [fieldType0, fieldType1, ...]
-        private readonly Dictionary<int, List<string>> _structFieldTypes = new();
+        // Struct buffer field GLSL types + emulated-64-bit shape: paramIndex → [(fieldType0, isEmu64, isF64), ...]
+        private readonly Dictionary<int, List<(string GlslType, bool IsEmulated64, bool IsF64)>> _structFieldTypes = new();
         // Sub-word element tracking: paramIndex → elementByteSize (1=byte, 2=short/half)
         private readonly Dictionary<int, int> _subWordParams = new();
         // Float16 sub-word params need f16-to-f32 conversion instead of sign extension
@@ -1557,12 +1557,38 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         }
 
         /// <summary>
-        /// Recursively flattens a struct type into its primitive GLSL field types.
+        /// Returns the GLSL type + emulation shape for ONE flattened struct leaf field.
+        /// Mirrors <see cref="GetBufferElementType"/>'s primitive mapping but additionally
+        /// flags Int64/Float64 fields under emulation: their true register type is uvec2
+        /// (or vec2/vec4 for f64) - a scalar "uint" is only their IEEE-bits storage shape,
+        /// one component at a time. Callers that declare/store a struct field must treat
+        /// such a field as TWO separate uint slots (lo/hi), exactly like the existing
+        /// non-struct emulated-64-bit buffer/param path - see EmitOutputVaryings and the
+        /// struct branch of GenerateCode(Store). Using the scalar "uint" directly for a
+        /// 64-bit field's TF varying declaration produces "cannot convert from highp
+        /// 2-component vector of uint to flat out highp uint" at shader compile time.
+        /// </summary>
+        private (string GlslType, bool IsEmulated64, bool IsF64) GetStructFieldInfo(TypeNode fieldType)
+        {
+            if (fieldType is PrimitiveType pt)
+            {
+                if (pt.BasicValueType == BasicValueType.Float64 && Backend.EnableF64Emulation)
+                    return ("uint", true, true);
+                if (pt.BasicValueType == BasicValueType.Int64 && Backend.EnableI64Emulation)
+                    return ("uint", true, false);
+                return (GetBufferElementType(fieldType), false, false);
+            }
+            return (TypeGenerator[fieldType], false, false);
+        }
+
+        /// <summary>
+        /// Recursively flattens a struct type into its primitive GLSL field types, alongside
+        /// each field's emulated-64-bit shape (see <see cref="GetStructFieldInfo"/>).
         /// For example, OuterStruct { InnerStruct { float Val }, int ID } → ["float", "int"]
         /// </summary>
-        private List<string> FlattenStructFields(TypeNode type)
+        private List<(string GlslType, bool IsEmulated64, bool IsF64)> FlattenStructFields(TypeNode type)
         {
-            var fields = new List<string>();
+            var fields = new List<(string, bool, bool)>();
             if (type is StructureType st)
             {
                 foreach (var fieldType in st.Fields)
@@ -1570,25 +1596,25 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     if (fieldType is StructureType nested)
                         fields.AddRange(FlattenStructFields(nested));
                     else
-                        fields.Add(GetBufferElementType(fieldType));
+                        fields.Add(GetStructFieldInfo(fieldType));
                 }
             }
             else
             {
-                fields.Add(GetBufferElementType(type));
+                fields.Add(GetStructFieldInfo(type));
             }
             return fields;
         }
 
         /// <summary>
-        /// Recursively generates (fieldAccessPath, glslType) pairs mapping flat field index
-        /// to the hierarchical GLSL struct field access path.
+        /// Recursively generates (fieldAccessPath, glslType, isEmulated64, isF64) tuples mapping
+        /// flat field index to the hierarchical GLSL struct field access path.
         /// For OuterStruct { InnerStruct { float Val }, int ID }:
-        ///   → [(".field_0.field_0", "float"), (".field_1", "int")]
+        ///   → [(".field_0.field_0", "float", false, false), (".field_1", "int", false, false)]
         /// </summary>
-        private List<(string Path, string GlslType)> GenerateStructFieldPaths(TypeNode type, string prefix = "")
+        private List<(string Path, string GlslType, bool IsEmulated64, bool IsF64)> GenerateStructFieldPaths(TypeNode type, string prefix = "")
         {
-            var result = new List<(string, string)>();
+            var result = new List<(string, string, bool, bool)>();
             if (type is StructureType st)
             {
                 int fieldIdx = 0;
@@ -1598,13 +1624,17 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     if (fieldType is StructureType nested)
                         result.AddRange(GenerateStructFieldPaths(nested, fieldPath));
                     else
-                        result.Add((fieldPath, GetBufferElementType(fieldType)));
+                    {
+                        var info = GetStructFieldInfo(fieldType);
+                        result.Add((fieldPath, info.GlslType, info.IsEmulated64, info.IsF64));
+                    }
                     fieldIdx++;
                 }
             }
             else
             {
-                result.Add((prefix, GetBufferElementType(type)));
+                var info = GetStructFieldInfo(type);
+                result.Add((prefix, info.GlslType, info.IsEmulated64, info.IsF64));
             }
             return result;
         }
@@ -1710,11 +1740,30 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     }
                     else if (_structFieldCounts.TryGetValue(param.Index, out var fieldCount) && fieldCount > 0)
                     {
-                        // Struct element buffer: emit per-field TF varyings
+                        // Struct element buffer: emit per-field TF varyings. A 64-bit
+                        // emulated field (Int64/Float64) needs TWO uint TF outputs (lo/hi)
+                        // exactly like the non-struct emulated-64-bit path above - its true
+                        // register type (uvec2/vec2/vec4) doesn't fit a scalar "uint" varying.
                         var fieldTypes = _structFieldTypes[param.Index];
                         for (int fi = 0; fi < fieldCount; fi++)
                         {
-                            string fieldGlslType = fieldTypes[fi];
+                            var (fieldGlslType, isFieldEmu64, _) = fieldTypes[fi];
+                            if (isFieldEmu64)
+                            {
+                                string loName = $"tf_out_{param.Index}_f{fi}_lo";
+                                string hiName = $"tf_out_{param.Index}_f{fi}_hi";
+                                Builder.AppendLine($"flat out highp uint {loName}; // TF output for param[{param.Index}] field {fi} (emu 64-bit lo)");
+                                Builder.AppendLine($"flat out highp uint {hiName}; // TF output for param[{param.Index}] field {fi} (emu 64-bit hi)");
+                                var loInfo = new OutputVaryingInfo(param.Index, outIndex++, loName, "uint",
+                                    isEmulated: true, emulatedSuffix: "lo", fieldIndex: fi);
+                                var hiInfo = new OutputVaryingInfo(param.Index, outIndex++, hiName, "uint",
+                                    isEmulated: true, emulatedSuffix: "hi", fieldIndex: fi);
+                                _outputVaryings.Add(loInfo);
+                                _outputVaryings.Add(hiInfo);
+                                _generatorArgs.OutputVaryings.Add(loInfo);
+                                _generatorArgs.OutputVaryings.Add(hiInfo);
+                                continue;
+                            }
                             bool needsFlat = fieldGlslType != "float";
                             string flatPrefix = needsFlat ? "flat " : "";
                             string varyingName = $"tf_out_{param.Index}_f{fi}";
@@ -3304,6 +3353,17 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 {
                     // Struct buffer: construct struct from per-field texelFetch
                     // Find the element type to get field paths
+                    // KNOWN GAP (2026-09-22, untested - no kernel currently texelFetch-reads a
+                    // struct-with-64-bit-field buffer): a field flagged IsEmulated64 by
+                    // GenerateStructFieldPaths still fetches ONE raw texel here and assigns it
+                    // to a uvec2-typed struct field - GLSL rejects that at compile time (loud
+                    // failure, not silent corruption), so this is safe-but-incomplete rather
+                    // than wrong. Fixing it needs structFieldCount to become a per-element TEXEL
+                    // count (2 texels for a 64-bit field, not 1) with per-field cumulative texel
+                    // offsets, plus a two-texelFetch uvec2/f64_from_ieee754_bits reconstruction -
+                    // see the store-side fix just below (GenerateCode(Store) struct branch) for
+                    // the parallel pattern. Deferred until a real kernel exercises it, so the fix
+                    // has a failing test to aim at (Rule 5).
                     var leaParam = Method.Parameters.FirstOrDefault(p => p.Index == leaParamIdx);
                     if (leaParam != null)
                     {
@@ -3414,18 +3474,53 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // Check if this is a struct buffer store
                 if (_structFieldCounts.TryGetValue(leaParamIdx, out var structFieldCount) && structFieldCount > 0)
                 {
-                    // Struct buffer: decompose struct into per-field TF outputs
-                    var structOutputs = _outputVaryings.Where(o => o.ParamIndex == leaParamIdx && o.FieldIndex >= 0).OrderBy(o => o.FieldIndex).ToList();
+                    // Struct buffer: decompose struct into per-field TF outputs. A 64-bit
+                    // emulated field (IsEmulated64) owns TWO varyings (lo/hi) sharing its
+                    // FieldIndex - group by field first so both shapes resolve correctly
+                    // (a flat Math.Min(fieldPaths.Count, structOutputs.Count) zip breaks the
+                    // moment any field is emulated, since counts then diverge).
+                    var structOutputsByField = _outputVaryings
+                        .Where(o => o.ParamIndex == leaParamIdx && o.FieldIndex >= 0)
+                        .GroupBy(o => o.FieldIndex)
+                        .ToDictionary(g => g.Key, g => g.ToList());
                     var leaParam = Method.Parameters.FirstOrDefault(p => p.Index == leaParamIdx);
-                    if (leaParam != null && structOutputs.Count > 0)
+                    if (leaParam != null && structOutputsByField.Count > 0)
                     {
                         var elemType = UnwrapType(leaParam.ParameterType);
                         var fieldPaths = GenerateStructFieldPaths(elemType);
-                        for (int fi = 0; fi < Math.Min(fieldPaths.Count, structOutputs.Count); fi++)
+                        for (int fi = 0; fi < fieldPaths.Count; fi++)
                         {
+                            if (!structOutputsByField.TryGetValue(fi, out var fieldVaryings))
+                                continue;
                             string fieldExpr = $"{val}{fieldPaths[fi].Path}";
+
+                            if (fieldPaths[fi].IsEmulated64)
+                            {
+                                // uvec2 (i64) or vec2/vec4 (f64) register value - split into the
+                                // lo/hi uint TF varyings, mirroring the non-struct emulated-64-bit
+                                // store path above.
+                                var loV = fieldVaryings.FirstOrDefault(o => o.EmulatedSuffix == "lo");
+                                var hiV = fieldVaryings.FirstOrDefault(o => o.EmulatedSuffix == "hi");
+                                if (loV == null || hiV == null) continue;
+                                if (fieldPaths[fi].IsF64)
+                                {
+                                    AppendLine($"{{");
+                                    AppendLine($"  uvec2 _ieee_bits_f{fi} = f64_to_ieee754_bits({fieldExpr});");
+                                    AppendLine($"  {loV.VaryingName} = _ieee_bits_f{fi}.x;");
+                                    AppendLine($"  {hiV.VaryingName} = _ieee_bits_f{fi}.y;");
+                                    AppendLine($"}}");
+                                }
+                                else
+                                {
+                                    AppendLine($"{loV.VaryingName} = {fieldExpr}.x;");
+                                    AppendLine($"{hiV.VaryingName} = {fieldExpr}.y;");
+                                }
+                                continue;
+                            }
+
+                            var fieldOutput = fieldVaryings[0];
                             // TF varying type matches the field's native type, so direct assignment
-                            AppendLine($"{structOutputs[fi].VaryingName} = {fieldExpr};");
+                            AppendLine($"{fieldOutput.VaryingName} = {fieldExpr};");
                         }
                         return;
                     }

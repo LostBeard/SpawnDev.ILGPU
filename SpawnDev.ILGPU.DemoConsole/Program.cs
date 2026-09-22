@@ -25,6 +25,12 @@ try
     if (args.Length > 0 && args[0] == "fp4-helper-glsl")
         return await Fp4HelperGlslDump.Run();
 
+    // Offline GLSL size/compile-time measurement for Autolykos2.GenerateDatasetKernel - checks
+    // whether the WebGL struct-field TF fix pushed the already-Blake2b-heavy shader into
+    // ANGLE compile-time blowup territory. No browser needed.
+    if (args.Length > 0 && args[0] == "autolykos2-dataset-glsl")
+        return await Autolykos2DatasetGlslDump.Run();
+
     if (args.Length > 0 && args[0] == "fp4-helper-ptx")
         return await Fp4HelperPtxDump.Run();
 

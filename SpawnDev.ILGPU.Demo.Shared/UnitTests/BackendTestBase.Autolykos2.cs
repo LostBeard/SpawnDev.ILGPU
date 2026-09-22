@@ -210,25 +210,38 @@ public abstract partial class BackendTestBase
     // writing) declare a scalar `uint` varying for a field whose actual value is `uvec2`, which
     // is exactly the reported dimension-mismatch error.
     //
-    // ATTEMPTED A FULL FIX the same day and reverted it: correcting the field-type string is a
-    // small, safe change (add a GetStructFieldGlslType wrapper used only by the struct-flattening
-    // paths), but it's not sufficient alone - the TF output DECLARATION and STORE code must also
-    // split such a field into lo/hi scalar outputs (mirroring the existing non-struct
-    // isEmulatedI64/F64 whole-value handling right above it), and CRITICALLY the JS-side readback
-    // (wwwroot/glWorker.js, the struct-reconstruction branch around "out.fieldIndex === 0") assumes
-    // every struct field is 4 bytes when computing structElemSize and per-field byte offsets -
-    // it needs the same fix, computed per-field (4 bytes normally, 8 for a lo/hi-paired field).
-    // Implementing all three (declaration, store, JS readback) got the shader to COMPILE, but the
-    // test then hung - a Playwright timeout waiting for the test's own "Run" button locator, not a
-    // clean assertion failure - most likely a WebGL Transform-Feedback separate-attribute limit
-    // being exceeded now that a 4-ulong-field struct needs 8 TF outputs instead of 4 (x4 for this
-    // test's 4 chunk-buffer parameters), though this wasn't confirmed with live browser DevTools.
-    // A silent hang is worse than a clean compile error, so the attempt was reverted rather than
-    // shipped half-working (git diff of GLSLKernelFunctionGenerator.cs and glWorker.js from this
-    // session's earlier commits shows exactly what was tried, if picking this back up).
-    // Whoever continues this needs live browser DevTools (chrome://inspect or CDP) to see the
-    // actual console error/GL error when the hang happens, not more static code reading - both
-    // WebGL bugs on this page have now had two rounds of static analysis each without a full fix.
+    // FIXED the compile error (2026-09-22): GetStructFieldInfo (GLSLKernelFunctionGenerator.cs)
+    // now flags a 64-bit-emulated struct field instead of returning the wrong scalar "uint".
+    // EmitOutputVaryings' struct branch declares TWO uint TF varyings (lo/hi) for such a field
+    // (mirroring the existing non-struct isEmulatedI64/F64 whole-value handling), the Store
+    // codegen splits the value into them (uvec2 -> .x/.y, or f64_to_ieee754_bits() first for an
+    // f64 field), and wwwroot/glWorker.js's struct-reconstruction readback computes each field's
+    // byte width (8 for a lo/hi pair, 4 otherwise) instead of assuming every field is 4 bytes.
+    // Confirmed via an offline GLSL dump (no browser) that the shader now compiles with ZERO
+    // errors. The struct-buffer texelFetch LOAD path (reading such a field back FROM a buffer,
+    // as opposed to writing it) still has the old scalar-only bug - dead code for now (no kernel
+    // reads a 64-bit struct field from a buffer), left as a documented gap with a fail-loud (GLSL
+    // compile error, not silent corruption) fallback in GLSLKernelFunctionGenerator.cs.
+    //
+    // Fixing the compile error UNCOVERED A SEPARATE, DEEPER problem, ROOT-CAUSED via CDP live
+    // browser DevTools (2026-09-22, this session): the shader now compiles but ANGLE's own shader
+    // compiler (not this library's C# codegen, which produces the GLSL text in under 1 second)
+    // never finishes compiling it within any practical time - observed running for 75+ seconds
+    // with zero progress before the test harness tore down the page. The generated GLSL for this
+    // kernel is genuinely huge: 18,883 lines / 620KB (measured via ShaderCompiler.Generate offline,
+    // see SpawnDev.ILGPU.DemoConsole -- autolykos2-dataset-glsl), because Blake2b's ~80 rounds of
+    // fully-unrolled emulated-64-bit (uvec2) arithmetic get inlined twice per element (two Blake2b
+    // calls per GenerateDatasetElement), across this kernel's 4 output struct-buffer parameters.
+    // This matches the same failure CLASS as the already-fixed "4.17.4: exponential GLSL blow-up
+    // on branchy WebGL loops" commit, but is evidently a DIFFERENT specific codegen pattern that
+    // fix didn't cover (deep ternary chains in ByteOfBE/DeriveIndex + heavy Blake2b inlining + the
+    // now-doubled struct-field TF varying count). NOT something to hack around with a longer test
+    // timeout - a multi-minute-per-test compile is not viable regardless of what number is in
+    // [TestMethod(Timeout=...)]. The real fix is architectural: stop fully inlining Blake2b's round
+    // function into every call site and route it through GLSLFunctionGenerator as a real (non-
+    // inlined) GLSL function instead (see Fp4HelperGlslDump.cs for the existing [NoInlining] +
+    // GLSLFunctionGenerator pattern this would need to follow) - a separate, substantial codegen
+    // change, not attempted in this session.
     [TestMethod]
     public async Task Autolykos2_DatasetGeneration_SmallN_GPU_CPUMatch() => await RunTest(async accelerator =>
     {
