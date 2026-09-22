@@ -102,10 +102,18 @@ namespace SpawnDev.ILGPU.Crypto
         // hang for the loop-shaped tests that G-alone-NoInlining doesn't have. Do not re-enable
         // without root-causing that hang first.
         //
-        // Real Blake2b (12 rounds) still produces a wrong digest regardless of Compress's
-        // inlining - a separate, precisely-bisected, NOT-YET-FIXED bug that reproduces even
-        // with G fully AggressiveInlining (no function call, no ref/inout involved at all): see
-        // BackendTestBase.Autolykos2.cs and NoInliningBlakeShapedRawVTest.
+        // Real Blake2b (12 rounds, G NoInlining as shipped) produced a wrong digest via a
+        // separate bug (Bug #5), FIXED 2026-09-22: GLSLCodeGenerator.GenerateCode
+        // (BinaryArithmeticValue)'s fallback path (used for standalone NoInlining GLSL
+        // functions - exactly what G's NoInlining routes through) fell through to native
+        // GLSL `+`/`-` for emulated-i64 Add/Sub instead of i64_add()/i64_sub() - correct for
+        // small values, silently dropping the lo-to-hi carry/borrow once G's mixing grew a
+        // word's lo word past 2^32. Fixed in GLSLCodeGenerator.cs; see
+        // NoInliningBlakeShapedTripleCallTest for the full root-cause investigation.
+        // Autolykos2_Blake2b_GPU_CPUMatch now passes on WebGL. DatasetGeneration_SmallN and
+        // Mine_SmallN still TIME OUT (30s) - a separate, still-open ANGLE compile-time hang
+        // for the 63-iteration Compress-in-a-loop shape (see BackendTestBase.Autolykos2.cs),
+        // not a correctness bug and not Bug #5.
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static void Compress(
             ref ulong h0, ref ulong h1, ref ulong h2, ref ulong h3,

@@ -1140,13 +1140,31 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 return;
             }
 
-            // Emulated 64-bit shift dispatch — closes Tests23_I64Shift_InHelper_NoCodegenError
-            // on WebGL (mirrors WGSL local.8 fix `WGSLCodeGenerator.GenerateBinOp`). Pre-fix
-            // GLSL emitted `uvec2 = uvec2 >> int` which performs COMPONENT-WISE shift
-            // (`(a.x >> shift, a.y >> shift)`) — losing the carry from hi to lo. For input
-            // 0x1234567890ABCDEF >> 8 the GLSL produced 0x0090ABCD (just `0x90ABCDEF >> 8`)
-            // instead of 0x7890ABCD. Route emu-i64/u64 shifts through `i64_shl` / `i64_shr`
-            // / `u64_shr` emulation helpers from GLSLEmulationLibrary.
+            // Emulated 64-bit shift/add/sub/mul dispatch — closes
+            // Tests23_I64Shift_InHelper_NoCodegenError on WebGL (mirrors WGSL local.8 fix
+            // `WGSLCodeGenerator.GenerateBinOp`). Pre-fix GLSL emitted `uvec2 = uvec2 >> int`
+            // which performs COMPONENT-WISE shift (`(a.x >> shift, a.y >> shift)`) — losing
+            // the carry from hi to lo. For input 0x1234567890ABCDEF >> 8 the GLSL produced
+            // 0x0090ABCD (just `0x90ABCDEF >> 8`) instead of 0x7890ABCD.
+            //
+            // Bug #5 (2026-09-22): this method (the fallback path GLSLFunctionGenerator uses
+            // for standalone NoInlining helper functions — GLSLKernelFunctionGenerator has its
+            // own override with a correct full i64 dispatch table) only special-cased Shl/Shr
+            // here; Add and Sub fell all the way through to the native `+`/`-` operators below.
+            // `uvec2 + uvec2` is GLSL's built-in COMPONENT-WISE addition (`a.x+b.x, a.y+b.y`
+            // independently) with NO carry from the lo word's overflow into the hi word - wrong
+            // for our lo/hi emulated-64-bit representation whenever the lo addition overflows.
+            // A Blake2b-G-shaped NoInlining helper (SpawnDev.ILGPU.Crypto.Blake2b.G) called
+            // repeatedly produced a result wrong by exactly one bit at the lo/hi boundary,
+            // reproducing identically in a hand-written raw-GLSL harness completely outside
+            // ILGPU (root-caused via NoInliningBlakeShapedTripleCallTest): correct for small
+            // values (the lo addition never overflows on the very first call), silently wrong
+            // once accumulated mixing grows a word past 2^32 in the lo word specifically. Mul is
+            // the same class of bug (`uvec2 * uvec2` is component-wise, not a real 64-bit
+            // multiply) and is fixed alongside Add/Sub even though no failing test hit it yet -
+            // it is exactly as wrong for the same reason. And/Or/Xor are NOT touched: those are
+            // genuinely bitwise-independent per word, so the native component-wise operators
+            // already give the correct 64-bit result.
             string leftType = TypeGenerator[value.Left.Type];
             bool leftIsEmuI64 = Backend.EnableI64Emulation
                 && (leftType == "uvec2" && value.Left.BasicValueType == BasicValueType.Int64);
@@ -1157,6 +1175,17 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     ? "i64_shl"
                     : (value.IsUnsigned ? "u64_shr" : "i64_shr");
                 AppendLine($"{target} = {shiftFn}({left}, uint({right}));");
+                return;
+            }
+            if (leftIsEmuI64 && value.Kind is BinaryArithmeticKind.Add or BinaryArithmeticKind.Sub or BinaryArithmeticKind.Mul)
+            {
+                string emulFn = value.Kind switch
+                {
+                    BinaryArithmeticKind.Add => "i64_add",
+                    BinaryArithmeticKind.Sub => "i64_sub",
+                    _ => value.IsUnsigned ? "u64_mul" : "i64_mul",
+                };
+                AppendLine($"{target} = {emulFn}({left}, {right});");
                 return;
             }
 

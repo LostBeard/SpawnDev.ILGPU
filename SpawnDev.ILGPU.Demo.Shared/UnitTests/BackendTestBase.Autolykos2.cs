@@ -284,25 +284,32 @@ public abstract partial class BackendTestBase
     // configuration) already avoids the ANGLE hang for all 3 WebGL Autolykos2 tests without
     // this problem, so that is what ships.
     //
-    // STILL OPEN, and definitively proven UNRELATED to any of the above (2026-09-22): even with
-    // the ref-write-back bug fixed and G correctly NoInlining/routed as a real fn-def call, real
-    // Blake2b still produces a wrong digest - because it needs Compress's full 12 rounds, and a
-    // from-scratch synthetic repro (BackendTestBase.Tests6.cs, NoInliningBlakeShapedRawVTest)
-    // precisely bisected a SEPARATE bug: 1 round (8 G-shaped calls reusing v0..v15 once each) is
-    // bit-exact; 2 rounds (16 calls, reusing v0..v15 a SECOND time) produces a wrong-but-
-    // plausible-looking result. Critically, this reproduces IDENTICALLY even with G marked
-    // AggressiveInlining instead of NoInlining - i.e. with NO function call, NO ref/inout
-    // parameter, NO fn-def call mechanism involved AT ALL, just plain straight-line GLSL
-    // arithmetic on uvec2 locals. This rules out everything investigated in this session
-    // (NoInlining, ref-write-back, the fn-def call mechanism, struct-field TF, multi-slot output)
-    // as the cause - it is a distinct, still-unnamed bug, most likely in WebGL's i64 emulation
-    // library (GLSLEmulationLibrary.cs) or in how a LARGE number of interdependent uvec2 locals
-    // get declared/hoisted, that only manifests once the SAME small set of local variables gets
-    // reused as an operand a second time across a long, otherwise-unremarkable sequence of
-    // add/xor/shift operations. Needs a fresh, from-scratch investigation (start from
-    // NoInliningBlakeShapedRawVTest with BlakeShapedNumRounds bumped to 2 - it is a much smaller,
-    // faster, fully isolated repro than the real Autolykos2 kernel, and does not need the
-    // ANGLE-hang-prone Compress-NoInlining configuration above at all).
+    // Bug #5 - FIXED 2026-09-22 (was: "STILL OPEN" here). With the ref-write-back bug fixed and
+    // G correctly NoInlining/routed as a real fn-def call, real Blake2b was STILL producing a
+    // wrong digest via a separate bug, precisely bisected down to
+    // BackendTestBase.Tests6.cs's NoInliningBlakeShapedTripleCallTest (3 chained calls to a
+    // Blake2b-G-shaped NoInlining function reusing the same 4 locals; correct for call 1,
+    // wrong by exactly 1 bit at the emulated uvec2 lo/hi boundary by call 3, once accumulated
+    // mixing grew a word's lo half past 2^32). Root cause: GLSLCodeGenerator.GenerateCode
+    // (BinaryArithmeticValue)'s fallback path - the one GLSLFunctionGenerator uses for
+    // standalone NoInlining helper functions, exactly what G's NoInlining routes through -
+    // only special-cased Shl/Shr for emulated-i64 uvec2 operands; Add/Sub fell through to
+    // native GLSL `+`/`-`, which is COMPONENT-WISE on a uvec2 (no carry from the lo word's
+    // overflow into hi) - wrong for our lo/hi 64-bit emulation. Fixed by extending the same
+    // emulated-i64 dispatch already used for Shl/Shr to Add/Sub/Mul too. See
+    // NoInliningBlakeShapedTripleCallTest for the full investigation and how it was
+    // root-caused (a hand-written raw-GLSL harness running the exact generated shader text
+    // completely outside ILGPU, isolating the bug to the shader text/compilation before
+    // finding the actual missing dispatch branch).
+    //
+    // Autolykos2_Blake2b_GPU_CPUMatch (single Compress call, no loop) now PASSES on WebGL.
+    // This test and Mine below still TIME OUT (30s) - the separate, STILL-OPEN ANGLE
+    // compile-time hang for GenerateDatasetKernel's 63-iteration Compress-in-a-loop shape
+    // (see Blake2b.cs Compress's own comment). Not a correctness bug, not Bug #5 - Compress
+    // is deliberately AggressiveInlining specifically to avoid this hang class (G-alone-
+    // NoInlining already fixed the ANGLE compile hang for shader SIZE; the loop-shaped hang
+    // here is a different problem needing a from-scratch investigation of its own if picked
+    // up next).
     [TestMethod]
     public async Task Autolykos2_DatasetGeneration_SmallN_GPU_CPUMatch() => await RunTest(async accelerator =>
     {

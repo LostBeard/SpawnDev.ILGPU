@@ -2486,60 +2486,40 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     throw new Exception($"NoInliningBlakeShapedCall9InlineTrace[{names[j]}] expected {expected[j]:x16}, got {result[j]:x16}");
         });
 
-        // Bug #5 - WebGL i64/uvec2 emulation reuse bug. STILL OPEN as of 2026-09-22, after the
-        // GLSLKernelFunctionGenerator Shr-dispatch bug above was found and fixed (that fix is
-        // real, verified, and shipped - it is NOT this bug; NoInliningBlakeShapedCall9InlineTraceTest
-        // above locks it in). This is the SMALLEST known repro: 3 CONSECUTIVE calls to the
-        // Blake2b-G-shaped NoInlining function, chaining the SAME 4 ulong locals through each
-        // call's output back into the next call's input. Call 3's result is wrong by exactly
-        // 1 bit, always at bit 32 (the emulated uvec2 lo/hi word boundary).
+        // Bug #5 - WebGL i64/uvec2 emulation reuse bug. FIXED 2026-09-22 (same session as the
+        // GLSLKernelFunctionGenerator Shr-dispatch bug above, but a genuinely separate bug).
+        // Smallest repro: 3 CONSECUTIVE calls to a Blake2b-G-shaped NoInlining function,
+        // chaining the SAME 4 ulong locals through each call's output back into the next
+        // call's input. Call 3's result was wrong by exactly 1 bit at the emulated uvec2 lo/hi
+        // boundary - correct for small starting values (call 1 never overflows the lo word),
+        // silently wrong once accumulated mixing grows a word past 2^32 in the lo word.
         //
-        // Extensively bisected and NOT explained by any of the following (each independently
-        // ruled out by a dedicated test, since removed from the suite - see git history
-        // 2026-09-22 for the full scaffold if this needs revisiting):
-        //   - The emulation MATH itself: a bit-for-bit C# port of GLSLEmulationLibrary's
-        //     i64_add/i64_shl/u64_shr/i64_xor, run against the exact same value sequence,
-        //     matches the real ulong ground truth with zero mismatches.
-        //   - ref/inout vs. struct-by-value calling convention (both shapes fail identically).
-        //   - Constant vs. round-varying message words (both fail).
-        //   - Loop vs. fully-unrolled straight-line code (both fail; a genuinely fresh,
-        //     never-before-touched set of locals passed through this SAME function as its
-        //     literal 9th call in the shader is CORRECT - ruling out raw call count/shader
-        //     position entirely. The trigger needs a data-dependent CHAIN of 3, not merely
-        //     3 occurrences of the function).
-        //   - GLSL `<`-based unsigned carry/borrow detection in i64_add/i64_sub (rewritten to
-        //     the branch-free bitwise generate/propagate identity - see i64_add's own comment
-        //     in GLSLEmulationLibrary.cs - with zero change in the wrong output).
-        //   - Compiler constant-folding/CSE across identical call sites (defeated by XOR-ing
-        //     every intermediate value against a genuine runtime kernel parameter, always 0
-        //     but opaque to the compiler at compile time - the same "u_one" anti-optimization
-        //     technique already used for f64 emulation - with zero change in the wrong output).
-        //   - The SAME compiled GLSL function object being reused 3x (defeated by alternating
-        //     between two byte-for-byte identical but separately-named function copies for
-        //     calls 1/2/3 - still fails identically).
-        //   - Register/ALU-level value corruption fixable by forcing a genuine GPU memory
-        //     round-trip (store to and load back from a real ArrayView<ulong> buffer between
-        //     calls 2 and 3) - this changed the wrong answer to something DIFFERENT rather
-        //     than fixing it, suggesting the memory-buffer readback path has its own,
-        //     separate correctness issue worth a fresh investigation of its own.
+        // Root cause: GLSLCodeGenerator.GenerateCode(BinaryArithmeticValue) - the FALLBACK
+        // path GLSLFunctionGenerator uses for standalone NoInlining helper functions
+        // (GLSLKernelFunctionGenerator has its own override with a correct full i64 dispatch
+        // table and was never affected) - only special-cased Shl/Shr for emulated-i64 uvec2
+        // operands. Add and Sub fell all the way through to the native GLSL `+`/`-` operators,
+        // which perform COMPONENT-WISE arithmetic on a uvec2 (`a.x+b.x, a.y+b.y` independently,
+        // no carry from the lo word's overflow into the hi word) - wrong for our lo/hi
+        // emulated-64-bit representation whenever the lo addition/subtraction actually
+        // overflows/borrows. Fixed by extending the same emulated-i64 dispatch check already
+        // used for Shl/Shr to also route Add/Sub/Mul through i64_add/i64_sub/i64_mul.
+        // (And/Or/Xor were NOT touched - those are genuinely bitwise-independent per word, so
+        // the native component-wise operators already give the correct result.)
         //
-        // Working theory (not yet confirmed): the corrupted word's correct value exceeds
-        // 2^24 in every failing case observed, and the corruption always rounds an ODD value
-        // down to the nearest EVEN one - the exact signature of a 32-bit integer being
-        // silently routed through a 24-bit-mantissa float intermediate somewhere in the
-        // driver's compiled code, once accumulated Blake2b mixing pushes a word's magnitude
-        // past that threshold. This would be consistent with GLSLEmulationLibrary.cs's
-        // existing documented ANGLE/D3D11 f64 precision-collapse bug (see the F64Functions
-        // "ANTI-OPTIMIZATION" comment above) manifesting in the i64 path instead - but the
-        // f64 fix's mitigation (a fake-dynamic-but-always-1.0 float multiply) does not
-        // obviously translate to an all-integer computation, and the runtime-XOR probe here
-        // (the closest integer analogue) did not fix it. NOT YET FIXED. If this needs
-        // picking up again: reproduce via the smallest test below, then try (a) forcing every
-        // intermediate through an actual `int`/`uint`-typed uniform read (not just XOR
-        // against one) to rule out int-vs-float ALU routing more directly, and (b) capturing
-        // an ANGLE HLSL disassembly (chrome://gpu / `--use-angle=d3d11 --show-fps-counter`
-        // shader dump flags) of fn_BlakeShapedGValueKernel's 3rd call site to inspect actual
-        // register allocation directly instead of black-box GLSL-source bisection.
+        // How this was root-caused, for anyone hitting a similar "works small, wrong once
+        // values grow" WebGL bug: bisection (ref/inout vs by-value, constant vs varying
+        // message words, loop vs unrolled, call count, the bitwise-carry i64_add rewrite,
+        // runtime-opaque anti-optimization XORs, alternating compiled function objects, a
+        // real GPU memory round-trip) repeatedly reproduced the identical wrong output no
+        // matter what was changed - which in hindsight was the tell that the bug was NOT in
+        // any of those dimensions. What actually settled it: extracting the EXACT real
+        // generated GLSL text and running it in a standalone WebGL2 harness completely outside
+        // ILGPU (raw `chromium.launch` + hand-authored HTML, no PMT/Blazor/glWorker.js),
+        // confirming the bug lived in the shader text/compilation itself - then hand-rewriting
+        // the same function to use explicit i64_add() calls (matching a by-hand port that was
+        // ALSO bit-exact against the true ulong ground truth) instead of the generated `+`,
+        // which fixed it outside any GPU-driver-level explanation at all.
         static void BlakeShapedTripleCallKernel(Index1D index, ArrayView<ulong> outBuf)
         {
             ulong w0 = 10, w1 = 11, w2 = 12, w3 = 13;
