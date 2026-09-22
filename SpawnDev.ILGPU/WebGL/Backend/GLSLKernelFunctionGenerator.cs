@@ -1959,7 +1959,22 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // like `struct_N v_K = struct_N(0)` (BVHRayTraversalTest).
                 string type;
                 string init;
-                if (value.Type is PointerType)
+                if (value.Type is PointerType && IsScalarAllocaPointer(value, out var scalarElemType))
+                {
+                    // Scalar alloca (e.g. a local `ulong` later passed `ref` into a real,
+                    // non-inlined fn-def call - see GenerateCode(Alloca)'s matching "Scalar
+                    // alloca" branch). Its GLSL representation IS its pointee's own type
+                    // (uvec2 for an emulated ulong), not the "int index" convention that's
+                    // correct for LEA/array-alloca pointers. Discovered 2026-09-22: hoisting
+                    // this as "int" - the pre-fn-def-codegen default, when every PointerType
+                    // hoist really was an int-indexed buffer/array pointer - produced "cannot
+                    // convert from highp 2-component vector of uint to highp int" once
+                    // Blake2b's mixing function (4 ref ulong params) started routing through
+                    // the fn-def path instead of being fully inlined.
+                    type = scalarElemType!;
+                    init = GetDefaultValue(type);
+                }
+                else if (value.Type is PointerType)
                 {
                     type = "int";
                     init = "0";
@@ -1977,6 +1992,30 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 }
                 TryEmitDeclaration(variable.Name, type, init);
             }
+        }
+
+        /// <summary>
+        /// True when <paramref name="value"/> is a SCALAR alloca (a local variable that was
+        /// address-taken - e.g. later passed `ref`/`out` into a real, non-inlined fn-def call -
+        /// not a `LocalMemory`/`new T[N]` array). Mirrors the exact classification
+        /// <see cref="GenerateCode(Alloca)"/> uses for its own "Scalar alloca" branch, so a
+        /// value hoisted for cross-block visibility gets the SAME declared type it would have
+        /// gotten had it first been visited during body codegen instead. Array allocas and
+        /// LEA-derived buffer pointers are unaffected - they still hoist as the "int index"
+        /// pointer convention this backend uses for them (<paramref name="scalarElemType"/> is
+        /// null for those, and the caller keeps its existing int/0 fallback).
+        /// </summary>
+        private bool IsScalarAllocaPointer(Value value, out string? scalarElemType)
+        {
+            scalarElemType = null;
+            if (value is not Alloca alloca) return false;
+            if (alloca.IsArrayAllocation(out _)) return false;
+            foreach (var use in alloca.Uses)
+            {
+                if (use.Resolve() is NewView) return false; // scalarized user array - stays "int"
+            }
+            scalarElemType = TypeGenerator[alloca.AllocaType];
+            return true;
         }
 
         private string GetDefaultValue(string glslType) => glslType switch

@@ -57,7 +57,15 @@ namespace SpawnDev.ILGPU.Crypto
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static ulong Rotr(ulong x, int n) => (x >> n) | (x << (64 - n));
 
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        // NoInlining (not AggressiveInlining): G is called 8x/round x 12 rounds = 96x per
+        // Compress call. Fully inlining its emulated-64-bit body 96x (x2 Compress calls per
+        // Autolykos2 dataset element) produced an 18,883-line / 620KB GLSL shader that ANGLE's
+        // WebGL compiler never finished compiling (measured 2026-09-22, no progress after 75s+).
+        // NoInlining routes this through the standalone-fn-def codegen path (rc.16, shared
+        // ILGPU IR mechanism, not WebGL-specific) instead - proven bit-exact for this exact
+        // shape (ref-output helper called many times) by NoInliningOutParamHelperBitExactTest
+        // and the NoInliningIdct16Row*BitExactTest family before ever trying it here.
+        [MethodImpl(MethodImplOptions.NoInlining)]
         private static void G(ref ulong a, ref ulong b, ref ulong c, ref ulong d, ulong x, ulong y)
         {
             a = a + b + x;

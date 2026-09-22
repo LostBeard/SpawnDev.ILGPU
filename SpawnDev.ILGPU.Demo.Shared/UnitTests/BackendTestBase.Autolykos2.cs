@@ -224,24 +224,49 @@ public abstract partial class BackendTestBase
     // compile error, not silent corruption) fallback in GLSLKernelFunctionGenerator.cs.
     //
     // Fixing the compile error UNCOVERED A SEPARATE, DEEPER problem, ROOT-CAUSED via CDP live
-    // browser DevTools (2026-09-22, this session): the shader now compiles but ANGLE's own shader
-    // compiler (not this library's C# codegen, which produces the GLSL text in under 1 second)
-    // never finishes compiling it within any practical time - observed running for 75+ seconds
-    // with zero progress before the test harness tore down the page. The generated GLSL for this
-    // kernel is genuinely huge: 18,883 lines / 620KB (measured via ShaderCompiler.Generate offline,
-    // see SpawnDev.ILGPU.DemoConsole -- autolykos2-dataset-glsl), because Blake2b's ~80 rounds of
-    // fully-unrolled emulated-64-bit (uvec2) arithmetic get inlined twice per element (two Blake2b
-    // calls per GenerateDatasetElement), across this kernel's 4 output struct-buffer parameters.
-    // This matches the same failure CLASS as the already-fixed "4.17.4: exponential GLSL blow-up
-    // on branchy WebGL loops" commit, but is evidently a DIFFERENT specific codegen pattern that
-    // fix didn't cover (deep ternary chains in ByteOfBE/DeriveIndex + heavy Blake2b inlining + the
-    // now-doubled struct-field TF varying count). NOT something to hack around with a longer test
-    // timeout - a multi-minute-per-test compile is not viable regardless of what number is in
-    // [TestMethod(Timeout=...)]. The real fix is architectural: stop fully inlining Blake2b's round
-    // function into every call site and route it through GLSLFunctionGenerator as a real (non-
-    // inlined) GLSL function instead (see Fp4HelperGlslDump.cs for the existing [NoInlining] +
-    // GLSLFunctionGenerator pattern this would need to follow) - a separate, substantial codegen
-    // change, not attempted in this session.
+    // browser DevTools (2026-09-22, this session): the shader compiled but ANGLE's own shader
+    // compiler never finished within any practical time - observed running 75+ seconds with zero
+    // progress. The generated GLSL was genuinely huge: 18,883 lines / 620KB (measured via
+    // ShaderCompiler.Generate offline, see SpawnDev.ILGPU.DemoConsole -- autolykos2-dataset-glsl),
+    // because Blake2b's ~80 rounds of fully-unrolled emulated-64-bit arithmetic got inlined twice
+    // per element across this kernel's 4 output struct-buffer parameters. Same failure CLASS as
+    // the already-fixed "4.17.4: exponential GLSL blow-up on branchy WebGL loops" commit, a
+    // different specific pattern that fix didn't cover.
+    //
+    // FIXED (2026-09-22, same session): this codebase already has real, working, shared infra for
+    // exactly this - the ILGPU IR Inliner (backend-agnostic, ILGPU/IR/Transformations/Inliner.cs)
+    // leaves a [MethodImpl(NoInlining)] method as a real MethodCall instead of inlining it, and
+    // WebGL's GLSLFunctionGenerator/GLSLCodeGenerator.GenerateCode(MethodCall) already emits it as
+    // a real standalone GLSL fn - proven bit-exact for exactly this shape (ref/out-output helper
+    // called many times) by the pre-existing NoInliningOutParamHelperBitExactTest and
+    // NoInliningIdct16Row*BitExactTest family (confirmed by running them BEFORE touching Blake2b).
+    // Marked Blake2b.G (the mixing function - 4 ref ulong params, called 96x per Compress call)
+    // NoInlining instead of AggressiveInlining: 18,883 -> 3,965 lines (4.75x), confirmed via the
+    // same offline dump, zero regressions across the full WebGLTests sweep (638 tests, 494 pass -
+    // same 3 pre-existing Autolykos2 failures, nothing new).
+    //
+    // That surfaced a SECOND, previously-latent bug it needed fixing alongside: GLSLKernelFunctionGenerator.
+    // EmitHoistedDeclarations declared EVERY hoisted PointerType value as GLSL "int" (correct for
+    // the LEA/array-alloca buffer-index convention this backend uses, wrong for a SCALAR alloca -
+    // e.g. one of Compress's local `ulong` chaining variables - once it can be address-taken and
+    // passed `ref` into a real, non-inlined G() call). Manifested as "cannot convert from highp
+    // 2-component vector of uint to highp int". FIXED: IsScalarAllocaPointer (new) distinguishes a
+    // scalar alloca from an LEA/array-alloca pointer, mirroring the classification
+    // GenerateCode(Alloca)'s own "Scalar alloca" branch already used - so a hoisted value gets the
+    // SAME declared type it would have gotten had it first been visited during body codegen. This
+    // bug was invisible before tonight because nothing on WebGL had ever hit the fn-def path with
+    // an emulated-64-bit ref/out parameter - Idct16Row-shape precedent tests all use int/ref int.
+    //
+    // STILL OPEN: with both fixes landed the shader compiles (small, fast) but the test still
+    // times out at the harness's 30s watchdog - confirmed via CDP this is NOT a compile hang this
+    // time (no console output at all during the wait, vs. the earlier fast, loud compile-error
+    // case) and NOT purely a thread-count effect (Autolykos2_Mine_SmallN_FindsKnownHits's own
+    // genKernel call at n=128 times out the same way as this test's n=2000). The generated GLSL
+    // has exactly one `for` loop, capped at a 100,000-iteration safety bound with an internal
+    // break condition - worth checking first whether that break condition is actually firing.
+    // Likely a THIRD, independent, previously-undiscovered bug: this kernel's runtime control flow
+    // has never actually executed on WebGL before tonight (it never got past the compile-error
+    // stage until now), so nothing here has ever been exercised on this backend.
     [TestMethod]
     public async Task Autolykos2_DatasetGeneration_SmallN_GPU_CPUMatch() => await RunTest(async accelerator =>
     {
