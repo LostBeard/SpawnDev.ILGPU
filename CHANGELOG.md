@@ -1,6 +1,26 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.13 - WebGL: emulated 64-bit arithmetic correctness fix in NoInlining helper functions (fork 2.3.3)
+
+### Fixed - emulated 64-bit Add/Sub/Mul in standalone WebGL helper functions silently dropped the carry/borrow
+
+Any `[MethodImpl(MethodImplOptions.NoInlining)]` method taking `ulong`/`long` values on the WebGL backend
+could silently produce a WRONG result once a computed value's low 32 bits overflowed. The codegen path used
+for standalone (non-inlined) helper functions routed `+`/`-`/`*` through GLSL's native, component-wise
+`uvec2` operators instead of the carry/borrow-propagating emulation helpers (`i64_add`/`i64_sub`/`i64_mul`)
+the kernel-body codegen already used correctly. Small values were unaffected; results were silently
+corrupted by exactly the dropped carry bit once a word's magnitude grew past 2^32. Found via
+`SpawnDev.ILGPU.Crypto.Blake2b`'s NoInlining `G` mixing function (used by the in-progress Autolykos2 mining
+kernel), fixed in the shared codegen so it applies to any user NoInlining method with the same shape.
+`i64_from_i32`/bit-and/or/xor were unaffected (those are genuinely per-word-independent).
+
+### Fixed - a separate WebGL unsigned right-shift dispatch bug
+
+`ulong >> n` emitted directly inside a kernel body (as opposed to inside a NoInlining helper function)
+could route through the signed/arithmetic shift instead of the logical one, sign-extending instead of
+zero-filling when the high word's top bit was set.
+
 ## 5.2.12 - Capture replay stops losing the device, and the scalar pool is per-device (fork 2.3.3)
 
 ### Fixed - a large captured plan LOST THE WEBGPU DEVICE on replay

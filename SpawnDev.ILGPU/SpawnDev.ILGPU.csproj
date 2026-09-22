@@ -4,9 +4,9 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.2.12</Version>
+		<Version>5.2.13</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>v5.2.12 - Capture replay no longer submits a whole plan as one command buffer (it lost the device on large graphs); the WebGPU scalar-params pool is per-device and enabled by default. See CHANGELOG.md.</PackageReleaseNotes>
+		<PackageReleaseNotes>v5.2.13 - WebGL: fixed emulated 64-bit Add/Sub/Mul silently dropping the carry/borrow in NoInlining helper functions (small values unaffected, wrong once a word's magnitude grew past 2^32); fixed a separate unsigned-right-shift dispatch bug in kernel-body codegen. See CHANGELOG.md.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
