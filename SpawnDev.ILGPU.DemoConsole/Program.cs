@@ -196,6 +196,13 @@ try
         typeof(NvJpegTests),
         typeof(UnsupportedKernelFeatureExceptionTests),
 
+        // Tier 2 (production-scale) Autolykos2 correctness, ~2GB real dataset - NOT registered by
+        // default (this repo has no opt-in/category mechanism, so "commented out" is how a heavy
+        // test stays out of the default sweep, same convention as the P2P block below). Uncomment
+        // this line to run it, then scope to just this class since it's real GPU memory pressure:
+        //   PMT_FILTER=Autolykos2Mainnet dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj
+        // typeof(Autolykos2MainnetScaleTests),
+
         // ─── P2P backend ON HOLD (core-6 focus). Uncomment this block to re-enable
         //     every P2P unit test in one place. ───────────────────────────────────
         // typeof(P2PLogicTests),               // 169 backend-agnostic P2P logic/dispatch tests
