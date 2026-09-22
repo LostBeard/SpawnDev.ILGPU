@@ -336,6 +336,44 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
         /// <summary>
+        /// Writes an i32.const whose immediate is ALWAYS 5 bytes (a padded signed LEB128, which
+        /// the spec allows), so the value can be patched in place later without moving any other
+        /// byte. Returns the position of the immediate's first byte in <paramref name="code"/>.
+        /// Non-negative values only.
+        /// </summary>
+        public static int EmitI32ConstPatchable(List<byte> code, int value)
+        {
+            if (value < 0) throw new ArgumentOutOfRangeException(nameof(value));
+            code.Add(WasmOpCodes.I32Const);
+            int pos = code.Count;
+            code.Add((byte)((value & 0x7F) | 0x80));
+            code.Add((byte)(((value >> 7) & 0x7F) | 0x80));
+            code.Add((byte)(((value >> 14) & 0x7F) | 0x80));
+            code.Add((byte)(((value >> 21) & 0x7F) | 0x80));
+            code.Add((byte)((value >> 28) & 0x07)); // bit 6 (sign) clear: value is non-negative
+            return pos;
+        }
+
+        /// <summary>Reads the value of an immediate written by <see cref="EmitI32ConstPatchable"/>.</summary>
+        public static int ReadI32ConstPatchable(IReadOnlyList<byte> code, int pos) =>
+            (code[pos] & 0x7F) | ((code[pos + 1] & 0x7F) << 7) | ((code[pos + 2] & 0x7F) << 14)
+            | ((code[pos + 3] & 0x7F) << 21) | ((code[pos + 4] & 0x07) << 28);
+
+        /// <summary>Overwrites an immediate written by <see cref="EmitI32ConstPatchable"/>.</summary>
+        public static void PatchI32ConstPatchable(byte[] code, int pos, int value)
+        {
+            if (value < 0) throw new ArgumentOutOfRangeException(nameof(value));
+            if ((code[pos] & 0x80) == 0 || (code[pos + 1] & 0x80) == 0 || (code[pos + 2] & 0x80) == 0
+                || (code[pos + 3] & 0x80) == 0 || (code[pos + 4] & 0xF8) != 0)
+                throw new InvalidOperationException($"Wasm: no patchable i32.const immediate at byte {pos}.");
+            code[pos] = (byte)((value & 0x7F) | 0x80);
+            code[pos + 1] = (byte)(((value >> 7) & 0x7F) | 0x80);
+            code[pos + 2] = (byte)(((value >> 14) & 0x7F) | 0x80);
+            code[pos + 3] = (byte)(((value >> 21) & 0x7F) | 0x80);
+            code[pos + 4] = (byte)((value >> 28) & 0x07);
+        }
+
+        /// <summary>
         /// Writes an i64.const instruction to a byte list.
         /// </summary>
         public static void EmitI64Const(List<byte> code, long value)

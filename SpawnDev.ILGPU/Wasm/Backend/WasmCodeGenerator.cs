@@ -488,7 +488,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     break;
                 case UnaryArithmeticKind.Not:
                     EmitGetLocal(src);
-                    if (wasmType == WasmOpCodes.I64)
+                    if (value.BasicValueType == BasicValueType.Int1)
+                    {
+                        // Logical not of a bool (an i32 holding 0 or 1): `x ^ -1` gives -1 / -2,
+                        // BOTH non-zero, so `!flag` was always true. Seen as a bool PARAMETER of a
+                        // [NoInlining] helper (Blake2b.Compress's isLastBlock) - an inlined call
+                        // folds the constant away and never reaches this.
+                        Code.Add(WasmOpCodes.I32Eqz);
+                    }
+                    else if (wasmType == WasmOpCodes.I64)
                     {
                         WasmModuleBuilder.EmitI64Const(Code, -1);
                         Code.Add(WasmOpCodes.I64Xor);

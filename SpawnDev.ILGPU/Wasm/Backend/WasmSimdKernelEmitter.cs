@@ -527,6 +527,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// written scalar with i32/i64 width coercion, mirroring the scalar <c>PushPhiValues</c>.</summary>
         private bool WriteHeaderPhis(List<PhiValue> headerPhis, BasicBlock pred, HashSet<Value> laneVariant)
         {
+            // The header phis of one edge are a PARALLEL copy: every source is pushed onto the
+            // operand stack BEFORE any phi local is written, then the locals are set in reverse
+            // push order. Setting each phi as soon as its source was pushed let a later phi read
+            // an already-updated one (a loop rotating its values: a' = b, b' = a).
+            var setOrder = new List<uint>();
             foreach (var phi in headerPhis)
             {
                 int j = -1;
@@ -539,9 +544,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     // 2-lane (f64/i64) accumulator: write BOTH halves (lo + hi).
                     if (!_simdHiLocal.TryGetValue(phi, out var phiHi)) return false;
                     if (!Push2Lane(src, false, laneVariant)) return false;
-                    WasmModuleBuilder.EmitLocalSet(Code, phiLocal);
+                    setOrder.Add(phiLocal);
                     if (!Push2Lane(src, true, laneVariant)) return false;
-                    WasmModuleBuilder.EmitLocalSet(Code, phiHi);
+                    setOrder.Add(phiHi);
                     continue;
                 }
                 if (laneVariant.Contains(phi))
@@ -556,8 +561,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     if (srcType == WasmOpCodes.I64 && phiType == WasmOpCodes.I32) Code.Add(WasmOpCodes.I32WrapI64);
                     else if (srcType == WasmOpCodes.I32 && phiType == WasmOpCodes.I64) Code.Add(WasmOpCodes.I64ExtendI32S);
                 }
-                WasmModuleBuilder.EmitLocalSet(Code, phiLocal);
+                setOrder.Add(phiLocal);
             }
+            for (int i = setOrder.Count - 1; i >= 0; i--)
+                WasmModuleBuilder.EmitLocalSet(Code, setOrder[i]);
             return true;
         }
 

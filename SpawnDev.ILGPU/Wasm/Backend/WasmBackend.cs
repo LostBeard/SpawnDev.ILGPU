@@ -616,6 +616,61 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             return gen;
         }
 
+        /// <summary>
+        /// Lays out the helper scratch regions of one function (the kernel or a helper) from the
+        /// helpers' ACTUAL generated sizes, rewrites the function's region-base constants in
+        /// <paramref name="code"/> to match, and returns the function's total per-thread scratch
+        /// (its own scratch + every region), or 0 when it reserves no regions. A helper's total is
+        /// its own scratch plus the regions it reserves for ITS helpers, so this recurses
+        /// bottom-up. The offsets the generators emitted came from a pre-generation estimate; a
+        /// helper that really needed more (FusedActivate: 1352 bytes against a 648-byte estimate)
+        /// wrote past its region into the next one, or into the next thread's scratch.
+        /// </summary>
+        private static int LayOutHelperScratch(
+            int regionBase,
+            List<Method> regionCallees,
+            List<(int ImmediatePos, int RegionIndex)> patches,
+            byte[] code,
+            Dictionary<Method, WasmKernelFunctionGenerator.HelperFunctionResult> helpers,
+            Dictionary<Method, int> helperTotals,
+            HashSet<Method> inProgress)
+        {
+            if (regionCallees.Count == 0)
+                return 0;
+            var regionOffsets = new int[regionCallees.Count];
+            int cumulative = 0;
+            for (int i = 0; i < regionCallees.Count; i++)
+            {
+                regionOffsets[i] = ((regionBase + cumulative) + 7) & ~7;
+                cumulative += (HelperTotalScratch(regionCallees[i], helpers, helperTotals, inProgress) + 7) & ~7;
+            }
+            if (patches.Count != regionCallees.Count)
+                throw new InvalidOperationException($"Wasm: {regionCallees.Count} helper scratch regions but {patches.Count} region-base constants.");
+            foreach (var (pos, regionIndex) in patches)
+                WasmModuleBuilder.PatchI32ConstPatchable(code, pos, regionOffsets[regionIndex]);
+            return ((regionBase + cumulative) + 7) & ~7;
+        }
+
+        private static int HelperTotalScratch(
+            Method helper,
+            Dictionary<Method, WasmKernelFunctionGenerator.HelperFunctionResult> helpers,
+            Dictionary<Method, int> helperTotals,
+            HashSet<Method> inProgress)
+        {
+            if (helperTotals.TryGetValue(helper, out int total))
+                return total;
+            if (!helpers.TryGetValue(helper, out var result))
+                throw new InvalidOperationException($"Wasm: a scratch region is reserved for '{helper.Name}', which was not generated as a helper function.");
+            if (!inProgress.Add(helper))
+                throw new InvalidOperationException($"Wasm: recursive helper call chain through '{helper.Name}' - its scratch cannot be laid out.");
+            int nested = LayOutHelperScratch(result.HelperRegionBase, result.HelperRegionCallees, result.HelperRegionPatches,
+                result.Code, helpers, helperTotals, inProgress);
+            inProgress.Remove(helper);
+            total = result.HelperRegionCallees.Count > 0 ? nested : (result.ScratchPerThread + 7) & ~7;
+            helperTotals[helper] = total;
+            return total;
+        }
+
         protected override CompiledKernel CreateKernel(
             EntryPoint entryPoint,
             CompiledKernel.KernelInfo? kernelInfo,
@@ -696,11 +751,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             moduleBuilder.ExportFunction("kernel", funcIdx);
 
             // Set kernel function body (defined function index 0)
-            moduleBuilder.SetFunctionBody(0, kernelGen._locals, kernelGen.Code.ToArray());
-
-            // Generate helper function bodies for multi-block helpers
+            // Generate helper function bodies for multi-block helpers. Function bodies are set
+            // only AFTER every helper exists: the scratch regions callers reserve for helpers are
+            // laid out from the helpers' ACTUAL sizes (LayOutHelperScratch), which are known only
+            // once they are generated - and a caller is always generated before its helpers.
             int definedFuncIndex = 1; // 0 = kernel
             int maxSharedMemorySize = data.SharedMemorySize;
+            var helperResults = new Dictionary<Method, WasmKernelFunctionGenerator.HelperFunctionResult>();
+            var helperDefinedIndex = new Dictionary<Method, int>();
 
             foreach (var helperMethod in data.HelperFunctionOrder)
             {
@@ -726,20 +784,29 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     if (VerboseLogging) Log($"Wasm: WARNING: Helper '{helperMethod.Name}' funcIdx mismatch: got {helperFuncIdx}, expected {expectedIdx}");
                 }
 
-                // Set helper function body
-                moduleBuilder.SetFunctionBody(definedFuncIndex, result.Locals, result.Code);
+                helperResults[helperMethod] = result;
+                helperDefinedIndex[helperMethod] = definedFuncIndex;
                 definedFuncIndex++;
 
                 // Track max shared memory (helpers may allocate Broadcast slots)
                 if (result.SharedMemorySize > maxSharedMemorySize)
                     maxSharedMemorySize = result.SharedMemorySize;
 
-                // Helper scratch is already included in ScratchPerThread via the kernel's
-                // _helperScratchCumulativeOffset (extended into _scratchNextOffset).
-                // Just ensure alignment.
-                data.ScratchPerThread = (data.ScratchPerThread + 7) & ~7;
-
                 if (VerboseLogging) Log($"[Wasm-Helper] '{helperMethod.Name}' funcIdx={helperFuncIdx}, params={result.ParamTypes.Length}, locals={result.Locals.Count}, code={result.Code.Length}b, barriers={result.BarrierCount}, resultTypes=[{string.Join(",", helperResultTypes.Select(t => $"0x{t:X2}"))}], phaseMode={data.PhaseCount > 1}");
+            }
+
+            var kernelCode = kernelGen.Code.ToArray();
+            int kernelScratch = LayOutHelperScratch(
+                kernelGen.HelperRegionBase, kernelGen.HelperRegionCallees, kernelGen.HelperRegionPatches,
+                kernelCode, helperResults, new Dictionary<Method, int>(), new HashSet<Method>());
+            if (kernelGen.HelperRegionCallees.Count > 0)
+                data.ScratchPerThread = kernelScratch;
+            data.ScratchPerThread = (data.ScratchPerThread + 7) & ~7;
+            moduleBuilder.SetFunctionBody(0, kernelGen._locals, kernelCode);
+            foreach (var helperMethod in data.HelperFunctionOrder)
+            {
+                var result = helperResults[helperMethod];
+                moduleBuilder.SetFunctionBody(helperDefinedIndex[helperMethod], result.Locals, result.Code);
             }
 
             // Update shared memory size to account for helper Broadcast slots

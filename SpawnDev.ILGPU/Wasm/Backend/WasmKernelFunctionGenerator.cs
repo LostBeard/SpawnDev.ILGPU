@@ -253,6 +253,46 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         private readonly List<(uint localIdx, int cumulativeOffset)> _helperScratchBaseLocals = new();
 
         /// <summary>
+        /// The helper each entry of <see cref="_helperScratchBaseLocals"/> reserves a scratch region
+        /// for (same index, same order = the layout order of the regions).
+        /// </summary>
+        internal readonly List<global::ILGPU.IR.Method> HelperRegionCallees = new();
+
+        /// <summary>
+        /// Final code positions of the patchable i32.const immediates holding each region's base
+        /// offset (index into <see cref="HelperRegionCallees"/>). The offsets emitted during
+        /// codegen come from ESTIMATED helper sizes; WasmBackend.LayOutHelperScratch rewrites them
+        /// from the helpers' ACTUAL generated sizes, since a helper is generated after its caller.
+        /// </summary>
+        internal readonly List<(int ImmediatePos, int RegionIndex)> HelperRegionPatches = new();
+
+        /// <summary>
+        /// Scratch offset where this function's helper regions begin (the end of its own scratch).
+        /// </summary>
+        internal int HelperRegionBase { get; private set; }
+
+        /// <summary>
+        /// Emits `helperBaseLocal = scratchBase + regionOffset` for every helper region into
+        /// <paramref name="block"/>, with patchable offsets, and returns where each immediate sits
+        /// relative to the start of <paramref name="block"/>.
+        /// </summary>
+        private List<(int RelativePos, int RegionIndex)> EmitHelperScratchBaseInit(List<byte> block, int regionBase)
+        {
+            HelperRegionBase = regionBase;
+            var positions = new List<(int, int)>();
+            for (int i = 0; i < _helperScratchBaseLocals.Count; i++)
+            {
+                var (localIdx, cumOffset) = _helperScratchBaseLocals[i];
+                WasmModuleBuilder.EmitLocalGet(block, _scratchBaseLocal);
+                int pos = WasmModuleBuilder.EmitI32ConstPatchable(block, ((regionBase + cumOffset) + 7) & ~7); // 8-byte align
+                block.Add(WasmOpCodes.I32Add);
+                WasmModuleBuilder.EmitLocalSet(block, localIdx);
+                positions.Add((pos, i));
+            }
+            return positions;
+        }
+
+        /// <summary>
         /// Per-helper dedicated scratch region locals for the SINGLE-CALL path (no-barrier
         /// helpers): one region per unique helper, shared across its call sites (a
         /// no-barrier helper keeps no cross-call state - only its completion-persist
@@ -344,6 +384,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             public int BarrierCount { get; set; }
             public int SharedMemorySize { get; set; }
             public int ScratchPerThread { get; set; }
+            /// <summary>Where this helper's own nested-helper regions begin (see HelperRegionBase).</summary>
+            public int HelperRegionBase { get; set; }
+            /// <summary>The helper each nested region is reserved for, in layout order.</summary>
+            public List<global::ILGPU.IR.Method> HelperRegionCallees { get; set; } = new();
+            /// <summary>Patchable region-base immediates in <see cref="Code"/>.</summary>
+            public List<(int ImmediatePos, int RegionIndex)> HelperRegionPatches { get; set; } = new();
         }
 
         /// <summary>
@@ -399,6 +445,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             {
                 GenerateStateMachineCode(blocks);
             }
+            EmitNonPhaseHelperScratchBases();
 
             // After the state machine, push the return value onto the stack.
             // In phase mode: state machine already pushes _yieldedLocal (i32).
@@ -426,6 +473,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 BarrierCount = _barrierCounter,
                 SharedMemorySize = _sharedMemorySize,
                 ScratchPerThread = (_scratchNextOffset + 7) & ~7,
+                HelperRegionBase = HelperRegionBase,
+                HelperRegionCallees = HelperRegionCallees,
+                HelperRegionPatches = HelperRegionPatches,
             };
         }
 
@@ -874,42 +924,46 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
         /// <summary>
-        /// Pushes phi values before a branch.
-        /// For each target block, find any phi values that source from the current block
-        /// and assign them before transitioning.
+        /// Assigns the phis of <paramref name="target"/> their operands for the edge from
+        /// <paramref name="source"/>. Called for ONE edge, right before the br that takes it -
+        /// never for every target of a branch up front: a conditional branch used to write the
+        /// phis of BOTH successors before testing its condition, so leaving a do-while through
+        /// its latch also overwrote the loop header's phis, and code after the loop that read a
+        /// header phi saw the next iteration's value.
+        /// The copies of one edge are a PARALLEL copy: every source is pushed onto the operand
+        /// stack before any phi local is set, then the locals are set in reverse push order -
+        /// so a loop that rotates its values (a' = b, b' = a) never reads an updated phi.
         /// </summary>
-        private void PushPhiValues(Branch branch)
+        private void PushPhiValues(BasicBlock source, BasicBlock target)
         {
-            for (int i = 0; i < branch.NumTargets; i++)
+            var setOrder = new List<uint>();
+            foreach (var valueEntry in target)
             {
-                var target = branch.Targets[i];
-                foreach (var valueEntry in target)
+                if (valueEntry.Value is PhiValue phi)
                 {
-                    if (valueEntry.Value is PhiValue phi)
+                    for (int j = 0; j < phi.Count; j++)
                     {
-                        // Find the value from the current block for this phi
-                        for (int j = 0; j < phi.Count; j++)
+                        if (phi.Sources[j] == source)
                         {
-                            if (phi.Sources[j] == branch.BasicBlock)
-                            {
-                                var phiLocal = GetLocal(phi);
-                                var srcValue = phi[j].Resolve();
-                                EmitGetLocal(srcValue);
+                            var phiLocal = GetLocal(phi);
+                            var srcValue = phi[j].Resolve();
+                            EmitGetLocal(srcValue);
 
-                                // Coerce type if source and PHI local differ
-                                var srcType = GetWasmTypeFromIR(srcValue.Type);
-                                var phiType = GetLocalType(phiLocal);
-                                if (srcType == WasmOpCodes.I64 && phiType == WasmOpCodes.I32)
-                                    Code.Add(WasmOpCodes.I32WrapI64);
-                                else if (srcType == WasmOpCodes.I32 && phiType == WasmOpCodes.I64)
-                                    Code.Add(WasmOpCodes.I64ExtendI32S);
+                            // Coerce type if source and PHI local differ
+                            var srcType = GetWasmTypeFromIR(srcValue.Type);
+                            var phiType = GetLocalType(phiLocal);
+                            if (srcType == WasmOpCodes.I64 && phiType == WasmOpCodes.I32)
+                                Code.Add(WasmOpCodes.I32WrapI64);
+                            else if (srcType == WasmOpCodes.I32 && phiType == WasmOpCodes.I64)
+                                Code.Add(WasmOpCodes.I64ExtendI32S);
 
-                                WasmModuleBuilder.EmitLocalSet(Code, phiLocal);
-                            }
+                            setOrder.Add(phiLocal);
                         }
                     }
                 }
             }
+            for (int i = setOrder.Count - 1; i >= 0; i--)
+                WasmModuleBuilder.EmitLocalSet(Code, setOrder[i]);
         }
 
         /// <summary>
@@ -982,21 +1036,62 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     _generatorArgs.HelperBarrierCounts[kvp.Key] = barrierCount;
                     if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-PreScan] Helper '{kvp.Key.Name}': pre-scan barriers={barrierCount}, blocks={kvp.Key.Blocks.Count}");
 
-                    // Estimate helper's scratch size for kernel-side offset computation.
-                    // Actual size is computed during helper codegen, but we need an estimate
-                    // now so the kernel can give each helper its own scratch region.
-                    // Count IR values as proxy for locals (each local ≤ 8 bytes), add overhead.
-                    int irValueCount = 0;
-                    foreach (var block in kvp.Key.Blocks)
-                        irValueCount += block.Count;
-                    // Conservative: 11 params + irValues locals, 8 bytes each, + 8 yield flag + alignment
-                    int estimatedHelperScratch = ((11 + irValueCount) * 8 + 8 + 7) & ~7;
-                    _generatorArgs.HelperScratchEstimates[kvp.Key] = estimatedHelperScratch;
                     _generatorArgs.HelperFunctionOrder.Add(kvp.Key);
                     string reason = kvp.Key.Blocks.Count > 1 ? "multi-block" : "has-barriers";
                     if (WasmBackend.VerboseLogging) WasmBackend.Log($"Wasm: Helper '{kvp.Key.Name}' promoted ({reason}): funcIdx={_generatorArgs.HelperFunctionIndices[kvp.Key]}, barriers={barrierCount}, blocks={kvp.Key.Blocks.Count}");
                 }
             }
+
+            // Scratch reservation per promoted helper. The caller lays its helpers' regions out
+            // before any helper is generated, so this must be an UPPER bound of what the helper
+            // really uses - WasmBackend checks it against the generated helper and throws rather
+            // than let one region silently run into the next.
+            var estimates = new Dictionary<global::ILGPU.IR.Method, int>();
+            foreach (var helper in _generatorArgs.HelperFunctionOrder)
+                _generatorArgs.HelperScratchEstimates[helper] =
+                    EstimateHelperScratch(helper, estimates, new HashSet<global::ILGPU.IR.Method>());
+        }
+
+        /// <summary>
+        /// Upper bound of a promoted helper's per-thread scratch: 8 bytes per IR value (every
+        /// local may be spilled or back an alloca), plus each alloca's REAL byte size (a struct or
+        /// local array is one IR value but many bytes), plus the regions the helper itself
+        /// reserves for the promoted helpers IT calls (laid out after its own scratch - see
+        /// EmitNonPhaseHelperScratchBases), plus params and the yield flag.
+        /// </summary>
+        private int EstimateHelperScratch(
+            global::ILGPU.IR.Method method,
+            Dictionary<global::ILGPU.IR.Method, int> memo,
+            HashSet<global::ILGPU.IR.Method> visiting)
+        {
+            if (memo.TryGetValue(method, out int known))
+                return known;
+            if (!visiting.Add(method))
+                return 0; // recursive call chain: its region is already being counted by the outer frame
+
+            long bytes = (11 + 1) * 8 + 8; // context params + yield flag
+            foreach (var block in method.Blocks)
+            {
+                foreach (var entry in block)
+                {
+                    var value = entry.Value;
+                    bytes += 8;
+                    if (value is Alloca alloca)
+                    {
+                        long elements = alloca.IsArrayAllocation(out var length) ? Math.Max(1, length.Int32Value) : 1;
+                        bytes += ((long)alloca.AllocaType.Size * elements + 7) & ~7L;
+                    }
+                    else if (value is MethodCall call
+                        && _generatorArgs.HelperFunctionIndices.ContainsKey(call.Target))
+                    {
+                        bytes += EstimateHelperScratch(call.Target, memo, visiting);
+                    }
+                }
+            }
+            visiting.Remove(method);
+            int result = (int)Math.Min(int.MaxValue, (bytes + 7) & ~7L);
+            memo[method] = result;
+            return result;
         }
 
         /// <summary>
@@ -1101,6 +1196,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 // Multi-block OR single-block-with-barriers: use state machine
                 GenerateStateMachineCode(blocks);
             }
+            EmitNonPhaseHelperScratchBases();
 
             // CRITICAL: Propagate BarrierCount, HasBarriers, and SharedMemorySize AFTER code generation.
             // _barrierCounter is incremented during IR visiting by GenerateCode(Barrier),
@@ -1468,14 +1564,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
                 // Set helper scratch base locals (runs on every phase, not just restore).
                 // Each helper gets scratchBase + _scratchNextOffset + cumulativeOffset.
-                foreach (var (localIdx, cumOffset) in _helperScratchBaseLocals)
-                {
-                    int offset = ((_scratchNextOffset + cumOffset) + 7) & ~7; // 8-byte align
-                    WasmModuleBuilder.EmitLocalGet(prologueCode, _scratchBaseLocal);
-                    WasmModuleBuilder.EmitI32Const(prologueCode, offset);
-                    prologueCode.Add(WasmOpCodes.I32Add);
-                    WasmModuleBuilder.EmitLocalSet(prologueCode, localIdx);
-                }
+                var regionImmediates = EmitHelperScratchBaseInit(prologueCode, _scratchNextOffset);
 
                 // Build the full-count SAVE block once (final _locals → symmetric with the
                 // restore prologue above). Inserted at every recorded save site.
@@ -1496,6 +1585,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 deferredInserts.Sort((a, b) => b.pos.CompareTo(a.pos));
                 for (int s = 0; s < deferredInserts.Count; s++)
                     Code.InsertRange(deferredInserts[s].pos, deferredInserts[s].bytes);
+
+                // Where the prologue - and so each region-base immediate in it - ended up: every
+                // insert BELOW the prologue's position shifted it up by that insert's length.
+                int prologueStart = phaseEntryInsertPoint;
+                for (int s = 0; s < deferredInserts.Count; s++)
+                    if (deferredInserts[s].pos < phaseEntryInsertPoint)
+                        prologueStart += deferredInserts[s].bytes.Count;
+                RecordHelperRegionPatches(prologueStart, regionImmediates);
             }
             // Set PhaseCount only for the kernel (not helpers — helpers don't drive dispatch).
             if (!_isHelperFunction)
@@ -1507,7 +1604,51 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // Extend _scratchNextOffset to include helper scratch regions.
             // Line 939 (after GenerateStateMachineCode returns) will use this to set
             // ScratchPerThread, ensuring it includes phase state + helper scratch.
-            _scratchNextOffset += _helperScratchCumulativeOffset;
+            // Phase mode only: the non-phase paths lay out (and initialize) the helper regions
+            // in EmitNonPhaseHelperScratchBases.
+            if (_phaseMode)
+                _scratchNextOffset += _helperScratchCumulativeOffset;
+        }
+
+        /// <summary>
+        /// Initializes the helper scratch-base locals at function entry when this function is NOT
+        /// in phase mode (phase mode sets them in its restore prologue above). Every call to a
+        /// multi-block helper passes one of these locals as the helper's scratch base, and the
+        /// helper keeps its own allocas there (e.g. a local passed `ref` to a nested helper).
+        /// Before this, only the phase-mode prologue ever assigned them, so a kernel or helper
+        /// WITHOUT barriers passed 0: the helper's locals lived at linear-memory address 0,
+        /// on top of buffer data and of every other thread's copy - wrong results that changed
+        /// from run to run. Must run after ALL body code is generated (the region starts past
+        /// the function's final scratch use) and inserts at byte 0 (function entry), which is
+        /// position-independent: nothing else records byte positions outside phase mode.
+        /// </summary>
+        private void EmitNonPhaseHelperScratchBases()
+        {
+            if (_phaseMode || _helperScratchBaseLocals.Count == 0)
+                return;
+            int regionStart = (_scratchNextOffset + 7) & ~7;
+            var init = new List<byte>();
+            var regionImmediates = EmitHelperScratchBaseInit(init, regionStart);
+            Code.InsertRange(0, init);
+            RecordHelperRegionPatches(0, regionImmediates);
+            _scratchNextOffset = regionStart + _helperScratchCumulativeOffset;
+        }
+
+        /// <summary>
+        /// Records the final code position of each region-base immediate, after its block was
+        /// inserted at <paramref name="blockStart"/>, and verifies each position really holds the
+        /// value emitted there - a wrong position would patch some other instruction's bytes.
+        /// </summary>
+        private void RecordHelperRegionPatches(int blockStart, List<(int RelativePos, int RegionIndex)> immediates)
+        {
+            foreach (var (relativePos, regionIndex) in immediates)
+            {
+                int pos = blockStart + relativePos;
+                int expected = ((HelperRegionBase + _helperScratchBaseLocals[regionIndex].cumulativeOffset) + 7) & ~7;
+                if (Code[pos - 1] != WasmOpCodes.I32Const || WasmModuleBuilder.ReadI32ConstPatchable(Code, pos) != expected)
+                    throw new InvalidOperationException($"Wasm: helper scratch region {regionIndex} base immediate not found at byte {pos} in {Method.Name}.");
+                HelperRegionPatches.Add((pos, regionIndex));
+            }
         }
 
         /// <summary>
@@ -1580,7 +1721,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         {
             if (!_isStateMachine) return;
 
-            PushPhiValues(branch);
+            PushPhiValues(branch.BasicBlock, branch.Target);
             int targetBlock = GetBlockIndex(branch.Target);
             EmitBranchToBlock(targetBlock);
         }
@@ -1589,19 +1730,21 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         {
             if (!_isStateMachine) return;
 
-            PushPhiValues(branch);
-
             int trueBlock = GetBlockIndex(branch.TrueTarget);
             int falseBlock = GetBlockIndex(branch.FalseTarget);
             if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-SM] IfBranch: true→{trueBlock} false→{falseBlock} (blockCount={_blockCount})");
 
+            // The condition is read before either arm runs its edge's phi copies, and each arm
+            // copies ONLY its own edge's phis (see PushPhiValues).
             EmitGetLocal(branch.Condition.Resolve());
             Code.Add(WasmOpCodes.If);
             Code.Add(WasmOpCodes.Void);
             // True branch — inside if{}, adds 1 nesting level
+            PushPhiValues(branch.BasicBlock, branch.TrueTarget);
             EmitBranchToBlock(trueBlock, 1);
             Code.Add(WasmOpCodes.Else);
             // False branch — still inside if/else{}, same extra nesting
+            PushPhiValues(branch.BasicBlock, branch.FalseTarget);
             EmitBranchToBlock(falseBlock, 1);
             Code.Add(WasmOpCodes.End);
         }
@@ -1610,11 +1753,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         {
             if (!_isStateMachine) return;
 
-            PushPhiValues(branch);
-
             int defaultBlock = GetBlockIndex(branch.DefaultBlock);
 
-            // For each case, use if chain — each if adds +1 nesting
+            // For each case, use if chain — each if adds +1 nesting. Each arm copies only its
+            // own edge's phis and then leaves via br, so a copy never feeds a later case test.
             for (int i = 0; i < branch.NumCasesWithoutDefault; i++)
             {
                 EmitGetLocal(branch.Condition.Resolve());
@@ -1622,12 +1764,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 Code.Add(WasmOpCodes.I32Eq);
                 Code.Add(WasmOpCodes.If);
                 Code.Add(WasmOpCodes.Void);
-                int caseBlock = GetBlockIndex(branch.GetCaseTarget(i));
+                var caseTarget = branch.GetCaseTarget(i);
+                PushPhiValues(branch.BasicBlock, caseTarget);
+                int caseBlock = GetBlockIndex(caseTarget);
                 EmitBranchToBlock(caseBlock, 1);
                 Code.Add(WasmOpCodes.End);
             }
 
             // Default — no extra nesting
+            PushPhiValues(branch.BasicBlock, branch.DefaultBlock);
             EmitBranchToBlock(defaultBlock);
         }
 
@@ -3608,6 +3753,7 @@ EmitSaveAllLocals();
                     int helperCumulativeForThisCall = _helperScratchCumulativeOffset;
                     // Record for prologue generation
                     _helperScratchBaseLocals.Add((helperScratchBaseLocal, helperCumulativeForThisCall));
+                    HelperRegionCallees.Add(targetMethod);
 
                     // N barriers in helper = N+1 phases (N yields + 1 completion)
                     int helperPhaseCount = helperBarrierCount + 1;
@@ -3735,6 +3881,7 @@ EmitSaveAllLocals();
                     {
                         singleCallScratchLocal = AllocateNewLocal(WasmOpCodes.I32);
                         _helperScratchBaseLocals.Add((singleCallScratchLocal, _helperScratchCumulativeOffset));
+                        HelperRegionCallees.Add(targetMethod);
                         if (_generatorArgs.HelperScratchEstimates.TryGetValue(targetMethod, out int singleHelperScratch))
                             _helperScratchCumulativeOffset += (singleHelperScratch + 7) & ~7;
                         else

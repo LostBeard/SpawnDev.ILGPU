@@ -674,6 +674,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     GenerateCodeFor(valueEntry.Value);
                 }
+                // The block's terminator is NOT in the value enumeration (see the single-block
+                // path above). It is what advances the state machine - `current_block = N;
+                // continue;` / `return;` plus the phi assignments for the edge taken. Without it
+                // `current_block` never changes and a multi-block [NoInlining] helper spins in
+                // case 0 forever (a loop or an if/else in a helper silently returned 0 on WebGPU).
+                if (block.Terminator != null)
+                    GenerateCodeFor(block.Terminator);
 
                 PopIndent();
                 AppendLine("}");
@@ -1392,12 +1399,32 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     string shHelper = value.Kind == BinaryArithmeticKind.Shl
                         ? "i64_shl"
                         : (leftShType == "emu_u64" || value.IsUnsigned ? "u64_shr" : "i64_shr");
-                    AppendLine($"{target} = {shHelper}({left}, u32({right}));");
+                    AppendLine($"{target} = {ConstantEmulatedShiftOrCall(shHelper, left.ToString(), value.Right, right.ToString())};");
+                }
+                else if (value.Left.BasicValueType == BasicValueType.Int32
+                    && (value.IsUnsigned || value.Kind == BinaryArithmeticKind.Shl))
+                {
+                    // uint lives in an i32 (BasicValueType has no UInt32) and WGSL `i32 >> u32`
+                    // is ARITHMETIC - an unsigned >> must go through u32 to zero-fill, or a
+                    // high-bit-set uint shifts in ones (0x80000000 >> 12 = 0xFFF80000). Shl goes
+                    // through u32 too, avoiding signed-shift UB into the sign bit. Same as the
+                    // WGSLKernelFunctionGenerator handler; this base one serves [NoInlining]
+                    // helper functions, which silently used the arithmetic shift.
+                    AppendLine($"{target} = bitcast<i32>(bitcast<u32>({left}) {op} u32({right}));");
                 }
                 else
                 {
                     AppendLine($"{target} = {left} {op} u32({right});");
                 }
+            }
+            else if ((value.Kind == BinaryArithmeticKind.Div || value.Kind == BinaryArithmeticKind.Rem)
+                && value.IsUnsigned
+                && value.Left.BasicValueType == BasicValueType.Int32
+                && !TypeGenerator[value.Left.Type].StartsWith("vec") && !TypeGenerator[value.Right.Type].StartsWith("vec"))
+            {
+                // WGSL `i32 / i32` and `i32 % i32` are SIGNED; a high-bit-set uint operand gives
+                // the wrong quotient/remainder. Same bitcast as the kernel handler.
+                AppendLine($"{target} = bitcast<i32>(bitcast<u32>({left}) {op} bitcast<u32>({right}));");
             }
             else
             {
@@ -1669,69 +1696,224 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         {
             var target = Load(value);
             var source = Load(value.Value);
-            var targetType = TypeGenerator[value.Type];
-            var sourceType = TypeGenerator[value.Value.Type];
             Declare(target);
+            AppendLine($"{target} = {BuildConvertExpression(value, source)};");
+        }
 
-            // Handle emulated 64-bit type conversions.
-            // emu_i64/emu_u64 are type aliases for vec2<u32> (lo, hi).
-            bool targetIsEmu64 = targetType == "emu_i64" || targetType == "emu_u64";
-            bool sourceIsEmu64 = sourceType == "emu_i64" || sourceType == "emu_u64";
+        /// <summary>
+        /// The WGSL expression for a <see cref="ConvertValue"/> - shared by kernel bodies and
+        /// [NoInlining] helper functions so a conversion means the same thing in both. The
+        /// helper path used to have its own, much thinner version: every 32-to-64-bit widening
+        /// zero-extended (so `(long)negativeInt` came out positive), an f32 widened to emulated
+        /// f64 was stored as raw float BITS, and every 64-to-32 narrowing took `.x` (garbage for
+        /// an emulated f64).
+        /// </summary>
+        protected string BuildConvertExpression(ConvertValue value, Variable source)
+        {
+            var targetType = TypeGenerator[value.Type];
 
-            if (targetIsEmu64 && !sourceIsEmu64)
+            // Fix: Handle Vector to Scalar conversion (e.g. i32(vec2)) which WGSL forbids
+            var sourceType = TypeGenerator[value.Value.Type];
+
+            bool isVectorSource = sourceType.StartsWith("vec");
+            bool isScalarTarget = !targetType.StartsWith("vec") && !targetType.StartsWith("mat") && !targetType.StartsWith("array")
+                                  && targetType != "emu_f64" && targetType != "emu_i64" && targetType != "emu_u64";
+
+            // Detect unsigned source conversion (e.g. uint → float)
+            bool isSourceUnsigned = (value.Flags & ConvertFlags.SourceUnsigned) == ConvertFlags.SourceUnsigned;
+
+            // Emulated type detection
+            bool isEmulatedF64Target = Backend.EnableF64Emulation && targetType == "emu_f64";
+            bool isEmulatedI64Target = Backend.EnableI64Emulation && (targetType == "emu_i64" || targetType == "emu_u64");
+            bool isEmulatedF64Source = Backend.EnableF64Emulation && sourceType == "emu_f64";
+            bool isEmulatedI64Source = Backend.EnableI64Emulation && (sourceType == "emu_i64" || sourceType == "emu_u64");
+
+            // ---- TARGET is emulated emu_f64 ----
+            if (isEmulatedF64Target)
             {
-                // Widening: i32/u32/f32 → emu_i64/emu_u64
-                // Convert source to u32, then zero-extend to vec2<u32>(lo, 0u)
-                AppendLine($"{target} = vec2<u32>(u32({source}), 0u);");
+                if (isEmulatedF64Source)
+                {
+                    // emu_f64 → emu_f64: just assign
+                    return $"{source}";
+                }
+                else if (isEmulatedI64Source)
+                {
+                    // emu_i64 → emu_f64: extract i32 then convert through f32
+                    return $"f64_from_f32(f32(i64_to_i32({source})))";
+                }
+                else if (isVectorSource)
+                {
+                    // vec → emu_f64: extract .x component
+                    return $"f64_from_f32(f32({source}.x))";
+                }
+                else if (sourceType == "f32")
+                {
+                    return $"f64_from_f32({source})";
+                }
+                else if (isSourceUnsigned && sourceType == "i32")
+                {
+                    // unsigned int → emu_f64: bitcast to u32 first to preserve unsigned value
+                    return $"f64_from_f32(f32(bitcast<u32>({source})))";
+                }
+                else
+                {
+                    // Integer or other scalar → emu_f64: convert to f32 first
+                    return $"f64_from_f32(f32({source}))";
+                }
             }
-            else if (!targetIsEmu64 && sourceIsEmu64)
+
+            // ---- TARGET is emulated emu_i64/emu_u64 ----
+            if (isEmulatedI64Target)
             {
-                // Narrowing: emu_i64/emu_u64 → i32/u32/f32
-                // Take low word (.x) and cast to target type
-                AppendLine($"{target} = {targetType}({source}.x);");
+                if (isEmulatedI64Source)
+                {
+                    // emu_i64 → emu_i64 (or emu_u64 → emu_u64): just assign
+                    return $"{source}";
+                }
+                else if (isEmulatedF64Source)
+                {
+                    // emu_f64 → emu_i64: extract f32, cast to i32, then widen
+                    return $"i64_from_i32(i32(f64_to_f32({source})))";
+                }
+                else if (isVectorSource)
+                {
+                    // Generic vec → emu_i64: extract .x, cast to i32, then widen
+                    if (targetType == "emu_u64")
+                        return $"u64_from_u32(u32({source}.x))";
+                    else
+                        return $"i64_from_i32(i32({source}.x))";
+                }
+                else if (sourceType == "i32")
+                {
+                    // A C# `uint` widening to a 64-bit type also lands here with sourceType=="i32"
+                    // (this backend doesn't carry a separate WGSL-level u32 IR type all the way
+                    // through arithmetic - unsignedness survives only as the ConvertFlags.SourceUnsigned
+                    // bit, computed above as isSourceUnsigned but never previously checked in this branch).
+                    // Zero-extend when it's actually unsigned - matches C# semantics: `(long)(uint)x`
+                    // zero-extends exactly like `(ulong)(uint)x` does, since a uint's value is never
+                    // negative, regardless of the destination's own signedness. Confirmed via
+                    // SpawnDev.ILGPU.DemoConsole's autolykos2-wgsl-dump probe:
+                    // `((ulong)height << 32) | Bswap32(index)` (both `uint`) compiled to two
+                    // back-to-back unconditional `i64_from_i32(...)` calls, corrupting any value
+                    // with bit 31 set (e.g. Bswap32 of any index >= 128).
+                    if (isSourceUnsigned)
+                        return $"u64_from_u32(bitcast<u32>({source}))";
+                    else
+                        return $"i64_from_i32({source})";
+                }
+                else if (sourceType == "u32")
+                {
+                    // A genuine WGSL u32 source is always unsigned by construction, so widening it
+                    // is always zero-extension - regardless of the target's nominal signedness.
+                    // The previous `targetType == "emu_u64"` check here was always false: emu_i64 and
+                    // emu_u64 are both `alias ... = vec2<u32>` (see the emulation library header), and
+                    // this backend's TypeGenerator only ever emits the string "emu_i64" for a 64-bit
+                    // integer target, never "emu_u64" - dead code, fixed for correctness even though
+                    // the i32 branch above is the one actually exercised by uint arithmetic in practice.
+                    return $"u64_from_u32({source})";
+                }
+                else if (sourceType == "f32")
+                {
+                    // f32 → emu_i64: cast to i32 first
+                    return $"i64_from_i32(i32({source}))";
+                }
+                else
+                {
+                    // Other scalar → emu_i64: cast to i32 first
+                    return $"i64_from_i32(i32({source}))";
+                }
             }
-            else if (targetType == "emu_f64" && !sourceIsEmu64)
+
+            // ---- SOURCE is emulated emu_f64, target is scalar ----
+            if (isEmulatedF64Source && isScalarTarget)
             {
-                // emu_f64 widening from f32: use vec2<u32> with bitcast
-                AppendLine($"{target} = vec2<u32>(bitcast<u32>(f32({source})), 0u);");
+                if (targetType == "f32")
+                {
+                    return $"f64_to_f32({source})";
+                }
+                else
+                {
+                    // emu_f64 → i32/u32/etc: extract to f32, then cast
+                    return $"{targetType}(f64_to_f32({source}))";
+                }
             }
-            else
+
+            // ---- SOURCE is emulated emu_i64/emu_u64, target is scalar ----
+            if (isEmulatedI64Source && isScalarTarget)
             {
-                // WGSL has no native i16/i8 types, so `i32(int_value)` is
-                // identity when both source and target lower to i32. Without
-                // explicit narrowing, `(short)((x + (1 << 13)) >> 14)` patterns
-                // in butterfly arithmetic (Tuvok's Vp9Idct16x16Kernel) leave
-                // high bits intact when intermediates are just above short
-                // range - producing small bit-exact divergence vs CPU oracle
-                // on Random/Batched inputs. Mirrors rc.14 Wasm `i32.extend16_s`.
-                // Combine cast + narrowing into one expression because helper
-                // bodies use `let v_X = ...;` (immutable, cannot reassign).
-                string castExpr = $"{targetType}({source})";
                 if (targetType == "i32")
                 {
-                    bool isTargetUnsigned = (value.Flags & ConvertFlags.TargetUnsigned) == ConvertFlags.TargetUnsigned;
-                    var dstBasicType = value.Type.BasicValueType;
-                    if (dstBasicType == BasicValueType.Int16)
-                        castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFFFi)" : $"extractBits({castExpr}, 0u, 16u)";
-                    else if (dstBasicType == BasicValueType.Int8)
-                        castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFi)" : $"extractBits({castExpr}, 0u, 8u)";
-                    else
-                    {
-                        // Widening from a SUB-WORD source (Int16/Int8) to a wider int: re-extend the
-                        // low bits per SourceUnsigned. The source may be zero-extended from an
-                        // unsigned sub-word load or a `(short)`/`(sbyte)` reinterpret the core IR
-                        // elided (short/ushort share BasicValueType.Int16). Mirrors the
-                        // WGSLKernelFunctionGenerator override; see that comment for the radix case.
-                        bool isSourceUnsigned = (value.Flags & ConvertFlags.SourceUnsigned) == ConvertFlags.SourceUnsigned;
-                        var srcBasicType = value.Value.BasicValueType;
-                        if (srcBasicType == BasicValueType.Int16)
-                            castExpr = isSourceUnsigned ? $"({castExpr} & 0xFFFFi)" : $"extractBits({castExpr}, 0u, 16u)";
-                        else if (srcBasicType == BasicValueType.Int8)
-                            castExpr = isSourceUnsigned ? $"({castExpr} & 0xFFi)" : $"extractBits({castExpr}, 0u, 8u)";
-                    }
+                    return $"i64_to_i32({source})";
                 }
-                AppendLine($"{target} = {castExpr};");
+                else if (targetType == "u32")
+                {
+                    return $"u64_to_u32({source})";
+                }
+                else if (targetType == "f32")
+                {
+                    // emu_i64 → f32: extract low word as i32, then cast to f32
+                    return $"f32(i64_to_i32({source}))";
+                }
+                else
+                {
+                    // emu_i64 → other scalar: extract low word and cast
+                    return $"{targetType}(i64_to_i32({source}))";
+                }
             }
+
+            // ---- Generic vector → scalar (non-emulated) ----
+            if (isVectorSource && isScalarTarget)
+            {
+                return $"{targetType}({source}.x)";
+            }
+
+            // ---- Unsigned int → float: must bitcast to u32 first to preserve unsigned value ----
+            if (isSourceUnsigned && sourceType == "i32" && targetType == "f32")
+            {
+                return $"f32(bitcast<u32>({source}))";
+            }
+
+            // ---- Standard scalar → scalar ----
+            // Sub-word narrowing for Int16 / Int8 targets baked into the
+            // cast expression: WGSL has no native i16/i8, so `i32(int_val)`
+            // is identity. Without explicit narrowing, `(short)((x + (1<<13)) >> 14)`
+            // butterfly patterns leave high bits intact (Tuvok's iDCT 16x16
+            // residual). Combine into one expression because `let v_X = ...`
+            // is immutable. Mirrors the base WGSL handler.
+            string castExpr = $"{targetType}({source})";
+            if (targetType == "i32")
+            {
+                bool isTargetUnsigned = (value.Flags & ConvertFlags.TargetUnsigned) == ConvertFlags.TargetUnsigned;
+                var dstBasicType = value.Type.BasicValueType;
+                // WGSL `extractBits` built-in: signed extract sign-extends.
+                // Single intrinsic call vs shift chain - smaller WGSL, faster
+                // validator. See base WGSLCodeGenerator handler for details.
+                if (dstBasicType == BasicValueType.Int16)
+                    castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFFFi)" : $"extractBits({castExpr}, 0u, 16u)";
+                else if (dstBasicType == BasicValueType.Int8)
+                    castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFi)" : $"extractBits({castExpr}, 0u, 8u)";
+                else
+                {
+                    // Widening from a SUB-WORD source (Int16/Int8) to a wider int (i32). The source
+                    // lives in an i32 but may be zero-extended - it came from an unsigned sub-word
+                    // load, or from a `(short)`/`(sbyte)` signedness reinterpret that the core IR
+                    // ELIDES (short and ushort share BasicValueType.Int16). C# sign-extends
+                    // short->int and zero-extends ushort->int; SourceUnsigned carries which. Re-
+                    // extend the low bits so the high bits are correct. Concretely PopArithmeticArgs
+                    // promotes the `(short)` operand of `(short)Interop.FloatAsInt(half) >> 15`
+                    // (AscendingHalf's ones-complement mask) to i32 via THIS convert; without the
+                    // re-extension `>> 15` saw a zero-extended value and returned 0 instead of
+                    // 0xFFFF for negative Halves. extractBits on a signed i32 sign-extends.
+                    // Idempotent for already-extended values; desktop backends never reach here.
+                    bool isWidenSrcUnsigned = (value.Flags & ConvertFlags.SourceUnsigned) == ConvertFlags.SourceUnsigned;
+                    var srcBasicType = value.Value.BasicValueType;
+                    if (srcBasicType == BasicValueType.Int16)
+                        castExpr = isWidenSrcUnsigned ? $"({castExpr} & 0xFFFFi)" : $"extractBits({castExpr}, 0u, 16u)";
+                    else if (srcBasicType == BasicValueType.Int8)
+                        castExpr = isWidenSrcUnsigned ? $"({castExpr} & 0xFFi)" : $"extractBits({castExpr}, 0u, 8u)";
+                }
+            }
+            return castExpr;
         }
 
         // Memory Operations
@@ -2364,14 +2546,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Previously, state machine mode emitted `break;` which only exits the
             // innermost loop - NOT the function. This caused `return` inside for-loops
             // to fall through to code after the loop instead of exiting the kernel.
+            // A non-void return always returns its value directly: a bare `return;` in a
+            // function with a return type is invalid WGSL, and assigning _ilgpu_return_val
+            // first is pointless when the function exits right here.
             if (value.IsVoidReturn)
             {
-                AppendLine("return;");
-            }
-            else if (IsStateMachineActive)
-            {
-                var retVal = Load(value.ReturnValue);
-                AppendLine($"_ilgpu_return_val = {retVal};");
                 AppendLine("return;");
             }
             else
@@ -2442,6 +2621,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         protected void EmitPhiAssignments(BasicBlock sourceBlock, BasicBlock targetBlock)
         {
+            var copies = new List<(Variable Target, Variable Source)>();
             foreach (var valueEntry in targetBlock)
             {
                 if (valueEntry.Value is PhiValue phi)
@@ -2449,11 +2629,82 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     var phiVar = Load(phi);
                     var srcValue = phi.GetValue(sourceBlock);
                     if (srcValue != null)
-                    {
-                        var srcVar = Load(srcValue);
-                        AppendLine($"{phiVar} = {srcVar};");
-                    }
+                        copies.Add((phiVar, Load(srcValue)));
                 }
+            }
+            EmitPhiCopies(copies);
+        }
+
+        /// <summary>
+        /// An emulated 64-bit shift (<paramref name="shiftFn"/> = i64_shl / u64_shr / i64_shr on an
+        /// emu_i64 = vec2&lt;u32&gt; (lo, hi)). When the shift amount is a compile-time constant -
+        /// every 64-bit rotate and most shifts in hashing/crypto code - the result is emitted as a
+        /// branch-free expression with exactly the library function's result for that amount,
+        /// instead of a call whose three runtime branches (== 0, >= 64, >= 32) the driver compiler
+        /// must process at EVERY inlined call site (Blake2b.Compress: 96 G mixes x 8 shifts, seconds
+        /// of D3D shader compile per inlined copy). Always wrapped in `emu_i64(...)`: the let-hoist
+        /// type inference recognizes that constructor. Otherwise returns the plain call.
+        /// </summary>
+        protected static string ConstantEmulatedShiftOrCall(string shiftFn, string a, Value amount, string amountExpr)
+        {
+            if (amount.Resolve() is not PrimitiveValue pv)
+                return $"{shiftFn}({a}, u32({amountExpr}))";
+            // Same value the library sees through u32(...): a negative constant is >= 64.
+            ulong c = pv.BasicValueType == BasicValueType.Int64
+                ? unchecked((ulong)pv.Int64Value)
+                : unchecked((uint)pv.Int32Value);
+            if (c == 0)
+                return $"emu_i64({a})";
+            switch (shiftFn)
+            {
+                case "i64_shl":
+                    if (c >= 64) return "emu_i64(0u, 0u)";
+                    if (c >= 32) return $"emu_i64(0u, {a}.x << {c - 32}u)";
+                    return $"emu_i64({a}.x << {c}u, ({a}.y << {c}u) | ({a}.x >> {32 - c}u))";
+                case "u64_shr":
+                    if (c >= 64) return "emu_i64(0u, 0u)";
+                    if (c >= 32) return $"emu_i64({a}.y >> {c - 32}u, 0u)";
+                    return $"emu_i64(({a}.x >> {c}u) | ({a}.y << {32 - c}u), {a}.y >> {c}u)";
+                case "i64_shr":
+                    if (c >= 64) return $"emu_i64(bitcast<u32>(bitcast<i32>({a}.y) >> 31u), bitcast<u32>(bitcast<i32>({a}.y) >> 31u))";
+                    if (c >= 32) return $"emu_i64(bitcast<u32>(bitcast<i32>({a}.y) >> {c - 32}u), bitcast<u32>(bitcast<i32>({a}.y) >> 31u))";
+                    return $"emu_i64(({a}.x >> {c}u) | ({a}.y << {32 - c}u), bitcast<u32>(bitcast<i32>({a}.y) >> {c}u))";
+                default:
+                    return $"{shiftFn}({a}, u32({amountExpr}))";
+            }
+        }
+
+        private int _phiCopyTempCounter;
+
+        /// <summary>
+        /// Emits the phi copies of ONE control-flow edge as a parallel copy (see
+        /// <see cref="PhiParallelCopy"/>): a source that another copy on this edge overwrites is
+        /// read into a <c>let</c> temporary first. Every phi-copy site funnels through here.
+        /// </summary>
+        protected void EmitPhiCopies(List<(Variable Target, Variable Source)> copies)
+        {
+            var targets = new string[copies.Count];
+            var sources = new string[copies.Count];
+            for (int i = 0; i < copies.Count; i++)
+            {
+                targets[i] = copies[i].Target.Name;
+                sources[i] = copies[i].Source.Name;
+            }
+            var stage = PhiParallelCopy.SourcesToStage(targets, sources);
+            var staged = stage == null ? null : new string[copies.Count];
+            if (stage != null)
+            {
+                for (int i = 0; i < copies.Count; i++)
+                {
+                    if (!stage[i]) continue;
+                    staged![i] = $"_phi_copy_{_phiCopyTempCounter++}";
+                    AppendLine($"let {staged[i]} = {copies[i].Source};");
+                }
+            }
+            for (int i = 0; i < copies.Count; i++)
+            {
+                string source = staged?[i] ?? copies[i].Source.ToString();
+                AppendLine($"{copies[i].Target} = {source};");
             }
         }
 

@@ -85,36 +85,20 @@ namespace SpawnDev.ILGPU.Crypto
         /// bytes hashed so far (including this block); for the single-block callers this
         /// primitive targets, <paramref name="t1"/> is always 0.
         /// </summary>
-        // TRIED NoInlining here too (2026-09-22, same session as G's own NoInlining change
-        // below) and REVERTED to AggressiveInlining. G-alone-NoInlining already fixes the ANGLE
-        // compile hang for all 3 WebGL Autolykos2 tests (proven, full 642-test regression sweep,
-        // zero regressions) WITHOUT touching Compress at all. Marking Compress NoInlining too
-        // uncovered a real, separate, now-FIXED bug along the way - GLSLCodeGenerator.
-        // GenerateCode(MethodCall)'s ref-argument passing built a dead-end AddressSpaceCast
-        // snapshot copy instead of the caller's real alloca variable, so a repeated-call
-        // write-back never reached anything later code could read (fixed at the call-site
-        // level, see GenerateCode(MethodCall)'s own comment) - but Compress-as-NoInlining
-        // introduces its OWN separate problem that fix does NOT resolve: ANGLE still hangs
-        // specifically on GenerateDatasetKernel's 63-iteration Compress-in-a-loop shape, with
-        // EITHER call-site argument-passing shape tried (direct-alloca-pass or snapshot-plus-
-        // write-back-after). Net effect of Compress-NoInlining is strictly worse than leaving it
-        // inlined: same underlying wrong-digest bug either way (see below), PLUS a reintroduced
-        // hang for the loop-shaped tests that G-alone-NoInlining doesn't have. Do not re-enable
-        // without root-causing that hang first.
+        // NoInlining (5.2.14): one Compress body per shader/module instead of one per call site -
+        // Autolykos2's dataset element calls it 65 times (once before its block loop, once in it,
+        // once after). An earlier attempt at NoInlining gave wrong digests on WebGL, WebGPU and
+        // Wasm; those were helper-function codegen bugs, all fixed in 5.2.14 (multi-block helpers
+        // lost their control flow - Compress is multi-block because of `if (isLastBlock)` - Wasm
+        // helper scratch sat at address 0, and Wasm negated a bool parameter bitwise). Every
+        // Autolykos2 test now passes on CPU/CUDA/OpenCL/WebGPU/Wasm with this layout.
         //
-        // Real Blake2b (12 rounds, G NoInlining as shipped) produced a wrong digest via a
-        // separate bug (Bug #5), FIXED 2026-09-22: GLSLCodeGenerator.GenerateCode
-        // (BinaryArithmeticValue)'s fallback path (used for standalone NoInlining GLSL
-        // functions - exactly what G's NoInlining routes through) fell through to native
-        // GLSL `+`/`-` for emulated-i64 Add/Sub instead of i64_add()/i64_sub() - correct for
-        // small values, silently dropping the lo-to-hi carry/borrow once G's mixing grew a
-        // word's lo word past 2^32. Fixed in GLSLCodeGenerator.cs; see
-        // NoInliningBlakeShapedTripleCallTest for the full root-cause investigation.
-        // Autolykos2_Blake2b_GPU_CPUMatch now passes on WebGL. DatasetGeneration_SmallN and
-        // Mine_SmallN still TIME OUT (30s) - a separate, still-open ANGLE compile-time hang
-        // for the 63-iteration Compress-in-a-loop shape (see BackendTestBase.Autolykos2.cs),
-        // not a correctness bug and not Bug #5.
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        // WebGL: DatasetGeneration_SmallN and Mine_SmallN still exceed the 30 s test timeout, in
+        // the driver's shader COMPILE (ANGLE -> D3D FXC), not in execution: measured 2026-09-22,
+        // one n=1 dispatch of a kernel containing a SINGLE Compress takes ~8.7 s on WebGL (1.5 s
+        // on WebGPU); two Compress bodies ~27 s. FXC is superlinear in long straight-line integer
+        // code, and 96 inlined emulated-64-bit G mixes is exactly that. Not a correctness bug.
+        [MethodImpl(MethodImplOptions.NoInlining)]
         public static void Compress(
             ref ulong h0, ref ulong h1, ref ulong h2, ref ulong h3,
             ref ulong h4, ref ulong h5, ref ulong h6, ref ulong h7,

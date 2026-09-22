@@ -3323,54 +3323,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// Phi values in ILGPU represent SSA merge points — when branching to a block,
         /// we assign the branch's source values to the phi destination variables.
         /// </summary>
-        private void PushPhiValues(UnconditionalBranch branch)
-        {
-            var targetBlock = branch.Target;
-            foreach (var valueEntry in targetBlock)
-            {
-                if (valueEntry.Value is PhiValue phi)
-                {
-                    // Find the source value for this phi from the current block
-                    for (int i = 0; i < phi.Nodes.Length; i++)
-                    {
-                        if (phi.Sources[i] == branch.BasicBlock)
-                        {
-                            var srcValue = phi.Nodes[i].Resolve();
-                            var phiVar = Load(phi);
-                            Declare(phiVar); // Ensure phi var is declared (Allocate doesn't call Declare)
-                            var srcVar = Load(srcValue);
-                            AppendLine($"{phiVar} = {srcVar};");
-                        }
-                    }
-                }
-                else break; // Phis are always at the start of a block
-            }
-        }
+        private void PushPhiValues(UnconditionalBranch branch) =>
+            PushPhiValues(branch.Target, branch.BasicBlock);
 
         /// <summary>
         /// Push phi values for a conditional branch (IfBranch) to a specific target block.
         /// </summary>
-        private void PushPhiValues(IfBranch branch, BasicBlock targetBlock)
-        {
-            foreach (var valueEntry in targetBlock)
-            {
-                if (valueEntry.Value is PhiValue phi)
-                {
-                    for (int i = 0; i < phi.Nodes.Length; i++)
-                    {
-                        if (phi.Sources[i] == branch.BasicBlock)
-                        {
-                            var srcValue = phi.Nodes[i].Resolve();
-                            var phiVar = Load(phi);
-                            Declare(phiVar); // Ensure phi var is declared (Allocate doesn't call Declare)
-                            var srcVar = Load(srcValue);
-                            AppendLine($"{phiVar} = {srcVar};");
-                        }
-                    }
-                }
-                else break;
-            }
-        }
+        private void PushPhiValues(IfBranch branch, BasicBlock targetBlock) =>
+            PushPhiValues(targetBlock, branch.BasicBlock);
 
         public override void GenerateCode()
         {
@@ -6607,7 +6567,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (value.Kind == BinaryArithmeticKind.Shl || value.Kind == BinaryArithmeticKind.Shr)
                     {
                         // Shift amount should be u32
-                        AppendLine($"{prefix}{target} = {emulFunc}({left}, u32({right}));");
+                        AppendLine($"{prefix}{target} = {ConstantEmulatedShiftOrCall(emulFunc, left.ToString(), value.Right, right.ToString())};");
                     }
                     else
                     {
@@ -6728,8 +6688,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
 
+        /// <summary>
+        /// Assigns every phi of <paramref name="targetBlock"/> its operand for the edge from
+        /// <paramref name="sourceBlock"/> - as ONE parallel copy (EmitPhiCopies), so a loop that
+        /// rotates its loop-carried values does not read a phi this edge already overwrote.
+        /// </summary>
         private void PushPhiValues(BasicBlock targetBlock, BasicBlock sourceBlock)
         {
+            var copies = new List<(Variable Target, Variable Source)>();
             foreach (var value in targetBlock)
             {
                 if (value.Value is PhiValue phi)
@@ -6742,8 +6708,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     {
                         if (phi.Sources[i] == sourceBlock)
                         {
-                            var sourceVal = Load(phi[i]);
-                            AppendLine($"{targetVar} = {sourceVal};");
+                            copies.Add((targetVar, Load(phi[i])));
                             matched = true;
                         }
                     }
@@ -6756,6 +6721,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     }
                 }
             }
+            EmitPhiCopies(copies);
         }
 
         /// <summary>
@@ -7333,218 +7299,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         {
             var target = Load(value);
             var source = Load(value.Value);
-            var targetType = TypeGenerator[value.Type];
-
             string prefix = GetPrefix(value);
-
-            // Fix: Handle Vector to Scalar conversion (e.g. i32(vec2)) which WGSL forbids
-            var sourceType = TypeGenerator[value.Value.Type];
-
-            bool isVectorSource = sourceType.StartsWith("vec");
-            bool isScalarTarget = !targetType.StartsWith("vec") && !targetType.StartsWith("mat") && !targetType.StartsWith("array")
-                                  && targetType != "emu_f64" && targetType != "emu_i64" && targetType != "emu_u64";
-
-            // Detect unsigned source conversion (e.g. uint → float)
-            bool isSourceUnsigned = (value.Flags & ConvertFlags.SourceUnsigned) == ConvertFlags.SourceUnsigned;
-
-            // Emulated type detection
-            bool isEmulatedF64Target = Backend.EnableF64Emulation && targetType == "emu_f64";
-            bool isEmulatedI64Target = Backend.EnableI64Emulation && (targetType == "emu_i64" || targetType == "emu_u64");
-            bool isEmulatedF64Source = Backend.EnableF64Emulation && sourceType == "emu_f64";
-            bool isEmulatedI64Source = Backend.EnableI64Emulation && (sourceType == "emu_i64" || sourceType == "emu_u64");
-
-            // ---- TARGET is emulated emu_f64 ----
-            if (isEmulatedF64Target)
-            {
-                if (isEmulatedF64Source)
-                {
-                    // emu_f64 → emu_f64: just assign
-                    AppendLine($"{prefix}{target} = {source};");
-                }
-                else if (isEmulatedI64Source)
-                {
-                    // emu_i64 → emu_f64: extract i32 then convert through f32
-                    AppendLine($"{prefix}{target} = f64_from_f32(f32(i64_to_i32({source})));");
-                }
-                else if (isVectorSource)
-                {
-                    // vec → emu_f64: extract .x component
-                    AppendLine($"{prefix}{target} = f64_from_f32(f32({source}.x));");
-                }
-                else if (sourceType == "f32")
-                {
-                    AppendLine($"{prefix}{target} = f64_from_f32({source});");
-                }
-                else if (isSourceUnsigned && sourceType == "i32")
-                {
-                    // unsigned int → emu_f64: bitcast to u32 first to preserve unsigned value
-                    AppendLine($"{prefix}{target} = f64_from_f32(f32(bitcast<u32>({source})));");
-                }
-                else
-                {
-                    // Integer or other scalar → emu_f64: convert to f32 first
-                    AppendLine($"{prefix}{target} = f64_from_f32(f32({source}));");
-                }
-                return;
-            }
-
-            // ---- TARGET is emulated emu_i64/emu_u64 ----
-            if (isEmulatedI64Target)
-            {
-                if (isEmulatedI64Source)
-                {
-                    // emu_i64 → emu_i64 (or emu_u64 → emu_u64): just assign
-                    AppendLine($"{prefix}{target} = {source};");
-                }
-                else if (isEmulatedF64Source)
-                {
-                    // emu_f64 → emu_i64: extract f32, cast to i32, then widen
-                    AppendLine($"{prefix}{target} = i64_from_i32(i32(f64_to_f32({source})));");
-                }
-                else if (isVectorSource)
-                {
-                    // Generic vec → emu_i64: extract .x, cast to i32, then widen
-                    if (targetType == "emu_u64")
-                        AppendLine($"{prefix}{target} = u64_from_u32(u32({source}.x));");
-                    else
-                        AppendLine($"{prefix}{target} = i64_from_i32(i32({source}.x));");
-                }
-                else if (sourceType == "i32")
-                {
-                    // A C# `uint` widening to a 64-bit type also lands here with sourceType=="i32"
-                    // (this backend doesn't carry a separate WGSL-level u32 IR type all the way
-                    // through arithmetic - unsignedness survives only as the ConvertFlags.SourceUnsigned
-                    // bit, computed above as isSourceUnsigned but never previously checked in this branch).
-                    // Zero-extend when it's actually unsigned - matches C# semantics: `(long)(uint)x`
-                    // zero-extends exactly like `(ulong)(uint)x` does, since a uint's value is never
-                    // negative, regardless of the destination's own signedness. Confirmed via
-                    // SpawnDev.ILGPU.DemoConsole's autolykos2-wgsl-dump probe:
-                    // `((ulong)height << 32) | Bswap32(index)` (both `uint`) compiled to two
-                    // back-to-back unconditional `i64_from_i32(...)` calls, corrupting any value
-                    // with bit 31 set (e.g. Bswap32 of any index >= 128).
-                    if (isSourceUnsigned)
-                        AppendLine($"{prefix}{target} = u64_from_u32(bitcast<u32>({source}));");
-                    else
-                        AppendLine($"{prefix}{target} = i64_from_i32({source});");
-                }
-                else if (sourceType == "u32")
-                {
-                    // A genuine WGSL u32 source is always unsigned by construction, so widening it
-                    // is always zero-extension - regardless of the target's nominal signedness.
-                    // The previous `targetType == "emu_u64"` check here was always false: emu_i64 and
-                    // emu_u64 are both `alias ... = vec2<u32>` (see the emulation library header), and
-                    // this backend's TypeGenerator only ever emits the string "emu_i64" for a 64-bit
-                    // integer target, never "emu_u64" - dead code, fixed for correctness even though
-                    // the i32 branch above is the one actually exercised by uint arithmetic in practice.
-                    AppendLine($"{prefix}{target} = u64_from_u32({source});");
-                }
-                else if (sourceType == "f32")
-                {
-                    // f32 → emu_i64: cast to i32 first
-                    AppendLine($"{prefix}{target} = i64_from_i32(i32({source}));");
-                }
-                else
-                {
-                    // Other scalar → emu_i64: cast to i32 first
-                    AppendLine($"{prefix}{target} = i64_from_i32(i32({source}));");
-                }
-                return;
-            }
-
-            // ---- SOURCE is emulated emu_f64, target is scalar ----
-            if (isEmulatedF64Source && isScalarTarget)
-            {
-                if (targetType == "f32")
-                {
-                    AppendLine($"{prefix}{target} = f64_to_f32({source});");
-                }
-                else
-                {
-                    // emu_f64 → i32/u32/etc: extract to f32, then cast
-                    AppendLine($"{prefix}{target} = {targetType}(f64_to_f32({source}));");
-                }
-                return;
-            }
-
-            // ---- SOURCE is emulated emu_i64/emu_u64, target is scalar ----
-            if (isEmulatedI64Source && isScalarTarget)
-            {
-                if (targetType == "i32")
-                {
-                    AppendLine($"{prefix}{target} = i64_to_i32({source});");
-                }
-                else if (targetType == "u32")
-                {
-                    AppendLine($"{prefix}{target} = u64_to_u32({source});");
-                }
-                else if (targetType == "f32")
-                {
-                    // emu_i64 → f32: extract low word as i32, then cast to f32
-                    AppendLine($"{prefix}{target} = f32(i64_to_i32({source}));");
-                }
-                else
-                {
-                    // emu_i64 → other scalar: extract low word and cast
-                    AppendLine($"{prefix}{target} = {targetType}(i64_to_i32({source}));");
-                }
-                return;
-            }
-
-            // ---- Generic vector → scalar (non-emulated) ----
-            if (isVectorSource && isScalarTarget)
-            {
-                AppendLine($"{prefix}{target} = {targetType}({source}.x);");
-                return;
-            }
-
-            // ---- Unsigned int → float: must bitcast to u32 first to preserve unsigned value ----
-            if (isSourceUnsigned && sourceType == "i32" && targetType == "f32")
-            {
-                AppendLine($"{prefix}{target} = f32(bitcast<u32>({source}));");
-                return;
-            }
-
-            // ---- Standard scalar → scalar ----
-            // Sub-word narrowing for Int16 / Int8 targets baked into the
-            // cast expression: WGSL has no native i16/i8, so `i32(int_val)`
-            // is identity. Without explicit narrowing, `(short)((x + (1<<13)) >> 14)`
-            // butterfly patterns leave high bits intact (Tuvok's iDCT 16x16
-            // residual). Combine into one expression because `let v_X = ...`
-            // is immutable. Mirrors the base WGSL handler.
-            string castExpr = $"{targetType}({source})";
-            if (targetType == "i32")
-            {
-                bool isTargetUnsigned = (value.Flags & ConvertFlags.TargetUnsigned) == ConvertFlags.TargetUnsigned;
-                var dstBasicType = value.Type.BasicValueType;
-                // WGSL `extractBits` built-in: signed extract sign-extends.
-                // Single intrinsic call vs shift chain - smaller WGSL, faster
-                // validator. See base WGSLCodeGenerator handler for details.
-                if (dstBasicType == BasicValueType.Int16)
-                    castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFFFi)" : $"extractBits({castExpr}, 0u, 16u)";
-                else if (dstBasicType == BasicValueType.Int8)
-                    castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFi)" : $"extractBits({castExpr}, 0u, 8u)";
-                else
-                {
-                    // Widening from a SUB-WORD source (Int16/Int8) to a wider int (i32). The source
-                    // lives in an i32 but may be zero-extended - it came from an unsigned sub-word
-                    // load, or from a `(short)`/`(sbyte)` signedness reinterpret that the core IR
-                    // ELIDES (short and ushort share BasicValueType.Int16). C# sign-extends
-                    // short->int and zero-extends ushort->int; SourceUnsigned carries which. Re-
-                    // extend the low bits so the high bits are correct. Concretely PopArithmeticArgs
-                    // promotes the `(short)` operand of `(short)Interop.FloatAsInt(half) >> 15`
-                    // (AscendingHalf's ones-complement mask) to i32 via THIS convert; without the
-                    // re-extension `>> 15` saw a zero-extended value and returned 0 instead of
-                    // 0xFFFF for negative Halves. extractBits on a signed i32 sign-extends.
-                    // Idempotent for already-extended values; desktop backends never reach here.
-                    bool isWidenSrcUnsigned = (value.Flags & ConvertFlags.SourceUnsigned) == ConvertFlags.SourceUnsigned;
-                    var srcBasicType = value.Value.BasicValueType;
-                    if (srcBasicType == BasicValueType.Int16)
-                        castExpr = isWidenSrcUnsigned ? $"({castExpr} & 0xFFFFi)" : $"extractBits({castExpr}, 0u, 16u)";
-                    else if (srcBasicType == BasicValueType.Int8)
-                        castExpr = isWidenSrcUnsigned ? $"({castExpr} & 0xFFi)" : $"extractBits({castExpr}, 0u, 8u)";
-                }
-            }
-            AppendLine($"{prefix}{target} = {castExpr};");
+            AppendLine($"{prefix}{target} = {BuildConvertExpression(value, source)};");
         }
 
         public override void GenerateCode(global::ILGPU.IR.Values.GetField value)
@@ -8374,11 +8130,83 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     AppendLine("return;");
                     block = null;
                 }
+                else if (terminator is global::ILGPU.IR.Values.SwitchBranch sw)
+                {
+                    block = EmitStructuredSwitch(sw, block, stopBlock, pd, visited, currentLoop);
+                }
                 else
                 {
-                    block = null;
+                    throw new NotSupportedException($"WGSL structured codegen: unhandled terminator {terminator?.GetType().Name ?? "null"} in {Method.Name}.");
                 }
             }
+        }
+
+        /// <summary>
+        /// A <see cref="global::ILGPU.IR.Values.SwitchBranch"/> (a dense C# switch - case i is
+        /// selector value i) in the structured walker, as an if / else-if chain on the selector.
+        /// Not a WGSL `switch`: a `break` inside a WGSL case leaves the SWITCH, but an arm that
+        /// exits the enclosing loop must break the LOOP. Each arm is handled like an if-branch
+        /// target: a back edge is `continue`, a loop exit emits its intermediate blocks and
+        /// `break`/`return`, anything else runs up to the switch's merge, which the caller then
+        /// continues from. Before this the walker had no SwitchBranch case and simply stopped:
+        /// the switch and the rest of the loop body vanished, leaving a `loop {}` that never
+        /// advanced its counter.
+        /// </summary>
+        /// <returns>The block to continue the walk from (the merge), or null.</returns>
+        private BasicBlock? EmitStructuredSwitch(
+            global::ILGPU.IR.Values.SwitchBranch sw,
+            BasicBlock block,
+            BasicBlock? stopBlock,
+            global::ILGPU.IR.Analyses.Dominators<global::ILGPU.IR.Analyses.ControlFlowDirection.Backwards> pd,
+            HashSet<BasicBlock> visited,
+            Loops<ReversePostOrder, Forwards>.Node? currentLoop)
+        {
+            var selector = Load(sw.Condition);
+            BasicBlock? mergeNode = pd.GetImmediateDominator(block);
+            if (mergeNode == block) mergeNode = null;
+            // Same clamp as the IfBranch path: a post-dominator outside the current loop means
+            // every arm leaves through continue/break - there is no in-loop merge to run to.
+            if (currentLoop != null && mergeNode != null && !currentLoop.Contains(mergeNode))
+                mergeNode = stopBlock;
+
+            var visitedBeforeArms = new HashSet<BasicBlock>(visited);
+            int caseCount = sw.NumCasesWithoutDefault;
+            for (int i = 0; i <= caseCount; i++)
+            {
+                var target = i < caseCount ? sw.GetCaseTarget(i) : sw.DefaultBlock;
+                if (caseCount == 0)
+                    AppendLine("{");
+                else if (i == 0)
+                    AppendLine($"if ({selector} == {i}) {{");
+                else if (i < caseCount)
+                    AppendLine($"}} else if ({selector} == {i}) {{");
+                else
+                    AppendLine("} else {");
+                PushIndent();
+                // Several cases may share a target, or a tail: each arm may re-emit a block
+                // another arm already emitted (each arm stops at the merge).
+                visited.IntersectWith(visitedBeforeArms);
+
+                if (currentLoop != null && IsLoopHeader(target, currentLoop))
+                {
+                    PushPhiValues(target, block);
+                    AppendLine("continue;");
+                }
+                else if (currentLoop != null && ExitsLoopTransitively(target, currentLoop, out var exitBlock))
+                {
+                    EmitIntermediateBlocksToExit(target, exitBlock, block, currentLoop, visited);
+                    AppendLine(IsReturnExit(exitBlock ?? target) ? "return;" : "break;");
+                }
+                else
+                {
+                    PushPhiValues(target, block);
+                    if (target != mergeNode)
+                        GenerateStructuredCodeRecursive(target, mergeNode, pd, visited, currentLoop);
+                }
+                PopIndent();
+            }
+            AppendLine("}");
+            return mergeNode;
         }
 
         /// <summary>

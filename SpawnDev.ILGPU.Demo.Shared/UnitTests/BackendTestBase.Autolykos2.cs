@@ -112,34 +112,10 @@ public abstract partial class BackendTestBase
         outDigests[baseOut + 3] = o3;
     }
 
-    // KNOWN OPEN ISSUE (found running this test 2026-09-21, re-investigated same day after
-    // fixing the separate WebGPU widening bug below): WebGL fails this test with a wrong (not a
-    // graceful skip/exception) digest even for the all-zero-message "empty" vector - CPU/CUDA/
-    // OpenCL/WebGPU (both subgroup variants)/Wasm all pass. Ruled out so far, each independently:
-    // - The GLSL i64 shift emulation (GLSLEmulationLibrary.cs i64_shl/u64_shr/i64_shr) by hand for
-    //   every rotate amount Blake2b uses (1, 16, 24, 32, 63) - all correct.
-    // - "The isLastBlock bool parameter isn't reaching the shader" - computed what the digest
-    //   would be with isLastBlock forced false - doesn't match the wrong output either.
-    // - The same uint-widening sign-extension mistake just fixed in WGSLKernelFunctionGenerator
-    //   (see the fixed note above) - checked GLSLEmulationLibrary's i64_from_i32/u64_from_u32 and
-    //   the GLSL kernel-function-generator's own ConvertValue handling; not the same bug pattern.
-    // - Dumped the actual generated GLSL offline (ShaderCompiler.Generate with
-    //   CapabilityProfiles.WebGL2Baseline, no GPU context needed - mirrors the technique that
-    //   found the WGSL bug) and spot-checked the IV/param-block initialization constants by hand
-    //   (v_1 = h0 = IV0^Param0, v_9 = v[8] = IV0 unmodified - both correct). The output is ~5600
-    //   lines of fully-unrolled emu_i64 (uvec2) arithmetic with no per-thread variance (this test
-    //   vector's message is all zero), so there's no sharp reproduction lever the way "index 128"
-    //   was for the WGSL bug - tracing further requires either instrumenting intermediate values
-    //   or comparing round-by-round against a reference trace, not spot-checking by eye. Stopped
-    //   here rather than continue an unbounded manual trace through ~500+ generated locals.
-    // Root cause is still open; this is a SpawnDev.ILGPU WebGL backend bug, not an Autolykos2/
-    // Blake2b logic bug (the same primitive is correct on every other backend, including the
-    // other i64-emulated one, WebGPU). Not chased further: WebGL is out of scope for production-
-    // scale mining regardless (see crypto-mining-funding-analysis.md and the plan file - multi-GB
-    // resident buffers exceed practical WebGL limits independent of this). Whoever picks this up
-    // next should instrument round-by-round intermediate v[] values (e.g. write them to an output
-    // buffer after each of the 12 rounds) and diff against a CPU trace of the same rounds, rather
-    // than re-deriving the emulation library by hand as both attempts here did.
+    // RESOLVED 2026-09-22: WebGL returned a wrong digest here (even for the all-zero "empty"
+    // vector) while every other backend passed. It was Bug #5 - emulated-64-bit Add/Sub/Mul in a
+    // standalone [NoInlining] GLSL function (G) used GLSL's component-wise uvec2 operators, which
+    // drop the lo-to-hi carry. Fixed in 5.2.13; see the dataset-generation test's comment below.
     [TestMethod]
     public async Task Autolykos2_Blake2b_GPU_CPUMatch() => await RunTest(async accelerator =>
     {
@@ -275,15 +251,6 @@ public abstract partial class BackendTestBase
     // regressions, 4 new passing tests (BackendTestBase.Tests6.cs, search "BlakeShaped" and
     // "RefULong8"). This fix is KEPT and shipped - it is real and general.
     //
-    // Compress itself was REVERTED back to AggressiveInlining, though (see Blake2b.cs's own
-    // comment on Compress): marking it NoInlining reintroduces the ANGLE compile/runtime hang
-    // specifically for GenerateDatasetKernel's 63-iteration Compress-in-a-loop shape (this test
-    // and the Mine test below), and the ref-write-back fix above does NOT resolve that hang -
-    // confirmed with two different call-site argument-passing shapes (direct-alloca-pass, and
-    // snapshot-plus-explicit-write-back-after). G-alone-NoInlining (the shipped, final
-    // configuration) already avoids the ANGLE hang for all 3 WebGL Autolykos2 tests without
-    // this problem, so that is what ships.
-    //
     // Bug #5 - FIXED 2026-09-22 (was: "STILL OPEN" here). With the ref-write-back bug fixed and
     // G correctly NoInlining/routed as a real fn-def call, real Blake2b was STILL producing a
     // wrong digest via a separate bug, precisely bisected down to
@@ -302,14 +269,18 @@ public abstract partial class BackendTestBase
     // completely outside ILGPU, isolating the bug to the shader text/compilation before
     // finding the actual missing dispatch branch).
     //
-    // Autolykos2_Blake2b_GPU_CPUMatch (single Compress call, no loop) now PASSES on WebGL.
-    // This test and Mine below still TIME OUT (30s) - the separate, STILL-OPEN ANGLE
-    // compile-time hang for GenerateDatasetKernel's 63-iteration Compress-in-a-loop shape
-    // (see Blake2b.cs Compress's own comment). Not a correctness bug, not Bug #5 - Compress
-    // is deliberately AggressiveInlining specifically to avoid this hang class (G-alone-
-    // NoInlining already fixed the ANGLE compile hang for shader SIZE; the loop-shaped hang
-    // here is a different problem needing a from-scratch investigation of its own if picked
-    // up next).
+    // 5.2.14: Compress is NoInlining too (see Blake2b.cs). Earlier NoInlining attempts gave wrong
+    // digests on WebGL/WebGPU/Wasm - helper-function codegen bugs (multi-block helpers lost their
+    // control flow, Wasm helper scratch at address 0, Wasm bitwise-negated bool parameters), all
+    // fixed and gated by BackendTestBase.NoInliningHelperControlFlow.cs. This test and Mine now
+    // pass on CPU/CUDA/OpenCL/WebGPU/Wasm.
+    //
+    // WebGL still exceeds the 30 s test timeout - in the driver's shader COMPILE (ANGLE -> D3D FXC),
+    // not in execution: an n=1 dispatch of a kernel with ONE Compress body takes ~8.7 s on WebGL
+    // (1.5 s on WebGPU), two bodies ~27 s (measured 2026-09-22). FXC is superlinear in long
+    // straight-line integer code; 96 inlined emulated-64-bit G mixes per Compress is exactly that.
+    // Not a correctness bug. Making it compile in time needs a smaller per-Compress body (e.g. a
+    // runtime round loop), which is its own piece of work.
     [TestMethod]
     public async Task Autolykos2_DatasetGeneration_SmallN_GPU_CPUMatch() => await RunTest(async accelerator =>
     {

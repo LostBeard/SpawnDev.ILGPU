@@ -13,6 +13,8 @@ using global::ILGPU.Backends;
 using global::ILGPU.Backends.EntryPoints;
 using global::ILGPU.IR;
 using global::ILGPU.IR.Analyses;
+using global::ILGPU.IR.Analyses.ControlFlowDirection;
+using global::ILGPU.IR.Analyses.TraversalOrders;
 using global::ILGPU.IR.Types;
 using global::ILGPU.IR.Values;
 using System.Text;
@@ -128,7 +130,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         protected int labelCounter = 0;
         protected readonly Dictionary<Value, Variable> valueVariables = new();
         private readonly Dictionary<BasicBlock, string> blockLabels = new();
-        protected bool IsStateMachineActive { get; set; } = false;
+        // True while emitting a multi-block body: Declare() writes every declaration into
+        // VariableBuilder, which is spliced in at function scope, so a variable defined inside
+        // one structured branch or loop body is visible wherever it is used.
+        protected bool HoistDeclarations { get; set; } = false;
 
         protected GLSLCodeGenerator(in GeneratorArgs args, Method method, Allocas allocas)
         {
@@ -137,6 +142,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             Method = method;
             Allocas = allocas;
             Builder = new StringBuilder();
+
+            _cfg = method.Blocks.CreateCFG();
+            _postDominators = _cfg.Blocks.CreatePostDominators();
+            _loops = _cfg.CreateLoops();
         }
 
         #endregion
@@ -215,7 +224,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (variable.Type == "bool")
                 booleanVariables.Add(variable.Name);
 
-            if (IsStateMachineActive)
+            if (HoistDeclarations)
             {
                 VariableBuilder.Append("    ");
                 VariableBuilder.Append(variable.Type);
@@ -246,7 +255,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 booleanVariables.Add(name);
 
             string line = $"{glslType} {name} = {initializer};";
-            if (IsStateMachineActive)
+            if (HoistDeclarations)
                 VariableBuilder.AppendLine($"    {line}");
             else
                 AppendLine(line);
@@ -414,12 +423,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var blocks = Method.Blocks;
             SetupAllocations(Allocas.LocalAllocations, MemoryAddressSpace.Local);
 
-            bool hasReturnValue = !Method.ReturnType.IsVoidType;
-            string returnType = hasReturnValue ? TypeGenerator[Method.ReturnType] : "void";
-
             if (blocks.Count == 1)
             {
-                IsStateMachineActive = false;
+                HoistDeclarations = false;
                 var theBlock = blocks.First();
                 foreach (var valueEntry in theBlock)
                     GenerateCodeFor(valueEntry.Value);
@@ -433,478 +439,28 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 return;
             }
 
-            // Multiple blocks: try structured control flow first (ANGLE D3D11 workaround).
-            // The D3D11 backend cannot compile vertex shaders containing switch/case state
-            // machines inside loops when used with Transform Feedback. Structured flow uses
-            // while/if/break/continue which D3D11 can JIT-compile.
-            if (TryEmitStructuredFlow(blocks, hasReturnValue, returnType))
-                return;
-
-            // Fallback: switch/case state machine (for complex/irreducible CFGs)
-            IsStateMachineActive = true;
-
-            if (hasReturnValue)
-            {
-                string zeroVal = GetDefaultValue(returnType);
-                AppendLine($"{returnType} _ilgpu_return_val = {zeroVal};");
-            }
-
+            // Multiple blocks: the SAME structured walker the kernel body uses (for/if/break/
+            // continue - ANGLE's D3D11 backend cannot compile a switch/case state machine inside
+            // a loop in a vertex shader). Every variable is declared at function scope, so a
+            // value defined inside one branch or loop body is visible wherever it is used.
+            // The helper-only emitter this replaced read each block's "terminator" from the
+            // value enumeration, which never contains it - so every loop and branch in a
+            // [NoInlining] helper was flattened into straight-line code.
+            HoistDeclarations = true;
             int deferredInsertPosition = Builder.Length;
-
-            AppendLine("int current_block = 0;");
-            AppendLine("for (int _sm_iter = 0; _sm_iter < 65535; _sm_iter++) {");
-            PushIndent();
-            AppendLine("switch (current_block) {");
-            PushIndent();
-
-            int blockIndex = 0;
-            foreach (var block in blocks)
-            {
-                AppendLine($"case {blockIndex}: {{");
-                PushIndent();
-                foreach (var valueEntry in block)
-                    GenerateCodeFor(valueEntry.Value);
-                AppendLine("break;");
-                PopIndent();
-                AppendLine("}");
-                blockIndex++;
-            }
-
-            AppendLine("default: break;");
-            PopIndent();
-            AppendLine("}"); // end switch
-
-            AppendLine("if (current_block == -1) break;");
-            PopIndent();
-            AppendLine("}"); // end for
-
-            // Insert deferred variable declarations
+            GenerateStructuredBody();
             if (VariableBuilder.Length > 0)
                 Builder.Insert(deferredInsertPosition, VariableBuilder.ToString());
-
-            if (hasReturnValue)
-                AppendLine($"return _ilgpu_return_val;");
-            else
-                AppendLine("return;");
         }
 
         /// <summary>
-        /// Attempts to emit structured control flow using while/if/break/continue
-        /// instead of the switch/case state machine. This is required for ANGLE's D3D11
-        /// backend which cannot JIT-compile switch/case inside loops in vertex shaders.
-        /// Returns true if structured flow was emitted, false to fall back to state machine.
+        /// Emits the method's blocks as structured control flow, starting at the entry block.
         /// </summary>
-        private bool TryEmitStructuredFlow(
-            IEnumerable<BasicBlock> blocks,
-            bool hasReturnValue,
-            string returnType)
+        protected void GenerateStructuredBody()
         {
-            // Build block list and index mapping
-            var blockList = blocks.ToList();
-            var blockIndexMap = new Dictionary<BasicBlock, int>();
-            for (int i = 0; i < blockList.Count; i++)
-                blockIndexMap[blockList[i]] = i;
-
-            // Analyze terminators and detect back edges (loops)
-            // A back edge is when a block branches to an earlier block (lower index)
-            var loopHeaders = new HashSet<int>();  // blocks that are loop headers
-            var backEdgeSources = new Dictionary<int, int>();  // source → header mapping
-
-            for (int i = 0; i < blockList.Count; i++)
-            {
-                var terminator = GetTerminator(blockList[i]);
-                if (terminator == null) continue;
-
-                foreach (var target in GetTerminatorTargets(terminator, blockIndexMap))
-                {
-                    if (target < i)  // back edge: target has lower index
-                    {
-                        loopHeaders.Add(target);
-                        backEdgeSources[i] = target;
-                    }
-                }
-
-                // SwitchBranch requires the state machine — bail out
-                if (terminator is global::ILGPU.IR.Values.SwitchBranch)
-                {
-                    if (WebGLBackend.VerboseLogging) WebGLBackend.Log($"[GLSL-SCF] FALLBACK: SwitchBranch found at block {i}");
-                    return false;
-                }
-            }
-
-            // For now, only handle single-loop or no-loop CFGs.
-            // Multiple nested loops or complex patterns fall back to state machine.
-            if (WebGLBackend.VerboseLogging) WebGLBackend.Log($"[GLSL-SCF] blocks={blockList.Count} loopHeaders={loopHeaders.Count} backEdges={backEdgeSources.Count} headers=[{string.Join(",", loopHeaders)}]");
-            if (loopHeaders.Count > 1)
-            {
-                if (WebGLBackend.VerboseLogging) WebGLBackend.Log("[GLSL-SCF] FALLBACK: multiple loop headers detected, using state machine");
-                return false;
-            }
-
-            // Use structured flow mode — variables are declared at top like state machine
-            IsStateMachineActive = true;
-
-            if (hasReturnValue)
-            {
-                string zeroVal = GetDefaultValue(returnType);
-                AppendLine($"{returnType} _ilgpu_return_val = {zeroVal};");
-            }
-
-            int deferredInsertPosition = Builder.Length;
-
-            // Emit blocks in order with structured control flow
-            int loopHeader = loopHeaders.Count > 0 ? loopHeaders.First() : -1;
-            int loopEnd = -1;  // last block in the loop body
-
-            // Find the loop exit block (first block after the loop that isn't in the loop)
-            if (loopHeader >= 0)
-            {
-                // Find all blocks that are part of the loop (between header and last back-edge source)
-                loopEnd = backEdgeSources.Keys.Max();
-            }
-
-            bool insideLoop = false;
-
-            for (int i = 0; i < blockList.Count; i++)
-            {
-                var block = blockList[i];
-                var terminator = GetTerminator(block);
-
-                // Open loop construct when we reach the loop header
-                if (i == loopHeader)
-                {
-                    insideLoop = true;
-                    AppendLine("while (true) {");
-                    PushIndent();
-                }
-
-                // Emit all values in this block EXCEPT the terminator
-                foreach (var valueEntry in block)
-                {
-                    if (IsTerminator(valueEntry.Value))
-                        continue;  // terminators are handled structurally below
-                    GenerateCodeFor(valueEntry.Value);
-                }
-
-                // Handle terminator structurally
-                if (terminator != null)
-                    EmitStructuredTerminator(terminator, i, blockList, blockIndexMap,
-                        loopHeader, loopEnd, insideLoop);
-
-                // Close loop construct after the last back-edge source block
-                if (insideLoop && i == loopEnd)
-                {
-                    insideLoop = false;
-                    PopIndent();
-                    AppendLine("}"); // end while
-                }
-            }
-
-            // Insert deferred variable declarations
-            if (VariableBuilder.Length > 0)
-                Builder.Insert(deferredInsertPosition, VariableBuilder.ToString());
-
-            if (hasReturnValue)
-                AppendLine($"return _ilgpu_return_val;");
-            else
-                AppendLine("return;");
-
-            return true;
-        }
-
-        /// <summary>
-        /// Gets the terminator instruction (last value) of a basic block.
-        /// </summary>
-        private static Value? GetTerminator(BasicBlock block)
-        {
-            Value? last = null;
-            foreach (var entry in block)
-                last = entry.Value;
-            return last;
-        }
-
-        /// <summary>
-        /// Returns true if the value is a terminator instruction.
-        /// </summary>
-        private static bool IsTerminator(Value value) => value is
-            global::ILGPU.IR.Values.UnconditionalBranch or
-            global::ILGPU.IR.Values.IfBranch or
-            global::ILGPU.IR.Values.SwitchBranch or
-            global::ILGPU.IR.Values.ReturnTerminator;
-
-        /// <summary>
-        /// Gets the target block indices of a terminator instruction.
-        /// </summary>
-        private static List<int> GetTerminatorTargets(Value terminator, Dictionary<BasicBlock, int> blockIndexMap)
-        {
-            var targets = new List<int>();
-            switch (terminator)
-            {
-                case global::ILGPU.IR.Values.UnconditionalBranch br:
-                    if (blockIndexMap.TryGetValue(br.Target, out int t1))
-                        targets.Add(t1);
-                    break;
-                case global::ILGPU.IR.Values.IfBranch ifBr:
-                    if (blockIndexMap.TryGetValue(ifBr.TrueTarget, out int tt))
-                        targets.Add(tt);
-                    if (blockIndexMap.TryGetValue(ifBr.FalseTarget, out int ft))
-                        targets.Add(ft);
-                    break;
-                case global::ILGPU.IR.Values.SwitchBranch swBr:
-                    if (blockIndexMap.TryGetValue(swBr.DefaultBlock, out int dt))
-                        targets.Add(dt);
-                    for (int i = 0; i < swBr.NumCasesWithoutDefault; i++)
-                    {
-                        if (blockIndexMap.TryGetValue(swBr.GetCaseTarget(i), out int ct))
-                            targets.Add(ct);
-                    }
-                    break;
-            }
-            return targets;
-        }
-
-        /// <summary>
-        /// Emits a terminator instruction as structured control flow (break/continue/fallthrough).
-        /// </summary>
-        private void EmitStructuredTerminator(
-            Value terminator,
-            int currentBlockIdx,
-            List<BasicBlock> blockList,
-            Dictionary<BasicBlock, int> blockIndexMap,
-            int loopHeader,
-            int loopEnd,
-            bool insideLoop)
-        {
-            switch (terminator)
-            {
-                case global::ILGPU.IR.Values.ReturnTerminator ret:
-                {
-                    if (!ret.IsVoidReturn)
-                    {
-                        var retVal = Load(ret.ReturnValue);
-                        AppendLine($"_ilgpu_return_val = {retVal};");
-                    }
-                    if (insideLoop)
-                        AppendLine("break;"); // exit the while loop, then return at end
-                    // If not in a loop, fall through to the return at the end
-                    break;
-                }
-
-                case global::ILGPU.IR.Values.UnconditionalBranch br:
-                {
-                    int targetIdx = blockIndexMap[br.Target];
-                    EmitPhiAssignments(br.BasicBlock, br.Target);
-
-                    if (targetIdx == loopHeader && insideLoop)
-                    {
-                        // Back edge: continue the loop
-                        AppendLine("continue;");
-                    }
-                    else if (targetIdx == currentBlockIdx + 1)
-                    {
-                        // Fall through to next block — no code needed
-                    }
-                    else if (targetIdx > loopEnd && insideLoop)
-                    {
-                        // Jump past the loop — break
-                        AppendLine("break;");
-                    }
-                    // else: forward jump to non-adjacent block within the loop body
-                    // This case shouldn't happen in simple loops but we handle it
-                    // by falling through (the blocks are in order)
-                    break;
-                }
-
-                case global::ILGPU.IR.Values.IfBranch ifBr:
-                {
-                    var cond = Load(ifBr.Condition);
-                    int trueIdx = blockIndexMap[ifBr.TrueTarget];
-                    int falseIdx = blockIndexMap[ifBr.FalseTarget];
-
-                    // Determine which branch is the "continue" (back to loop header)
-                    // and which is the "exit" (break out or fall through)
-                    if (insideLoop)
-                    {
-                        bool trueIsBackEdge = trueIdx == loopHeader;
-                        bool falseIsBackEdge = falseIdx == loopHeader;
-                        bool trueIsExit = trueIdx > loopEnd;
-                        bool falseIsExit = falseIdx > loopEnd;
-
-                        if (trueIsBackEdge && falseIsExit)
-                        {
-                            // if (cond) → continue loop; else → break out
-                            AppendLine($"if (!({cond})) {{");
-                            PushIndent();
-                            EmitPhiAssignments(ifBr.BasicBlock, ifBr.FalseTarget);
-                            AppendLine("break;");
-                            PopIndent();
-                            AppendLine("}");
-                            EmitPhiAssignments(ifBr.BasicBlock, ifBr.TrueTarget);
-                            AppendLine("continue;");
-                        }
-                        else if (falseIsBackEdge && trueIsExit)
-                        {
-                            // if (cond) → break out; else → continue loop
-                            AppendLine($"if ({cond}) {{");
-                            PushIndent();
-                            EmitPhiAssignments(ifBr.BasicBlock, ifBr.TrueTarget);
-                            AppendLine("break;");
-                            PopIndent();
-                            AppendLine("}");
-                            EmitPhiAssignments(ifBr.BasicBlock, ifBr.FalseTarget);
-                            AppendLine("continue;");
-                        }
-                        else if (trueIsBackEdge)
-                        {
-                            // True goes back to header, false falls through to next block
-                            AppendLine($"if ({cond}) {{");
-                            PushIndent();
-                            EmitPhiAssignments(ifBr.BasicBlock, ifBr.TrueTarget);
-                            AppendLine("continue;");
-                            PopIndent();
-                            AppendLine("}");
-                            EmitPhiAssignments(ifBr.BasicBlock, ifBr.FalseTarget);
-                        }
-                        else if (falseIsBackEdge)
-                        {
-                            // False goes back to header, true falls through
-                            AppendLine($"if (!({cond})) {{");
-                            PushIndent();
-                            EmitPhiAssignments(ifBr.BasicBlock, ifBr.FalseTarget);
-                            AppendLine("continue;");
-                            PopIndent();
-                            AppendLine("}");
-                            EmitPhiAssignments(ifBr.BasicBlock, ifBr.TrueTarget);
-                        }
-                        else if (trueIsExit && !falseIsExit)
-                        {
-                            // True breaks out of loop, false falls through in loop body
-                            AppendLine($"if ({cond}) {{");
-                            PushIndent();
-                            EmitPhiAssignments(ifBr.BasicBlock, ifBr.TrueTarget);
-                            AppendLine("break;");
-                            PopIndent();
-                            AppendLine("}");
-                            EmitPhiAssignments(ifBr.BasicBlock, ifBr.FalseTarget);
-                        }
-                        else if (falseIsExit && !trueIsExit)
-                        {
-                            // False breaks out of loop, true falls through in loop body
-                            AppendLine($"if (!({cond})) {{");
-                            PushIndent();
-                            EmitPhiAssignments(ifBr.BasicBlock, ifBr.FalseTarget);
-                            AppendLine("break;");
-                            PopIndent();
-                            AppendLine("}");
-                            EmitPhiAssignments(ifBr.BasicBlock, ifBr.TrueTarget);
-                        }
-                        else
-                        {
-                            // Both targets are within the loop body — simple if/else
-                            // True goes to one body block, false to another
-                            EmitIfElseBlocks(ifBr, cond, trueIdx, falseIdx, currentBlockIdx, blockList, blockIndexMap, loopHeader, loopEnd);
-                        }
-                    }
-                    else
-                    {
-                        // Not in a loop — simple if/else with fall-through
-                        // One target should be the next block (fall-through), the other is a forward jump
-                        if (trueIdx == currentBlockIdx + 1)
-                        {
-                            // True is fall-through, false is forward jump
-                            AppendLine($"if (!({cond})) {{");
-                            PushIndent();
-                            EmitPhiAssignments(ifBr.BasicBlock, ifBr.FalseTarget);
-                            // Emit the false-target blocks inline? Or just skip ahead via comments?
-                            // For now, we need to handle this case — but it's rare outside loops
-                            PopIndent();
-                            AppendLine("}");
-                            EmitPhiAssignments(ifBr.BasicBlock, ifBr.TrueTarget);
-                        }
-                        else if (falseIdx == currentBlockIdx + 1)
-                        {
-                            // False is fall-through, true is forward jump
-                            AppendLine($"if ({cond}) {{");
-                            PushIndent();
-                            EmitPhiAssignments(ifBr.BasicBlock, ifBr.TrueTarget);
-                            PopIndent();
-                            AppendLine("}");
-                            EmitPhiAssignments(ifBr.BasicBlock, ifBr.FalseTarget);
-                        }
-                        else
-                        {
-                            // Neither is fall-through — shouldn't happen in simple CFGs
-                            // Fall back to state machine
-                            EmitPhiAssignments(ifBr.BasicBlock, ifBr.TrueTarget);
-                            EmitPhiAssignments(ifBr.BasicBlock, ifBr.FalseTarget);
-                        }
-                    }
-                    break;
-                }
-            }
-        }
-
-        /// <summary>
-        /// Emits an if/else construct for branches where both targets are within the loop body.
-        /// </summary>
-        private void EmitIfElseBlocks(
-            global::ILGPU.IR.Values.IfBranch ifBr,
-            Variable cond,
-            int trueIdx,
-            int falseIdx,
-            int currentBlockIdx,
-            List<BasicBlock> blockList,
-            Dictionary<BasicBlock, int> blockIndexMap,
-            int loopHeader,
-            int loopEnd)
-        {
-            // The next sequential block is the fall-through target
-            int nextIdx = currentBlockIdx + 1;
-
-            if (trueIdx == nextIdx)
-            {
-                // True falls through, false needs phi assignments only
-                AppendLine($"if (!({cond})) {{");
-                PushIndent();
-                EmitPhiAssignments(ifBr.BasicBlock, ifBr.FalseTarget);
-                PopIndent();
-                AppendLine("}");
-                EmitPhiAssignments(ifBr.BasicBlock, ifBr.TrueTarget);
-            }
-            else if (falseIdx == nextIdx)
-            {
-                // False falls through, true needs phi assignments only  
-                AppendLine($"if ({cond}) {{");
-                PushIndent();
-                EmitPhiAssignments(ifBr.BasicBlock, ifBr.TrueTarget);
-                PopIndent();
-                AppendLine("}");
-                EmitPhiAssignments(ifBr.BasicBlock, ifBr.FalseTarget);
-            }
-            else
-            {
-                // Neither is fall-through — emit both phi assignments  
-                AppendLine($"if ({cond}) {{");
-                PushIndent();
-                EmitPhiAssignments(ifBr.BasicBlock, ifBr.TrueTarget);
-                PopIndent();
-                AppendLine("} else {");
-                PushIndent();
-                EmitPhiAssignments(ifBr.BasicBlock, ifBr.FalseTarget);
-                PopIndent();
-                AppendLine("}");
-            }
-        }
-
-        protected int GetBlockIndex(BasicBlock block)
-        {
-            int index = 0;
-            foreach (var b in Method.Blocks)
-            {
-                if (b == block) return index;
-                index++;
-            }
-            return -1;
+            _visitedBlocks.Clear();
+            _activeLoopHeaders.Clear();
+            GenerateStructuredCode(Method.EntryBlock, null);
         }
 
         protected void SetupAllocations(AllocaKindInformation allocas, MemoryAddressSpace addressSpace)
@@ -952,6 +508,820 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 else
                     AppendLine($"{elementType} {variable.Name};");
             }
+        }
+
+        #endregion
+
+        #region Structured Control Flow
+
+        // CFG analyses for the structured walker, computed once per method.
+        protected readonly CFG<ReversePostOrder, Forwards> _cfg;
+        protected readonly Dominators<Backwards> _postDominators;
+        protected readonly Loops<ReversePostOrder, Forwards> _loops;
+        protected readonly HashSet<BasicBlock> _visitedBlocks = new();
+        protected readonly Stack<BasicBlock> _activeLoopHeaders = new();
+        /// <summary>
+        /// The current loop's header exit target. Used by EmitBreakWithIntermediateCode
+        /// to distinguish body-break-specific blocks from the shared merge block.
+        /// </summary>
+        protected BasicBlock? _glslHeaderExitTarget;
+        private int _loopCounter = 0;
+
+        protected void GenerateBlockCode(BasicBlock block)
+        {
+            // Emit all non-terminator values in the block
+            foreach (var value in block)
+            {
+                if (value.Value is TerminatorValue) continue;
+                GenerateCodeFor(value.Value);
+            }
+        }
+
+        /// <summary>
+        /// Finds the innermost loop that has the given block as a header.
+        /// </summary>
+        protected Loops<ReversePostOrder, Forwards>.Node? FindLoopForHeader(BasicBlock block)
+        {
+            for (int i = 0; i < _loops.Count; i++)
+            {
+                var loop = _loops[i];
+                foreach (var header in loop.Headers)
+                {
+                    if (header == block)
+                        return loop;
+                }
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Checks if target is a back-edge to an active loop header (should emit 'continue').
+        /// </summary>
+        protected bool IsBackEdgeToActiveLoop(BasicBlock target)
+        {
+            return _activeLoopHeaders.Contains(target);
+        }
+
+        /// <summary>
+        /// Emit a branch to target, handling loop continue/break/fall-through.
+        /// Returns true if the branch was emitted as continue/break (caller should not recurse).
+        /// </summary>
+        protected bool EmitBranchTarget(BasicBlock target, BasicBlock source, BasicBlock? stop)
+        {
+            PushPhiValues(target, source);
+
+            // Back-edge to active loop header → continue
+            if (IsBackEdgeToActiveLoop(target))
+            {
+                AppendLine("continue;");
+                return true;
+            }
+
+            // Target is the stop block → let caller handle it
+            if (target == stop)
+                return true;
+
+            // Already visited → skip
+            if (_visitedBlocks.Contains(target))
+                return true;
+
+            return false;
+        }
+
+        protected void GenerateStructuredCode(BasicBlock current, BasicBlock? stop)
+        {
+            if (current == null || current == stop || _visitedBlocks.Contains(current)) return;
+            _visitedBlocks.Add(current);
+
+            // Check if this block is a loop header
+            var loop = FindLoopForHeader(current);
+            if (loop != null)
+            {
+                // ANGLE D3D11 crashes on while(true) — use bounded for loop instead.
+                // The loop body's own break/condition controls actual iteration.
+                var loopVarName = $"_loop{_loopCounter++}";
+                AppendLine($"for (int {loopVarName} = 0; {loopVarName} < 100000; {loopVarName}++) {{");
+                PushIndent();
+
+                _activeLoopHeaders.Push(current);
+
+                // Detect the header's exit target before entering the loop body.
+                // This is the first block outside the loop that the header's normal
+                // exit leads to — used for post-loop continuation.
+                BasicBlock? headerExitTarget = null;
+                if (current.Terminator is IfBranch headerBranch)
+                {
+                    if (!loop.Contains(headerBranch.TrueTarget) || ExitsLoopTransitively(headerBranch.TrueTarget, loop))
+                        headerExitTarget = headerBranch.TrueTarget;
+                    else if (!loop.Contains(headerBranch.FalseTarget) || ExitsLoopTransitively(headerBranch.FalseTarget, loop))
+                        headerExitTarget = headerBranch.FalseTarget;
+                }
+                _glslHeaderExitTarget = headerExitTarget;
+
+                // Remove current from visited so we can re-enter it for the loop body
+                _visitedBlocks.Remove(current);
+
+                // Generate the loop body starting from the header
+                GenerateLoopBody(current, loop, stop);
+
+                _activeLoopHeaders.Pop();
+                _glslHeaderExitTarget = null;
+
+                PopIndent();
+                AppendLine("}");
+
+                // Continue with exit blocks after the loop.
+                // Use the header's exit target for continuation instead of iterating
+                // all loop.Exits — avoids processing body-break-specific intermediate
+                // blocks (whose code was emitted inside the break scope).
+                BasicBlock? postLoopBlock = headerExitTarget;
+                if (postLoopBlock == null && loop.Exits.Length > 0)
+                    postLoopBlock = loop.Exits[0]; // Fallback
+
+                if (postLoopBlock != null)
+                {
+                    var exitBlock = postLoopBlock;
+                    // Skip pass-through blocks
+                    int skipLimit = 10;
+                    while (exitBlock != null && exitBlock != stop
+                        && !_visitedBlocks.Contains(exitBlock)
+                        && skipLimit-- > 0)
+                    {
+                        if (exitBlock.Terminator is UnconditionalBranch exitUBranch
+                            && !HasNonPhiInstructions(exitBlock))
+                        {
+                            _visitedBlocks.Add(exitBlock);
+                            exitBlock = exitUBranch.Target;
+                        }
+                        else
+                        {
+                            break;
+                        }
+                    }
+                    if (exitBlock != null && exitBlock != stop && !_visitedBlocks.Contains(exitBlock))
+                    {
+                        GenerateStructuredCode(exitBlock, stop);
+                    }
+                }
+                return;
+            }
+
+            // Not a loop header — emit the block's values
+            GenerateBlockCode(current);
+
+            // Handle terminator
+            var terminator = current.Terminator;
+
+            if (terminator is ReturnTerminator rt)
+            {
+                GenerateCode(rt);
+            }
+            else if (terminator is UnconditionalBranch ub)
+            {
+                if (!EmitBranchTarget(ub.Target, current, stop))
+                    GenerateStructuredCode(ub.Target, stop);
+            }
+            else if (terminator is IfBranch ib)
+            {
+                EmitIfBranch(ib, current, stop);
+            }
+            else if (terminator is SwitchBranch sb)
+            {
+                EmitSwitchBranch(sb, current, stop, null, null);
+            }
+            else if (terminator != null)
+            {
+                throw new NotSupportedException($"GLSL structured codegen: unhandled terminator {terminator.GetType().Name} in {Method.Name}.");
+            }
+        }
+
+        /// <summary>
+        /// Emits a <see cref="SwitchBranch"/> (a dense C# switch - case i is selector value i)
+        /// as an if / else-if chain on the selector: GLSL ES 3.0 has `switch`, but ANGLE's D3D11
+        /// backend cannot compile switch/case inside a loop in a vertex shader (the reason this
+        /// walker exists). Each arm is handled like an if-branch target: outside a loop the arms
+        /// run up to the switch block's post-dominator, which is then emitted once; inside a
+        /// loop an arm is a continue (back edge), a break (loop exit) or loop-body code up to
+        /// the in-loop merge. Before this, the walker had no SwitchBranch case at all and the
+        /// switch - and everything after it in the loop body - silently vanished.
+        /// </summary>
+        protected void EmitSwitchBranch(
+            SwitchBranch sb,
+            BasicBlock source,
+            BasicBlock? stop,
+            Loops<ReversePostOrder, Forwards>.Node? loop,
+            BasicBlock? outerStop)
+        {
+            var selector = Load(sb.Condition);
+            var merge = _postDominators?.GetImmediateDominator(source);
+            bool pinnedMerge = false;
+            if (loop != null)
+            {
+                if (merge != null && !loop.Contains(merge))
+                    merge = null; // every arm leaves through continue/break; no in-loop merge
+                if (merge != null && !_visitedBlocks.Contains(merge))
+                {
+                    _visitedBlocks.Add(merge);
+                    pinnedMerge = true;
+                }
+            }
+            var visitedBeforeArms = new HashSet<BasicBlock>(_visitedBlocks);
+
+            int caseCount = sb.NumCasesWithoutDefault;
+            for (int i = 0; i <= caseCount; i++)
+            {
+                var target = i < caseCount ? sb.GetCaseTarget(i) : sb.DefaultBlock;
+                if (caseCount == 0)
+                    AppendLine("{");
+                else if (i == 0)
+                    AppendLine($"if ({selector} == {i}) {{");
+                else if (i < caseCount)
+                    AppendLine($"}} else if ({selector} == {i}) {{");
+                else
+                    AppendLine("} else {");
+                PushIndent();
+                // Each arm may re-reach a block another arm shares (the same target for several
+                // cases, or a shared tail) - restore the pre-switch visited set per arm, exactly
+                // like EmitIfBranch does for its false arm. A pinned merge stays pinned.
+                _visitedBlocks.IntersectWith(visitedBeforeArms);
+                PushPhiValues(target, source);
+                if (loop == null)
+                {
+                    GenerateStructuredCode(target, merge);
+                }
+                else if (IsBackEdgeToActiveLoop(target))
+                {
+                    AppendLine("continue;");
+                }
+                else if (ExitsLoopTransitively(target, loop))
+                {
+                    EmitBreakWithIntermediateCode(target, source, loop);
+                }
+                else if (target != merge)
+                {
+                    GenerateLoopBody(target, loop, outerStop);
+                }
+                PopIndent();
+            }
+            AppendLine("}");
+
+            if (loop == null)
+            {
+                if (merge != null && merge != stop)
+                    GenerateStructuredCode(merge, stop);
+            }
+            else if (pinnedMerge)
+            {
+                _visitedBlocks.Remove(merge!);
+                GenerateLoopBody(merge!, loop, outerStop);
+            }
+        }
+
+        /// <summary>
+        /// Generates the body of a loop (all blocks inside the loop).
+        /// </summary>
+        protected void GenerateLoopBody(BasicBlock current, Loops<ReversePostOrder, Forwards>.Node loop, BasicBlock? outerStop)
+        {
+            if (current == null || _visitedBlocks.Contains(current)) return;
+
+            // Check if this block is a NESTED loop header (different from current loop)
+            var nestedLoop = FindLoopForHeader(current);
+            if (nestedLoop != null && nestedLoop != loop)
+            {
+                // Delegate to GenerateStructuredCode which emits the nested for() construct
+                GenerateStructuredCode(current, outerStop);
+                return;
+            }
+
+            _visitedBlocks.Add(current);
+
+            // Emit the block's values
+            GenerateBlockCode(current);
+
+            // Handle terminator with loop-aware logic
+            var terminator = current.Terminator;
+
+            if (terminator is ReturnTerminator rt)
+            {
+                GenerateCode(rt);
+            }
+            else if (terminator is UnconditionalBranch ub)
+            {
+                PushPhiValues(ub.Target, current);
+
+                if (IsBackEdgeToActiveLoop(ub.Target))
+                {
+                    AppendLine("continue;");
+                }
+                else if (ExitsLoopTransitively(ub.Target, loop))
+                {
+                    // Exit the loop — trace through intermediate blocks first
+                    EmitBreakWithIntermediateCode(ub.Target, current, loop);
+                }
+                else
+                {
+                    GenerateLoopBody(ub.Target, loop, outerStop);
+                }
+            }
+            else if (terminator is IfBranch ib)
+            {
+                EmitLoopIfBranch(ib, current, loop, outerStop);
+            }
+            else if (terminator is SwitchBranch sb)
+            {
+                EmitSwitchBranch(sb, current, null, loop, outerStop);
+            }
+            else if (terminator != null)
+            {
+                throw new NotSupportedException($"GLSL structured codegen: unhandled terminator {terminator.GetType().Name} in {Method.Name}.");
+            }
+        }
+
+        /// <summary>
+        /// Emits an if/else branch inside a loop body.
+        /// </summary>
+        protected void EmitLoopIfBranch(IfBranch ib, BasicBlock source, Loops<ReversePostOrder, Forwards>.Node loop, BasicBlock? outerStop)
+        {
+            var trueTarget = ib.TrueTarget;
+            var falseTarget = ib.FalseTarget;
+            var cond = Load(ib.Condition);
+
+            bool trueIsBackEdge = IsBackEdgeToActiveLoop(trueTarget);
+            bool falseIsBackEdge = IsBackEdgeToActiveLoop(falseTarget);
+            // DEBUG IL FIX: Use transitive exit detection.
+            // In Debug builds, Roslyn inserts intermediate blocks between
+            // branches and the actual loop exit. Follow unconditional branch
+            // chains to detect indirect exits.
+            bool trueIsExit = ExitsLoopTransitively(trueTarget, loop);
+            bool falseIsExit = ExitsLoopTransitively(falseTarget, loop);
+
+
+            // Case 1: Loop condition check — one side continues, other exits
+            if (trueIsBackEdge && falseIsExit)
+            {
+                // if (cond) continue; else break;
+                AppendLine($"if (!{cond}) {{");
+                PushIndent();
+                PushPhiValues(falseTarget, source);
+                EmitBreakWithIntermediateCode(falseTarget, source, loop);
+                PopIndent();
+                AppendLine("}");
+                PushPhiValues(trueTarget, source);
+                AppendLine("continue;");
+                return;
+            }
+            if (falseIsBackEdge && trueIsExit)
+            {
+                AppendLine($"if ({cond}) {{");
+                PushIndent();
+                PushPhiValues(trueTarget, source);
+                EmitBreakWithIntermediateCode(trueTarget, source, loop);
+                PopIndent();
+                AppendLine("}");
+                PushPhiValues(falseTarget, source);
+                AppendLine("continue;");
+                return;
+            }
+
+            // Case 2: One side is a back-edge, other continues in-loop
+            if (trueIsBackEdge)
+            {
+                AppendLine($"if ({cond}) {{");
+                PushIndent();
+                PushPhiValues(trueTarget, source);
+                AppendLine("continue;");
+                PopIndent();
+                AppendLine("}");
+                PushPhiValues(falseTarget, source);
+                if (falseIsExit)
+                    EmitBreakWithIntermediateCode(falseTarget, source, loop);
+                else
+                    GenerateLoopBody(falseTarget, loop, outerStop);
+                return;
+            }
+            if (falseIsBackEdge)
+            {
+                AppendLine($"if (!{cond}) {{");
+                PushIndent();
+                PushPhiValues(falseTarget, source);
+                AppendLine("continue;");
+                PopIndent();
+                AppendLine("}");
+                PushPhiValues(trueTarget, source);
+                if (trueIsExit)
+                    EmitBreakWithIntermediateCode(trueTarget, source, loop);
+                else
+                    GenerateLoopBody(trueTarget, loop, outerStop);
+                return;
+            }
+
+            // Case 3: One side exits the loop, other stays
+            if (trueIsExit && !falseIsExit)
+            {
+                AppendLine($"if ({cond}) {{");
+                PushIndent();
+                PushPhiValues(trueTarget, source);
+                EmitBreakWithIntermediateCode(trueTarget, source, loop);
+                PopIndent();
+                AppendLine("}");
+                PushPhiValues(falseTarget, source);
+                GenerateLoopBody(falseTarget, loop, outerStop);
+                return;
+            }
+            if (falseIsExit && !trueIsExit)
+            {
+                AppendLine($"if (!{cond}) {{");
+                PushIndent();
+                PushPhiValues(falseTarget, source);
+                EmitBreakWithIntermediateCode(falseTarget, source, loop);
+                PopIndent();
+                AppendLine("}");
+                PushPhiValues(trueTarget, source);
+                GenerateLoopBody(trueTarget, loop, outerStop);
+                return;
+            }
+
+            // Case 4: Both sides stay in loop — use post-dominator for merge
+            var merge = _postDominators?.GetImmediateDominator(source);
+            bool mergeInLoop = merge != null && loop.Contains(merge);
+
+            // FIX: When the post-dominator is outside the loop (due to a break-exit
+            // path from one branch), find the in-loop merge by checking which target
+            // reaches the header through a UB chain (it's the continuation block).
+            if (!mergeInLoop && merge != null)
+            {
+                BasicBlock? inLoopMerge = null;
+                if (loop.Contains(trueTarget) && ReachesHeaderThroughUBChain(trueTarget, loop))
+                    inLoopMerge = trueTarget;
+                else if (loop.Contains(falseTarget) && ReachesHeaderThroughUBChain(falseTarget, loop))
+                    inLoopMerge = falseTarget;
+                if (inLoopMerge != null)
+                {
+                    merge = inLoopMerge;
+                    mergeInLoop = true;
+                }
+            }
+
+            // EMIT EACH BLOCK ONCE (fixes exponential tail-duplication). PIN the in-loop merge
+            // (the post-dominator = the block both branches converge on) as visited BEFORE emitting
+            // the branches, so neither branch runs INTO the loop-body continuation — each stops at
+            // the merge. The merge is then emitted exactly ONCE after the if/else.
+            //
+            // The OLD approach re-emitted the merge by resetting `_visitedBlocks` to the pre-branch
+            // state after the if/else (`IntersectWith(visitedBeforeTrueBranch); GenerateLoopBody(merge)`).
+            // Because the merge is the loop-body continuation, and that continuation contains further
+            // Case-4 branches that each did the SAME reset+regenerate, the loop body was duplicated on
+            // every nested conditional → 2^N. A 4×4 bicubic loop with ~15 bounds/weight conditionals
+            // produced a 33 MB / 500K-line GLSL shader (`CubicWeight` inlined 5,561× vs the intended ~20)
+            // that exhausted the Blazor WASM managed heap during compile. This mirrors the acyclic
+            // `EmitIfBranch` (which passes `merge` as the `stop` and emits it once) and the WGSL backend,
+            // which stays ~30 KB on the SAME IR.
+            bool pinnedMerge = false;
+            if (mergeInLoop && merge != null && !_visitedBlocks.Contains(merge))
+            {
+                _visitedBlocks.Add(merge);
+                pinnedMerge = true;
+            }
+
+            // Snapshot AFTER pinning the merge. The || short-circuit restore below still lets the false
+            // path re-reach a shared in-branch body block, but the merge stays pinned in the snapshot so
+            // both branches keep stopping at it (the restore never un-pins it).
+            var visitedBeforeTrueBranch = new HashSet<BasicBlock>(_visitedBlocks);
+
+            AppendLine($"if ({cond}) {{");
+            PushIndent();
+            PushPhiValues(trueTarget, source);
+            if (trueTarget != merge)
+                GenerateLoopBody(trueTarget, loop, outerStop);
+            PopIndent();
+            AppendLine("} else {");
+            PushIndent();
+            PushPhiValues(falseTarget, source);
+            // Restore visited to the pre-true-branch state so the false path can re-reach a shared
+            // `||` body block (e.g. the PHI write-back + continue block in BVH traversal). The merge
+            // is part of this snapshot, so it stays pinned — this is a bounded re-visit, not the old
+            // unbounded merge-subtree regeneration.
+            _visitedBlocks.IntersectWith(visitedBeforeTrueBranch);
+            if (falseTarget != merge)
+                GenerateLoopBody(falseTarget, loop, outerStop);
+            PopIndent();
+            AppendLine("}");
+
+            // Emit the merge (the loop-body continuation) exactly ONCE, only if we pinned it here
+            // (otherwise an enclosing scope owns and will emit it). Un-pin so GenerateLoopBody runs it.
+            if (pinnedMerge)
+            {
+                _visitedBlocks.Remove(merge);
+                GenerateLoopBody(merge, loop, outerStop);
+            }
+        }
+
+        /// <summary>
+        /// Emits an if/else branch outside a loop (acyclic structured flow).
+        /// </summary>
+        protected void EmitIfBranch(IfBranch ib, BasicBlock source, BasicBlock? stop)
+        {
+            var trueTarget = ib.TrueTarget;
+            var falseTarget = ib.FalseTarget;
+            var merge = _postDominators?.GetImmediateDominator(source);
+
+            PushPhiValues(trueTarget, source);
+
+            // SHORT-CIRCUIT FIX: Save visited state before true branch so that
+            // blocks visited during the true path can be re-visited by the false
+            // path. This is essential for || short-circuit patterns where both
+            // branches converge on a shared body block (e.g. if (a || b) { body }).
+            var visitedBeforeTrueBranch = new HashSet<BasicBlock>(_visitedBlocks);
+
+            var cond = Load(ib.Condition);
+            AppendLine($"if ({cond}) {{");
+            PushIndent();
+            GenerateStructuredCode(trueTarget, merge);
+            PopIndent();
+            AppendLine("} else {");
+            PushIndent();
+            PushPhiValues(falseTarget, source);
+            // Restore visited state: remove blocks that were only visited during
+            // the true branch, so the false branch can reach shared targets.
+            _visitedBlocks.IntersectWith(visitedBeforeTrueBranch);
+            GenerateStructuredCode(falseTarget, merge);
+            PopIndent();
+            AppendLine("}");
+
+            if (merge != null && merge != stop)
+                GenerateStructuredCode(merge, stop);
+        }
+
+        /// <summary>
+        /// Assigns every phi of <paramref name="targetBlock"/> its operand for the edge from
+        /// <paramref name="sourceBlock"/> as ONE parallel copy (<see cref="PhiParallelCopy"/>): a
+        /// loop that rotates or swaps its loop-carried values must not read a phi this edge
+        /// already overwrote. Every phi-copy site (structured walker, break chains) comes here.
+        /// </summary>
+        protected void PushPhiValues(BasicBlock targetBlock, BasicBlock sourceBlock)
+        {
+            var copies = new List<(Variable Target, Variable Source)>();
+            foreach (var value in targetBlock)
+            {
+                if (value.Value is PhiValue phi)
+                {
+                    var targetVar = Load(phi);
+                    for (int i = 0; i < phi.Count; i++)
+                    {
+                        if (phi.Sources[i] == sourceBlock)
+                        {
+                            if (!declaredVariables.Contains(targetVar.Name))
+                                Declare(targetVar);
+                            copies.Add((targetVar, Load(phi[i])));
+                        }
+                    }
+                }
+            }
+            if (copies.Count == 0)
+                return;
+
+            var targets = new string[copies.Count];
+            var sources = new Variable[copies.Count];
+            var sourceNames = new string[copies.Count];
+            for (int i = 0; i < copies.Count; i++)
+            {
+                targets[i] = copies[i].Target.Name;
+                sources[i] = copies[i].Source;
+                sourceNames[i] = copies[i].Source.Name;
+            }
+            var stage = PhiParallelCopy.SourcesToStage(targets, sourceNames);
+            var read = new string[copies.Count];
+            for (int i = 0; i < copies.Count; i++)
+            {
+                var target = copies[i].Target;
+                read[i] = CastIfNeeded(sources[i], target.Type);
+                if (stage != null && stage[i])
+                {
+                    // Staged at the TARGET's type, so the assignment below needs no cast.
+                    string temp = $"_phi_copy_{_phiCopyTempCounter++}";
+                    AppendLine($"{target.Type} {temp} = {read[i]};");
+                    read[i] = temp;
+                }
+            }
+            for (int i = 0; i < copies.Count; i++)
+            {
+                AppendLine($"{copies[i].Target} = {read[i]};");
+                OnPhiCopied(copies[i].Target, sources[i]);
+            }
+        }
+
+        private int _phiCopyTempCounter;
+
+        /// <summary>
+        /// Called after each phi copy so a derived generator can carry per-variable metadata
+        /// (e.g. the kernel's buffer-pointer mappings) from the source to the phi.
+        /// </summary>
+        protected virtual void OnPhiCopied(Variable target, Variable source) { }
+
+        /// <summary>
+        /// Emits code for intermediate blocks between a break source and the loop exit,
+        /// then emits the break statement. When ILGPU generates IR for `hitT = t; steps = i; break;`,
+        /// the assignments end up in intermediate blocks between the break source and the
+        /// merge/exit block. These blocks must have their code emitted before the GLSL break.
+        /// 
+        /// CRITICAL: Does NOT add intermediate blocks to _visitedBlocks — they may need
+        /// to be re-entered by the post-loop code generator.
+        /// </summary>
+        protected void EmitBreakWithIntermediateCode(BasicBlock exitTarget, BasicBlock sourceBlock,
+            Loops<ReversePostOrder, Forwards>.Node? currentLoop = null)
+        {
+            // Trace through intermediate blocks that have unconditional branches.
+            // IMPORTANT: Stop when we reach a block outside the current loop — its PHIs
+            // belong to an ancestor loop and will be handled by post-loop code emission.
+            // Without this check, nested loops push PHI values for ancestor loop counters
+            // that reference increment variables not yet computed (triple-nested loop bug).
+            var current = exitTarget;
+            int maxDepth = 8; // Safety limit
+            for (int depth = 0; depth < maxDepth; depth++)
+            {
+                if (current.Terminator is UnconditionalBranch uBranch)
+                {
+                    // Stop if next block is outside current loop
+                    if (currentLoop != null && !currentLoop.Contains(uBranch.Target))
+                        break;
+                    // Emit this intermediate block's code (assignments like hitT = t)
+                    GenerateBlockCode(current);
+                    // Push PHI values to the next block
+                    PushPhiValues(uBranch.Target, current);
+                    current = uBranch.Target;
+                }
+                else
+                {
+                    break; // Not an unconditional branch, stop tracing
+                }
+            }
+
+            // Follow the exit chain OUTSIDE the loop to find merge-point PHIs.
+            // When a loop has multiple exit paths (header normal exit + body break),
+            // they converge at a merge block whose PHIs need values from ALL exits.
+            // The exit block may be a pass-through (no PHIs) that chains to the merge.
+            // This handles the LoopBreakAssignment pattern where break-path assignments
+            // need to reach the post-loop merge block.
+            if (currentLoop != null)
+            {
+                // FIX: If the current block is outside the loop and is NOT the header's
+                // exit target, it's a body-break-specific intermediate block (e.g.,
+                // contains `flagged = true`). Emit its code inside the break scope
+                // and mark visited so it's not re-emitted after the loop.
+                if (!currentLoop.Contains(current)
+                    && _glslHeaderExitTarget != null
+                    && current != _glslHeaderExitTarget
+                    && HasNonPhiInstructions(current))
+                {
+                    GenerateBlockCode(current);
+                    _visitedBlocks.Add(current);
+                }
+
+                // Push PHIs through the exit chain (outside the loop)
+                // Stop at parent loop headers to avoid overwriting their PHIs
+                var exitChain = current;
+                for (int depth = 0; depth < maxDepth; depth++)
+                {
+                    if (exitChain.Terminator is UnconditionalBranch exitUB)
+                    {
+                        var next = exitUB.Target;
+                        if (IsBlockLoopHeader(next)) break;
+                        // Only push if we're outside the loop (don't re-push inside)
+                        if (!currentLoop.Contains(exitChain))
+                        {
+                            PushPhiValues(next, exitChain);
+                        }
+                        exitChain = next;
+                    }
+                    else break;
+                }
+            }
+
+            // Check if the exit path leads directly to a ReturnTerminator
+            // (through empty pass-through blocks). If so, this is a genuine kernel
+            // return inside the loop, not a break to post-loop code.
+            // A break whose exit chain leads straight to the function's return (through empty
+            // phi-only blocks) IS that return, emitted in place - GenerateCode(ReturnTerminator)
+            // returns the phi-carried value in a helper and emits plain `return;` in a kernel.
+            if (TryGetReturnExit(current, out var returnExit))
+                GenerateCode(returnExit);
+            else
+                AppendLine("break;");
+        }
+
+        /// <summary>
+        /// Checks if a block is a loop header for any loop in the kernel.
+        /// </summary>
+        protected bool IsBlockLoopHeader(BasicBlock block)
+        {
+            foreach (var loop in _loops)
+                foreach (var header in loop.Headers)
+                    if (header == block) return true;
+            return false;
+        }
+
+        /// <summary>
+        /// DEBUG IL FIX: Checks whether a block exits the loop, either directly
+        /// or transitively through a chain of unconditional branches.
+        /// 
+        /// In Debug builds, Roslyn inserts intermediate basic blocks between
+        /// control flow decisions and their actual targets. This method follows
+        /// such chains to determine if the eventual destination is outside the loop.
+        /// </summary>
+        protected static bool ExitsLoopTransitively(
+            BasicBlock target,
+            Loops<ReversePostOrder, Forwards>.Node loop)
+        {
+            // Fast path: direct exit
+            if (!loop.Contains(target))
+                return true;
+
+            // Follow unconditional branch chains through intermediate blocks
+            var current = target;
+            int maxDepth = 10; // Safety limit
+            for (int i = 0; i < maxDepth; i++)
+            {
+                if (current.Terminator is UnconditionalBranch uBranch)
+                {
+                    if (!loop.Contains(uBranch.Target))
+                        return true;
+                    current = uBranch.Target;
+                }
+                else
+                {
+                    break;
+                }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// DEBUG IL FIX: Checks if a block contains any non-PHI, non-terminator instructions.
+        /// Pure pass-through blocks can be skipped in post-loop exit chain processing
+        /// since their PHI values were already handled by the loop's break paths.
+        /// </summary>
+        /// <summary>
+        /// Check if a block reaches a loop header through an unconditional branch chain.
+        /// Used to identify the loop's continuation block (back-edge source).
+        /// </summary>
+        protected static bool ReachesHeaderThroughUBChain(BasicBlock block, Loops<ReversePostOrder, Forwards>.Node loop)
+        {
+            var current = block;
+            for (int i = 0; i < 10; i++)
+            {
+                if (current.Terminator is UnconditionalBranch ub)
+                {
+                    foreach (var header in loop.Headers)
+                    {
+                        if (ub.Target == header) return true;
+                    }
+                    if (!loop.Contains(ub.Target)) return false;
+                    current = ub.Target;
+                }
+                else return false;
+            }
+            return false;
+        }
+
+        protected static bool HasNonPhiInstructions(BasicBlock block)
+        {
+            foreach (var value in block)
+            {
+                if (value.Value is TerminatorValue) continue;
+                if (value.Value is PhiValue) continue;
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Checks if a block (or chain of unconditional branches from it) leads DIRECTLY
+        /// to a ReturnTerminator without passing through any blocks that contain real code.
+        /// Only follows empty pass-through blocks (PHI-only + unconditional branch/return).
+        /// A block with non-PHI instructions is post-loop code, not a direct return path.
+        /// Ported from WGSLKernelFunctionGenerator.IsReturnExit; returns the terminator so the
+        /// caller emits the real return (a helper's return carries its value).
+        /// </summary>
+        protected static bool TryGetReturnExit(BasicBlock block, out ReturnTerminator returnTerminator)
+        {
+            returnTerminator = null!;
+            int limit = 10;
+            var current = block;
+            while (current != null && limit-- > 0)
+            {
+                if (HasNonPhiInstructions(current))
+                    return false;
+                if (current.Terminator is ReturnTerminator rt)
+                {
+                    returnTerminator = rt;
+                    return true;
+                }
+                if (current.Terminator is UnconditionalBranch ub)
+                    current = ub.Target;
+                else
+                    break;
+            }
+            return false;
         }
 
         #endregion
@@ -1174,7 +1544,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 string shiftFn = value.Kind == BinaryArithmeticKind.Shl
                     ? "i64_shl"
                     : (value.IsUnsigned ? "u64_shr" : "i64_shr");
-                AppendLine($"{target} = {shiftFn}({left}, uint({right}));");
+                AppendLine($"{target} = {ConstantEmulatedShiftOrCall(shiftFn, left.ToString(), value.Right, right.ToString())};");
                 return;
             }
             if (leftIsEmuI64 && value.Kind is BinaryArithmeticKind.Add or BinaryArithmeticKind.Sub or BinaryArithmeticKind.Mul)
@@ -1535,9 +1905,66 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         {
             var target = Load(value);
             var source = Load(value.Value);
+            Declare(target);
+            AppendLine($"{target} = {BuildConvertExpression(value, source)};");
+        }
+
+        /// <summary>
+        /// The GLSL expression for a <see cref="ConvertValue"/> - shared by kernel bodies and
+        /// [NoInlining] helper functions so a conversion means the same thing in both. (Helpers
+        /// used to emit a plain constructor cast, so `(ulong)someUint` in a helper became
+        /// `uvec2(x)`, which REPLICATES the scalar into both words: the high word held x instead
+        /// of 0 - exact only for 0.)
+        /// </summary>
+        protected string BuildConvertExpression(ConvertValue value, Variable source)
+        {
             var targetType = TypeGenerator[value.Type];
             var sourceType = TypeGenerator[value.Value.Type];
-            Declare(target);
+
+            bool isEmulatedF64Target = Backend.EnableF64Emulation && (targetType == "vec2" || (Backend.UseOzakiF64Emulation && targetType == "vec4"));
+            bool isEmulatedI64Target = Backend.EnableI64Emulation && targetType == "uvec2";
+            bool isEmulatedF64Source = Backend.EnableF64Emulation && (sourceType == "vec2" || (Backend.UseOzakiF64Emulation && sourceType == "vec4"));
+            bool isEmulatedI64Source = Backend.EnableI64Emulation && sourceType == "uvec2";
+
+            // Detect unsigned source conversion (e.g. uint → float). Unsigned 32-bit values are
+            // typed "int" (IR Int32 carries no signedness; the convert's flag does).
+            bool isSourceUnsigned = (value.Flags & ConvertFlags.SourceUnsigned) == ConvertFlags.SourceUnsigned;
+            bool isUnsigned32Source = sourceType == "uint" || (isSourceUnsigned && sourceType == "int");
+
+            if (isEmulatedF64Target)
+            {
+                if (isEmulatedF64Source) return source.ToString();
+                if (isEmulatedI64Source) return $"f64_from_f32(float(i64_to_i32({source})))";
+                if (sourceType == "float") return $"f64_from_f32({source})";
+                if (isUnsigned32Source) return $"f64_from_f32(float(uint({source})))";
+                return $"f64_from_f32(float({source}))";
+            }
+            if (isEmulatedI64Target)
+            {
+                if (isEmulatedI64Source) return source.ToString();
+                if (isEmulatedF64Source) return $"i64_from_i32(int(f64_to_f32({source})))";
+                // Zero-extend an unsigned 32-bit source (C# uint -> ulong/long); only a signed
+                // source sign-extends. i64_from_i32 on a uint >= 2^31 set the high word to all ones.
+                if (isUnsigned32Source) return $"u64_from_u32(uint({source}))";
+                if (sourceType == "int") return $"i64_from_i32({source})";
+                return $"i64_from_i32(int({source}))";
+            }
+            if (isEmulatedF64Source)
+            {
+                if (targetType == "float") return $"f64_to_f32({source})";
+                return $"{targetType}(f64_to_f32({source}))";
+            }
+            if (isEmulatedI64Source)
+            {
+                if (targetType == "int") return $"i64_to_i32({source})";
+                if (targetType == "uint") return $"u64_to_u32({source})";
+                if (targetType == "float") return $"float(i64_to_i32({source}))";
+                return $"{targetType}(i64_to_i32({source}))";
+            }
+
+            // Unsigned int → float: must cast through uint to preserve unsigned value
+            if (isSourceUnsigned && sourceType == "int" && targetType == "float")
+                return $"float(uint({source}))";
 
             // Build the cast expression. Skip redundant cast when types match.
             string castExpr = (targetType == sourceType)
@@ -1573,7 +2000,6 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     // stayed zero-extended and `>> 15` returned 0 instead of 0xFFFF for negative
                     // Halves on all browser backends. Idempotent for already-correctly-extended
                     // values; desktop backends use native sub-word registers and never reach here.
-                    bool isSourceUnsigned = (value.Flags & ConvertFlags.SourceUnsigned) == ConvertFlags.SourceUnsigned;
                     var srcBasicType = value.Value.BasicValueType;
                     if (srcBasicType == BasicValueType.Int16)
                         castExpr = isSourceUnsigned ? $"({castExpr} & 0xFFFF)" : SignExtend16(castExpr);
@@ -1581,7 +2007,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         castExpr = isSourceUnsigned ? $"({castExpr} & 0xFF)" : SignExtend8(castExpr);
                 }
             }
-            AppendLine($"{target} = {castExpr};");
+            return castExpr;
         }
 
         // Memory Operations — GLSL has no pointers; arrays accessed directly
@@ -1935,102 +2361,65 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         // Control Flow
         public virtual void GenerateCode(ReturnTerminator value)
         {
-            if (IsStateMachineActive)
-            {
-                if (!value.IsVoidReturn)
-                {
-                    var retVal = Load(value.ReturnValue);
-                    AppendLine($"_ilgpu_return_val = {retVal};");
-                }
-                AppendLine("current_block = -1;");
-                AppendLine("break;");
-            }
+            // GLSL allows `return` anywhere, including inside the structured walker's loops.
+            if (value.IsVoidReturn)
+                AppendLine("return;");
             else
             {
-                if (value.IsVoidReturn)
-                    AppendLine("return;");
-                else
-                {
-                    var retVal = Load(value.ReturnValue);
-                    AppendLine($"return {retVal};");
-                }
+                var retVal = Load(value.ReturnValue);
+                AppendLine($"return {retVal};");
             }
         }
 
-        public virtual void GenerateCode(UnconditionalBranch branch)
-        {
-            EmitPhiAssignments(branch.BasicBlock, branch.Target);
-            int targetIdx = GetBlockIndex(branch.Target);
-            AppendLine($"current_block = {targetIdx};");
-            AppendLine("continue;");
-        }
+        // Branches are never emitted as values: the structured walker (GenerateStructuredCode)
+        // turns every branch into if/else/for/break/continue and emits its phi copies itself.
+        // Reaching one of these means a block was emitted outside the walker - fail loudly
+        // rather than silently dropping control flow (which is how [NoInlining] helpers lost
+        // every loop and branch before).
+        public virtual void GenerateCode(UnconditionalBranch branch) =>
+            throw new InvalidOperationException($"GLSL: branch {branch} reached value codegen outside the structured walker ({Method.Name}).");
 
-        public virtual void GenerateCode(IfBranch branch)
-        {
-            var cond = Load(branch.Condition);
-            int trueIdx = GetBlockIndex(branch.TrueTarget);
-            int falseIdx = GetBlockIndex(branch.FalseTarget);
+        public virtual void GenerateCode(IfBranch branch) =>
+            throw new InvalidOperationException($"GLSL: branch {branch} reached value codegen outside the structured walker ({Method.Name}).");
 
-            AppendLine($"if ({cond}) {{");
-            PushIndent();
-            EmitPhiAssignments(branch.BasicBlock, branch.TrueTarget);
-            AppendLine($"current_block = {trueIdx};");
-            PopIndent();
-            AppendLine("} else {");
-            PushIndent();
-            EmitPhiAssignments(branch.BasicBlock, branch.FalseTarget);
-            AppendLine($"current_block = {falseIdx};");
-            PopIndent();
-            AppendLine("}");
-            AppendLine("continue;");
-        }
+        public virtual void GenerateCode(SwitchBranch branch) =>
+            throw new InvalidOperationException($"GLSL: branch {branch} reached value codegen outside the structured walker ({Method.Name}).");
 
-        public virtual void GenerateCode(SwitchBranch branch)
+        /// <summary>
+        /// An emulated 64-bit shift (<paramref name="shiftFn"/> = i64_shl / u64_shr / i64_shr on a
+        /// uvec2 (lo, hi)). When the shift amount is a compile-time constant - every 64-bit rotate
+        /// (`(x >> n) | (x << (64 - n))`) and most shifts in hashing/crypto code - the result is
+        /// emitted as a branch-free expression with exactly the library function's result for that
+        /// amount, instead of a call whose three runtime branches (== 0, >= 64, >= 32) the driver
+        /// compiler must process at EVERY inlined call site. Blake2b.Compress (96 G mixes x 8 shifts)
+        /// took ANGLE/FXC ~10 s per inlined copy with the calls. Otherwise returns the plain call.
+        /// </summary>
+        protected static string ConstantEmulatedShiftOrCall(string shiftFn, string a, Value amount, string amountExpr)
         {
-            var selector = Load(branch.Condition);
-            AppendLine($"switch ({selector}) {{");
-            PushIndent();
-            for (int i = 0; i < branch.NumCasesWithoutDefault; i++)
+            if (amount.Resolve() is not PrimitiveValue pv)
+                return $"{shiftFn}({a}, uint({amountExpr}))";
+            // Same value the library sees through uint(...): a negative constant is >= 64.
+            ulong c = pv.BasicValueType == BasicValueType.Int64
+                ? unchecked((ulong)pv.Int64Value)
+                : unchecked((uint)pv.Int32Value);
+            if (c == 0)
+                return a;
+            switch (shiftFn)
             {
-                var target = branch.GetCaseTarget(i);
-                int targetIdx = GetBlockIndex(target);
-                AppendLine($"case {i}: {{");
-                PushIndent();
-                EmitPhiAssignments(branch.BasicBlock, target);
-                AppendLine($"current_block = {targetIdx};");
-                AppendLine("break;");
-                PopIndent();
-                AppendLine("}");
-            }
-            int defaultIdx = GetBlockIndex(branch.DefaultBlock);
-            AppendLine("default: {");
-            PushIndent();
-            EmitPhiAssignments(branch.BasicBlock, branch.DefaultBlock);
-            AppendLine($"current_block = {defaultIdx};");
-            AppendLine("break;");
-            PopIndent();
-            AppendLine("}");
-            PopIndent();
-            AppendLine("}");
-            AppendLine("continue;");
-        }
-
-        protected virtual void EmitPhiAssignments(BasicBlock sourceBlock, BasicBlock targetBlock)
-        {
-            foreach (var valueEntry in targetBlock)
-            {
-                if (valueEntry.Value is PhiValue phi)
-                {
-                    var phiVar = Load(phi);
-                    var srcValue = phi.GetValue(sourceBlock);
-                    if (srcValue != null)
-                    {
-                        var srcVar = Load(srcValue);
-                        // GLSL ES 3.0: cast to phi variable type if needed
-                        string srcExpr = CastIfNeeded(srcVar, phiVar.Type);
-                        AppendLine($"{phiVar} = {srcExpr};");
-                    }
-                }
+                case "i64_shl":
+                    if (c >= 64) return "uvec2(0u, 0u)";
+                    if (c >= 32) return $"uvec2(0u, {a}.x << {c - 32}u)";
+                    return $"uvec2({a}.x << {c}u, ({a}.y << {c}u) | ({a}.x >> {32 - c}u))";
+                case "u64_shr":
+                    if (c >= 64) return "uvec2(0u, 0u)";
+                    if (c >= 32) return $"uvec2({a}.y >> {c - 32}u, 0u)";
+                    return $"uvec2(({a}.x >> {c}u) | ({a}.y << {32 - c}u), {a}.y >> {c}u)";
+                case "i64_shr":
+                    if (c >= 64) return $"uvec2(uint(int({a}.y) >> 31), uint(int({a}.y) >> 31))";
+                    if (c >= 32) return $"uvec2(uint(int({a}.y) >> {c - 32}), uint(int({a}.y) >> 31))";
+                    return $"uvec2(({a}.x >> {c}u) | ({a}.y << {32 - c}u), uint(int({a}.y) >> {c}))";
+                default:
+                    return $"{shiftFn}({a}, uint({amountExpr}))";
             }
         }
 
@@ -2046,63 +2435,6 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             {
                 target = Load(methodCall);
                 Declare(target);
-            }
-
-            string name = methodCall.Target.Name;
-            string? glslFunc = name switch
-            {
-                var n when n.Contains("Rsqrt") => "inversesqrt",
-                var n when n.Contains("Rcp") => "rcp_custom",
-                var n when n.Contains("Asin") => "asin",
-                var n when n.Contains("Acos") => "acos",
-                var n when n.Contains("Atan2") => "atan",
-                var n when n.Contains("Atan") => "atan",
-                var n when n.Contains("Sinh") => "sinh",
-                var n when n.Contains("Cosh") => "cosh",
-                var n when n.Contains("Tanh") => "tanh",
-                var n when n.Contains("FusedMultiplyAdd") => "fma_custom",
-                var n when n.Contains("Sin") => "sin",
-                var n when n.Contains("Cos") => "cos",
-                var n when n.Contains("Tan") => "tan",
-                var n when n.Contains("Sqrt") => "sqrt",
-                var n when n.Contains("Abs") => "abs",
-                var n when n.Contains("Pow") => "pow",
-                var n when n.Contains("Exp") => "exp",
-                var n when n.Contains("Log") => "log",
-                var n when n.Contains("Floor") => "floor",
-                var n when n.Contains("Ceiling") => "ceil",
-                var n when n.Contains("Min") => "min",
-                var n when n.Contains("Max") => "max",
-                var n when n.Contains("Clamp") => "clamp",
-                var n when n.Contains("Sign") => "sign",
-                var n when n.Contains("Round") => "round",
-                var n when n.Contains("Truncate") => "trunc",
-                var n when n.Contains("Lerp") || n.Contains("Mix") => "mix",
-                _ => null
-            };
-
-            if (glslFunc != null)
-            {
-                if (glslFunc == "rcp_custom" && methodCall.Count == 1)
-                {
-                    AppendLine($"{target} = 1.0 / {Load(methodCall[0])};");
-                    return;
-                }
-                if (glslFunc == "fma_custom" && methodCall.Count == 3)
-                {
-                    var a = Load(methodCall[0]); var b = Load(methodCall[1]); var c = Load(methodCall[2]);
-                    AppendLine($"{target} = {a} * {b} + {c};");
-                    return;
-                }
-
-                var args = new StringBuilder();
-                for (int i = 0; i < methodCall.Count; i++)
-                {
-                    if (i > 0) args.Append(", ");
-                    args.Append(Load(methodCall[i]));
-                }
-                AppendLine($"{target} = {glslFunc}({args});");
-                return;
             }
 
             // Method has an implementation but isn't a recognized intrinsic - emit a
@@ -2169,6 +2501,70 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 }
                 return;
             }
+
+            // Built-in math mapped BY NAME - only for calls that are NOT a user method with a
+            // body. This used to run first, so a [NoInlining] helper whose name merely CONTAINED
+            // Sin/Exp/Log/Abs/Min/Max/Sign/Round/Pow/Tan/Mix (SinglePass, Absorb, LogEntry,
+            // Signature, a Blake-style "Mix") was replaced by the GLSL builtin - for a void
+            // helper that emitted ` = mix(a, b, c);`, a syntax error; for a non-void one, a
+            // silently wrong value. Same order as the WGSL helper and kernel generators.
+            string name = methodCall.Target.Name;
+            string? glslFunc = name switch
+            {
+                var n when n.Contains("Rsqrt") => "inversesqrt",
+                var n when n.Contains("Rcp") => "rcp_custom",
+                var n when n.Contains("Asin") => "asin",
+                var n when n.Contains("Acos") => "acos",
+                var n when n.Contains("Atan2") => "atan",
+                var n when n.Contains("Atan") => "atan",
+                var n when n.Contains("Sinh") => "sinh",
+                var n when n.Contains("Cosh") => "cosh",
+                var n when n.Contains("Tanh") => "tanh",
+                var n when n.Contains("FusedMultiplyAdd") => "fma_custom",
+                var n when n.Contains("Sin") => "sin",
+                var n when n.Contains("Cos") => "cos",
+                var n when n.Contains("Tan") => "tan",
+                var n when n.Contains("Sqrt") => "sqrt",
+                var n when n.Contains("Abs") => "abs",
+                var n when n.Contains("Pow") => "pow",
+                var n when n.Contains("Exp") => "exp",
+                var n when n.Contains("Log") => "log",
+                var n when n.Contains("Floor") => "floor",
+                var n when n.Contains("Ceiling") => "ceil",
+                var n when n.Contains("Min") => "min",
+                var n when n.Contains("Max") => "max",
+                var n when n.Contains("Clamp") => "clamp",
+                var n when n.Contains("Sign") => "sign",
+                var n when n.Contains("Round") => "round",
+                var n when n.Contains("Truncate") => "trunc",
+                var n when n.Contains("Lerp") || n.Contains("Mix") => "mix",
+                _ => null
+            };
+
+            if (glslFunc != null)
+            {
+                if (glslFunc == "rcp_custom" && methodCall.Count == 1)
+                {
+                    AppendLine($"{target} = 1.0 / {Load(methodCall[0])};");
+                    return;
+                }
+                if (glslFunc == "fma_custom" && methodCall.Count == 3)
+                {
+                    var a = Load(methodCall[0]); var b = Load(methodCall[1]); var c = Load(methodCall[2]);
+                    AppendLine($"{target} = {a} * {b} + {c};");
+                    return;
+                }
+
+                var args = new StringBuilder();
+                for (int i = 0; i < methodCall.Count; i++)
+                {
+                    if (i > 0) args.Append(", ");
+                    args.Append(Load(methodCall[i]));
+                }
+                AppendLine($"{target} = {glslFunc}({args});");
+                return;
+            }
+
 
             // In-kernel GROUP/WARP scan & reduce intrinsics (Group.ExclusiveScan / InclusiveScan /
             // AllReduce / Reduce and the warp variants) require the group's threads to communicate
@@ -2394,21 +2790,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         public virtual void GenerateThrow(Value value)
         {
             AppendLine($"// [GLSL] Throw encountered: {value} (Ignored/Unreachable)");
-            if (IsStateMachineActive)
-            {
-                AppendLine("current_block = -1;");
-                AppendLine("break;");
-            }
+            // For non-void functions, return a typed default value
+            // so GLSL can see all code paths return correctly.
+            var returnType = TypeGenerator[Method.ReturnType];
+            if (returnType == "void")
+                AppendLine("return;");
             else
-            {
-                // For non-void functions, return a typed default value
-                // so GLSL can see all code paths return correctly.
-                var returnType = TypeGenerator[Method.ReturnType];
-                if (returnType == "void")
-                    AppendLine("return;");
-                else
-                    AppendLine($"return {GetDefaultValue(returnType)};");
-            }
+                AppendLine($"return {GetDefaultValue(returnType)};");
         }
 
         #endregion
