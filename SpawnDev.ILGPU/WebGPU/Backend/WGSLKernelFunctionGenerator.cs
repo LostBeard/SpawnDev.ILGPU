@@ -7411,14 +7411,32 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
                 else if (sourceType == "i32")
                 {
-                    AppendLine($"{prefix}{target} = i64_from_i32({source});");
+                    // A C# `uint` widening to a 64-bit type also lands here with sourceType=="i32"
+                    // (this backend doesn't carry a separate WGSL-level u32 IR type all the way
+                    // through arithmetic - unsignedness survives only as the ConvertFlags.SourceUnsigned
+                    // bit, computed above as isSourceUnsigned but never previously checked in this branch).
+                    // Zero-extend when it's actually unsigned - matches C# semantics: `(long)(uint)x`
+                    // zero-extends exactly like `(ulong)(uint)x` does, since a uint's value is never
+                    // negative, regardless of the destination's own signedness. Confirmed via
+                    // SpawnDev.ILGPU.DemoConsole's autolykos2-wgsl-dump probe:
+                    // `((ulong)height << 32) | Bswap32(index)` (both `uint`) compiled to two
+                    // back-to-back unconditional `i64_from_i32(...)` calls, corrupting any value
+                    // with bit 31 set (e.g. Bswap32 of any index >= 128).
+                    if (isSourceUnsigned)
+                        AppendLine($"{prefix}{target} = u64_from_u32(bitcast<u32>({source}));");
+                    else
+                        AppendLine($"{prefix}{target} = i64_from_i32({source});");
                 }
                 else if (sourceType == "u32")
                 {
-                    if (targetType == "emu_u64")
-                        AppendLine($"{prefix}{target} = u64_from_u32({source});");
-                    else
-                        AppendLine($"{prefix}{target} = i64_from_i32(i32({source}));");
+                    // A genuine WGSL u32 source is always unsigned by construction, so widening it
+                    // is always zero-extension - regardless of the target's nominal signedness.
+                    // The previous `targetType == "emu_u64"` check here was always false: emu_i64 and
+                    // emu_u64 are both `alias ... = vec2<u32>` (see the emulation library header), and
+                    // this backend's TypeGenerator only ever emits the string "emu_i64" for a 64-bit
+                    // integer target, never "emu_u64" - dead code, fixed for correctness even though
+                    // the i32 branch above is the one actually exercised by uint arithmetic in practice.
+                    AppendLine($"{prefix}{target} = u64_from_u32({source});");
                 }
                 else if (sourceType == "f32")
                 {

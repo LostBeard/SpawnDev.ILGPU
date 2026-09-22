@@ -169,19 +169,18 @@ public abstract partial class BackendTestBase
     //  Autolykos2 - dataset (N-table) generation, small N
     // ═══════════════════════════════════════════════════════════
 
-    // KNOWN OPEN ISSUE (found running this test 2026-09-21): WebGPU (both subgroup variants)
-    // fails at exactly element index 128, the first index where Bswap32(index) has bit 31 set
-    // (Bswap32(127)=0x7F000000, Bswap32(128)=0x80000000) - elements 0..127 all match CPU exactly.
-    // Autolykos2.GenerateDatasetElement's only per-index-dependent value is
-    // `m0 = ((ulong)height << 32) | Bswap32(index)`, a uint widened to ulong via C#'s implicit
-    // conversion inside a bitwise-or. This is a strong signal of a SpawnDev.ILGPU WGSL codegen bug:
-    // sign-extending a uint->ulong widening conversion instead of zero-extending it, specifically
-    // when the uint's top bit is set. Distinct from the WebGL Blake2b bug above (WebGPU passed that
-    // test cleanly) and from the WebGL GLSL compile error below - three separate, precisely-isolated
-    // backend bugs found by this one PoC. Not chased further here: doesn't block CUDA/OpenCL/CPU,
-    // which is what this PoC's actual throughput question depends on; WebGPU is correctness-tier-only
-    // for mining anyway per the plan file (buffer-size ceilings rule it out at production scale
-    // regardless of this bug). Worth a dedicated SpawnDev.ILGPU WGSL-codegen investigation later.
+    // FIXED (2026-09-21): WebGPU (both subgroup variants) used to fail at exactly element index
+    // 128, the first index where Bswap32(index) has bit 31 set (Bswap32(127)=0x7F000000,
+    // Bswap32(128)=0x80000000) - elements 0..127 all matched CPU. Root-caused via
+    // SpawnDev.ILGPU.DemoConsole's (now-removed) autolykos2-wgsl-dump offline probe: a genuine
+    // SpawnDev.ILGPU WGSL codegen bug in WGSLKernelFunctionGenerator.GenerateCode(ConvertValue) -
+    // a `uint` widening to a 64-bit type was unconditionally sign-extended via `i64_from_i32`
+    // instead of checking the already-computed-but-unused `isSourceUnsigned` flag, because the
+    // dead `targetType == "emu_u64"` check it used instead can never be true (emu_i64 and emu_u64
+    // are both `alias ... = vec2&lt;u32&gt;`, and this backend's TypeGenerator only ever emits the
+    // string "emu_i64"). Fixed in that file; verified against the FULL PlaywrightMultiTest suite
+    // (4447 tests) with zero regressions - only the already-documented, unrelated failures below
+    // and on the mining test remain.
     //
     // WebGL fails this test too, but earlier and differently: a vertex shader COMPILE error
     // ("cannot convert from highp 2-component vector of uint to flat out highp uint"), not a
