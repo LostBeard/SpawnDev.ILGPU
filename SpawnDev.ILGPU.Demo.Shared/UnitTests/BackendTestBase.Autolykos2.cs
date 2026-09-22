@@ -199,10 +199,36 @@ public abstract partial class BackendTestBase
     //
     // WebGL fails this test too, but earlier and differently: a vertex shader COMPILE error
     // ("cannot convert from highp 2-component vector of uint to flat out highp uint"), not a
-    // wrong-answer at runtime. This is on top of the separate WebGL Blake2b runtime-correctness
-    // bug above - a second, distinct WebGL backend issue, most likely in how a ulong (uvec2)
-    // value computed inside this method's loop gets wired to a GLSL "flat out" varying. Also not
-    // chased further here for the same out-of-scope-for-mining reason.
+    // wrong-answer at runtime. Root-caused precisely (2026-09-21) via an offline GLSL dump
+    // (ShaderCompiler.Generate with CapabilityProfiles.WebGL2Baseline): GLSLKernelFunctionGenerator.
+    // GetBufferElementType maps a 64-bit struct FIELD (e.g. this Element256's ulong fields) to the
+    // scalar string "uint" instead of "uvec2" (its true GLSL representation) - correct for
+    // GetBufferElementType's own non-struct callers, which branch on isEmulatedI64/F64 separately
+    // and never use that string for such params, but wrong for struct-field flattening
+    // (FlattenStructFields/GenerateStructFieldPaths), which takes the returned string as the
+    // field's real type. This makes the TF output declaration loop (~line 1721 at the time of
+    // writing) declare a scalar `uint` varying for a field whose actual value is `uvec2`, which
+    // is exactly the reported dimension-mismatch error.
+    //
+    // ATTEMPTED A FULL FIX the same day and reverted it: correcting the field-type string is a
+    // small, safe change (add a GetStructFieldGlslType wrapper used only by the struct-flattening
+    // paths), but it's not sufficient alone - the TF output DECLARATION and STORE code must also
+    // split such a field into lo/hi scalar outputs (mirroring the existing non-struct
+    // isEmulatedI64/F64 whole-value handling right above it), and CRITICALLY the JS-side readback
+    // (wwwroot/glWorker.js, the struct-reconstruction branch around "out.fieldIndex === 0") assumes
+    // every struct field is 4 bytes when computing structElemSize and per-field byte offsets -
+    // it needs the same fix, computed per-field (4 bytes normally, 8 for a lo/hi-paired field).
+    // Implementing all three (declaration, store, JS readback) got the shader to COMPILE, but the
+    // test then hung - a Playwright timeout waiting for the test's own "Run" button locator, not a
+    // clean assertion failure - most likely a WebGL Transform-Feedback separate-attribute limit
+    // being exceeded now that a 4-ulong-field struct needs 8 TF outputs instead of 4 (x4 for this
+    // test's 4 chunk-buffer parameters), though this wasn't confirmed with live browser DevTools.
+    // A silent hang is worse than a clean compile error, so the attempt was reverted rather than
+    // shipped half-working (git diff of GLSLKernelFunctionGenerator.cs and glWorker.js from this
+    // session's earlier commits shows exactly what was tried, if picking this back up).
+    // Whoever continues this needs live browser DevTools (chrome://inspect or CDP) to see the
+    // actual console error/GL error when the hang happens, not more static code reading - both
+    // WebGL bugs on this page have now had two rounds of static analysis each without a full fix.
     [TestMethod]
     public async Task Autolykos2_DatasetGeneration_SmallN_GPU_CPUMatch() => await RunTest(async accelerator =>
     {
