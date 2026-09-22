@@ -257,30 +257,52 @@ public abstract partial class BackendTestBase
     // bug was invisible before tonight because nothing on WebGL had ever hit the fn-def path with
     // an emulated-64-bit ref/out parameter - Idct16Row-shape precedent tests all use int/ref int.
     //
-    // STILL OPEN, precisely bisected (2026-09-22): with both fixes above landed the shader
-    // compiles (small, fast) but still times out at the harness's 30s watchdog - confirmed via
-    // CDP this is NOT a compile hang this time (silent, no console output, vs. the earlier fast
-    // loud compile-error case) and NOT purely thread-count driven (Autolykos2_Mine_SmallN's own
-    // genKernel call at n=128 times out identically to this test's n=2000). The generated GLSL's
-    // one `for` loop (GenerateDatasetElement's real, correct 63-iteration Blake2b block-chaining
-    // loop, `blk <= 63` - NOT a broken break condition; traced and ruled out) still fully inlines
-    // Compress (96 G() call statements + v0..v15 setup) INSIDE that loop body on every one of its
-    // 63 iterations. Marking Compress NoInlining too (mirroring G) DOES eliminate the hang - all
-    // 3 WebGL Autolykos2 tests ran in ~100ms instead of timing out - confirming the hang is ANGLE
-    // itself still struggling with Compress's body duplicated 63x inside a real runtime loop, not
-    // the loop's own control flow. But it introduced a worse, different bug and was REVERTED
-    // (see Blake2b.cs Compress's own comment): Compress's `ref h0..h7` write-back doesn't
-    // propagate AT ALL when Compress itself is non-inlined and called from multiple sites (once
-    // before the loop, 63x inside it, once after) - the GPU digest comes back as the untouched
-    // initial IV state. G's own 4-ref-param write-back is proven correct at the same call-count
-    // scale (638-test WebGL regression sweep, zero regressions); Compress's 8-ref-param write-
-    // back through multiple call sites including one inside a loop is not, and fails SILENTLY
-    // (wrong answer, not a compile/link error) - worse than the hang it would replace, so not
-    // shipped. This is now the precise remaining blocker: root-cause and fix the WebGL fn-def
-    // call mechanism's ref-argument aliasing for a method called from more than one call site,
-    // at least one of them inside a loop - almost certainly the same class of cross-scope
-    // variable-name-collision bug already seen and fixed once tonight in EmitHoistedDeclarations,
-    // but in the call-site argument-aliasing code instead of the hoisting pre-pass.
+    // ANOTHER BUG FOUND AND FIXED (2026-09-22, same session): marking Compress NoInlining too
+    // (mirroring G) eliminates the ANGLE compile/runtime hang entirely for a SINGLE Compress call
+    // (e.g. Autolykos2_Blake2b_GPU_CPUMatch's Blake2bBatchKernel) - but it exposed a real,
+    // separate, general bug along the way: GLSLCodeGenerator.GenerateCode(MethodCall)'s ref/out
+    // argument passing built a fresh AddressSpaceCast SNAPSHOT COPY of the caller's alloca for
+    // each call ("v_53 = v_0; // addrSpaceCast", then passed v_53 as the `inout` argument) -
+    // GLSL's copy-restore semantics then updated v_53, but nothing ever copied v_53's post-call
+    // value back into v_0, so a LATER read of the alloca (another call reusing it, or the
+    // caller's own code after the call returns) silently saw the pre-call value. Manifested as
+    // Compress's `ref h0..h7` appearing to do nothing at all - the GPU digest came back as the
+    // untouched initial IV state. FIXED: the call-site argument builder now walks through any
+    // AddressSpaceCast chain to the underlying Alloca and passes it directly - no snapshot,
+    // nothing to lose the write-back through. Proven correct with a from-scratch minimal repro
+    // (a NoInlining helper mirroring G's exact 4-ref-param rotating-argument shape, isolated
+    // from Blake2b/Autolykos2 entirely) plus a full 642-test WebGL regression sweep, zero
+    // regressions, 4 new passing tests (BackendTestBase.Tests6.cs, search "BlakeShaped" and
+    // "RefULong8"). This fix is KEPT and shipped - it is real and general.
+    //
+    // Compress itself was REVERTED back to AggressiveInlining, though (see Blake2b.cs's own
+    // comment on Compress): marking it NoInlining reintroduces the ANGLE compile/runtime hang
+    // specifically for GenerateDatasetKernel's 63-iteration Compress-in-a-loop shape (this test
+    // and the Mine test below), and the ref-write-back fix above does NOT resolve that hang -
+    // confirmed with two different call-site argument-passing shapes (direct-alloca-pass, and
+    // snapshot-plus-explicit-write-back-after). G-alone-NoInlining (the shipped, final
+    // configuration) already avoids the ANGLE hang for all 3 WebGL Autolykos2 tests without
+    // this problem, so that is what ships.
+    //
+    // STILL OPEN, and definitively proven UNRELATED to any of the above (2026-09-22): even with
+    // the ref-write-back bug fixed and G correctly NoInlining/routed as a real fn-def call, real
+    // Blake2b still produces a wrong digest - because it needs Compress's full 12 rounds, and a
+    // from-scratch synthetic repro (BackendTestBase.Tests6.cs, NoInliningBlakeShapedRawVTest)
+    // precisely bisected a SEPARATE bug: 1 round (8 G-shaped calls reusing v0..v15 once each) is
+    // bit-exact; 2 rounds (16 calls, reusing v0..v15 a SECOND time) produces a wrong-but-
+    // plausible-looking result. Critically, this reproduces IDENTICALLY even with G marked
+    // AggressiveInlining instead of NoInlining - i.e. with NO function call, NO ref/inout
+    // parameter, NO fn-def call mechanism involved AT ALL, just plain straight-line GLSL
+    // arithmetic on uvec2 locals. This rules out everything investigated in this session
+    // (NoInlining, ref-write-back, the fn-def call mechanism, struct-field TF, multi-slot output)
+    // as the cause - it is a distinct, still-unnamed bug, most likely in WebGL's i64 emulation
+    // library (GLSLEmulationLibrary.cs) or in how a LARGE number of interdependent uvec2 locals
+    // get declared/hoisted, that only manifests once the SAME small set of local variables gets
+    // reused as an operand a second time across a long, otherwise-unremarkable sequence of
+    // add/xor/shift operations. Needs a fresh, from-scratch investigation (start from
+    // NoInliningBlakeShapedRawVTest with BlakeShapedNumRounds bumped to 2 - it is a much smaller,
+    // faster, fully isolated repro than the real Autolykos2 kernel, and does not need the
+    // ANGLE-hang-prone Compress-NoInlining configuration above at all).
     [TestMethod]
     public async Task Autolykos2_DatasetGeneration_SmallN_GPU_CPUMatch() => await RunTest(async accelerator =>
     {

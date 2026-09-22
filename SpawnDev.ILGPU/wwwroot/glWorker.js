@@ -733,12 +733,25 @@ function dispatchKernel(msg) {
                     }
                 }
             } else if (out.isEmulated && out.emulatedSuffix === 'lo') {
+                // A thread that stores MULTIPLE emulated-64-bit elements into this buffer
+                // (positional multi-store, e.g. digest[base+0..3] = o0..o3, each 8 bytes) gets
+                // one lo/hi varying PAIR per slot (EmitOutputVaryings' emuStoreCount branch) -
+                // place each slot at its own offset within the per-vertex record instead of
+                // always writeOffset + v*8 (which only ever wrote slot 0's storage location,
+                // repeatedly, for every slot - the actual root cause of the "Compress ref
+                // write-back" symptom: every store after the first silently overwrote the same
+                // 8 bytes, so only the LAST store's value ever reached the host, discovered and
+                // fixed 2026-09-22 with a minimal repro that reproduced it standalone, no ref
+                // params or fn-def calls needed at all).
+                const emuStoreCount = out.storeCount || 1;
+                const emuSlot = out.storeSlot >= 0 ? out.storeSlot : 0;
+                const emuBytesPerVertex = emuStoreCount * 8;
                 const hiOutIdx = out.outputIndex + 1;
-                const elemCount = Math.min(totalVertices, Math.floor(out.writeLengthBytes / 8));
+                const elemCount = Math.min(totalVertices, Math.floor(out.writeLengthBytes / emuBytesPerVertex));
                 for (let v = 0; v < elemCount; v++) {
                     const loSrc = v * strideBytes + out.outputIndex * 4;
                     const hiSrc = v * strideBytes + hiOutIdx * 4;
-                    const dst = writeOffset + v * 8;
+                    const dst = writeOffset + v * emuBytesPerVertex + emuSlot * 8;
                     destView[dst] = readbackBytes[loSrc];
                     destView[dst + 1] = readbackBytes[loSrc + 1];
                     destView[dst + 2] = readbackBytes[loSrc + 2];

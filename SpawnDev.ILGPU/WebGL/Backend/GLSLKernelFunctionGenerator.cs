@@ -88,6 +88,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         // Pre-indexed lookups for O(1) output varying access (built after all varyings are added)
         private Dictionary<int, OutputVaryingInfo>? _atomicVoteIndex;           // paramIdx → atomic vote varying
         private Dictionary<(int, string), OutputVaryingInfo>? _emulatedIndex;   // (paramIdx, suffix) → emulated varying
+        private Dictionary<(int, int, string), OutputVaryingInfo>? _emulatedSlotIndex; // (paramIdx, slot, suffix) → multi-store emulated-64-bit varying
         private Dictionary<(int, int), OutputVaryingInfo>? _storeSlotIndex;     // (paramIdx, slot) → multi-store varying
         private Dictionary<int, OutputVaryingInfo>? _singleStoreIndex;          // paramIdx → single-store varying (slot < 0)
         private Dictionary<int, OutputVaryingInfo>? _paramFallbackIndex;        // paramIdx → first varying for param
@@ -1726,17 +1727,49 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
                     if (isEmulatedF64 || isEmulatedI64)
                     {
-                        // Emulated 64-bit types need TWO uint TF outputs (lo and hi words)
-                        Builder.AppendLine($"flat out highp uint tf_out_{param.Index}_lo; // TF output for param[{param.Index}] (emu 64-bit lo)");
-                        Builder.AppendLine($"flat out highp uint tf_out_{param.Index}_hi; // TF output for param[{param.Index}] (emu 64-bit hi)");
-                        var loInfo = new OutputVaryingInfo(param.Index, outIndex++, $"tf_out_{param.Index}_lo", "uint",
-                            isEmulated: true, emulatedSuffix: "lo");
-                        var hiInfo = new OutputVaryingInfo(param.Index, outIndex++, $"tf_out_{param.Index}_hi", "uint",
-                            isEmulated: true, emulatedSuffix: "hi");
-                        _outputVaryings.Add(loInfo);
-                        _outputVaryings.Add(hiInfo);
-                        _generatorArgs.OutputVaryings.Add(loInfo);
-                        _generatorArgs.OutputVaryings.Add(hiInfo);
+                        // Emulated 64-bit types need TWO uint TF outputs (lo and hi words) per
+                        // store slot. A thread that stores MULTIPLE elements into this buffer
+                        // (positional multi-store, e.g. digest[base+0..3] = o0..o3) needs one
+                        // lo/hi PAIR per slot, not one pair for the whole param - this branch
+                        // used to always emit exactly one pair regardless of _outputStoreCount,
+                        // so every store after the first silently overwrote the same TF varyings
+                        // and only the LAST store's value ever reached the host (discovered
+                        // 2026-09-22 chasing Blake2b.Compress's apparent "ref write-back" bug -
+                        // it was never about ref params or the fn-def call path at all; a
+                        // minimal ulong[8]-positional-store repro with no ref params, no loop,
+                        // no NoInlining call reproduced it standalone).
+                        int emuStoreCount = _outputStoreCount.GetValueOrDefault(param.Index, 1);
+                        if (emuStoreCount > 1)
+                        {
+                            for (int slot = 0; slot < emuStoreCount; slot++)
+                            {
+                                string loName = $"tf_out_{param.Index}_s{slot}_lo";
+                                string hiName = $"tf_out_{param.Index}_s{slot}_hi";
+                                Builder.AppendLine($"flat out highp uint {loName}; // TF output for param[{param.Index}] slot {slot}/{emuStoreCount} (emu 64-bit lo)");
+                                Builder.AppendLine($"flat out highp uint {hiName}; // TF output for param[{param.Index}] slot {slot}/{emuStoreCount} (emu 64-bit hi)");
+                                var loSlotInfo = new OutputVaryingInfo(param.Index, outIndex++, loName, "uint",
+                                    isEmulated: true, emulatedSuffix: "lo", storeSlot: slot, storeCount: emuStoreCount);
+                                var hiSlotInfo = new OutputVaryingInfo(param.Index, outIndex++, hiName, "uint",
+                                    isEmulated: true, emulatedSuffix: "hi", storeSlot: slot, storeCount: emuStoreCount);
+                                _outputVaryings.Add(loSlotInfo);
+                                _outputVaryings.Add(hiSlotInfo);
+                                _generatorArgs.OutputVaryings.Add(loSlotInfo);
+                                _generatorArgs.OutputVaryings.Add(hiSlotInfo);
+                            }
+                        }
+                        else
+                        {
+                            Builder.AppendLine($"flat out highp uint tf_out_{param.Index}_lo; // TF output for param[{param.Index}] (emu 64-bit lo)");
+                            Builder.AppendLine($"flat out highp uint tf_out_{param.Index}_hi; // TF output for param[{param.Index}] (emu 64-bit hi)");
+                            var loInfo = new OutputVaryingInfo(param.Index, outIndex++, $"tf_out_{param.Index}_lo", "uint",
+                                isEmulated: true, emulatedSuffix: "lo");
+                            var hiInfo = new OutputVaryingInfo(param.Index, outIndex++, $"tf_out_{param.Index}_hi", "uint",
+                                isEmulated: true, emulatedSuffix: "hi");
+                            _outputVaryings.Add(loInfo);
+                            _outputVaryings.Add(hiInfo);
+                            _generatorArgs.OutputVaryings.Add(loInfo);
+                            _generatorArgs.OutputVaryings.Add(hiInfo);
+                        }
                     }
                     else if (_structFieldCounts.TryGetValue(param.Index, out var fieldCount) && fieldCount > 0)
                     {
@@ -1823,6 +1856,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         {
             _atomicVoteIndex = new Dictionary<int, OutputVaryingInfo>();
             _emulatedIndex = new Dictionary<(int, string), OutputVaryingInfo>();
+            _emulatedSlotIndex = new Dictionary<(int, int, string), OutputVaryingInfo>();
             _storeSlotIndex = new Dictionary<(int, int), OutputVaryingInfo>();
             _singleStoreIndex = new Dictionary<int, OutputVaryingInfo>();
             _paramFallbackIndex = new Dictionary<int, OutputVaryingInfo>();
@@ -1831,9 +1865,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             {
                 if (ov.IsAtomicVote)
                     _atomicVoteIndex.TryAdd(ov.ParamIndex, ov);
-                if (ov.IsEmulated && ov.EmulatedSuffix != null)
+                if (ov.IsEmulated && ov.EmulatedSuffix != null && ov.StoreSlot >= 0)
+                    _emulatedSlotIndex.TryAdd((ov.ParamIndex, ov.StoreSlot, ov.EmulatedSuffix), ov);
+                else if (ov.IsEmulated && ov.EmulatedSuffix != null)
                     _emulatedIndex.TryAdd((ov.ParamIndex, ov.EmulatedSuffix), ov);
-                if (ov.StoreSlot >= 0)
+                if (ov.StoreSlot >= 0 && !ov.IsEmulated)
                     _storeSlotIndex.TryAdd((ov.ParamIndex, ov.StoreSlot), ov);
                 if (ov.StoreSlot < 0 && !ov.IsAtomicVote && !ov.IsEmulated && ov.FieldIndex < 0)
                     _singleStoreIndex.TryAdd(ov.ParamIndex, ov);
@@ -3482,9 +3518,25 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // Emulated 64-bit buffer store via TF output
             if (_emulatedVarMappings.TryGetValue(address.ToString(), out var emulInfo))
             {
-                // Find the lo and hi TF varyings for this param
-                _emulatedIndex!.TryGetValue((emulInfo.ParamIndex, "lo"), out var loOutput);
-                _emulatedIndex!.TryGetValue((emulInfo.ParamIndex, "hi"), out var hiOutput);
+                // Find the lo and hi TF varyings for this param. A thread that stores MULTIPLE
+                // elements into this buffer (positional multi-store) gets one lo/hi pair PER
+                // SLOT (EmitOutputVaryings' emuStoreCount branch) - route each sequential store
+                // to its own slot's pair, mirroring the plain (non-emulated) multi-store path's
+                // _currentStoreSlot bookkeeping, instead of always the single param-wide pair.
+                int emuStoreCount = _outputStoreCount.GetValueOrDefault(emulInfo.ParamIndex, 1);
+                OutputVaryingInfo? loOutput, hiOutput;
+                if (emuStoreCount > 1)
+                {
+                    int emuSlot = _currentStoreSlot.GetValueOrDefault(emulInfo.ParamIndex, 0);
+                    _emulatedSlotIndex!.TryGetValue((emulInfo.ParamIndex, emuSlot, "lo"), out loOutput);
+                    _emulatedSlotIndex!.TryGetValue((emulInfo.ParamIndex, emuSlot, "hi"), out hiOutput);
+                    _currentStoreSlot[emulInfo.ParamIndex] = emuSlot + 1;
+                }
+                else
+                {
+                    _emulatedIndex!.TryGetValue((emulInfo.ParamIndex, "lo"), out loOutput);
+                    _emulatedIndex!.TryGetValue((emulInfo.ParamIndex, "hi"), out hiOutput);
+                }
                 if (loOutput != null && hiOutput != null)
                 {
                     if (emulInfo.IsF64)

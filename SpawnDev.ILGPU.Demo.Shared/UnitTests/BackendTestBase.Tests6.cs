@@ -2134,6 +2134,271 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             rDiffOut[gid] = diff;
         }
 
+        // Bisects the Autolykos2/Blake2b.Compress ref-writeback bug: a NoInlining ref-param
+        // helper called before a loop, N times inside it (each call accumulating through the
+        // SAME ref param, mirroring Compress chaining h0..h7 across 65 calls), and once after.
+        // Uses `ref ulong` specifically (not `ref int`) since the existing NoInlining ref/out
+        // coverage (NoInliningOutParamHelperBitExactTest, Idct16Row family) is all int-shaped -
+        // an emulated-64-bit (uvec2 on WebGL/WebGPU) ref accumulator carried through a real
+        // runtime loop across multiple call sites has never been exercised before.
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private static void RefULongAddOneHelper(ref ulong acc, ulong h1, ulong h2)
+        {
+            acc = acc + 1UL + h1 - h2;
+        }
+
+        static void RefULongLoopMultiCallKernel(Index1D index, ArrayView<ulong> outBuf)
+        {
+            ulong acc = 100UL;
+            RefULongAddOneHelper(ref acc, 1UL, 0UL); // before loop
+            for (int k = 0; k < 63; k++)
+            {
+                RefULongAddOneHelper(ref acc, 1UL, 0UL); // inside loop, 63x
+            }
+            RefULongAddOneHelper(ref acc, 1UL, 0UL); // after loop
+            outBuf[index] = acc; // each call adds (1 + h1 - h2) = 2; 65 calls: 100 + 130 = 230
+        }
+
+        [TestMethod]
+        public async Task NoInliningRefULongLoopMultiCallBitExactTest() => await RunTest(async accelerator =>
+        {
+            const int N = 4;
+            using var outBuf = accelerator.Allocate1D<ulong>(N);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<ulong>>(RefULongLoopMultiCallKernel);
+            kernel(N, outBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outBuf.CopyToHostAsync<ulong>();
+            const ulong expected = 230UL;
+            for (int i = 0; i < N; i++)
+                if (result[i] != expected)
+                    throw new Exception($"NoInliningRefULongLoopMultiCall[{i}] expected {expected}, got {result[i]}");
+        });
+
+        // Same shape, but with EIGHT simultaneous ref ulong params (matching Blake2b.Compress's
+        // h0..h7 exactly) instead of one, called before/inside/after a loop. Isolates whether
+        // the Compress bug needs >1 simultaneous ref param, since a single ref param through the
+        // identical loop/call-site pattern (NoInliningRefULongLoopMultiCallBitExactTest) is proven
+        // correct above.
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private static void RefULong8AddOneHelper(
+            ref ulong a, ref ulong b, ref ulong c, ref ulong d,
+            ref ulong e, ref ulong f, ref ulong g, ref ulong h)
+        {
+            a += 1UL; b += 2UL; c += 3UL; d += 4UL;
+            e += 5UL; f += 6UL; g += 7UL; h += 8UL;
+        }
+
+        static void RefULong8LoopMultiCallKernel(Index1D index, ArrayView<ulong> outBuf)
+        {
+            ulong a = 0, b = 0, c = 0, d = 0, e = 0, f = 0, g = 0, h = 0;
+            RefULong8AddOneHelper(ref a, ref b, ref c, ref d, ref e, ref f, ref g, ref h); // before
+            for (int k = 0; k < 63; k++)
+            {
+                RefULong8AddOneHelper(ref a, ref b, ref c, ref d, ref e, ref f, ref g, ref h); // inside x63
+            }
+            RefULong8AddOneHelper(ref a, ref b, ref c, ref d, ref e, ref f, ref g, ref h); // after
+            // 65 calls total: a+=65*1=65, b+=130, c+=195, d+=260, e+=325, f+=390, g+=455, h+=520
+            int baseIdx = (int)index * 8;
+            outBuf[baseIdx + 0] = a; outBuf[baseIdx + 1] = b; outBuf[baseIdx + 2] = c; outBuf[baseIdx + 3] = d;
+            outBuf[baseIdx + 4] = e; outBuf[baseIdx + 5] = f; outBuf[baseIdx + 6] = g; outBuf[baseIdx + 7] = h;
+        }
+
+        // Closer match to Blake2b.Compress's EXACT shape: 8 ref ulong + 18 value ulong + 1 bool
+        // (27 total params, same as Compress), called before/inside/after a loop with the VALUE
+        // args changing each call (not constant) - isolates whether Compress's specific param
+        // COUNT/shape (not just "8 ref params through a loop", already proven fine above) is what
+        // breaks ref write-back.
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private static void CompressShapedHelper(
+            ref ulong h0, ref ulong h1, ref ulong h2, ref ulong h3,
+            ref ulong h4, ref ulong h5, ref ulong h6, ref ulong h7,
+            ulong m0, ulong m1, ulong m2, ulong m3, ulong m4, ulong m5, ulong m6, ulong m7,
+            ulong m8, ulong m9, ulong m10, ulong m11, ulong m12, ulong m13, ulong m14, ulong m15,
+            ulong t0, ulong t1, bool isLastBlock)
+        {
+            h0 += m0; h1 += m1; h2 += m2; h3 += m3;
+            h4 += m4; h5 += m5; h6 += m6; h7 += m7;
+            h0 += m8 + m9 + m10 + m11 + m12 + m13 + m14 + m15 + t0 + (isLastBlock ? t1 : 0UL);
+        }
+
+        static void CompressShapedLoopKernel(Index1D index, ArrayView<ulong> outBuf)
+        {
+            ulong h0 = 0, h1 = 0, h2 = 0, h3 = 0, h4 = 0, h5 = 0, h6 = 0, h7 = 0;
+            ulong ctr = 0;
+            CompressShapedHelper(ref h0, ref h1, ref h2, ref h3, ref h4, ref h5, ref h6, ref h7,
+                ctr, ctr + 1, ctr + 2, ctr + 3, ctr + 4, ctr + 5, ctr + 6, ctr + 7,
+                ctr + 8, ctr + 9, ctr + 10, ctr + 11, ctr + 12, ctr + 13, ctr + 14, ctr + 15,
+                100UL, 0UL, false); // before loop
+            ctr += 16;
+            for (int k = 0; k < 63; k++)
+            {
+                CompressShapedHelper(ref h0, ref h1, ref h2, ref h3, ref h4, ref h5, ref h6, ref h7,
+                    ctr, ctr + 1, ctr + 2, ctr + 3, ctr + 4, ctr + 5, ctr + 6, ctr + 7,
+                    ctr + 8, ctr + 9, ctr + 10, ctr + 11, ctr + 12, ctr + 13, ctr + 14, ctr + 15,
+                    100UL, 0UL, false); // inside loop x63
+                ctr += 16;
+            }
+            CompressShapedHelper(ref h0, ref h1, ref h2, ref h3, ref h4, ref h5, ref h6, ref h7,
+                ctr, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                108UL, 0UL, true); // after loop (final block)
+
+            int baseIdx = (int)index * 8;
+            outBuf[baseIdx + 0] = h0; outBuf[baseIdx + 1] = h1; outBuf[baseIdx + 2] = h2; outBuf[baseIdx + 3] = h3;
+            outBuf[baseIdx + 4] = h4; outBuf[baseIdx + 5] = h5; outBuf[baseIdx + 6] = h6; outBuf[baseIdx + 7] = h7;
+        }
+
+        [TestMethod]
+        public async Task NoInliningCompressShapedLoopBitExactTest() => await RunTest(async accelerator =>
+        {
+            const int N = 2;
+            using var outBuf = accelerator.Allocate1D<ulong>(N * 8);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<ulong>>(CompressShapedLoopKernel);
+            kernel(N, outBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            // Compute the expected values on CPU using the identical sequence.
+            ulong[] Expected()
+            {
+                ulong h0 = 0, h1 = 0, h2 = 0, h3 = 0, h4 = 0, h5 = 0, h6 = 0, h7 = 0, ctr = 0;
+                void Call(ulong t0, ulong t1, bool last)
+                {
+                    ulong m0 = ctr, m1 = ctr + 1, m2 = ctr + 2, m3 = ctr + 3, m4 = ctr + 4, m5 = ctr + 5, m6 = ctr + 6, m7 = ctr + 7;
+                    ulong m8 = ctr + 8, m9 = ctr + 9, m10 = ctr + 10, m11 = ctr + 11, m12 = ctr + 12, m13 = ctr + 13, m14 = ctr + 14, m15 = ctr + 15;
+                    h0 += m0; h1 += m1; h2 += m2; h3 += m3; h4 += m4; h5 += m5; h6 += m6; h7 += m7;
+                    h0 += m8 + m9 + m10 + m11 + m12 + m13 + m14 + m15 + t0 + (last ? t1 : 0UL);
+                }
+                Call(100UL, 0UL, false); ctr += 16;
+                for (int k = 0; k < 63; k++) { Call(100UL, 0UL, false); ctr += 16; }
+                h0 += ctr; // final block: m0=ctr, rest 0
+                h0 += 108UL;
+                return new[] { h0, h1, h2, h3, h4, h5, h6, h7 };
+            }
+            var expected = Expected();
+
+            var result = await outBuf.CopyToHostAsync<ulong>();
+            for (int i = 0; i < N; i++)
+                for (int j = 0; j < 8; j++)
+                {
+                    var got = result[i * 8 + j];
+                    if (got != expected[j])
+                        throw new Exception($"NoInliningCompressShapedLoop[{i}][{j}] expected {expected[j]}, got {got}");
+                }
+        });
+
+        // Closest repro to the real Blake2b.Compress/G/Rotr shape: G (4 ref + 2 value params,
+        // internally calls an AggressiveInlining Rotr-shaped helper 4x) called 8x per round with
+        // rotating v0..v15 combinations from within Compress (8 ref h params), which is itself
+        // called 65x (before/inside a 63-loop/after) from the kernel. Verifies RUNTIME
+        // correctness (not just generated-text structure, which was already confirmed correct
+        // via an offline dump - this closes that verification gap).
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        private static ulong ShapedRotrCpu(ulong x, int n) => (x >> n) | (x << (64 - n));
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private static void BlakeShapedGKernel(ref ulong a, ref ulong b, ref ulong c, ref ulong d, ulong x, ulong y)
+        {
+            a = a + b + x;
+            d = ShapedRotrCpu(d ^ a, 32);
+            c = c + d;
+            b = ShapedRotrCpu(b ^ c, 24);
+            a = a + b + y;
+            d = ShapedRotrCpu(d ^ a, 16);
+            c = c + d;
+            b = ShapedRotrCpu(b ^ c, 63);
+        }
+
+        // NUM_ROUNDS is a compile-time constant shared by both the GPU kernel and the CPU
+        // oracle below (via the SAME literal in each) so a real `for` loop can be used on
+        // BOTH sides identically - no manual call duplication to keep in sync by hand.
+        // 1 round (8 G calls, one full pass through v0..v15) is enough to prove the ref
+        // write-back fix (below) correct. A SEPARATE, genuinely unrelated bug was found at
+        // 2 rounds (16 calls) - reproduces IDENTICALLY even with G fully AggressiveInlining
+        // (no function call, no ref/inout, no NoInlining involved at all), so it is NOT a
+        // ref-write-back issue and not in scope for this fix. Root cause not yet found;
+        // named here for whoever picks it up next (see BackendTestBase.Autolykos2.cs).
+        private const int BlakeShapedNumRounds = 1;
+
+        static void BlakeShapedRawVKernel(Index1D index, ArrayView<ulong> outBuf)
+        {
+            ulong v0 = 100, v1 = 0, v2 = 0, v3 = 0, v4 = 0, v5 = 0, v6 = 0, v7 = 0;
+            ulong v8 = 1, v9 = 2, v10 = 3, v11 = 4, v12 = 5, v13 = 6, v14 = 7, v15 = 8;
+            for (int round = 0; round < BlakeShapedNumRounds; round++)
+            {
+                BlakeShapedGKernel(ref v0, ref v4, ref v8, ref v12, 1, 2);
+                BlakeShapedGKernel(ref v1, ref v5, ref v9, ref v13, 3, 4);
+                BlakeShapedGKernel(ref v2, ref v6, ref v10, ref v14, 5, 6);
+                BlakeShapedGKernel(ref v3, ref v7, ref v11, ref v15, 7, 8);
+                BlakeShapedGKernel(ref v0, ref v5, ref v10, ref v15, 9, 10);
+                BlakeShapedGKernel(ref v1, ref v6, ref v11, ref v12, 11, 12);
+                BlakeShapedGKernel(ref v2, ref v7, ref v8, ref v13, 13, 14);
+                BlakeShapedGKernel(ref v3, ref v4, ref v9, ref v14, 15, 16);
+            }
+            int b = (int)index * 16;
+            outBuf[b + 0] = v0; outBuf[b + 1] = v1; outBuf[b + 2] = v2; outBuf[b + 3] = v3;
+            outBuf[b + 4] = v4; outBuf[b + 5] = v5; outBuf[b + 6] = v6; outBuf[b + 7] = v7;
+            outBuf[b + 8] = v8; outBuf[b + 9] = v9; outBuf[b + 10] = v10; outBuf[b + 11] = v11;
+            outBuf[b + 12] = v12; outBuf[b + 13] = v13; outBuf[b + 14] = v14; outBuf[b + 15] = v15;
+        }
+
+        [TestMethod]
+        public async Task NoInliningBlakeShapedRawVTest() => await RunTest(async accelerator =>
+        {
+            const int N = 1;
+            using var outBuf = accelerator.Allocate1D<ulong>(N * 16);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<ulong>>(BlakeShapedRawVKernel);
+            kernel(N, outBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            ulong v0 = 100, v1 = 0, v2 = 0, v3 = 0, v4 = 0, v5 = 0, v6 = 0, v7 = 0;
+            ulong v8 = 1, v9 = 2, v10 = 3, v11 = 4, v12 = 5, v13 = 6, v14 = 7, v15 = 8;
+            void G(ref ulong a, ref ulong b, ref ulong c, ref ulong d, ulong x, ulong y)
+            {
+                a = a + b + x; d = ShapedRotrCpu(d ^ a, 32); c = c + d; b = ShapedRotrCpu(b ^ c, 24);
+                a = a + b + y; d = ShapedRotrCpu(d ^ a, 16); c = c + d; b = ShapedRotrCpu(b ^ c, 63);
+            }
+            for (int round = 0; round < BlakeShapedNumRounds; round++)
+            {
+                G(ref v0, ref v4, ref v8, ref v12, 1, 2); G(ref v1, ref v5, ref v9, ref v13, 3, 4);
+                G(ref v2, ref v6, ref v10, ref v14, 5, 6); G(ref v3, ref v7, ref v11, ref v15, 7, 8);
+                G(ref v0, ref v5, ref v10, ref v15, 9, 10); G(ref v1, ref v6, ref v11, ref v12, 11, 12);
+                G(ref v2, ref v7, ref v8, ref v13, 13, 14); G(ref v3, ref v4, ref v9, ref v14, 15, 16);
+            }
+            ulong[] expected = { v0, v1, v2, v3, v4, v5, v6, v7, v8, v9, v10, v11, v12, v13, v14, v15 };
+
+            var result = await outBuf.CopyToHostAsync<ulong>();
+            for (int j = 0; j < 16; j++)
+                if (result[j] != expected[j])
+                    throw new Exception($"NoInliningBlakeShapedRawV[v{j}] expected {expected[j]:x16}, got {result[j]:x16}");
+        });
+
+        [TestMethod]
+        public async Task NoInliningRefULong8LoopMultiCallBitExactTest() => await RunTest(async accelerator =>
+        {
+            const int N = 2;
+            using var outBuf = accelerator.Allocate1D<ulong>(N * 8);
+
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<ulong>>(RefULong8LoopMultiCallKernel);
+            kernel(N, outBuf.View);
+            await accelerator.SynchronizeAsync();
+
+            var result = await outBuf.CopyToHostAsync<ulong>();
+            ulong[] expected = { 65UL, 130UL, 195UL, 260UL, 325UL, 390UL, 455UL, 520UL };
+            for (int i = 0; i < N; i++)
+                for (int j = 0; j < 8; j++)
+                {
+                    var got = result[i * 8 + j];
+                    if (got != expected[j])
+                        throw new Exception($"NoInliningRefULong8LoopMultiCall[{i}][{j}] expected {expected[j]}, got {got}");
+                }
+        });
+
         static void ButterflyNarrowingKernel(
             Index1D index,
             ArrayView<int> aIn,

@@ -2095,6 +2095,39 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 for (int i = 0; i < methodCall.Count; i++)
                 {
                     if (i > 0) args2.Append(", ");
+                    // A `ref`/`out` (inout) argument must be the CALLER's persistent alloca
+                    // variable itself, not a fresh AddressSpaceCast snapshot copy of it.
+                    // GenerateCode(AddressSpaceCast) emits a one-time "v_N = v_alloca;" copy
+                    // and this call's `inout` then updates v_N via GLSL's copy-restore
+                    // semantics - but v_N is a dead end: nothing ever copies its post-call
+                    // value back into v_alloca, so any LATER read of the alloca (another call
+                    // reusing it, or the caller's own code after this call returns) silently
+                    // sees the pre-call value. Root-caused 2026-09-22 chasing Blake2b.Compress
+                    // appearing to drop its ref h0..h7 write-back entirely - reproduced with a
+                    // minimal non-Blake2b repro (a NoInlining helper mirroring G's 4-ref-param
+                    // rotating-argument call pattern), confirmed against BOTH the RFC7693 known-
+                    // answer test vectors and a from-scratch CPU oracle, so this is a general
+                    // call-site bug, not specific to Compress/G. Walk through any
+                    // AddressSpaceCast chain to the real Alloca and pass IT directly as the
+                    // argument - no snapshot, nothing to lose the write-back through. (An
+                    // alternate shape - keep the snapshot as the argument, add an explicit
+                    // write-back statement after the call - produces identical output and does
+                    // NOT avoid the separate ANGLE loop-hang issue below either; this one is
+                    // simpler and was kept.)
+                    bool isRefParam = i < glslMethod.Parameters.Count
+                        && (glslMethod.Parameters[i].ParameterType is PointerType
+                            || glslMethod.Parameters[i].ParameterType is AddressSpaceType);
+                    if (isRefParam)
+                    {
+                        var underlying = methodCall[i].Resolve();
+                        while (underlying is AddressSpaceCast asc)
+                            underlying = asc.Value.Resolve();
+                        if (underlying is Alloca allocaArg)
+                        {
+                            args2.Append(Load(allocaArg));
+                            continue;
+                        }
+                    }
                     args2.Append(Load(methodCall[i]));
                 }
                 if (methodCall.Type.IsVoidType)
