@@ -112,19 +112,34 @@ public abstract partial class BackendTestBase
         outDigests[baseOut + 3] = o3;
     }
 
-    // KNOWN OPEN ISSUE (found running this test 2026-09-21): WebGL fails this test with a
-    // wrong (not a graceful skip/exception) digest even for the all-zero-message "empty"
-    // vector - CPU/CUDA/OpenCL/WebGPU (both subgroup variants)/Wasm all pass. Traced the
-    // GLSL i64 shift emulation (GLSLEmulationLibrary.cs i64_shl/u64_shr) by hand for every
-    // rotate amount Blake2b uses (1, 16, 24, 32, 63) - all correct. Also ruled out "the
-    // isLastBlock bool parameter isn't reaching the shader" (computed what the digest would
-    // be with isLastBlock forced false - doesn't match the wrong output either). Root cause
-    // is still open; this is a SpawnDev.ILGPU WebGL backend bug, not an Autolykos2/Blake2b
-    // logic bug (the same primitive is correct on every other backend, including the other
-    // i64-emulated one, WebGPU). Not chased further here: WebGL is out of scope for
-    // production-scale mining regardless (see crypto-mining-funding-analysis.md and the plan
-    // file - multi-GB resident buffers exceed practical WebGL limits independent of this),
-    // and this needs its own investigation as a SpawnDev.ILGPU WebGL-backend issue.
+    // KNOWN OPEN ISSUE (found running this test 2026-09-21, re-investigated same day after
+    // fixing the separate WebGPU widening bug below): WebGL fails this test with a wrong (not a
+    // graceful skip/exception) digest even for the all-zero-message "empty" vector - CPU/CUDA/
+    // OpenCL/WebGPU (both subgroup variants)/Wasm all pass. Ruled out so far, each independently:
+    // - The GLSL i64 shift emulation (GLSLEmulationLibrary.cs i64_shl/u64_shr/i64_shr) by hand for
+    //   every rotate amount Blake2b uses (1, 16, 24, 32, 63) - all correct.
+    // - "The isLastBlock bool parameter isn't reaching the shader" - computed what the digest
+    //   would be with isLastBlock forced false - doesn't match the wrong output either.
+    // - The same uint-widening sign-extension mistake just fixed in WGSLKernelFunctionGenerator
+    //   (see the fixed note above) - checked GLSLEmulationLibrary's i64_from_i32/u64_from_u32 and
+    //   the GLSL kernel-function-generator's own ConvertValue handling; not the same bug pattern.
+    // - Dumped the actual generated GLSL offline (ShaderCompiler.Generate with
+    //   CapabilityProfiles.WebGL2Baseline, no GPU context needed - mirrors the technique that
+    //   found the WGSL bug) and spot-checked the IV/param-block initialization constants by hand
+    //   (v_1 = h0 = IV0^Param0, v_9 = v[8] = IV0 unmodified - both correct). The output is ~5600
+    //   lines of fully-unrolled emu_i64 (uvec2) arithmetic with no per-thread variance (this test
+    //   vector's message is all zero), so there's no sharp reproduction lever the way "index 128"
+    //   was for the WGSL bug - tracing further requires either instrumenting intermediate values
+    //   or comparing round-by-round against a reference trace, not spot-checking by eye. Stopped
+    //   here rather than continue an unbounded manual trace through ~500+ generated locals.
+    // Root cause is still open; this is a SpawnDev.ILGPU WebGL backend bug, not an Autolykos2/
+    // Blake2b logic bug (the same primitive is correct on every other backend, including the
+    // other i64-emulated one, WebGPU). Not chased further: WebGL is out of scope for production-
+    // scale mining regardless (see crypto-mining-funding-analysis.md and the plan file - multi-GB
+    // resident buffers exceed practical WebGL limits independent of this). Whoever picks this up
+    // next should instrument round-by-round intermediate v[] values (e.g. write them to an output
+    // buffer after each of the 12 rounds) and diff against a CPU trace of the same rounds, rather
+    // than re-deriving the emulation library by hand as both attempts here did.
     [TestMethod]
     public async Task Autolykos2_Blake2b_GPU_CPUMatch() => await RunTest(async accelerator =>
     {
