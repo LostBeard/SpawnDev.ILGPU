@@ -125,9 +125,49 @@ namespace SpawnDev.ILGPU.Crypto
         }
 
         /// <summary>
+        /// Number of dataset chunks the mining/generation kernels are wired for. OpenCL's
+        /// <c>CL_DEVICE_MAX_MEM_ALLOC_SIZE</c> commonly caps a single buffer at roughly 1/4 of
+        /// device memory - a fixed 4-way split (not a general auto-splitting mechanism, per the
+        /// plan file's explicit scope decision) keeps every backend able to reach at least the
+        /// full device memory's worth of dataset, once chunk buffers are actually allocated
+        /// separately by the caller (a single-chunk dataset just passes elementsPerChunk == N,
+        /// so chunks 1..3 are never dereferenced - see <see cref="GetChunked"/>/<see cref="SetChunked"/>).
+        /// </summary>
+        public const int ChunkCount = 4;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static Element256 GetChunked(uint globalIndex, uint elementsPerChunk,
+            ArrayView<Element256> chunk0, ArrayView<Element256> chunk1,
+            ArrayView<Element256> chunk2, ArrayView<Element256> chunk3)
+        {
+            uint chunkIdx = globalIndex / elementsPerChunk;
+            long localIdx = globalIndex % elementsPerChunk;
+            if (chunkIdx == 0) return chunk0[localIdx];
+            if (chunkIdx == 1) return chunk1[localIdx];
+            if (chunkIdx == 2) return chunk2[localIdx];
+            return chunk3[localIdx];
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static void SetChunked(uint globalIndex, uint elementsPerChunk, Element256 value,
+            ArrayView<Element256> chunk0, ArrayView<Element256> chunk1,
+            ArrayView<Element256> chunk2, ArrayView<Element256> chunk3)
+        {
+            uint chunkIdx = globalIndex / elementsPerChunk;
+            long localIdx = globalIndex % elementsPerChunk;
+            if (chunkIdx == 0) chunk0[localIdx] = value;
+            else if (chunkIdx == 1) chunk1[localIdx] = value;
+            else if (chunkIdx == 2) chunk2[localIdx] = value;
+            else chunk3[localIdx] = value;
+        }
+
+        /// <summary>
         /// GPU kernel: one thread per dataset element index. Positional store only (thread i writes
         /// only element i) - no scatter, no shared memory, no atomics. <see cref="AcceleratorRequirements"/>:
-        /// RequiresInt64 only.
+        /// RequiresInt64 only. For a dataset that fits in one buffer, pass it as
+        /// <paramref name="chunk0"/> with <paramref name="elementsPerChunk"/> == the full element
+        /// count and default/empty views for chunks 1-3 (never dereferenced in that case - see
+        /// <see cref="SetChunked"/>).
         /// </summary>
         /// <remarks>
         /// Index type is <see cref="Index1D"/> (32-bit), not <see cref="LongIndex1D"/>: <see cref="MaxN"/>
@@ -136,10 +176,14 @@ namespace SpawnDev.ILGPU.Crypto
         /// rejects <see cref="LongIndex1D"/> outright ("long indices are not supported") - explicit grouping
         /// would be needed to use it, which N's real ceiling doesn't justify.
         /// </remarks>
-        public static void GenerateDatasetKernel(Index1D index, ArrayView<Element256> dataset, uint height)
+        public static void GenerateDatasetKernel(
+            Index1D index, uint elementsPerChunk,
+            ArrayView<Element256> chunk0, ArrayView<Element256> chunk1,
+            ArrayView<Element256> chunk2, ArrayView<Element256> chunk3,
+            uint height)
         {
             GenerateDatasetElement((uint)index, height, out ulong e0, out ulong e1, out ulong e2, out ulong e3);
-            dataset[index] = new Element256(e0, e1, e2, e3);
+            SetChunked((uint)index, elementsPerChunk, new Element256(e0, e1, e2, e3), chunk0, chunk1, chunk2, chunk3);
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -219,27 +263,33 @@ namespace SpawnDev.ILGPU.Crypto
         /// Deliberately no shared memory: the whole point of the K=32 gather is that indices are
         /// pseudorandom across the full dataset (the ASIC-resistance property), so there is no
         /// reusable tile to stage - this kernel is bound by raw random-access memory throughput.
+        /// <paramref name="header"/> and <paramref name="target"/> are packed into
+        /// <see cref="Element256"/> (4 plain <c>ulong</c> fields, no <c>ArrayView</c>) purely to
+        /// stay under <c>LoadAutoGroupedStreamKernel</c>'s 15-type-parameter ceiling - unrelated to
+        /// the chunking use of the same struct elsewhere in this file.
         /// </summary>
         public static void MineKernel(
             Index1D nonceOffset,
-            ArrayView<Element256> dataset, uint datasetLength,
+            uint elementsPerChunk,
+            ArrayView<Element256> chunk0, ArrayView<Element256> chunk1,
+            ArrayView<Element256> chunk2, ArrayView<Element256> chunk3,
+            uint datasetLength,
             ulong nonceBase,
-            ulong h0m, ulong h1m, ulong h2m, ulong h3m,
-            ulong target0, ulong target1, ulong target2, ulong target3,
+            Element256 header, Element256 target,
             ArrayView<ulong> winningNonces, ArrayView<int> winningCount)
         {
             ulong nonce = nonceBase + (ulong)nonceOffset;
             ulong nonceBE = Bswap64(nonce);
 
             // Stage 1: seed hash of (header || nonce), reduced mod N to pick one dataset element.
-            Blake2b.Hash256(h0m, h1m, h2m, h3m, nonceBE, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 40,
+            Blake2b.Hash256(header.W0, header.W1, header.W2, header.W3, nonceBE, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 40,
                 out ulong sa0, out ulong sa1, out ulong sa2, out ulong sa3);
             uint seedIndex = (uint)(Bswap64(sa3) % (ulong)datasetLength);
-            Element256 seed = dataset[(long)seedIndex];
+            Element256 seed = GetChunked(seedIndex, elementsPerChunk, chunk0, chunk1, chunk2, chunk3);
 
             // Stage 2: second hash of (seed element || header || nonce) - see ComputeFinalHash's
             // remarks for why this is 32+32+8=72 bytes here rather than the reference's 71.
-            Blake2b.Hash256(seed.W0, seed.W1, seed.W2, seed.W3, h0m, h1m, h2m, h3m, nonceBE,
+            Blake2b.Hash256(seed.W0, seed.W1, seed.W2, seed.W3, header.W0, header.W1, header.W2, header.W3, nonceBE,
                 0, 0, 0, 0, 0, 0, 0, 72,
                 out ulong sh0, out ulong sh1, out ulong sh2, out ulong sh3);
 
@@ -250,7 +300,7 @@ namespace SpawnDev.ILGPU.Crypto
             for (int k = 0; k < K; k++)
             {
                 uint idx = DeriveIndex(sh0, sh1, sh2, sh3, k, datasetLength);
-                Element256 e = dataset[(long)idx];
+                Element256 e = GetChunked(idx, elementsPerChunk, chunk0, chunk1, chunk2, chunk3);
                 ulong c;
                 acc0 = AddWithCarry(acc0, e.W0, 0, out c);
                 acc1 = AddWithCarry(acc1, e.W1, c, out c);
@@ -263,6 +313,7 @@ namespace SpawnDev.ILGPU.Crypto
             ComputeFinalHash(acc0, acc1, acc2, acc3,
                 out ulong d0, out ulong d1, out ulong d2, out ulong d3);
 
+            ulong target0 = target.W0, target1 = target.W1, target2 = target.W2, target3 = target.W3;
             bool hit = d0 < target0 || (d0 == target0 && (d1 < target1 || (d1 == target1 &&
                 (d2 < target2 || (d2 == target2 && d3 < target3)))));
             if (hit)

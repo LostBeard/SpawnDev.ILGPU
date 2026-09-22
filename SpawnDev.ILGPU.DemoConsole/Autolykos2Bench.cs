@@ -27,6 +27,12 @@ using SpawnDev.ILGPU.Crypto;
 ///                        higher due to the N-boost schedule since block 614,400 - pass a
 ///                        larger --n once you've looked up the current value if that matters)
 ///          --seconds &lt;n&gt; mining duration (default: 30)
+///
+/// Splits the dataset across up to Autolykos2.ChunkCount (4) buffers when a single buffer
+/// would exceed the device's max single allocation (OpenCL's CL_DEVICE_MAX_MEM_ALLOC_SIZE
+/// commonly caps this at ~1/4 of device memory; CUDA/CPU have no equivalent cap queried here,
+/// so they always get a single chunk).
+///
 /// Run: dotnet run --project SpawnDev.ILGPU.DemoConsole -- autolykos2-bench   (for a quick sanity
 ///      check only - the actual number to trust must come from the published build per above)
 /// </summary>
@@ -63,32 +69,71 @@ internal static class Autolykos2Bench
             Console.WriteLine($"[autolykos2-bench] backend={accelerator.AcceleratorType} name={accelerator.Name}");
             Console.WriteLine($"[autolykos2-bench] N={n:N0} elements ({n * 32.0 / (1024 * 1024 * 1024):F2} GB)");
 
-            using var dataset = accelerator.Allocate1D<Element256>(n);
+            // Decide the chunk split. OpenCL's CL_DEVICE_MAX_MEM_ALLOC_SIZE is the only backend-
+            // reported single-allocation ceiling queried here; CUDA/CPU get one chunk (no
+            // equivalent cap surfaced by ILGPU's device wrappers at this layer).
+            long maxSingleAllocBytes = long.MaxValue;
+            if (accelerator.Device is CLDevice clDevice)
+                maxSingleAllocBytes = clDevice.GetDeviceInfo<long>(CLDeviceInfoType.CL_DEVICE_MAX_MEM_ALLOC_SIZE);
+
+            long totalBytes = n * 32L;
+            int chunkCount = 1;
+            while (chunkCount < Autolykos2.ChunkCount && totalBytes / chunkCount > maxSingleAllocBytes)
+                chunkCount++;
+            long elementsPerChunk = (n + chunkCount - 1) / chunkCount;
+            if (elementsPerChunk * 32L > maxSingleAllocBytes)
+            {
+                Console.WriteLine(
+                    $"[autolykos2-bench] ERROR: N={n:N0} needs {elementsPerChunk * 32.0 / (1024 * 1024 * 1024):F2} GB per chunk " +
+                    $"even split across the max {Autolykos2.ChunkCount} chunks this PoC supports, but the device's max single " +
+                    $"allocation is {maxSingleAllocBytes / (1024.0 * 1024 * 1024):F2} GB. Reduce --n.");
+                return 1;
+            }
+            if (chunkCount > 1)
+                Console.WriteLine($"[autolykos2-bench] splitting dataset into {chunkCount} chunks of {elementsPerChunk:N0} elements " +
+                    $"(device max single alloc: {maxSingleAllocBytes / (1024.0 * 1024 * 1024):F2} GB)");
+
+            // Allocate exactly the chunks needed. Unused chunk slots get a real tiny 1-element
+            // buffer, not ArrayView<Element256>.Empty - an empty/null-backed view as a kernel
+            // argument crashes WebGPU's launch path and silently corrupts results on Wasm, even
+            // though GetChunked/SetChunked never dereference an unused chunk in practice (this
+            // benchmark only targets CUDA/OpenCL/CPU anyway, but the same kernels are shared with
+            // the cross-backend correctness tests, so the fix lives once, here in the kernel-arg
+            // convention, not duplicated per caller).
+            using var chunk0 = accelerator.Allocate1D<Element256>(Math.Min(elementsPerChunk, n));
+            using var chunk1 = chunkCount > 1 ? accelerator.Allocate1D<Element256>(Math.Min(elementsPerChunk, n - elementsPerChunk)) : accelerator.Allocate1D<Element256>(1);
+            using var chunk2 = chunkCount > 2 ? accelerator.Allocate1D<Element256>(Math.Min(elementsPerChunk, n - 2 * elementsPerChunk)) : accelerator.Allocate1D<Element256>(1);
+            using var chunk3 = chunkCount > 3 ? accelerator.Allocate1D<Element256>(n - 3 * elementsPerChunk) : accelerator.Allocate1D<Element256>(1);
+            var chunk0View = chunk0.View;
+            var chunk1View = chunk1.View;
+            var chunk2View = chunk2.View;
+            var chunk3View = chunk3.View;
+
             var genKernel = accelerator.LoadAutoGroupedStreamKernel<
-                Index1D, ArrayView<Element256>, uint>(Autolykos2.GenerateDatasetKernel);
+                Index1D, uint, ArrayView<Element256>, ArrayView<Element256>, ArrayView<Element256>, ArrayView<Element256>, uint>(
+                Autolykos2.GenerateDatasetKernel);
 
             const uint height = 1_500_000;
             var genSw = Stopwatch.StartNew();
             // n fits Index1D per Autolykos2.GenerateDatasetKernel's own remarks (MaxN < int.MaxValue).
-            genKernel((int)n, dataset.View, height);
+            genKernel((int)n, (uint)elementsPerChunk, chunk0View, chunk1View, chunk2View, chunk3View, height);
             await accelerator.SynchronizeAsync();
             genSw.Stop();
             Console.WriteLine($"[autolykos2-bench] dataset generation: {genSw.Elapsed.TotalSeconds:F2}s ({n / genSw.Elapsed.TotalSeconds:N0} elements/sec)");
 
-            const ulong h0m = 0x0102030405060708UL, h1m = 0x1112131415161718UL,
-                        h2m = 0x2122232425262728UL, h3m = 0x3132333435363738UL;
+            var header = new Element256(0x0102030405060708UL, 0x1112131415161718UL, 0x2122232425262728UL, 0x3132333435363738UL);
             // Target 0 everywhere: no nonce can ever satisfy "digest < 0", so the atomic/scatter
             // hit path is never taken - this measures steady-state mining throughput, the same
             // way real mining spends the overwhelming majority of its time not finding a block.
-            const ulong target0 = 0, target1 = 0, target2 = 0, target3 = 0;
+            var target = new Element256(0, 0, 0, 0);
 
             using var winningNonces = accelerator.Allocate1D<ulong>(4);
             using var winningCount = accelerator.Allocate1D<int>(1);
             winningCount.MemSetToZero();
 
             var mineKernel = accelerator.LoadAutoGroupedStreamKernel<
-                Index1D, ArrayView<Element256>, uint, ulong, ulong, ulong, ulong, ulong,
-                ulong, ulong, ulong, ulong, ArrayView<ulong>, ArrayView<int>>(Autolykos2.MineKernel);
+                Index1D, uint, ArrayView<Element256>, ArrayView<Element256>, ArrayView<Element256>, ArrayView<Element256>, uint,
+                ulong, Element256, Element256, ArrayView<ulong>, ArrayView<int>>(Autolykos2.MineKernel);
 
             const int batchSize = 4_000_000;
             ulong nonceBase = 0;
@@ -96,8 +141,8 @@ internal static class Autolykos2Bench
             var mineSw = Stopwatch.StartNew();
             while (mineSw.Elapsed.TotalSeconds < seconds)
             {
-                mineKernel(batchSize, dataset.View, (uint)n, nonceBase, h0m, h1m, h2m, h3m,
-                    target0, target1, target2, target3, winningNonces.View, winningCount.View);
+                mineKernel(batchSize, (uint)elementsPerChunk, chunk0View, chunk1View, chunk2View, chunk3View,
+                    (uint)n, nonceBase, header, target, winningNonces.View, winningCount.View);
                 await accelerator.SynchronizeAsync();
                 nonceBase += batchSize;
                 totalNonces += batchSize;

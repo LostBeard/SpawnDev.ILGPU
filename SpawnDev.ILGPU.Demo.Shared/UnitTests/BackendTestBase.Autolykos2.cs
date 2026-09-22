@@ -196,9 +196,18 @@ public abstract partial class BackendTestBase
         const uint height = 1_500_000; // arbitrary plausible Ergo mainnet height, fixed for reproducibility
 
         using var datasetBuf = accelerator.Allocate1D<Element256>(n);
+        // Unused chunk slots are tiny real 1-element buffers, not ArrayView.Empty - an empty/
+        // null-backed view as a kernel argument crashes WebGPU's launch path (NullReferenceException
+        // in WebGPUAccelerator.RunKernel) and silently corrupts results on Wasm, even though the
+        // kernel logic itself never dereferences an unused chunk (elementsPerChunk == n routes every
+        // real index to chunk0). A real backing buffer per parameter is the portable choice.
+        using var unusedChunk1 = accelerator.Allocate1D<Element256>(1);
+        using var unusedChunk2 = accelerator.Allocate1D<Element256>(1);
+        using var unusedChunk3 = accelerator.Allocate1D<Element256>(1);
         var kernel = accelerator.LoadAutoGroupedStreamKernel<
-            Index1D, ArrayView<Element256>, uint>(Autolykos2.GenerateDatasetKernel);
-        kernel(n, datasetBuf.View, height);
+            Index1D, uint, ArrayView<Element256>, ArrayView<Element256>, ArrayView<Element256>, ArrayView<Element256>, uint>(
+            Autolykos2.GenerateDatasetKernel);
+        kernel(n, (uint)n, datasetBuf.View, unusedChunk1.View, unusedChunk2.View, unusedChunk3.View, height);
         await accelerator.SynchronizeAsync();
 
         var gpuDataset = await datasetBuf.CopyToHostAsync();
@@ -227,10 +236,14 @@ public abstract partial class BackendTestBase
 
     // KNOWN OPEN ISSUES (found running this test 2026-09-21), neither chased further for the
     // same out-of-scope-for-mining reason as the issues documented on the other two tests above:
-    // - WebGPU with subgroups disabled (WebGPUNoSubgroupsTests) times out (>30s) on this kernel,
-    //   while the subgroup-enabled WebGPU variant passes it cleanly and quickly - points at a
-    //   pathologically slow fallback path for atomics/scatter without subgroup ops, not a
-    //   correctness bug.
+    // - Both WebGPU variants (subgroups and no-subgroups) time out (>30s) on this kernel as of the
+    //   dataset-chunking parameter shape (4 chunk ArrayViews + elementsPerChunk, header/target
+    //   packed into Element256 structs to stay under LoadAutoGroupedStreamKernel's 15-type-param
+    //   ceiling). Before that change, the subgroup-enabled variant passed this test cleanly and
+    //   quickly and only the no-subgroups variant timed out - so the extra parameters pushed the
+    //   subgroup-enabled path into the same pathologically slow regime, not a new distinct bug.
+    //   Not a correctness bug (the small, non-chunked correctness case this test exercises isn't
+    //   where the slowness is - it's dispatch/compile-time related to the parameter shape itself).
     // - Wasm: reports 0 hits when exactly 1 is expected (the known nonce goes missing, no false
     //   positives) - Wasm passed both the Blake2b and dataset-generation tests above cleanly, so
     //   this points specifically at the atomic-allocate-then-scatter-write pattern
@@ -251,9 +264,15 @@ public abstract partial class BackendTestBase
         // Build the small dataset once (GPU dispatch, already proven correct by the prior test)
         // and copy it to host so the CPU reference path has a plain array to index.
         using var datasetBuf = accelerator.Allocate1D<Element256>(n);
+        // See the dataset-generation test above for why these are real 1-element buffers, not
+        // ArrayView.Empty (WebGPU crashes, Wasm silently corrupts results on an empty view arg).
+        using var unusedChunk1 = accelerator.Allocate1D<Element256>(1);
+        using var unusedChunk2 = accelerator.Allocate1D<Element256>(1);
+        using var unusedChunk3 = accelerator.Allocate1D<Element256>(1);
         var genKernel = accelerator.LoadAutoGroupedStreamKernel<
-            Index1D, ArrayView<Element256>, uint>(Autolykos2.GenerateDatasetKernel);
-        genKernel(n, datasetBuf.View, height);
+            Index1D, uint, ArrayView<Element256>, ArrayView<Element256>, ArrayView<Element256>, ArrayView<Element256>, uint>(
+            Autolykos2.GenerateDatasetKernel);
+        genKernel(n, (uint)n, datasetBuf.View, unusedChunk1.View, unusedChunk2.View, unusedChunk3.View, height);
         await accelerator.SynchronizeAsync();
         Element256[] hostDataset = await datasetBuf.CopyToHostAsync();
 
@@ -294,10 +313,11 @@ public abstract partial class BackendTestBase
         winningCount.MemSetToZero();
 
         var mineKernel = accelerator.LoadAutoGroupedStreamKernel<
-            Index1D, ArrayView<Element256>, uint, ulong, ulong, ulong, ulong, ulong,
-            ulong, ulong, ulong, ulong, ArrayView<ulong>, ArrayView<int>>(Autolykos2.MineKernel);
-        mineKernel(nonceRange, datasetBuf.View, n, nonceBase, h0m, h1m, h2m, h3m,
-            target0, target1, target2, target3, winningNonces.View, winningCount.View);
+            Index1D, uint, ArrayView<Element256>, ArrayView<Element256>, ArrayView<Element256>, ArrayView<Element256>, uint,
+            ulong, Element256, Element256, ArrayView<ulong>, ArrayView<int>>(Autolykos2.MineKernel);
+        mineKernel(nonceRange, (uint)n, datasetBuf.View, unusedChunk1.View, unusedChunk2.View, unusedChunk3.View,
+            n, nonceBase, new Element256(h0m, h1m, h2m, h3m), new Element256(target0, target1, target2, target3),
+            winningNonces.View, winningCount.View);
         await accelerator.SynchronizeAsync();
 
         int gpuCount = (await winningCount.CopyToHostAsync())[0];
