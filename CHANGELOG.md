@@ -1,6 +1,90 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.14 - Browser backends: [NoInlining] helper functions compile correctly; loop phi copies, switch, 64-bit converts (fork 2.3.3)
+
+Every fix below is a silent wrong result (or a hang) on WebGPU, WebGL and/or Wasm; CUDA, OpenCL and CPU
+were always correct. New gates in `BackendTestBase.NoInliningHelperControlFlow.cs` check OUTPUT against the
+CPU oracle, in a kernel body AND in a `[MethodImpl(MethodImplOptions.NoInlining)]` helper, on all backends.
+
+### Fixed - loops and branches inside a NoInlining helper function were dropped (WebGPU, WebGL)
+
+A helper that is emitted as its own shader function (rather than inlined) and has more than one basic
+block - any loop, any if/else - lost its control flow. The helper emitters read each block's terminator
+from the block's value list, which never contains it. On WebGL every loop and branch was flattened into
+straight-line code (a 63-iteration loop ran once); on WebGPU the `switch(current_block)` state machine
+never advanced and spun until the GPU gave up (the helper returned 0). WGSL now emits the terminators;
+GLSL helpers now use the same structured for/if/break/continue walker as kernel bodies (moved into the
+shared `GLSLCodeGenerator`), declaring every variable at function scope. A non-void WGSL helper returning
+from inside that state machine also emitted a bare `return;` - now `return value;`.
+
+### Fixed - loops that rotate or swap loop-carried values (WebGPU, WebGL, Wasm - kernels and helpers)
+
+The phi copies taken on one control-flow edge were emitted one after another, so `t = a; a = b; b = t;`
+style loops read a variable the same edge had already overwritten. They are now a parallel copy
+(`PhiParallelCopy`: WGSL/GLSL stage conflicting sources in temporaries; Wasm pushes every source before
+setting any local, including the SIMD path's header phis).
+
+### Fixed - Wasm updated BOTH successors' phis before a conditional branch
+
+Leaving a do-while through its latch also overwrote the loop header's phis, so code after the loop that
+read the value from the top of the last iteration saw the next iteration's value. Each arm of an
+IfBranch/SwitchBranch now copies only its own edge's phis.
+
+### Fixed - `switch` statements were dropped by the structured walkers (WebGPU and WebGL kernels, WebGL helpers)
+
+Neither the GLSL nor the WGSL structured walker had a SwitchBranch case: the switch and the rest of the
+enclosing loop body vanished, leaving a loop that never advanced. Both now lower it to an if / else-if
+chain on the selector (not a WGSL `switch`, whose `break` exits the switch instead of the loop). An
+unrecognized terminator now throws instead of silently ending the walk.
+
+### Fixed - Wasm helper scratch: uninitialized base, and regions smaller than the helper
+
+A kernel or helper without barriers never initialized the scratch-base local it passes to a multi-block
+helper, so the helper kept its locals (e.g. ones passed `ref` to another helper) at address 0 - on top of
+buffer data and every other thread's copy; wrong values that changed from run to run. Separately, every
+caller reserved a helper's region from a pre-generation ESTIMATE, and a helper could need more
+(`FusedActivate`: 1352 bytes against 648 reserved) - it wrote past its region into the next one or into
+the next thread's scratch. Regions are now laid out after all helpers are generated, from their actual
+sizes (nested helpers included): the region-base constants are emitted patchable and rewritten, and
+`ScratchPerThread` follows.
+
+### Fixed - Wasm negated a bool bitwise
+
+Logical NOT of a bool (an i32 0/1) was emitted as `x ^ -1`, which is never zero, so a branch on
+`!flag` - or `if (flag)`, which reaches the backend as a negation - always went the same way. Surfaced by
+a bool parameter of a NoInlining helper (`Blake2b.Compress`'s `isLastBlock`); an inlined call with a
+constant argument folds it away.
+
+### Fixed - helper-function codegen that had drifted from the kernel codegen
+
+- GLSL: `(ulong)someUint` in a helper emitted `uvec2(x)`, which replicates x into BOTH words; WGSL helpers
+  zero-extended every 32-to-64-bit widening (`(long)negativeInt` came out positive), stored an f32 widened
+  to emulated f64 as raw float bits, and narrowed emulated f64 by taking `.x`. Kernel bodies and helpers
+  now share one conversion builder per backend (`BuildConvertExpression`).
+- Kernel bodies too: a `uint` widened to `long`/`ulong` on WebGL was SIGN-extended (wrong for values
+  >= 2^31); it now zero-extends.
+- WGSL helpers: `uint >>`, `/` and `%` used the signed i32 operators; they now go through u32 like the
+  kernel path.
+- GLSL: a call to a user method whose NAME contained Sin, Exp, Log, Abs, Min, Max, Sign, Round, Pow, Tan,
+  Mix, ... was replaced by the GLSL builtin of that name (`SinglePass`, `Absorb`, `LogEntry`, a mixer named
+  `Mix`). A method with a body is now always a real call; the name table only sees methods without one.
+
+### Changed - constant 64-bit shifts on the emulated backends are branch-free (WebGPU, WebGL)
+
+A 64-bit shift by a compile-time constant - every rotate `(x >> n) | (x << (64 - n))` - now emits the
+lo/hi word arithmetic for that exact amount instead of a call to the general emulated shift, whose three
+runtime branches the driver compiler re-processes at every inlined call site. Same result for every
+amount (0, 1-31, 32-63, >= 64). One Blake2b compression compiled in 1.5 s instead of 2.4 s on WebGPU.
+
+### Changed - `Blake2b.Compress` is NoInlining
+
+One compression body per shader instead of one per call site (Autolykos2's dataset element calls it 65
+times). All Autolykos2 tests pass on CPU, CUDA, OpenCL, WebGPU and Wasm - including
+`Autolykos2_Mine_SmallN_FindsKnownHits` on Wasm, which failed before this release. WebGL's
+`DatasetGeneration_SmallN` / `Mine_SmallN` still exceed the 30 s test timeout in the driver's shader
+compile (ANGLE -> D3D FXC: ~8.7 s for ONE compression body), not in execution.
+
 ## 5.2.13 - WebGL: emulated 64-bit arithmetic correctness fix in NoInlining helper functions (fork 2.3.3)
 
 ### Fixed - emulated 64-bit Add/Sub/Mul in standalone WebGL helper functions silently dropped the carry/borrow
