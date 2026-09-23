@@ -1,6 +1,26 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.16 - Fork 2.3.5: the RoundToEven fix that 2.3.4 was meant to carry
+
+**SpawnDev.ILGPU.Algorithms.Fork 2.3.4 (paired with SpawnDev.ILGPU 5.2.15) does not contain the CUDA/PTX
+`XMath.RoundToEven` fix listed under 5.2.15** - its ties-to-even test still reads the mantissa field, so 1.5
+rounds to 1 on the backends that use XMath's rounding implementation. The fix was made in
+`ILGPU.Algorithms/XMath/RoundingModes.cs`, which is generated from `RoundingModes.tt`; the clean release
+build re-ran the template and silently restored the old code. The PMT sweep for 5.2.15 ran before that
+rebuild, so it tested the fixed code. Verified on the published DLL's IL (`ldloc mantissa` vs `ldloc bits`).
+
+- The fix is now in `RoundingModes.tt`; regenerating reproduces the committed `.cs` exactly.
+- `_check-tt-drift.bat` built only `ILGPU.csproj`, so it never re-ran the ILGPU.Algorithms templates and
+  could not have caught this; it now builds ILGPU.Algorithms (which builds ILGPU). It also crashed on its
+  own drift message (an unescaped parenthesis inside an `if` block). Red-checked: it reports this drift
+  with the unfixed template and passes with the fixed one.
+- PlaywrightMultiTest: a browser project that failed to initialize was only logged (every browser test
+  vanished and the run passed); it now fails the project's Build test.
+- Examples 01-04 on the current package.
+
+Library code is otherwise identical to 5.2.15.
+
 ## 5.2.15 - Emulated double: exact conversions and rounding, shaders that compile in seconds (fork 2.3.4)
 
 Emulated `double` (WebGPU and WebGL, Dekker vec2 and Ozaki vec4) is now exact where it was approximate,

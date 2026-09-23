@@ -208,7 +208,9 @@ namespace ILGPU.Algorithms
                         // The fractional part is exactly x.5 - Round To Even.
                         var evenMask = midpoint << 1;
                         return Utilities.Select(
-                            (mantissa & evenMask) == 0,
+                            (bits & evenMask) == 0, // bits, not mantissa: for 1 <= |x| < 2 the integer part's
+                            // low bit is the IMPLICIT 1 (the exponent field's low bit here), which the
+                            // mantissa mask drops - 1.5 rounded to 1 instead of 2.
                             Interop.IntAsFloat(truncatedValue),
                             Interop.IntAsFloat(truncatedValue + (midpoint << 1)));
                     }

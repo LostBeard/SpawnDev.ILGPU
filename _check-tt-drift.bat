@@ -22,7 +22,10 @@ REM mirroring CI's fresh-clone behavior (where all files have equal mtime). With
 REM flag, T4.Build's --skip-up-to-date check sees the working-tree .cs mtime as newer
 REM than the .tt and skips regen, which lets local builds silently pass while CI fails.
 REM Hit this 2026-04-28 - local drift check passed, CI flagged ArithmeticOperations.cs.
-dotnet build ILGPU\ILGPU.csproj -c Release --nologo -p:TextTemplateTransformSkipUpToDate=false
+REM Build ILGPU.Algorithms (it builds ILGPU too): building only ILGPU.csproj never re-ran the
+REM Algorithms templates, so a hand edit to ILGPU.Algorithms/XMath/RoundingModes.cs went unnoticed and was
+REM reverted by the next clean build - into the published SpawnDev.ILGPU.Algorithms.Fork 2.3.4 (2026-09-23).
+dotnet build ILGPU.Algorithms\ILGPU.Algorithms.csproj -c Release --nologo -p:TextTemplateTransformSkipUpToDate=false
 if errorlevel 1 (
     echo [tt-drift] BUILD FAILED. Fix compile errors first, then re-run drift check.
     exit /b 1
@@ -44,7 +47,7 @@ if defined drifted (
     echo [tt-drift] because T4 was skipped; CI's clean build runs T4 fresh.
     echo.
     echo [tt-drift] Fix: port the manual edit to the matching .tt, regen the .cs
-    echo [tt-drift] (this script just regenerated them), commit BOTH together.
+    echo [tt-drift] ^(this script just regenerated them^), commit BOTH together.
     echo.
     echo [tt-drift] See Docs/development.md for the full pattern.
     exit /b 1
