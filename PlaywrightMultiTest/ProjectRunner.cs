@@ -406,6 +406,11 @@ namespace PlaywrightMultiTest
                     catch (Exception ex)
                     {
                         LogStatus($"Error initializing {project.Name}: {ex.Message}");
+                        // ⚠️ FAIL THE RUN. This catch used to only log, so a browser that closed on launch
+                        // (the bundled Chromium under --disable-software-rasterizer does) dropped EVERY
+                        // browser test and the sweep still reported Passed. Found 2026-09-23 red-checking
+                        // the WebGPU adapter probe in SpawnDev.VoxelEngine.
+                        buildTest.SetError($"{project.Name} failed to initialize - none of its browser tests ran: {ex.Message}");
                     }
                 }
                 else if (project.AppProjectType == ProjectType.Exe)
