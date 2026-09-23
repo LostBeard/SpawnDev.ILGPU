@@ -388,6 +388,7 @@ namespace PlaywrightMultiTest
 
                             // Backend scoping (PMT_LANES) - applied like the name filter, before the
                             // test is ever scheduled.
+                            if (!string.IsNullOrEmpty(typeName)) _enumeratedTypeNames.Add(typeName);
                             if (!MatchesLane(laneFilter, typeName))
                             {
                                 continue;
@@ -461,6 +462,7 @@ namespace PlaywrightMultiTest
                         // ⚠️ THE SECOND ENUMERATION SITE. PMT_LANES was first applied only at the
                         // browser site; the desktop lane then still ran unfiltered, which looks exactly
                         // like the filter not working.
+                        if (!string.IsNullOrEmpty(typeName)) _enumeratedTypeNames.Add(typeName);
                         if (!MatchesLane(laneFilter, typeName))
                         {
                             continue;
@@ -492,7 +494,10 @@ namespace PlaywrightMultiTest
                             var unitTest = testResltTest != null ? JsonSerializer.Deserialize<UnitTest>(testResltTest) : null;
                             if (unitTest == null)
                             {
-                                throw new Exception("Test run failed");
+                                // No TEST: line means the test process died before reporting (a native crash, a
+                                // runtime abort) - say how it exited and what it printed last, not just "failed".
+                                var tail = string.Join("\n", resultLines.TakeLast(15));
+                                throw new Exception($"Test run failed: the test process exited with code {result.ExitCode} (0x{result.ExitCode:X8}) without reporting a result. Last output:\n{tail}");
                             }
                             var stateMessage = unitTest.ResultText;
                             rowTest.Result = unitTest.Result;
@@ -536,10 +541,24 @@ namespace PlaywrightMultiTest
                     var nmt11 = true;
                 }
             }
+            // A scope that selects nothing must FAIL, not pass. With PMT_FILTER / PMT_LANES matching zero
+            // real tests only the Build rows remain, the run reports "Passed!" and it reads exactly like the
+            // scoped test passing. PMT_LANES matches the test CLASS name (DesktopXTests, WebGPUTests, ...),
+            // not a lane label like "cpu", which is the easy way to hit this.
+            if ((!string.IsNullOrEmpty(filter) || laneFilter != null)
+                && TestableProjects.Count > 0
+                && !TestableProjects.Any(p => p.Tests.Any(t => t.TestTypeName != null)))
+            {
+                var scopeTest = new ProjectTest(TestableProjects[0], "PMT scope matched no tests");
+                scopeTest.SetError($"PMT_FILTER='{filter}' PMT_LANES='{(laneFilter == null ? "" : string.Join(",", laneFilter))}' selected 0 tests. PMT_LANES matches test class names; the classes here are: {string.Join(", ", _enumeratedTypeNames.Distinct())}");
+                TestableProjects[0].Tests.Add(scopeTest);
+            }
             LogStatus($"Init() complete. Total projects={TestableProjects.Count}, " +
                 $"total tests={TestableProjects.Sum(p => p.Tests.Count)}");
             var nmt = true;
         }
+        // Every test class name seen during enumeration, before scoping - named in the "matched no tests" error.
+        readonly List<string> _enumeratedTypeNames = new();
         IEnumerable<TestCaseData>? _TestCases;
         public IEnumerable<TestCaseData> TestCases => _TestCases ??= GetPlaywrightTasks();
 
