@@ -21,6 +21,18 @@
         // onSubmittedWorkDone / SynchronizeAsync for that). Reading performance.now() is ~free,
         // so this records unconditionally; .NET fetches it on demand only.
         last: { ops: 0, encodeMs: 0, submitMs: 0 },
+        // ── Interop cost probes ─────────────────────────────────────────────────────────────────
+        // These do NOTHING on purpose. device.createBindGroup measured 1.14 ms per call in a Kokoro
+        // pass (2,117 ms of 2,128 ms of the whole bind-group phase), and "1.14 ms" has three possible
+        // owners with three different fixes: the .NET->JS crossing itself, MARSHALLING the descriptor
+        // (its members are walked and rebuilt as a JS object per call - a layout reference, an entries
+        // array, and a nested resource object per entry - so the cost scales with members), or Dawn's
+        // own validation. A no-op crossing brackets the first; a no-op crossing that still marshals the
+        // descriptor brackets the first two; whatever the real call costs beyond that is Dawn's.
+        // noopDescriptor touches .entries.length so the marshalled object cannot be optimised away.
+        noop(x) { return x | 0; },
+        noopDescriptor(desc) { return desc && desc.entries ? desc.entries.length : 0; },
+
         // Rewrite the dstOffset (slot [i*7+4]) of copy entries in place - the patch surface for
         // parameterized replay (e.g. a KV-cache append whose destination row advances per decode
         // token). Entries must be tag-1 copies; throws otherwise (a wrong index would silently
@@ -32,14 +44,38 @@
                 plan[i + 4] = newDstOffsets[k];
             }
         },
-        // Replays a recorded plan on the given device: one encoder, one pass per dispatch
-        // (pass-per-dispatch keeps storage-buffer write->read ordering guarantees airtight),
-        // copies/clears encoded inline in captured order, one queue submit.
+        // Replays a recorded plan on the given device: one pass per dispatch (pass-per-dispatch keeps
+        // storage-buffer write->read ordering guarantees airtight), copies/clears encoded inline in
+        // captured order, submitted in BATCHES of maxPassesPerSubmit compute passes.
         // Returns the number of operations encoded.
-        replay(device, plan) {
+        //
+        // 🔴 WHY THIS BATCHES INSTEAD OF SUBMITTING ONCE. It used to encode the whole plan into a
+        // single command encoder and issue one queue.submit(). That is fine for a small plan and it
+        // LOSES THE DEVICE for a large one: MEASURED 2026-09-15, Kokoro at input_ids[1,360] replayed
+        // and Chrome came back "WebGPU device has been lost and cannot accept commands" - the GPU
+        // watchdog killing a single command buffer that ran too long. A 35-token Kokoro plan is
+        // already 3,155 dispatches; the 360-token one is several times that, in ONE buffer, with no
+        // point at which the driver can preempt.
+        //
+        // The uncaptured path never had this problem because WebGPUStream flushes as it goes - the
+        // library's own documented rule is "if dispatching many kernels (>50), call Flush() every
+        // 16-32 dispatches". Capture replay was the one path that ignored it. Splitting into several
+        // command buffers changes nothing about ordering: buffers submitted to the same queue execute
+        // in submission order, and the implicit inter-pass synchronization is per-queue, not
+        // per-buffer.
+        replay(device, plan, maxPassesPerSubmit) {
             const t0 = performance.now();
-            const enc = device.createCommandEncoder();
+            const cap = (maxPassesPerSubmit > 0) ? (maxPassesPerSubmit | 0) : 0x7fffffff;
             const n = plan.length;
+            let enc = device.createCommandEncoder();
+            let passesInBatch = 0;
+            let submitMs = 0;
+            const flush = () => {
+                const s0 = performance.now();
+                device.queue.submit([enc.finish()]);
+                submitMs += performance.now() - s0;
+                passesInBatch = 0;
+            };
             for (let i = 0; i < n; i += 7) {
                 const tag = plan[i];
                 if (tag === 0) {
@@ -48,6 +84,11 @@
                     pass.setBindGroup(0, plan[i + 2]);
                     pass.dispatchWorkgroups(plan[i + 3], plan[i + 4], plan[i + 5]);
                     pass.end();
+                    // Close the batch only BETWEEN operations, never inside a pass.
+                    if (++passesInBatch >= cap) {
+                        flush();
+                        enc = device.createCommandEncoder();
+                    }
                 } else if (tag === 1) {
                     enc.copyBufferToBuffer(plan[i + 1], plan[i + 2], plan[i + 3], plan[i + 4], plan[i + 5]);
                 } else if (tag === 2) {
@@ -55,11 +96,10 @@
                 }
             }
             const t1 = performance.now();
-            device.queue.submit([enc.finish()]);
-            const t2 = performance.now();
+            flush();                     // the tail (a no-op encoder submits an empty buffer, which is legal)
             api.last.ops = n / 7;
-            api.last.encodeMs = t1 - t0;
-            api.last.submitMs = t2 - t1;
+            api.last.encodeMs = (t1 - t0) - submitMs;
+            api.last.submitMs = submitMs;
             return n / 7;
         },
         // Replays the plan with per-pass GPU timestamps and returns a JSON string aggregating GPU

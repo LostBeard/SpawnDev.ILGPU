@@ -442,6 +442,12 @@ function dispatchKernel(msg) {
     const uOneLoc = getUniformLoc(cached, 'u_one');
     if (uOneLoc !== null) gl.uniform1f(uOneLoc, 1.0);
 
+    // ---- Loop guard: every generated loop runs `_loopN < u_loopLimit` (GLSLCodeGenerator). A uniform so
+    // D3D's FXC cannot see a trip count (its loop analysis is superlinear in the body); int max so no
+    // real loop is ever cut short. Absent (null) when the shader has no loops.
+    const uLoopLimitLoc = getUniformLoc(cached, 'u_loopLimit');
+    if (uLoopLimitLoc !== null) gl.uniform1i(uLoopLimitLoc, 2147483647);
+
     // ---- Step 2: Dimension uniforms ----
     const dimWLoc = getUniformLoc(cached, 'u_dimWidth');
     if (dimWLoc) gl.uniform1i(dimWLoc, dimX);
@@ -680,13 +686,74 @@ function dispatchKernel(msg) {
             const destView = entry.data;
             const writeOffset = out.writeByteOffset;
 
-            if (out.isEmulated && out.emulatedSuffix === 'lo') {
+            if (out.fieldIndex >= 0) {
+                // Struct field output - either a plain scalar field, or the 'lo' half of a
+                // 64-bit emulated field ('hi' halves were already skipped above). Checked
+                // BEFORE the plain isEmulated/'lo' branch below because a struct field's
+                // lo varying also has isEmulated=true, but must NOT go through the flat
+                // (non-struct) 8-bytes-per-vertex reconstruction - it's one field of a
+                // larger per-vertex struct record, at its own byte offset within it.
+                //
+                // Run the whole-struct reconstruction exactly once, triggered by the first
+                // (lowest outputIndex) struct-field varying for this param.
+                const structVaryings = outputs.filter(o => o.paramIndex === out.paramIndex && o.fieldIndex >= 0);
+                if (structVaryings[0].outputIndex !== out.outputIndex) continue;
+
+                // One representative varying per logical field (its 'lo' half for an
+                // emulated 64-bit field, the field itself otherwise), in field order. Each
+                // carries the field's REAL byte offset and size inside the element and the
+                // element size, from ILGPU's struct layout (GLSLKernelFunctionGenerator
+                // StructLeaf) - alignment padding included, so { int; long; } puts the long at
+                // byte 8. Only the field's own bytes are written: a sub-4-byte field copies the
+                // low bytes of its 32-bit varying and never touches its neighbours.
+                const maxFieldIndex = Math.max(...structVaryings.map(o => o.fieldIndex));
+                const fieldsInOrder = [];
+                for (let f = 0; f <= maxFieldIndex; f++) {
+                    const forField = structVaryings.filter(o => o.fieldIndex === f);
+                    fieldsInOrder.push(forField.find(o => o.emulatedSuffix === 'lo') || forField[0]);
+                }
+                const fieldByteWidths = fieldsInOrder.map(o => o.fieldByteSize);
+                const structElemSize = fieldsInOrder[0].structByteSize;
+                const fieldByteOffsets = fieldsInOrder.map(o => o.fieldByteOffset);
+
+                const elemCount = Math.min(totalVertices, Math.floor(out.writeLengthBytes / structElemSize));
+                for (let v = 0; v < elemCount; v++) {
+                    for (let fi = 0; fi < fieldsInOrder.length; fi++) {
+                        const fieldOut = fieldsInOrder[fi];
+                        const dstOff = writeOffset + v * structElemSize + fieldByteOffsets[fi];
+                        const srcOff = v * strideBytes + fieldOut.outputIndex * 4;
+                        if (srcOff + 4 > readbackBytes.length) continue;
+                        const loBytes = Math.min(fieldByteWidths[fi], 4);
+                        for (let b = 0; b < loBytes; b++) destView[dstOff + b] = readbackBytes[srcOff + b];
+                        if (fieldByteWidths[fi] === 8) {
+                            const hiSrc = v * strideBytes + (fieldOut.outputIndex + 1) * 4;
+                            destView[dstOff + 4] = readbackBytes[hiSrc];
+                            destView[dstOff + 5] = readbackBytes[hiSrc + 1];
+                            destView[dstOff + 6] = readbackBytes[hiSrc + 2];
+                            destView[dstOff + 7] = readbackBytes[hiSrc + 3];
+                        }
+                    }
+                }
+            } else if (out.isEmulated && out.emulatedSuffix === 'lo') {
+                // A thread that stores MULTIPLE emulated-64-bit elements into this buffer
+                // (positional multi-store, e.g. digest[base+0..3] = o0..o3, each 8 bytes) gets
+                // one lo/hi varying PAIR per slot (EmitOutputVaryings' emuStoreCount branch) -
+                // place each slot at its own offset within the per-vertex record instead of
+                // always writeOffset + v*8 (which only ever wrote slot 0's storage location,
+                // repeatedly, for every slot - the actual root cause of the "Compress ref
+                // write-back" symptom: every store after the first silently overwrote the same
+                // 8 bytes, so only the LAST store's value ever reached the host, discovered and
+                // fixed 2026-09-22 with a minimal repro that reproduced it standalone, no ref
+                // params or fn-def calls needed at all).
+                const emuStoreCount = out.storeCount || 1;
+                const emuSlot = out.storeSlot >= 0 ? out.storeSlot : 0;
+                const emuBytesPerVertex = emuStoreCount * 8;
                 const hiOutIdx = out.outputIndex + 1;
-                const elemCount = Math.min(totalVertices, Math.floor(out.writeLengthBytes / 8));
+                const elemCount = Math.min(totalVertices, Math.floor(out.writeLengthBytes / emuBytesPerVertex));
                 for (let v = 0; v < elemCount; v++) {
                     const loSrc = v * strideBytes + out.outputIndex * 4;
                     const hiSrc = v * strideBytes + hiOutIdx * 4;
-                    const dst = writeOffset + v * 8;
+                    const dst = writeOffset + v * emuBytesPerVertex + emuSlot * 8;
                     destView[dst] = readbackBytes[loSrc];
                     destView[dst + 1] = readbackBytes[loSrc + 1];
                     destView[dst + 2] = readbackBytes[loSrc + 2];
@@ -695,25 +762,6 @@ function dispatchKernel(msg) {
                     destView[dst + 5] = readbackBytes[hiSrc + 1];
                     destView[dst + 6] = readbackBytes[hiSrc + 2];
                     destView[dst + 7] = readbackBytes[hiSrc + 3];
-                }
-            } else if (out.fieldIndex >= 0 && out.fieldIndex === 0) {
-                const structFields = outputs.filter(o => o.paramIndex === out.paramIndex && o.fieldIndex >= 0)
-                    .sort((a, b) => a.fieldIndex - b.fieldIndex);
-                const fieldCount = structFields.length;
-                const structElemSize = fieldCount * 4;
-                const elemCount = Math.min(totalVertices, Math.floor(out.writeLengthBytes / structElemSize));
-                for (let v = 0; v < elemCount; v++) {
-                    for (let fi = 0; fi < fieldCount; fi++) {
-                        const fieldOut = structFields[fi];
-                        const srcOff = v * strideBytes + fieldOut.outputIndex * 4;
-                        const dstOff = writeOffset + v * structElemSize + fi * 4;
-                        if (srcOff + 4 <= readbackBytes.length) {
-                            destView[dstOff] = readbackBytes[srcOff];
-                            destView[dstOff + 1] = readbackBytes[srcOff + 1];
-                            destView[dstOff + 2] = readbackBytes[srcOff + 2];
-                            destView[dstOff + 3] = readbackBytes[srcOff + 3];
-                        }
-                    }
                 }
             } else if (out.fieldIndex < 0) {
                 const storeCount = out.storeCount || 1;
