@@ -598,9 +598,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (loop != null)
             {
                 // ANGLE D3D11 crashes on while(true) — use bounded for loop instead.
-                // The loop body's own break/condition controls actual iteration.
+                // The loop body's own break/condition controls actual iteration. The bound is the
+                // u_loopLimit UNIFORM (int.MaxValue at runtime), never a literal: FXC's loop analysis
+                // on a loop with a visible trip count is superlinear in the body (see WebGLBackend's
+                // declaration), and a literal cap silently cut long loops short.
                 var loopVarName = $"_loop{_loopCounter++}";
-                AppendLine($"for (int {loopVarName} = 0; {loopVarName} < 100000; {loopVarName}++) {{");
+                AppendLine($"for (int {loopVarName} = 0; {loopVarName} < u_loopLimit; {loopVarName}++) {{");
                 PushIndent();
 
                 _activeLoopHeaders.Push(current);

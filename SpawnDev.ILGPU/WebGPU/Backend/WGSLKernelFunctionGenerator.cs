@@ -258,15 +258,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         // --- Packed Struct Support ---
         // When a view's element type is a struct containing emulated 64-bit fields (emu_f64, emu_i64, emu_u64),
         // the WGSL struct's std430 alignment may differ from the CPU struct's layout. For example:
-        //   RadixSortPair<double, int> on CPU: 8 (double) + 4 (int) = 12 bytes
+        //   RadixSortPair<double, int> on CPU: double @0, int @8, 16 bytes (4 of trailing padding)
         //   In WGSL with Ozaki emu_f64=vec4<f32>: stride = roundup(16, 16+4) = 32 bytes  ← mismatch!
-        // Fix: bind such struct arrays as array<u32> using the CPU field layout (packed), so the shader
-        // uses the same byte offsets as the host allocator.
+        // Fix: bind such struct arrays as array<u32> addressed with the CPU layout - ILGPU's field
+        // offsets and element size, padding included - so the shader uses the same byte offsets as
+        // the host allocator.
         private struct PackedStructFieldInfo
         {
             public string WgslType;      // e.g. "emu_f64", "emu_i64", "i32", "f32", etc.
             public int U32Offset;        // offset in u32 units from element start
             public int U32Count;         // number of u32s this field occupies
+            public int StrideU32s;       // u32s per ELEMENT (the struct's size / 4, trailing padding included)
+            public int BitShift;         // sub-word field (byte/short): bit position inside its u32 word
+            public int BitWidth;         // 32 for a whole-word field, 64 for an emulated one, 8/16 for a sub-word one
+            public int ByteOffset;       // byte offset from element start (the layout's source of truth)
+            public int ElemBytes;        // the struct's size in bytes
+            public bool ByteAddressed;   // size not a multiple of 4: elements share u32 words, so the binding is
+                                         // atomic<u32>, _base_idx is a BYTE index and stores are atomic RMW
             public bool IsEmuF64;        // field maps to emu_f64 (f64_to/from_ieee754_bits needed)
             public bool IsEmuI64OrU64;   // field maps to emu_i64 or emu_u64
         }
@@ -1426,53 +1434,157 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
         /// <summary>
+        /// Value of a packed-struct field that is NOT emulated 64-bit, read from its u32 word. A sub-word
+        /// field (byte / short) is extracted zero-extended - the backend's register convention for
+        /// sub-word values; a signed use re-extends at its widening convert.
+        /// </summary>
+        private static string PackedFieldFromWord(string wordRef, PackedStructFieldInfo field)
+        {
+            if (field.BitWidth < 32)
+            {
+                uint mask = (1u << field.BitWidth) - 1u;
+                string raw = $"(({wordRef} >> {field.BitShift}u) & {mask}u)";
+                return field.WgslType == "i32" ? $"i32({raw})" : raw;
+            }
+            return field.WgslType switch
+            {
+                "i32" => $"bitcast<i32>({wordRef})",
+                "f32" => $"bitcast<f32>({wordRef})",
+                "bool" => $"bool({wordRef})",
+                _ => wordRef, // u32
+            };
+        }
+
+        /// <summary>
+        /// Value of a field of a BYTE-ADDRESSED packed struct (see <see cref="PackedStructFieldInfo.ByteAddressed"/>)
+        /// at byte index <paramref name="byteIdx"/> of the atomic&lt;u32&gt; binding <paramref name="binding"/>.
+        /// </summary>
+        private static string ByteAddressedFieldLoad(string binding, string byteIdx, PackedStructFieldInfo field)
+        {
+            uint mask = (1u << field.BitWidth) - 1u;
+            string raw = $"((atomicLoad(&(*{binding})[u32({byteIdx}) >> 2u]) >> ((u32({byteIdx}) & 3u) * 8u)) & {mask}u)";
+            return field.WgslType == "i32" ? $"i32({raw})" : raw;
+        }
+
+        /// <summary>
+        /// Statements storing a field of a BYTE-ADDRESSED packed struct: neighbouring ELEMENTS share its u32
+        /// word, so the field's bits are cleared and set with atomicAnd / atomicOr (the sub-word view RMW).
+        /// </summary>
+        private static string ByteAddressedFieldStore(string binding, string byteIdx, PackedStructFieldInfo field, string value)
+        {
+            uint mask = (1u << field.BitWidth) - 1u;
+            string word = $"&(*{binding})[u32({byteIdx}) >> 2u]";
+            string shift = $"((u32({byteIdx}) & 3u) * 8u)";
+            string asU32 = field.WgslType == "i32" ? $"bitcast<u32>({value})" : value;
+            return $"atomicAnd({word}, ~({mask}u << {shift})); atomicOr({word}, ({asU32} & {mask}u) << {shift});";
+        }
+
+        /// <summary>
+        /// Statement storing a NOT emulated 64-bit packed-struct field into its u32 word. A sub-word field
+        /// replaces only its own bits (read-modify-write of the element's own word - no other thread's
+        /// element shares it, since such a struct's size is a multiple of 8).
+        /// </summary>
+        private static string PackedFieldToWord(string wordRef, PackedStructFieldInfo field, string value)
+        {
+            string asU32 = field.WgslType switch
+            {
+                "i32" or "f32" => $"bitcast<u32>({value})",
+                "bool" => $"select(0u, 1u, {value})",
+                _ => value,
+            };
+            if (field.BitWidth < 32)
+            {
+                uint mask = (1u << field.BitWidth) - 1u;
+                uint keep = ~(mask << field.BitShift);
+                return $"{wordRef} = ({wordRef} & {keep}u) | (({asU32} & {mask}u) << {field.BitShift}u);";
+            }
+            return $"{wordRef} = {asU32};";
+        }
+
+        /// <summary>
         /// Computes the packed u32 layout for a struct type whose fields include emulated 64-bit types.
         /// Returns null if the struct does not contain any emulated 64-bit fields, or if any field
         /// has an unsupported type that cannot be packed into u32 slots.
         /// </summary>
         private List<PackedStructFieldInfo>? ComputePackedLayout(StructureType structType)
         {
+            // Field offsets and the element size come from ILGPU's layout, which matches the managed
+            // struct the host uploads byte for byte - alignment padding included. Packing fields back
+            // to back put { int A; long B; } 's B at word 1 instead of word 2 (and every later field
+            // one word early); summing field widths for the stride dropped trailing padding.
             var fields = new List<PackedStructFieldInfo>();
-            int u32Offset = 0;
-            bool hasEmuField = false;
-
-            foreach (var fieldType in structType.Fields)
+            bool hasEmuField = false, hasSubWordField = false, hasSubWordNonInt = false;
+            for (int fi = 0; fi < structType.NumFields; fi++)
             {
+                var fieldType = structType.Fields[fi];
                 string wgslType = TypeGenerator[fieldType];
                 bool isEmuF64 = Backend.EnableF64Emulation && wgslType == "emu_f64";
                 bool isEmuI64u64 = Backend.EnableI64Emulation &&
                                    (wgslType == "emu_i64" || wgslType == "emu_u64");
-                int u32Count;
-
                 if (isEmuF64 || isEmuI64u64)
-                {
-                    u32Count = 2;
                     hasEmuField = true;
-                }
-                else if (wgslType == "i32" || wgslType == "u32" || wgslType == "f32" ||
-                         wgslType == "f16" || wgslType == "i16" || wgslType == "u16" ||
-                         wgslType == "i8"  || wgslType == "u8"  || wgslType == "bool")
-                {
-                    u32Count = 1;
-                }
-                else
+                else if (wgslType != "i32" && wgslType != "u32" && wgslType != "f32")
                 {
                     // Nested struct or unsupported type — skip packed treatment for safety
-                    return null;
+                    if (fieldType is StructureType || fieldType.Size >= 4)
+                        return null;
                 }
+                if (fieldType is not StructureType && fieldType.Size < 4)
+                {
+                    hasSubWordField = true;
+                    if (!(fieldType is PrimitiveType swpt &&
+                          (swpt.BasicValueType == BasicValueType.Int8 || swpt.BasicValueType == BasicValueType.Int16)))
+                        hasSubWordNonInt = true;
+                }
+            }
+            // A struct with a byte / short field must be packed too: WGSL widens such a field to i32, so
+            // a plain array<struct> had a different stride and offsets from the host bytes
+            // ({ byte; sbyte; short; byte; } is 6 bytes on the host, 16 in WGSL).
+            if (!hasEmuField && !hasSubWordField)
+                return null;
+            // A Half / BFloat16 / FP8 / 4-bit field (a radix-sort pair key, say) keeps the native WGSL
+            // struct path when there is no 64-bit field: the packed path has no f16/fp8/nibble conversion
+            // for struct fields. Those buffers are consistent GPU-side (the radix pairs are GPU-internal),
+            // but their WGSL layout is NOT the host's - uploading or reading such a struct buffer from the
+            // host is not supported on WebGPU.
+            if (hasSubWordNonInt && !hasEmuField)
+                return null;
+            bool byteAddressed = structType.Size % 4 != 0;
+
+            for (int fi = 0; fi < structType.NumFields; fi++)
+            {
+                var fieldType = structType.Fields[fi];
+                string wgslType = TypeGenerator[fieldType];
+                bool isEmuF64 = Backend.EnableF64Emulation && wgslType == "emu_f64";
+                bool isEmuI64u64 = Backend.EnableI64Emulation &&
+                                   (wgslType == "emu_i64" || wgslType == "emu_u64");
+                int byteOffset = structType.GetOffset(new FieldAccess(fi));
+                int size = fieldType.Size;
+                bool subWordInt = size < 4 && fieldType is PrimitiveType spt &&
+                    (spt.BasicValueType == BasicValueType.Int8 || spt.BasicValueType == BasicValueType.Int16);
+                if ((size >= 4 && (byteOffset % 4 != 0 || byteAddressed)) || (size < 4 && !subWordInt))
+                    throw new NotSupportedException(
+                        $"WebGPU: a struct buffer element with 64-bit fields cannot hold field {fi} ({wgslType}, " +
+                        $"{size} bytes at byte {byteOffset} of a {structType.Size}-byte struct) - such structs are " +
+                        "addressed as u32 words; 16/8-bit float fields (Half, BFloat16, FP8) are not supported there. " +
+                        "Widen the field to float.");
 
                 fields.Add(new PackedStructFieldInfo
                 {
                     WgslType = wgslType,
-                    U32Offset = u32Offset,
-                    U32Count = u32Count,
+                    U32Offset = byteOffset / 4,
+                    U32Count = isEmuF64 || isEmuI64u64 ? 2 : 1,
+                    StrideU32s = structType.Size / 4,
+                    BitShift = size < 4 ? (byteOffset % 4) * 8 : 0,
+                    BitWidth = isEmuF64 || isEmuI64u64 ? 64 : Math.Min(size, 4) * 8,
+                    ByteOffset = byteOffset,
+                    ElemBytes = structType.Size,
+                    ByteAddressed = byteAddressed,
                     IsEmuF64 = isEmuF64,
                     IsEmuI64OrU64 = isEmuI64u64,
                 });
-                u32Offset += u32Count;
             }
-
-            return hasEmuField ? fields : null;
+            return fields;
         }
 
 
@@ -2084,10 +2196,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             {
                                 bindingWgslType = "u32";
                             }
-                            else if (_packedStructBSFieldLayouts.ContainsKey((param.Index, fi)))
+                            else if (_packedStructBSFieldLayouts.TryGetValue((param.Index, fi), out var declBsPsLayout))
                             {
                                 // Packed struct view field: bind as array<u32> using CPU layout packing
-                                bindingWgslType = "u32";
+                                // (atomic when elements share words)
+                                bindingWgslType = declBsPsLayout[0].ByteAddressed ? "atomic<u32>" : "u32";
                             }
                             else if (isSubWordField)
                             {
@@ -2280,9 +2393,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     {
                         bindingWgslType = "u32"; // Raw bits storage
                     }
-                    else if (_packedStructLayouts.ContainsKey(param.Index))
+                    else if (_packedStructLayouts.TryGetValue(param.Index, out var declPsLayout))
                     {
-                        bindingWgslType = "u32"; // Packed struct: CPU-layout u32 packing
+                        // Packed struct: CPU-layout u32 packing (atomic when elements share words)
+                        bindingWgslType = declPsLayout[0].ByteAddressed ? "atomic<u32>" : "u32";
                     }
                     else if (_subWordParams.ContainsKey(param.Index))
                     {
@@ -5356,9 +5470,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // Check for packed struct body-struct view field
                     if (_packedStructBSFieldLayouts.TryGetValue((bsParam.Index, fieldIdx), out var bsPsLayout))
                     {
-                        int psStrideU32s = bsPsLayout.Sum(f => f.U32Count);
+                        int psStrideU32s = bsPsLayout[0].StrideU32s;
                         AppendIndent();
-                        if (bsFields[fieldIdx].ViewOffsetSlot >= 0)
+                        if (bsPsLayout[0].ByteAddressed)
+                        {
+                            // BYTE index of the element; the view offset is in elements for such views.
+                            string elemIdx = bsFields[fieldIdx].ViewOffsetSlot >= 0
+                                ? $"(i32(_scalar_params[{bsFields[fieldIdx].ViewOffsetSlot}]) + i32({offsetExpr}))"
+                                : $"i32({offsetExpr})";
+                            if (bsFields[fieldIdx].ViewOffsetSlot >= 0) _bodyReferencesScalarParams = true;
+                            Builder.Append($"let {target.Name}_base_idx = {elemIdx} * {bsPsLayout[0].ElemBytes};");
+                        }
+                        else if (bsFields[fieldIdx].ViewOffsetSlot >= 0)
                         {
                             _bodyReferencesScalarParams = true;
                             int voSlotBS = bsFields[fieldIdx].ViewOffsetSlot;
@@ -5567,10 +5690,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // Check if this is a packed struct buffer (struct with emu fields, CPU-layout packed)
                     if (_packedStructLayouts.TryGetValue(param.Index, out var psLayout))
                     {
-                        int psStrideU32s = psLayout.Sum(f => f.U32Count);
+                        int psStrideU32s = psLayout[0].StrideU32s;
                         // base_idx = u32Offset + i * stride  (u32Offset already in scalar params as padding/4)
                         AppendIndent();
-                        if (hasViewOffset)
+                        if (psLayout[0].ByteAddressed)
+                            // BYTE index of the element; the view offset is in elements for such views.
+                            Builder.Append($"let {target.Name}_base_idx = {(hasViewOffset ? $"(i32(_scalar_params[{voSlot}]) + i32({offsetExpr}))" : $"i32({offsetExpr})")} * {psLayout[0].ElemBytes};");
+                        else if (hasViewOffset)
                             Builder.Append($"let {target.Name}_base_idx = i32(_scalar_params[{voSlot}]) + i32({offsetExpr}) * {psStrideU32s};");
                         else
                             Builder.Append($"let {target.Name}_base_idx = i32({offsetExpr}) * {psStrideU32s};");
@@ -5867,13 +5993,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 string baseIdxVar = $"{source}_base_idx";
                 string elemRef = $"(*{source})[u32({baseIdxVar})]";
-                string fieldExpr = psScalarLoad.FieldInfo.WgslType switch
-                {
-                    "i32" => $"bitcast<i32>({elemRef})",
-                    "f32" => $"bitcast<f32>({elemRef})",
-                    "bool" => $"bool({elemRef})",
-                    _ => elemRef  // u32 or other
-                };
+                string fieldExpr = psScalarLoad.FieldInfo.ByteAddressed
+                    ? ByteAddressedFieldLoad(source.ToString(), baseIdxVar, psScalarLoad.FieldInfo)
+                    : PackedFieldFromWord(elemRef, psScalarLoad.FieldInfo);
                 Declare(target);
                 AppendLine($"{target} = {fieldExpr};");
                 return;
@@ -5887,6 +6009,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 for (int fi = 0; fi < psLoadInfo.Layout.Count; fi++)
                 {
                     var field = psLoadInfo.Layout[fi];
+                    if (field.ByteAddressed)
+                    {
+                        AppendLine($"{target}.field_{fi} = {ByteAddressedFieldLoad(source.ToString(), $"({baseIdxVar} + {field.ByteOffset})", field)};");
+                        continue;
+                    }
                     string fieldRef = $"(*{source})[u32({baseIdxVar}) + {field.U32Offset}u]";
                     string fieldRef1 = $"(*{source})[u32({baseIdxVar}) + {field.U32Offset + 1}u]";
                     string fieldExpr;
@@ -5894,12 +6021,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         fieldExpr = $"f64_from_ieee754_bits({fieldRef}, {fieldRef1})";
                     else if (field.IsEmuI64OrU64)
                         fieldExpr = $"{field.WgslType}({fieldRef}, {fieldRef1})";
-                    else if (field.WgslType == "f32")
-                        fieldExpr = $"bitcast<f32>({fieldRef})";
-                    else if (field.WgslType == "i32")
-                        fieldExpr = $"bitcast<i32>({fieldRef})";
                     else
-                        fieldExpr = fieldRef; // u32 or other: raw u32
+                        fieldExpr = PackedFieldFromWord(fieldRef, field);
                     AppendLine($"{target}.field_{fi} = {fieldExpr};");
                 }
                 return;
@@ -6102,14 +6225,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (_packedScalarFieldPtrs.TryGetValue(address.ToString(), out var psScalarStore))
             {
                 string baseIdxVar = $"{address}_base_idx";
-                string storeExpr = psScalarStore.FieldInfo.WgslType switch
-                {
-                    "i32" => $"bitcast<u32>({val})",
-                    "f32" => $"bitcast<u32>({val})",
-                    "bool" => $"u32({val})",
-                    _ => $"{val}"  // u32 or other
-                };
-                AppendLine($"(*{address})[u32({baseIdxVar})] = {storeExpr};");
+                AppendLine(psScalarStore.FieldInfo.ByteAddressed
+                    ? ByteAddressedFieldStore(address.ToString(), baseIdxVar, psScalarStore.FieldInfo, val.ToString())
+                    : PackedFieldToWord($"(*{address})[u32({baseIdxVar})]", psScalarStore.FieldInfo, val.ToString()));
                 return;
             }
 
@@ -6120,6 +6238,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 for (int fi = 0; fi < psStoreInfo.Layout.Count; fi++)
                 {
                     var field = psStoreInfo.Layout[fi];
+                    if (field.ByteAddressed)
+                    {
+                        AppendLine(ByteAddressedFieldStore(address.ToString(), $"({baseIdxVar} + {field.ByteOffset})", field, $"{val}.field_{fi}"));
+                        continue;
+                    }
                     string slotRef = $"(*{address})[u32({baseIdxVar}) + {field.U32Offset}u]";
                     string slotRef1 = $"(*{address})[u32({baseIdxVar}) + {field.U32Offset + 1}u]";
                     if (field.IsEmuF64)
@@ -6134,13 +6257,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         AppendLine($"{slotRef} = {val}.field_{fi}.x;");
                         AppendLine($"{slotRef1} = {val}.field_{fi}.y;");
                     }
-                    else if (field.WgslType == "f32" || field.WgslType == "i32")
-                    {
-                        AppendLine($"{slotRef} = bitcast<u32>({val}.field_{fi});");
-                    }
                     else
                     {
-                        AppendLine($"{slotRef} = {val}.field_{fi};"); // u32 or other: direct
+                        AppendLine(PackedFieldToWord(slotRef, field, $"{val}.field_{fi}"));
                     }
                 }
                 return;
@@ -7318,8 +7437,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 // For packed struct params, arrayLength() returns u32 count — divide by stride
                                 if (_packedStructLayouts.TryGetValue(param.Index, out var psLenLayout2))
                                 {
-                                    int psStride2 = psLenLayout2.Sum(f => f.U32Count);
-                                    totalLen = $"({totalLen} / {psStride2})";
+                                    int psStride2 = psLenLayout2[0].StrideU32s;
+                                    totalLen = psLenLayout2[0].ByteAddressed
+                                        ? $"({totalLen} * 4 / {psLenLayout2[0].ElemBytes})"
+                                        : $"({totalLen} / {psStride2})";
                                 }
                                 // For sub-word params, arrayLength() returns atomic<u32> count
                                 if (_subWordParams.TryGetValue(param.Index, out var swMdElemSize))
@@ -7577,7 +7698,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     var field = psLFA.Layout[fieldIdx];
                     var target = Load(value);
                     string sourceBaseIdx = $"{sourceVar}_base_idx";
-                    AppendLine($"let {target.Name}_base_idx = {sourceBaseIdx} + {field.U32Offset};");
+                    AppendLine($"let {target.Name}_base_idx = {sourceBaseIdx} + {(field.ByteAddressed ? field.ByteOffset : field.U32Offset)};");
                     AppendLine($"let {target.Name} = &{psLFA.BindingName};");
                     if (field.IsEmuF64)
                         _emulatedVarMappings[target.Name] = (-1, -1, true);
@@ -7658,8 +7779,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // For packed struct params, arrayLength() returns u32 count — divide by stride to get logical element count
                 if (_packedStructLayouts.TryGetValue(param.Index, out var psLenLayout))
                 {
-                    int psStridelen = psLenLayout.Sum(f => f.U32Count);
-                    lengthExpr = $"({lengthExpr} / {psStridelen})";
+                    int psStridelen = psLenLayout[0].StrideU32s;
+                    lengthExpr = psLenLayout[0].ByteAddressed
+                        ? $"({lengthExpr} * 4 / {psLenLayout[0].ElemBytes})"
+                        : $"({lengthExpr} / {psStridelen})";
                 }
 
                 // For sub-word params, arrayLength() returns atomic<u32> count; logical element

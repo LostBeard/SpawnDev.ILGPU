@@ -75,6 +75,23 @@ namespace SpawnDev.ILGPU.WebGPU
         /// </summary>
         private const ulong MinStorageBufferOffsetAlignment = 256UL;
 
+        private static readonly ConcurrentDictionary<Type, int> _bitsPerElementCache = new();
+
+        /// <summary>
+        /// Bits one element of the view occupies in its buffer: 4 for a [PackedBits(4)] type, else its
+        /// size * 8 (the view's element type is its <c>ArrayView&lt;T&gt;</c> argument).
+        /// </summary>
+        private static int BitsPerElementOf(IContiguousArrayView view) =>
+            _bitsPerElementCache.GetOrAdd(view.GetType(), t =>
+            {
+                var elem = t.IsGenericType ? t.GetGenericArguments()[0] : null;
+                return elem != null && Attribute.GetCustomAttribute(elem, typeof(PackedBitsAttribute)) is PackedBitsAttribute pb && pb.Bits > 0
+                    ? pb.Bits
+                    : view.ElementSize * 8;
+            });
+
+        private static ulong Gcd(ulong a, ulong b) { while (b != 0) (a, b) = (b, a % b); return a; }
+
         /// <summary>
         /// True if the underlying GPU device has been lost (driver crash, GPU reset, etc.).
         /// </summary>
@@ -1812,6 +1829,18 @@ namespace SpawnDev.ILGPU.WebGPU
                         // satisfying WebGPU's writable storage buffer aliasing rules.
                         ulong rawOffset = (ulong)((long)contiguous.IndexInBytes);
                         ulong alignedOffset = rawOffset & ~(MinStorageBufferOffsetAlignment - 1);
+                        // Elements that are not whole u32 words (byte, short, Half, the packed 4-bit types,
+                        // a struct whose size is not a multiple of 4) get their shader offset in ELEMENTS.
+                        // An element size that does not divide 256 (a 6-byte struct) also needs the binding
+                        // start on a whole element: align to lcm(256, size), still 256-aligned.
+                        int bitsPerElement = BitsPerElementOf(contiguous);
+                        bool wholeWords = bitsPerElement % 32 == 0;
+                        if (!wholeWords && bitsPerElement >= 8)
+                        {
+                            ulong elemBytes = (ulong)(bitsPerElement / 8);
+                            ulong unit = MinStorageBufferOffsetAlignment * elemBytes / Gcd(MinStorageBufferOffsetAlignment, elemBytes);
+                            alignedOffset = rawOffset - rawOffset % unit;
+                        }
                         ulong padding = rawOffset - alignedOffset;
                         ulong bindingSize = (ulong)WebGPUAlignment.AlignTo4((long)(padding + (ulong)contiguous.LengthInBytes));
                         // Clamp to actual GPU buffer size (which was allocated with AlignTo4)
@@ -1854,7 +1883,12 @@ namespace SpawnDev.ILGPU.WebGPU
                         // This correctly handles packed structs where CPU element size != GPU packed size.
                         // For regular 4-byte views: u32Offset == elementOffset (no change in behavior).
                         // For emu_f64/i64 (8-byte CPU, 2 u32s): formulas are mathematically equivalent.
-                        int elementOffset = (int)(padding / 4UL);
+                        // Sub-word views used to get padding / 4 too, which the shader adds to an ELEMENT
+                        // index: a byte SubView(5) read from element 1 (SubWordView_SubViewAtOddOffset_*).
+                        // For them the offset is exact from Index (IndexInBytes floors a 4-bit index).
+                        int elementOffset = wholeWords
+                            ? (int)(padding / 4UL)
+                            : (int)(contiguous.Index - (long)(alignedOffset * 8UL / (ulong)bitsPerElement));
                         viewElementOffsets[currentBindingIndex] = elementOffset;
                         // Record the logical element count for packed-struct views.
                         // contiguous.Length gives the exact count regardless of CPU vs GPU element size.

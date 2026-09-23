@@ -1567,59 +1567,53 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         }
 
         /// <summary>
-        /// Recursively flattens a struct type into its primitive GLSL field types, alongside
-        /// each field's emulated-64-bit shape (see <see cref="GetStructFieldInfo"/>).
-        /// For example, OuterStruct { InnerStruct { float Val }, int ID } → ["float", "int"]
+        /// The GLSL type + emulated-64-bit shape of each flattened struct leaf field, in field order
+        /// (see <see cref="GenerateStructFieldPaths"/>).
         /// </summary>
         private List<(string GlslType, bool IsEmulated64, bool IsF64)> FlattenStructFields(TypeNode type)
-        {
-            var fields = new List<(string, bool, bool)>();
-            if (type is StructureType st)
-            {
-                foreach (var fieldType in st.Fields)
-                {
-                    if (fieldType is StructureType nested)
-                        fields.AddRange(FlattenStructFields(nested));
-                    else
-                        fields.Add(GetStructFieldInfo(fieldType));
-                }
-            }
-            else
-            {
-                fields.Add(GetStructFieldInfo(type));
-            }
-            return fields;
-        }
+            => GenerateStructFieldPaths(type).Select(l => (l.GlslType, l.IsEmulated64, l.IsF64)).ToList();
 
         /// <summary>
-        /// Recursively generates (fieldAccessPath, glslType, isEmulated64, isF64) tuples mapping
-        /// flat field index to the hierarchical GLSL struct field access path.
-        /// For OuterStruct { InnerStruct { float Val }, int ID }:
-        ///   → [(".field_0.field_0", "float", false, false), (".field_1", "int", false, false)]
+        /// One flattened leaf field of a struct buffer element: its GLSL access path, GLSL type,
+        /// emulated-64-bit shape, and its real byte LAYOUT inside the element (ILGPU's
+        /// <see cref="StructureType.GetOffset"/>, which matches the managed struct the host
+        /// uploads byte for byte - including alignment padding, e.g. <c>{ int; long; }</c> puts the
+        /// long at byte 8, not 4).
         /// </summary>
-        private List<(string Path, string GlslType, bool IsEmulated64, bool IsF64)> GenerateStructFieldPaths(TypeNode type, string prefix = "")
+        private readonly record struct StructLeaf(
+            string Path, string GlslType, bool IsEmulated64, bool IsF64, int ByteOffset, int ByteSize,
+            BasicValueType Basic);
+
+        /// <summary>
+        /// Recursively flattens a struct element type into its leaves, in field order.
+        /// For OuterStruct { InnerStruct { float Val }, int ID }:
+        ///   → [(".field_0.field_0", "float", offset 0, size 4), (".field_1", "int", offset 4, size 4)]
+        /// </summary>
+        private List<StructLeaf> GenerateStructFieldPaths(TypeNode type, string prefix = "", int baseOffset = 0)
         {
-            var result = new List<(string, string, bool, bool)>();
+            var result = new List<StructLeaf>();
             if (type is StructureType st)
             {
-                int fieldIdx = 0;
-                foreach (var fieldType in st.Fields)
+                for (int fieldIdx = 0; fieldIdx < st.NumFields; fieldIdx++)
                 {
+                    var fieldType = st.Fields[fieldIdx];
                     string fieldPath = $"{prefix}.field_{fieldIdx}";
+                    int fieldOffset = baseOffset + st.GetOffset(new FieldAccess(fieldIdx));
                     if (fieldType is StructureType nested)
-                        result.AddRange(GenerateStructFieldPaths(nested, fieldPath));
+                        result.AddRange(GenerateStructFieldPaths(nested, fieldPath, fieldOffset));
                     else
                     {
                         var info = GetStructFieldInfo(fieldType);
-                        result.Add((fieldPath, info.GlslType, info.IsEmulated64, info.IsF64));
+                        result.Add(new StructLeaf(fieldPath, info.GlslType, info.IsEmulated64, info.IsF64, fieldOffset, fieldType.Size,
+                            (fieldType as PrimitiveType)?.BasicValueType ?? BasicValueType.None));
                     }
-                    fieldIdx++;
                 }
             }
             else
             {
                 var info = GetStructFieldInfo(type);
-                result.Add((prefix, info.GlslType, info.IsEmulated64, info.IsF64));
+                result.Add(new StructLeaf(prefix, info.GlslType, info.IsEmulated64, info.IsF64, baseOffset, type.Size,
+                    (type as PrimitiveType)?.BasicValueType ?? BasicValueType.None));
             }
             return result;
         }
@@ -1762,9 +1756,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         // exactly like the non-struct emulated-64-bit path above - its true
                         // register type (uvec2/vec2/vec4) doesn't fit a scalar "uint" varying.
                         var fieldTypes = _structFieldTypes[param.Index];
+                        // The real byte layout travels with each varying so glWorker.js places every
+                        // field where the managed struct has it (padding included).
+                        var structElemType = UnwrapType(param.ParameterType);
+                        var structLeaves = GenerateStructFieldPaths(structElemType);
+                        int structByteSize = structElemType.Size;
                         for (int fi = 0; fi < fieldCount; fi++)
                         {
                             var (fieldGlslType, isFieldEmu64, _) = fieldTypes[fi];
+                            var layout = (Offset: structLeaves[fi].ByteOffset, Size: structLeaves[fi].ByteSize);
                             if (isFieldEmu64)
                             {
                                 string loName = $"tf_out_{param.Index}_f{fi}_lo";
@@ -1772,9 +1772,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                                 Builder.AppendLine($"flat out highp uint {loName}; // TF output for param[{param.Index}] field {fi} (emu 64-bit lo)");
                                 Builder.AppendLine($"flat out highp uint {hiName}; // TF output for param[{param.Index}] field {fi} (emu 64-bit hi)");
                                 var loInfo = new OutputVaryingInfo(param.Index, outIndex++, loName, "uint",
-                                    isEmulated: true, emulatedSuffix: "lo", fieldIndex: fi);
+                                    isEmulated: true, emulatedSuffix: "lo", fieldIndex: fi)
+                                { FieldByteOffset = layout.Offset, FieldByteSize = layout.Size, StructByteSize = structByteSize };
                                 var hiInfo = new OutputVaryingInfo(param.Index, outIndex++, hiName, "uint",
-                                    isEmulated: true, emulatedSuffix: "hi", fieldIndex: fi);
+                                    isEmulated: true, emulatedSuffix: "hi", fieldIndex: fi)
+                                { FieldByteOffset = layout.Offset, FieldByteSize = layout.Size, StructByteSize = structByteSize };
                                 _outputVaryings.Add(loInfo);
                                 _outputVaryings.Add(hiInfo);
                                 _generatorArgs.OutputVaryings.Add(loInfo);
@@ -1785,7 +1787,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                             string flatPrefix = needsFlat ? "flat " : "";
                             string varyingName = $"tf_out_{param.Index}_f{fi}";
                             Builder.AppendLine($"{flatPrefix}out highp {fieldGlslType} {varyingName}; // TF output for param[{param.Index}] field {fi}");
-                            var varyingInfo = new OutputVaryingInfo(param.Index, outIndex++, varyingName, fieldGlslType, fieldIndex: fi);
+                            var varyingInfo = new OutputVaryingInfo(param.Index, outIndex++, varyingName, fieldGlslType, fieldIndex: fi)
+                            { FieldByteOffset = layout.Offset, FieldByteSize = layout.Size, StructByteSize = structByteSize };
                             _outputVaryings.Add(varyingInfo);
                             _generatorArgs.OutputVaryings.Add(varyingInfo);
                         }
@@ -2644,12 +2647,16 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 var elemSize = _subWordParams[subWordParamIdx];
                 string swBn = GetParamBindingName(subWordParamIdx);
                 string extractExpr;
+                // u_paramN_offset is the view's first ELEMENT: it joins the element index BEFORE the
+                // per-texel split (texel = (idx + offset) / K, shift from (idx + offset) % K). Adding it to
+                // the texel index after the division read a byte SubView(5) from the wrong texel and
+                // position (SubWordView_SubViewAtOddOffset_ReadAndWrite).
                 if (_subWordQInt4Params.Contains(subWordParamIdx))
                 {
                     // Packed 4-bit nibble extraction: 8 nibbles per R32I texel.
                     // texel = idx>>3, shift = (idx&7)*4, mask 0xF, sign-extend (signed QInt4).
-                    var texelIdx = $"(({idx}) / 8 + {swBn}_offset)";
-                    var shift = $"(({idx}) % 8) * 4";
+                    var texelIdx = $"((({idx}) + {swBn}_offset) / 8)";
+                    var shift = $"((({idx}) + {swBn}_offset) % 8) * 4";
                     var fetch = $"texelFetch({swBn}, ivec2({texelIdx} % {swBn}_tileW, {texelIdx} / {swBn}_tileW), 0).r";
                     var rawNib = $"(({fetch}) >> ({shift})) & 0xF";
                     extractExpr = _subWordUnsignedParams.Contains(subWordParamIdx)
@@ -2660,8 +2667,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 {
                     // FP4 packed nibble extraction: 8 nibbles per R32I texel (same nibble addressing as
                     // QInt4), then decode the 4-bit E2M1 code to float.
-                    var texelIdx = $"(({idx}) / 8 + {swBn}_offset)";
-                    var shift = $"(({idx}) % 8) * 4";
+                    var texelIdx = $"((({idx}) + {swBn}_offset) / 8)";
+                    var shift = $"((({idx}) + {swBn}_offset) % 8) * 4";
                     var fetch = $"texelFetch({swBn}, ivec2({texelIdx} % {swBn}_tileW, {texelIdx} / {swBn}_tileW), 0).r";
                     var rawNib = $"(({fetch}) >> ({shift})) & 0xF";
                     extractExpr = $"_e2m1_to_f32(uint({rawNib}))";
@@ -2669,8 +2676,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 else if (elemSize == 1)
                 {
                     // Byte extraction: 4 bytes per texel
-                    var texelIdx = $"(({idx}) / 4 + {swBn}_offset)";
-                    var shift = $"(({idx}) % 4) * 8";
+                    var texelIdx = $"((({idx}) + {swBn}_offset) / 4)";
+                    var shift = $"((({idx}) + {swBn}_offset) % 4) * 8";
                     var fetch = $"texelFetch({swBn}, ivec2({texelIdx} % {swBn}_tileW, {texelIdx} / {swBn}_tileW), 0).r";
                     var rawByte = $"(({fetch}) >> ({shift})) & 0xFF";
                     if (_subWordFloat8Params.TryGetValue(subWordParamIdx, out bool fp8IsE4M3))
@@ -2687,8 +2694,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     // Helper from GLSLEmulationLibrary.F16Functions handles all cases:
                     // signed zero, denormals (flushed), normal, Inf, NaN. Previous
                     // inline code mishandled exp==0 denormals and exp==31 Inf/NaN.
-                    var texelIdx = $"({idx} / 2 + {swBn}_offset)";
-                    var shift = $"(({idx}) % 2) * 16";
+                    var texelIdx = $"((({idx}) + {swBn}_offset) / 2)";
+                    var shift = $"((({idx}) + {swBn}_offset) % 2) * 16";
                     var fetch = $"texelFetch({swBn}, ivec2({texelIdx} % {swBn}_tileW, {texelIdx} / {swBn}_tileW), 0).r";
                     var rawExpr = $"uint((({fetch}) >> ({shift})) & 0xFFFF)";
                     extractExpr = $"_f16_to_f32({rawExpr})";
@@ -2697,8 +2704,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 {
                     // bfloat16 extraction: 2 bf16 per texel, call _bf16_to_f32 helper
                     // (same 2-byte sub-word texel layout as Float16, different conversion).
-                    var texelIdx = $"({idx} / 2 + {swBn}_offset)";
-                    var shift = $"(({idx}) % 2) * 16";
+                    var texelIdx = $"((({idx}) + {swBn}_offset) / 2)";
+                    var shift = $"((({idx}) + {swBn}_offset) % 2) * 16";
                     var fetch = $"texelFetch({swBn}, ivec2({texelIdx} % {swBn}_tileW, {texelIdx} / {swBn}_tileW), 0).r";
                     var rawExpr = $"uint((({fetch}) >> ({shift})) & 0xFFFF)";
                     extractExpr = $"_bf16_to_f32({rawExpr})";
@@ -2706,16 +2713,16 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 else if (_subWordUnsignedParams.Contains(subWordParamIdx))
                 {
                     // UInt16 extraction: 2 ushorts per texel, zero-extension
-                    var texelIdx = $"({idx} / 2 + {swBn}_offset)";
-                    var shift = $"(({idx}) % 2) * 16";
+                    var texelIdx = $"((({idx}) + {swBn}_offset) / 2)";
+                    var shift = $"((({idx}) + {swBn}_offset) % 2) * 16";
                     var fetch = $"texelFetch({swBn}, ivec2({texelIdx} % {swBn}_tileW, {texelIdx} / {swBn}_tileW), 0).r";
                     extractExpr = $"(({fetch}) >> ({shift})) & 0xFFFF"; // zero-extend: & 0xFFFF gives 0-65535
                 }
                 else // elemSize == 2, Int16
                 {
                     // Int16 extraction: 2 shorts per texel, with sign extension
-                    var texelIdx = $"({idx} / 2 + {swBn}_offset)";
-                    var shift = $"(({idx}) % 2) * 16";
+                    var texelIdx = $"((({idx}) + {swBn}_offset) / 2)";
+                    var shift = $"((({idx}) + {swBn}_offset) % 2) * 16";
                     var fetch = $"texelFetch({swBn}, ivec2({texelIdx} % {swBn}_tileW, {texelIdx} / {swBn}_tileW), 0).r";
                     var rawExpr = $"(({fetch}) >> ({shift})) & 0xFFFF";
                     // Sign-extend: if bit 15 set, extend to full int negative
@@ -2738,34 +2745,71 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // Check if this is a struct buffer load
                 if (_structFieldCounts.TryGetValue(leaParamIdx, out var structFieldCount) && structFieldCount > 0)
                 {
-                    // Struct buffer: construct struct from per-field texelFetch
-                    // Find the element type to get field paths
-                    // KNOWN GAP (2026-09-22, untested - no kernel currently texelFetch-reads a
-                    // struct-with-64-bit-field buffer): a field flagged IsEmulated64 by
-                    // GenerateStructFieldPaths still fetches ONE raw texel here and assigns it
-                    // to a uvec2-typed struct field - GLSL rejects that at compile time (loud
-                    // failure, not silent corruption), so this is safe-but-incomplete rather
-                    // than wrong. Fixing it needs structFieldCount to become a per-element TEXEL
-                    // count (2 texels for a 64-bit field, not 1) with per-field cumulative texel
-                    // offsets, plus a two-texelFetch uvec2/f64_from_ieee754_bits reconstruction -
-                    // see the store-side fix just below (GenerateCode(Store) struct branch) for
-                    // the parallel pattern. Deferred until a real kernel exercises it, so the fix
-                    // has a failing test to aim at (Rule 5).
+                    // Struct buffer: construct the struct from its fields' texels. The texture is the
+                    // element array's raw bytes, one 32-bit texel per 4 bytes (glWorker.js
+                    // uploadTextureData), so a field lives at byte (index + offset) * elementSize +
+                    // fieldOffset - ILGPU's real layout, padding included. A 64-bit emulated field is
+                    // TWO texels (lo, hi). u_paramN_offset is the SubView's first ELEMENT, so it is
+                    // scaled by the element's texel count like the index.
                     var leaParam = Method.Parameters.FirstOrDefault(p => p.Index == leaParamIdx);
                     if (leaParam != null)
                     {
                         var elemType = UnwrapType(leaParam.ParameterType);
-                        var fieldPaths = GenerateStructFieldPaths(elemType);
-                        string structType = TypeGenerator[elemType];
+                        var leaves = GenerateStructFieldPaths(elemType);
+                        int elemSize = elemType.Size;
                         Declare(target);
-                        // Use intBitsToFloat for float fields since texture is R32I
-                        for (int fi = 0; fi < fieldPaths.Count; fi++)
+                        for (int fi = 0; fi < leaves.Count; fi++)
                         {
-                            string fetchExpr = $"texelFetch({leaBn}, ivec2((int({source}) * {structFieldCount} + {fi} + {leaBn}_offset) % {leaBn}_tileW, (int({source}) * {structFieldCount} + {fi} + {leaBn}_offset) / {leaBn}_tileW), 0).r";
-                            string valExpr = fieldPaths[fi].GlslType == "float"
-                                ? $"intBitsToFloat({fetchExpr})"
-                                : fetchExpr;
-                            AppendLine($"{target}{fieldPaths[fi].Path} = {valExpr};");
+                            var leaf = leaves[fi];
+                            string Fetch(string texelIdx) =>
+                                $"texelFetch({leaBn}, ivec2(({texelIdx}) % {leaBn}_tileW, ({texelIdx}) / {leaBn}_tileW), 0).r";
+                            string valExpr;
+                            if (leaf.ByteSize < 4)
+                            {
+                                // byte / short: shift + mask out of its texel, zero-extended (the
+                                // backend's sub-word register convention; a signed use re-extends at its
+                                // widening convert). A struct of only sub-word fields can have a size that
+                                // is not a multiple of 4, so the texel and shift are computed per element.
+                                if (leaf.Basic != BasicValueType.Int8 && leaf.Basic != BasicValueType.Int16)
+                                    throw new NotSupportedException(
+                                        $"WebGL: struct buffer field {leaf.Path} ({leaf.Basic}, {leaf.ByteSize} bytes) cannot be read - " +
+                                        "16/8-bit float fields (Half, BFloat16, FP8) inside a struct buffer are not supported. " +
+                                        "Widen the field to float.");
+                                string texelIdx, shift;
+                                if (elemSize % 4 == 0)
+                                {
+                                    texelIdx = $"(int({source}) + {leaBn}_offset) * {elemSize / 4} + {leaf.ByteOffset / 4}";
+                                    shift = $"{(leaf.ByteOffset % 4) * 8}u";
+                                }
+                                else
+                                {
+                                    string byteAddr = $"((int({source}) + {leaBn}_offset) * {elemSize} + {leaf.ByteOffset})";
+                                    texelIdx = $"({byteAddr} >> 2)";
+                                    shift = $"uint(({byteAddr} & 3) * 8)";
+                                }
+                                string raw = $"((uint({Fetch(texelIdx)}) >> {shift}) & {(1u << (leaf.ByteSize * 8)) - 1u}u)";
+                                valExpr = $"int({raw})";
+                                AppendLine($"{target}{leaf.Path} = {valExpr};");
+                                continue;
+                            }
+                            if (elemSize % 4 != 0 || leaf.ByteOffset % 4 != 0 || leaf.ByteSize != 4 && leaf.ByteSize != 8)
+                                throw new NotSupportedException(
+                                    $"WebGL: reading struct field {leaf.Path} ({leaf.ByteSize} bytes at byte {leaf.ByteOffset} of a " +
+                                    $"{elemSize}-byte element) from a buffer is not supported. Use WebGPU/Wasm.");
+                            string texel0 = $"(int({source}) + {leaBn}_offset) * {elemSize / 4} + {leaf.ByteOffset / 4}";
+                            if (leaf.IsEmulated64)
+                            {
+                                string lo = $"uint({Fetch(texel0)})";
+                                string hi = $"uint({Fetch(texel0 + " + 1")})";
+                                valExpr = leaf.IsF64 ? $"f64_from_ieee754_bits({lo}, {hi})" : $"uvec2({lo}, {hi})";
+                            }
+                            else if (leaf.GlslType == "float")
+                                valExpr = $"intBitsToFloat({Fetch(texel0)})";
+                            else if (leaf.GlslType == "uint")
+                                valExpr = $"uint({Fetch(texel0)})";
+                            else
+                                valExpr = Fetch(texel0);
+                            AppendLine($"{target}{leaf.Path} = {valExpr};");
                         }
                         return;
                     }
@@ -3982,6 +4026,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// instead of writing each vertex's value to its own sequential slot.
         /// </summary>
         public bool IsAtomicVote { get; }
+
+        /// <summary>For struct field varyings: the field's byte offset inside one element (ILGPU layout, padding included). -1 otherwise.</summary>
+        public int FieldByteOffset { get; init; } = -1;
+        /// <summary>For struct field varyings: the field's size in bytes (8 for an emulated 64-bit field's lo/hi pair).</summary>
+        public int FieldByteSize { get; init; }
+        /// <summary>For struct field varyings: the size in bytes of one struct element.</summary>
+        public int StructByteSize { get; init; }
 
         public OutputVaryingInfo(int paramIndex, int outputIndex, string varyingName, string glslType,
             bool isEmulated = false, string? emulatedSuffix = null, int fieldIndex = -1,

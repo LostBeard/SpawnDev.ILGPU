@@ -442,6 +442,12 @@ function dispatchKernel(msg) {
     const uOneLoc = getUniformLoc(cached, 'u_one');
     if (uOneLoc !== null) gl.uniform1f(uOneLoc, 1.0);
 
+    // ---- Loop guard: every generated loop runs `_loopN < u_loopLimit` (GLSLCodeGenerator). A uniform so
+    // D3D's FXC cannot see a trip count (its loop analysis is superlinear in the body); int max so no
+    // real loop is ever cut short. Absent (null) when the shader has no loops.
+    const uLoopLimitLoc = getUniformLoc(cached, 'u_loopLimit');
+    if (uLoopLimitLoc !== null) gl.uniform1i(uLoopLimitLoc, 2147483647);
+
     // ---- Step 2: Dimension uniforms ----
     const dimWLoc = getUniformLoc(cached, 'u_dimWidth');
     if (dimWLoc) gl.uniform1i(dimWLoc, dimX);
@@ -694,23 +700,21 @@ function dispatchKernel(msg) {
                 if (structVaryings[0].outputIndex !== out.outputIndex) continue;
 
                 // One representative varying per logical field (its 'lo' half for an
-                // emulated 64-bit field, the field itself otherwise), in field order, each
-                // carrying its own byte width - 8 for an emulated field's lo+hi pair, 4 for
-                // a plain scalar field. Byte offsets are the running sum of prior widths
-                // (Element256-style tight packing - no general C# struct padding support).
+                // emulated 64-bit field, the field itself otherwise), in field order. Each
+                // carries the field's REAL byte offset and size inside the element and the
+                // element size, from ILGPU's struct layout (GLSLKernelFunctionGenerator
+                // StructLeaf) - alignment padding included, so { int; long; } puts the long at
+                // byte 8. Only the field's own bytes are written: a sub-4-byte field copies the
+                // low bytes of its 32-bit varying and never touches its neighbours.
                 const maxFieldIndex = Math.max(...structVaryings.map(o => o.fieldIndex));
                 const fieldsInOrder = [];
                 for (let f = 0; f <= maxFieldIndex; f++) {
                     const forField = structVaryings.filter(o => o.fieldIndex === f);
                     fieldsInOrder.push(forField.find(o => o.emulatedSuffix === 'lo') || forField[0]);
                 }
-                const fieldByteWidths = fieldsInOrder.map(o => o.isEmulated ? 8 : 4);
-                const structElemSize = fieldByteWidths.reduce((a, b) => a + b, 0);
-                const fieldByteOffsets = [];
-                for (let f = 0, running = 0; f < fieldByteWidths.length; f++) {
-                    fieldByteOffsets.push(running);
-                    running += fieldByteWidths[f];
-                }
+                const fieldByteWidths = fieldsInOrder.map(o => o.fieldByteSize);
+                const structElemSize = fieldsInOrder[0].structByteSize;
+                const fieldByteOffsets = fieldsInOrder.map(o => o.fieldByteOffset);
 
                 const elemCount = Math.min(totalVertices, Math.floor(out.writeLengthBytes / structElemSize));
                 for (let v = 0; v < elemCount; v++) {
@@ -719,10 +723,8 @@ function dispatchKernel(msg) {
                         const dstOff = writeOffset + v * structElemSize + fieldByteOffsets[fi];
                         const srcOff = v * strideBytes + fieldOut.outputIndex * 4;
                         if (srcOff + 4 > readbackBytes.length) continue;
-                        destView[dstOff] = readbackBytes[srcOff];
-                        destView[dstOff + 1] = readbackBytes[srcOff + 1];
-                        destView[dstOff + 2] = readbackBytes[srcOff + 2];
-                        destView[dstOff + 3] = readbackBytes[srcOff + 3];
+                        const loBytes = Math.min(fieldByteWidths[fi], 4);
+                        for (let b = 0; b < loBytes; b++) destView[dstOff + b] = readbackBytes[srcOff + b];
                         if (fieldByteWidths[fi] === 8) {
                             const hiSrc = v * strideBytes + (fieldOut.outputIndex + 1) * 4;
                             destView[dstOff + 4] = readbackBytes[hiSrc];

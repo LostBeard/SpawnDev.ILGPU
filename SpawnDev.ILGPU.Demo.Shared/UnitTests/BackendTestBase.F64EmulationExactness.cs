@@ -214,6 +214,32 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [MethodImpl(MethodImplOptions.NoInlining)]
         static double F64X_MathHelper(double x, double y, int op) => F64X_MathOp(x, y, op);
 
+        // One [NoInlining] helper PER OP for the grouped kernels below (the op constant folds the switch
+        // away in ILGPU). F64X_MathHelper - one helper switching over all 19 ops - stays in the all-ops
+        // Dekker gate, which is what covers a switch inside a helper. Called from the Ozaki groups it
+        // cost 6-24 s of FXC per group (measured 2026-09-23): D3D inlines the helper's whole 19-op
+        // body at each call site before it can fold the constant op, while each Ozaki op on its own
+        // compiles in 0.07-0.74 s.
+        [MethodImpl(MethodImplOptions.NoInlining)] static double F64X_H0(double x, double y) => F64X_MathOp(x, y, 0);
+        [MethodImpl(MethodImplOptions.NoInlining)] static double F64X_H1(double x, double y) => F64X_MathOp(x, y, 1);
+        [MethodImpl(MethodImplOptions.NoInlining)] static double F64X_H2(double x, double y) => F64X_MathOp(x, y, 2);
+        [MethodImpl(MethodImplOptions.NoInlining)] static double F64X_H3(double x, double y) => F64X_MathOp(x, y, 3);
+        [MethodImpl(MethodImplOptions.NoInlining)] static double F64X_H4(double x, double y) => F64X_MathOp(x, y, 4);
+        [MethodImpl(MethodImplOptions.NoInlining)] static double F64X_H5(double x, double y) => F64X_MathOp(x, y, 5);
+        [MethodImpl(MethodImplOptions.NoInlining)] static double F64X_H6(double x, double y) => F64X_MathOp(x, y, 6);
+        [MethodImpl(MethodImplOptions.NoInlining)] static double F64X_H7(double x, double y) => F64X_MathOp(x, y, 7);
+        [MethodImpl(MethodImplOptions.NoInlining)] static double F64X_H8(double x, double y) => F64X_MathOp(x, y, 8);
+        [MethodImpl(MethodImplOptions.NoInlining)] static double F64X_H9(double x, double y) => F64X_MathOp(x, y, 9);
+        [MethodImpl(MethodImplOptions.NoInlining)] static double F64X_H10(double x, double y) => F64X_MathOp(x, y, 10);
+        [MethodImpl(MethodImplOptions.NoInlining)] static double F64X_H11(double x, double y) => F64X_MathOp(x, y, 11);
+        [MethodImpl(MethodImplOptions.NoInlining)] static double F64X_H12(double x, double y) => F64X_MathOp(x, y, 12);
+        [MethodImpl(MethodImplOptions.NoInlining)] static double F64X_H13(double x, double y) => F64X_MathOp(x, y, 13);
+        [MethodImpl(MethodImplOptions.NoInlining)] static double F64X_H14(double x, double y) => F64X_MathOp(x, y, 14);
+        [MethodImpl(MethodImplOptions.NoInlining)] static double F64X_H15(double x, double y) => F64X_MathOp(x, y, 15);
+        [MethodImpl(MethodImplOptions.NoInlining)] static double F64X_H16(double x, double y) => F64X_MathOp(x, y, 16);
+        [MethodImpl(MethodImplOptions.NoInlining)] static double F64X_H17(double x, double y) => F64X_MathOp(x, y, 17);
+        [MethodImpl(MethodImplOptions.NoInlining)] static double F64X_H18(double x, double y) => F64X_MathOp(x, y, 18);
+
         // Every result is exactly representable in 48 bits (sqrt(x*x) = |x| with |x| < 2^24, so
         // x*x < 2^48; the products, sums and remainders stay within 48 bits). 2.5 + 2^-30 (and its
         // negative, and 0.5 + 2^-30) put an exact .5 TIE in the f32 hi component with the deciding
@@ -343,12 +369,12 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             inKernel[b + 3] = Math.Min(x, y);
             inKernel[b + 4] = Math.Max(x, y);
             inKernel[b + 5] = -x;
-            inHelper[b + 0] = F64X_MathHelper(x, y, 0);
-            inHelper[b + 1] = F64X_MathHelper(x, y, 1);
-            inHelper[b + 2] = F64X_MathHelper(x, y, 2);
-            inHelper[b + 3] = F64X_MathHelper(x, y, 3);
-            inHelper[b + 4] = F64X_MathHelper(x, y, 4);
-            inHelper[b + 5] = F64X_MathHelper(x, y, 5);
+            inHelper[b + 0] = F64X_H0(x, y);
+            inHelper[b + 1] = F64X_H1(x, y);
+            inHelper[b + 2] = F64X_H2(x, y);
+            inHelper[b + 3] = F64X_H3(x, y);
+            inHelper[b + 4] = F64X_H4(x, y);
+            inHelper[b + 5] = F64X_H5(x, y);
         }
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static void F64X_MathG1(Index1D i, ArrayView<double> xs, ArrayView<double> ys, ArrayView<double> inKernel, ArrayView<double> inHelper)
@@ -361,12 +387,12 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             inKernel[b + 3] = x / 4.0;
             inKernel[b + 4] = double.IsNaN(x) ? 1.0 : 0.0;
             inKernel[b + 5] = double.IsInfinity(x) ? 1.0 : 0.0;
-            inHelper[b + 0] = F64X_MathHelper(x, y, 6);
-            inHelper[b + 1] = F64X_MathHelper(x, y, 7);
-            inHelper[b + 2] = F64X_MathHelper(x, y, 8);
-            inHelper[b + 3] = F64X_MathHelper(x, y, 9);
-            inHelper[b + 4] = F64X_MathHelper(x, y, 11);
-            inHelper[b + 5] = F64X_MathHelper(x, y, 12);
+            inHelper[b + 0] = F64X_H6(x, y);
+            inHelper[b + 1] = F64X_H7(x, y);
+            inHelper[b + 2] = F64X_H8(x, y);
+            inHelper[b + 3] = F64X_H9(x, y);
+            inHelper[b + 4] = F64X_H11(x, y);
+            inHelper[b + 5] = F64X_H12(x, y);
         }
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static void F64X_MathG2(Index1D i, ArrayView<double> xs, ArrayView<double> ys, ArrayView<double> inKernel, ArrayView<double> inHelper)
@@ -375,8 +401,8 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             int b = i * 2;
             inKernel[b + 0] = Math.Sqrt(Math.Abs(x) * Math.Abs(x));
             inKernel[b + 1] = x % y;
-            inHelper[b + 0] = F64X_MathHelper(x, y, 10);
-            inHelper[b + 1] = F64X_MathHelper(x, y, 13);
+            inHelper[b + 0] = F64X_H10(x, y);
+            inHelper[b + 1] = F64X_H13(x, y);
         }
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static void F64X_MathG3(Index1D i, ArrayView<double> xs, ArrayView<double> ys, ArrayView<double> inKernel, ArrayView<double> inHelper)
@@ -387,10 +413,10 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             inKernel[b + 1] = Math.Truncate(x);
             inKernel[b + 2] = Math.Round(x, MidpointRounding.AwayFromZero);
             inKernel[b + 3] = Math.Min(Math.Max(x, -100.25), 100.5);
-            inHelper[b + 0] = F64X_MathHelper(x, y, 14);
-            inHelper[b + 1] = F64X_MathHelper(x, y, 15);
-            inHelper[b + 2] = F64X_MathHelper(x, y, 16);
-            inHelper[b + 3] = F64X_MathHelper(x, y, 18);
+            inHelper[b + 0] = F64X_H14(x, y);
+            inHelper[b + 1] = F64X_H15(x, y);
+            inHelper[b + 2] = F64X_H16(x, y);
+            inHelper[b + 3] = F64X_H18(x, y);
         }
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         static void F64X_MathG4(Index1D i, ArrayView<double> xs, ArrayView<double> ys, ArrayView<double> inKernel, ArrayView<double> inHelper)
@@ -398,7 +424,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             double x = xs[i], y = ys[i];
             int b = i * 1;
             inKernel[b + 0] = global::ILGPU.Algorithms.XMath.IEEERemainder(x, y);
-            inHelper[b + 0] = F64X_MathHelper(x, y, 17);
+            inHelper[b + 0] = F64X_H17(x, y);
         }
         static void F64X_Math_Dekker_G0(Index1D i, ArrayView<double> a, ArrayView<double> b, ArrayView<double> c, ArrayView<double> d) => F64X_MathG0(i, a, b, c, d);
         static void F64X_Math_Ozaki_G0(Index1D i, ArrayView<double> a, ArrayView<double> b, ArrayView<double> c, ArrayView<double> d) => F64X_MathG0(i, a, b, c, d);
@@ -415,8 +441,11 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         static readonly Action<Index1D, ArrayView<double>, ArrayView<double>, ArrayView<double>, ArrayView<double>>[] F64X_MathOzakiGroups =
             { F64X_Math_Ozaki_G0, F64X_Math_Ozaki_G1, F64X_Math_Ozaki_G2, F64X_Math_Ozaki_G3, F64X_Math_Ozaki_G4 };
 
-        // Ten shaders (5 groups x 2 modes); the Ozaki (quad-float) ones take up to 18 s EACH to compile
-        // on WebGL (ANGLE -> D3D FXC), about 45 s in all (measured 2026-09-22) - past the 30 s default.
+        // Ten shaders (5 groups x 2 modes). Offline FXC on ANGLE's HLSL (2026-09-23, per-op helpers): Dekker
+        // 0.1-0.4 s per group; Ozaki (quad-float) 3.4 / 4.1 / 5.5 / 6.7 / 13.8 s - about 35 s in all, past
+        // the 30 s default. The 13.8 s group is Sqrt and % twice each: an Ozaki load + store alone is
+        // ~313 FXC instruction slots and Sqrt / % / Round each add 1000-1500, and FXC is superlinear in
+        // the total.
         [TestMethod(Timeout = 120000)]
         public async Task F64Emulation_MathOperations_KernelAndNoInliningHelper_AreExact() => await RunEmulatedTest(async accelerator =>
         {

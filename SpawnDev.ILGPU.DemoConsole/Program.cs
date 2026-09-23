@@ -41,6 +41,10 @@ try
     if (args.Length > 0 && args[0] == "fromrawbits-dump")
         return await FromRawBitsDump.Run();
 
+    // Offline WGSL/GLSL dump of one emulated-double op per kernel, for per-op compile-cost timing.
+    if (args.Length > 0 && args[0] == "f64-op-cost")
+        return await F64OpCostProbe.Run(args);
+
     // Offline WGSL/GLSL/Wasm dump of any BackendTestBase kernel method (KernelDump.cs).
     if (args.Length > 0 && args[0] == "kernel-dump")
         return await KernelDump.Run(args);

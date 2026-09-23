@@ -44,6 +44,22 @@ namespace SpawnDev.ILGPU.Crypto
     /// </remarks>
     public static class Autolykos2
     {
+        /// <summary>
+        /// What <see cref="GenerateDatasetKernel"/> needs from a device: 64-bit integers (native or
+        /// emulated). Every SpawnDev.ILGPU backend satisfies it, WebGL included.
+        /// </summary>
+        public static AcceleratorRequirements DatasetRequirements { get; } = new() { RequiresInt64 = true };
+
+        /// <summary>
+        /// What <see cref="MineKernel"/> needs from a device: 64-bit integers, atomics and scatter
+        /// stores - a hit takes a slot with <c>Atomic.Add</c> and writes its nonce there. WebGL has
+        /// neither (Transform Feedback is one positional output per thread, and its Atomic.Add
+        /// emulation cannot return the old value), so filter with
+        /// <c>device.Satisfies(Autolykos2.MineRequirements)</c>.
+        /// </summary>
+        public static AcceleratorRequirements MineRequirements { get; } =
+            new() { RequiresInt64 = true, RequiresAtomics = true, RequiresScatterStores = true };
+
         /// <summary>k: number of dataset elements summed per nonce attempt.</summary>
         public const int K = 32;
 
@@ -73,10 +89,14 @@ namespace SpawnDev.ILGPU.Crypto
         /// every element and every height, per the reference's <c>InitPrehash</c> kernel. This is a
         /// 65-block chained compression (8 + 8192 = 8200 bytes), not a single Hash256 call, which is
         /// why it calls <see cref="Blake2b.Compress"/> directly rather than the single-block wrapper.
-        /// Register-only: the loop below recomputes each block's message words from the loop counter
-        /// every iteration - no local array is ever indexed by a runtime variable (see Blake2b.cs's
-        /// remarks on why that matters on this fork).
+        /// Register-only: each block's message words are recomputed from the block number - no
+        /// local array is ever indexed by a runtime variable (see Blake2b.cs's remarks on why that
+        /// matters on this fork).
         /// </summary>
+        // ONE Compress call site, in one loop over all 65 blocks (first, middle and last differ only in
+        // their words, counter and last-block flag, all selected per block). D3D's FXC - ANGLE's WebGL
+        // compiler on Windows - inlines every call, so the previous three call sites (first block, the
+        // 63-block loop, last block) were three copies of Compress in the final shader.
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static void GenerateDatasetElement(uint index, uint height, out ulong e0, out ulong e1, out ulong e2, out ulong e3)
         {
@@ -84,38 +104,26 @@ namespace SpawnDev.ILGPU.Crypto
             ulong h1 = Blake2b.IV1, h2 = Blake2b.IV2, h3 = Blake2b.IV3;
             ulong h4 = Blake2b.IV4, h5 = Blake2b.IV5, h6 = Blake2b.IV6, h7 = Blake2b.IV7;
 
-            // Block 0: index (big-endian 32-bit) || height (raw 32-bit) || M[0..14] (14 counters).
-            ulong m0 = ((ulong)height << 32) | Bswap32(index);
-            ulong t = 128;
-            Blake2b.Compress(
-                ref h0, ref h1, ref h2, ref h3, ref h4, ref h5, ref h6, ref h7,
-                m0, Bswap64(0), Bswap64(1), Bswap64(2), Bswap64(3), Bswap64(4), Bswap64(5), Bswap64(6),
-                Bswap64(7), Bswap64(8), Bswap64(9), Bswap64(10), Bswap64(11), Bswap64(12), Bswap64(13), Bswap64(14),
-                t, 0UL, isLastBlock: false);
-
-            // Blocks 1..63: 16 more M counters each (M[15..1022], 1008 values across 63 blocks).
-            ulong ctr = 15;
-            for (int blk = 1; blk <= 63; blk++)
+            // Word i of block b (i >= 1) is M counter 16b + i - 1, and word 0 is counter 16b - 1:
+            // block 0 is index || height then counters 0..14, blocks 1..63 carry 16 counters each
+            // (15..1022), and the last block (64) is counter 1023 then zero padding. Total message
+            // length 8 (index + height) + 8192 (M) = 8200 bytes.
+            for (int blk = 0; blk <= 64; blk++)
             {
-                t += 128;
-                ulong m0b = Bswap64(ctr), m1b = Bswap64(ctr + 1), m2b = Bswap64(ctr + 2), m3b = Bswap64(ctr + 3);
-                ulong m4b = Bswap64(ctr + 4), m5b = Bswap64(ctr + 5), m6b = Bswap64(ctr + 6), m7b = Bswap64(ctr + 7);
-                ulong m8b = Bswap64(ctr + 8), m9b = Bswap64(ctr + 9), m10b = Bswap64(ctr + 10), m11b = Bswap64(ctr + 11);
-                ulong m12b = Bswap64(ctr + 12), m13b = Bswap64(ctr + 13), m14b = Bswap64(ctr + 14), m15b = Bswap64(ctr + 15);
+                bool last = blk == 64;
+                ulong keep = last ? 0UL : ulong.MaxValue;
+                uint c = (uint)blk << 4;
+                ulong m0 = blk == 0 ? ((ulong)height << 32) | Bswap32(index) : CounterWord(c - 1);
+                ulong t = last ? 8200UL : (ulong)(blk + 1) << 7;
                 Blake2b.Compress(
                     ref h0, ref h1, ref h2, ref h3, ref h4, ref h5, ref h6, ref h7,
-                    m0b, m1b, m2b, m3b, m4b, m5b, m6b, m7b, m8b, m9b, m10b, m11b, m12b, m13b, m14b, m15b,
-                    t, 0UL, isLastBlock: false);
-                ctr += 16;
+                    m0, CounterWord(c) & keep, CounterWord(c + 1) & keep, CounterWord(c + 2) & keep,
+                    CounterWord(c + 3) & keep, CounterWord(c + 4) & keep, CounterWord(c + 5) & keep,
+                    CounterWord(c + 6) & keep, CounterWord(c + 7) & keep, CounterWord(c + 8) & keep,
+                    CounterWord(c + 9) & keep, CounterWord(c + 10) & keep, CounterWord(c + 11) & keep,
+                    CounterWord(c + 12) & keep, CounterWord(c + 13) & keep, CounterWord(c + 14) & keep,
+                    t, 0UL, last);
             }
-
-            // Final block: the last M counter (M[1023]) plus zero padding. Total message length
-            // 8 (index+height) + 8192 (M) = 8200 bytes.
-            t += 8;
-            Blake2b.Compress(
-                ref h0, ref h1, ref h2, ref h3, ref h4, ref h5, ref h6, ref h7,
-                Bswap64(ctr), 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
-                t, 0UL, isLastBlock: true);
 
             // "takeRight(31, digest)" per ErgoDocs: the reference kernel implements this by zeroing
             // one byte of the 32-byte output rather than shifting the buffer. Best-effort transcription
@@ -123,6 +131,14 @@ namespace SpawnDev.ILGPU.Crypto
             e0 = h0 & 0xFFFFFFFFFFFFFF00UL;
             e1 = h1; e2 = h2; e3 = h3;
         }
+
+        /// <summary>
+        /// One M word: counter <paramref name="c"/> as a big-endian u64, read as a little-endian
+        /// message word. Equal to <c>Bswap64(c)</c> for a counter below 2^32 (M's are 0..1023), in
+        /// 32-bit operations.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static ulong CounterWord(uint c) => (ulong)Bswap32(c) << 32;
 
         /// <summary>
         /// Number of dataset chunks the mining/generation kernels are wired for. OpenCL's

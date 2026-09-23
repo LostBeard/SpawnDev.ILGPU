@@ -90,6 +90,74 @@ public abstract partial class BackendTestBase
         return Task.CompletedTask;
     }
 
+    // Dataset elements computed independently with Python's hashlib.blake2b(digest_size=32) over
+    // index_be32 || height_le32 || M (M = big-endian u64 counters 0..1023), low byte of the digest
+    // zeroed. The GPU/CPU dataset test only proves the two backends agree with each other; these
+    // pin the element to real BLAKE2b, including the multi-block chaining and the final-block counter.
+    // Indices cover bit 31 set (Bswap32 sign boundary at 128), MaxN - 1 and uint.MaxValue.
+    private static readonly (uint Index, uint Height, ulong E0, ulong E1, ulong E2, ulong E3)[] DatasetElementVectors =
+    {
+        (0u, 1_500_000u, 0x7aab33aba36ca100UL, 0xf46e4e8a3b55a969UL, 0x13997bab0f3cbde0UL, 0x89102dcbdb23e5f6UL),
+        (1u, 1_500_000u, 0xfd9128d0f2c76700UL, 0x005ed9409b305de5UL, 0x12eb6603077e9ee6UL, 0xa3d3b2bfdd8325e6UL),
+        (127u, 1_500_000u, 0x0908e9bb2638cf00UL, 0xe9b31f9ca3e8a073UL, 0x02891520f211ee36UL, 0x4da39a3fe14c1735UL),
+        (128u, 1_500_000u, 0x442623505f1a6700UL, 0x760bba393f67b30cUL, 0x82617c0e9dd56b61UL, 0x6d44bb61e937d013UL),
+        (1999u, 1_500_000u, 0x22e08955cc79fc00UL, 0x533d4db5fc14751aUL, 0xf17f3e638f027710UL, 0xb3c19f76a6a4c73dUL),
+        (2143944599u, 1_500_000u, 0xb7c72af1ae79d800UL, 0xf082b47706d84b1dUL, 0x9fc98f7a03e2d884UL, 0x10421dde737c6ca7UL),
+        (4294967295u, 1_500_000u, 0xc246525a374cd100UL, 0xc096692f7a1f1a10UL, 0x08f23f8fd3b1c117UL, 0xccca28060e37464dUL),
+        (12345u, 0u, 0xd7405abc53e4ea00UL, 0x73707acdec71bff6UL, 0x6cc6b4920c555ec3UL, 0x1b20ecfdb7fa5bcdUL),
+        (12345u, 4294967295u, 0xea755c3e1125ca00UL, 0x5ea586ca91e8fc77UL, 0xcf82aebab6a106b6UL, 0x7575f61493056e64UL),
+    };
+
+    private static void DatasetElementBatchKernel(
+        Index1D i, ArrayView<uint> indices, ArrayView<uint> heights, ArrayView<ulong> outWords)
+    {
+        Autolykos2.GenerateDatasetElement(indices[i], heights[i], out ulong e0, out ulong e1, out ulong e2, out ulong e3);
+        outWords[i * 4 + 0] = e0;
+        outWords[i * 4 + 1] = e1;
+        outWords[i * 4 + 2] = e2;
+        outWords[i * 4 + 3] = e3;
+    }
+
+    [TestMethod]
+    public async Task Autolykos2_DatasetElement_KnownVectors() => await RunTest(async accelerator =>
+    {
+        var vs = DatasetElementVectors;
+        int n = vs.Length;
+        var idxHost = new uint[n];
+        var hHost = new uint[n];
+        for (int i = 0; i < n; i++) { idxHost[i] = vs[i].Index; hHost[i] = vs[i].Height; }
+
+        // The managed path first: the GPU/CPU dataset test uses it as its oracle.
+        for (int i = 0; i < n; i++)
+        {
+            Autolykos2.GenerateDatasetElement(vs[i].Index, vs[i].Height, out ulong c0, out ulong c1, out ulong c2, out ulong c3);
+            if (c0 != vs[i].E0 || c1 != vs[i].E1 || c2 != vs[i].E2 || c3 != vs[i].E3)
+                throw new Exception(
+                    $"Autolykos2 dataset element (index {vs[i].Index}, height {vs[i].Height}) managed mismatch: " +
+                    $"got {c0:x16}{c1:x16}{c2:x16}{c3:x16}, expected {vs[i].E0:x16}{vs[i].E1:x16}{vs[i].E2:x16}{vs[i].E3:x16}");
+        }
+
+        using var idxBuf = accelerator.Allocate1D(idxHost);
+        using var hBuf = accelerator.Allocate1D(hHost);
+        using var outBuf = accelerator.Allocate1D<ulong>(n * 4);
+        var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<uint>, ArrayView<uint>, ArrayView<ulong>>(
+            DatasetElementBatchKernel);
+        kernel(n, idxBuf.View, hBuf.View, outBuf.View);
+        await accelerator.SynchronizeAsync();
+        var outHost = await outBuf.CopyToHostAsync();
+
+        for (int i = 0; i < n; i++)
+        {
+            ulong g0 = outHost[i * 4], g1 = outHost[i * 4 + 1], g2 = outHost[i * 4 + 2], g3 = outHost[i * 4 + 3];
+            if (g0 != vs[i].E0 || g1 != vs[i].E1 || g2 != vs[i].E2 || g3 != vs[i].E3)
+                throw new Exception(
+                    $"Autolykos2 dataset element (index {vs[i].Index}, height {vs[i].Height}) mismatch on {BackendName}: " +
+                    $"got {g0:x16}{g1:x16}{g2:x16}{g3:x16}, expected {vs[i].E0:x16}{vs[i].E1:x16}{vs[i].E2:x16}{vs[i].E3:x16}");
+        }
+
+        Console.WriteLine($"[Autolykos2] Dataset element known vectors on {BackendName}: {n}/{n} ✓");
+    });
+
     private static void Blake2bBatchKernel(
         Index1D index,
         ArrayView<ulong> m, // vectorCount x 16 words, row-major
@@ -275,12 +343,14 @@ public abstract partial class BackendTestBase
     // fixed and gated by BackendTestBase.NoInliningHelperControlFlow.cs. This test and Mine now
     // pass on CPU/CUDA/OpenCL/WebGPU/Wasm.
     //
-    // WebGL still exceeds the 30 s test timeout - in the driver's shader COMPILE (ANGLE -> D3D FXC),
-    // not in execution: an n=1 dispatch of a kernel with ONE Compress body takes ~8.7 s on WebGL
-    // (1.5 s on WebGPU), two bodies ~27 s (measured 2026-09-22). FXC is superlinear in long
-    // straight-line integer code; 96 inlined emulated-64-bit G mixes per Compress is exactly that.
-    // Not a correctness bug. Making it compile in time needs a smaller per-Compress body (e.g. a
-    // runtime round loop), which is its own piece of work.
+    // 5.2.15: WebGL exceeded the 30 s timeout in the driver's shader compile, not in execution.
+    // Measured on ANGLE's own HLSL (2026-09-23): Chrome's program link took 521 s, and FXC's first
+    // attempt failed with X3511 "unable to unroll loop" before ANGLE's retry succeeded. Two causes:
+    // every WebGL loop was emitted with a literal `_loop < 100000` guard, and FXC's analysis of a loop
+    // with a visible trip count is superlinear in its body (140 s for the 65-block loop; 1.4 s once
+    // the bound is the u_loopLimit uniform); and Compress's 96 straight-line G mixes, inlined by FXC
+    // at three call sites. Compress is now a 12-round loop and the element one 65-block loop with a
+    // single Compress call: the kernel links in 0.6 s.
     [TestMethod]
     public async Task Autolykos2_DatasetGeneration_SmallN_GPU_CPUMatch() => await RunTest(async accelerator =>
     {
@@ -326,24 +396,22 @@ public abstract partial class BackendTestBase
     //  Autolykos2 - mining kernel, small N
     // ═══════════════════════════════════════════════════════════
 
-    // KNOWN OPEN ISSUES (found running this test 2026-09-21), neither chased further for the
-    // same out-of-scope-for-mining reason as the issues documented on the other two tests above:
-    // - Both WebGPU variants (subgroups and no-subgroups) time out (>30s) on this kernel as of the
-    //   dataset-chunking parameter shape (4 chunk ArrayViews + elementsPerChunk, header/target
-    //   packed into Element256 structs to stay under LoadAutoGroupedStreamKernel's 15-type-param
-    //   ceiling). Before that change, the subgroup-enabled variant passed this test cleanly and
-    //   quickly and only the no-subgroups variant timed out - so the extra parameters pushed the
-    //   subgroup-enabled path into the same pathologically slow regime, not a new distinct bug.
-    //   Not a correctness bug (the small, non-chunked correctness case this test exercises isn't
-    //   where the slowness is - it's dispatch/compile-time related to the parameter shape itself).
-    // - Wasm: reports 0 hits when exactly 1 is expected (the known nonce goes missing, no false
-    //   positives) - Wasm passed both the Blake2b and dataset-generation tests above cleanly, so
-    //   this points specifically at the atomic-allocate-then-scatter-write pattern
-    //   (Atomic.Add(ref winningCount[0], 1) then winningNonces[slot] = nonce), not at the hash
-    //   math itself.
+    // History: WebGPU timed out and Wasm reported 0 hits here on 2026-09-21; both were browser
+    // helper-codegen bugs fixed in 5.2.14 (see BackendTestBase.NoInliningHelperControlFlow.cs).
+    //
+    // WebGL is skipped: MineKernel allocates a result slot with Atomic.Add and scatters the nonce
+    // into it (Autolykos2.MineRequirements = Int64 + Atomics + ScatterStores). WebGL has neither -
+    // Transform Feedback writes one positional record per thread and its Atomic.Add emulation
+    // returns 0 - so this is a genuine capability gap, not a codegen bug. The kernel's buffer READS
+    // (Element256 from the dataset) are covered on WebGL by StructBuffer_UInt64Fields_Load.
     [TestMethod]
     public async Task Autolykos2_Mine_SmallN_FindsKnownHits() => await RunTest(async accelerator =>
     {
+        if (!accelerator.Device.Satisfies(Autolykos2.MineRequirements))
+            throw new UnsupportedTestException(
+                $"{BackendName} does not satisfy Autolykos2.MineRequirements ({Autolykos2.MineRequirements.Describe()}): " +
+                "MineKernel takes a result slot with Atomic.Add and scatters the winning nonce into it.");
+
         const int n = 128; // small N, fast to generate and to gather from on every backend
         const uint height = 1_500_000;
         const int nonceRange = 256; // small enough that an exhaustive CPU scan is instant

@@ -363,6 +363,17 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             builder.AppendLine("precision highp int;");
             builder.AppendLine();
 
+            // Every structured loop runs `for (int _loopN = 0; _loopN < u_loopLimit; _loopN++)` (see
+            // GLSLCodeGenerator.GenerateStructuredCode). glWorker.js sets it to int.MaxValue. It is a
+            // uniform, not a literal, on purpose: D3D's FXC (ANGLE's compiler on Windows) runs a
+            // loop analysis on any loop whose trip count it can see - a literal bound or `while(true)` -
+            // that is superlinear in the body; a 65-iteration Blake2b block loop took 140 s to compile
+            // with a literal bound and 1.4 s with a uniform one (measured 2026-09-23). The literal was
+            // also a correctness bug: a loop past 100000 iterations silently stopped.
+            // Declared here, before helper functions, which contain loops too.
+            builder.AppendLine("uniform highp int u_loopLimit;");
+            builder.AppendLine();
+
             // Struct definitions land here so helper functions (emitted next, with
             // struct-typed params) can see the type. The original placeholder in
             // GLSLKernelFunctionGenerator.GenerateHeader still emits, but lands

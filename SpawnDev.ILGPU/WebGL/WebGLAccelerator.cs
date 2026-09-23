@@ -1255,6 +1255,9 @@ namespace SpawnDev.ILGPU.WebGL
                                 storeSlot = outputInfo.StoreSlot,
                                 storeCount = outputInfo.StoreCount,
                                 isAtomicVote = outputInfo.IsAtomicVote,
+                                fieldByteOffset = outputInfo.FieldByteOffset,
+                                fieldByteSize = outputInfo.FieldByteSize,
+                                structByteSize = outputInfo.StructByteSize,
                                 writeByteOffset = (int)(contiguous.Index * contiguous.ElementSize),
                                 writeLengthBytes = (int)contiguous.LengthInBytes,
                                 subWordElementSize

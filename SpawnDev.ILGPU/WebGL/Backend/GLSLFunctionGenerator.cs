@@ -266,8 +266,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 string idx = $"{sourceVar.Name}_idx";
                 string bn = $"p_{paramIdx}";
                 // texel = idx>>3, shift = (idx&7)*4, mask 0xF (8 nibbles / 32-bit texel).
-                string texelIdx = $"(({idx}) / 8 + {bn}_offset)";
-                string shift = $"(({idx}) % 8) * 4";
+                string texelIdx = $"((({idx}) + {bn}_offset) / 8)";
+                string shift = $"((({idx}) + {bn}_offset) % 8) * 4";
                 string fetch = $"texelFetch({bn}, ivec2({texelIdx} % {bn}_tileW, {texelIdx} / {bn}_tileW), 0).r";
                 string rawNib = $"(({fetch}) >> ({shift})) & 0xF";
                 string extractExpr;

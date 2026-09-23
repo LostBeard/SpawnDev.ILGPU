@@ -1807,6 +1807,17 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         #region Override: Memory Operations
 
+        /// <summary>
+        /// Memory width in bytes of a byte / sbyte / short / ushort struct field (its value lives in an
+        /// i32 local); 0 for every other field. Struct copies, field stores and field loads must use
+        /// 8 / 16-bit ops for these: a 4-byte i32.store of a trailing byte field wrote into the NEXT
+        /// element - another thread's - and zeroed it (StructBuffer_SubWordFields_LoadAndStore, Wasm).
+        /// </summary>
+        private static int NarrowIntFieldBytes(TypeNode fieldType) =>
+            fieldType is PrimitiveType pt &&
+            (pt.BasicValueType == BasicValueType.Int8 || pt.BasicValueType == BasicValueType.Int16)
+                ? pt.Size : 0;
+
         public override void GenerateCode(Load value)
         {
             // Global Float16 loads (e.g. ArrayView1D<Half>[idx]) must not use the
@@ -1862,6 +1873,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         && ptF16Chk.BasicValueType == BasicValueType.Float16;
                     bool isViewPtrField = fieldType is AddressSpaceType;
                     byte fieldWasmType = GetWasmTypeFromIR(fieldType);
+                    int narrowBytes = NarrowIntFieldBytes(fieldType);
                     byte loadOp, storeOp;
                     uint align;
                     if (isFloat16Field)
@@ -1870,6 +1882,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         loadOp = WasmOpCodes.I32Load16U;
                         storeOp = WasmOpCodes.I32Store16;
                         align = 1;
+                    }
+                    else if (narrowBytes > 0)
+                    {
+                        loadOp = narrowBytes == 1 ? WasmOpCodes.I32Load8U : WasmOpCodes.I32Load16U;
+                        storeOp = narrowBytes == 1 ? WasmOpCodes.I32Store8 : WasmOpCodes.I32Store16;
+                        align = narrowBytes == 1 ? 0u : 1u;
                     }
                     else if (isViewPtrField && fieldType.Size >= 8)
                     {
@@ -1903,6 +1921,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                             // Float16: 2-byte atomic load
                             WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicLoad16U, 1, 0);
                         }
+                        else if (narrowBytes > 0)
+                        {
+                            WasmModuleBuilder.EmitAtomicRmw(Code,
+                                narrowBytes == 1 ? WasmOpCodes.I32AtomicLoad8U : WasmOpCodes.I32AtomicLoad16U, align, 0);
+                        }
                         else if (isViewPtrField && fieldType.Size >= 8)
                         {
                             WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I64AtomicLoad, 3, 0);
@@ -1930,6 +1953,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         {
                             // Float16: 2-byte store to scratch (raw f16 bits)
                             WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store16, 1, 0);
+                        }
+                        else if (narrowBytes > 0)
+                        {
+                            WasmModuleBuilder.EmitStore(Code, storeOp, align, 0);
                         }
                         else if (isViewPtrField && fieldType.Size >= 8)
                         {
@@ -2790,6 +2817,18 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     else
                         WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load16S, 1, 0);
                 }
+                else if (NarrowIntFieldBytes(fieldType) == 1)
+                {
+                    // Int8: load 1 byte with sign extension, like Int16 above (an i32 load read the
+                    // neighbouring fields into the upper bits).
+                    if (_hasBarriers)
+                    {
+                        WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicLoad8U, 0, 0);
+                        Code.Add(WasmOpCodes.I32Extend8S);
+                    }
+                    else
+                        WasmModuleBuilder.EmitLoad(Code, WasmOpCodes.I32Load8S, 0, 0);
+                }
                 else
                 {
                     // Emit typed load for the field (atomic for barrier kernels)
@@ -2952,6 +2991,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 EmitGetLocal(value.Value.Resolve()); // push new value
 
                 // Float16: value is f32 on Wasm stack — convert to f16 bits, 2-byte store
+                int narrowBytes = NarrowIntFieldBytes(fieldType);
                 if (isFloat16Field)
                 {
                     EmitF32ToF16();
@@ -2959,6 +2999,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         EmitVerifiedAtomicStore(16);
                     else
                         WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store16, 1, 0);
+                }
+                else if (narrowBytes > 0)
+                {
+                    if (_hasBarriers)
+                        EmitVerifiedAtomicStore(narrowBytes * 8);
+                    else
+                        WasmModuleBuilder.EmitStore(Code,
+                            narrowBytes == 1 ? WasmOpCodes.I32Store8 : WasmOpCodes.I32Store16, narrowBytes == 1 ? 0u : 1u, 0);
                 }
                 else if (_hasBarriers)
                 {
@@ -3264,6 +3312,7 @@ EmitSaveAllLocals();
                     bool isFloat16Field = fieldType is PrimitiveType ptF16St
                         && ptF16St.BasicValueType == BasicValueType.Float16;
                     byte fieldWasmType = GetWasmTypeFromIR(fieldType);
+                    int narrowBytes = NarrowIntFieldBytes(fieldType);
 
                     byte loadOp, storeOp;
                     uint align;
@@ -3272,6 +3321,12 @@ EmitSaveAllLocals();
                         loadOp = WasmOpCodes.I32Load16U;
                         storeOp = WasmOpCodes.I32Store16;
                         align = 1;
+                    }
+                    else if (narrowBytes > 0)
+                    {
+                        loadOp = narrowBytes == 1 ? WasmOpCodes.I32Load8U : WasmOpCodes.I32Load16U;
+                        storeOp = narrowBytes == 1 ? WasmOpCodes.I32Store8 : WasmOpCodes.I32Store16;
+                        align = narrowBytes == 1 ? 0u : 1u;
                     }
                     else switch (fieldWasmType)
                     {
@@ -3324,6 +3379,11 @@ EmitSaveAllLocals();
                             // Float16: 2-byte atomic load (raw f16 bits as i32)
                             WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicLoad16U, 1, 0);
                         }
+                        else if (narrowBytes > 0)
+                        {
+                            WasmModuleBuilder.EmitAtomicRmw(Code,
+                                narrowBytes == 1 ? WasmOpCodes.I32AtomicLoad8U : WasmOpCodes.I32AtomicLoad16U, align, 0);
+                        }
                         else switch (fieldWasmType)
                         {
                             case WasmOpCodes.I64:
@@ -3346,6 +3406,8 @@ EmitSaveAllLocals();
                     {
                         if (isFloat16Field)
                             EmitVerifiedAtomicStore(16);
+                        else if (narrowBytes > 0)
+                            EmitVerifiedAtomicStore(narrowBytes * 8);
                         else switch (fieldWasmType)
                         {
                             case WasmOpCodes.I64:
@@ -3570,10 +3632,18 @@ EmitSaveAllLocals();
                     EmitGetLocal(value[i].Resolve());
 
                     // Float16: value is f32 on the Wasm stack — convert to f16 bits before 2-byte store
+                    int narrowBytes = NarrowIntFieldBytes(fieldType);
                     if (isFloat16Field)
                     {
                         EmitF32ToF16();
                         WasmModuleBuilder.EmitStore(Code, WasmOpCodes.I32Store16, 1, 0);
+                    }
+                    else if (narrowBytes > 0)
+                    {
+                        // The scratch slot is exactly Size bytes: a 4-byte store of a trailing byte field
+                        // ran into the next slot.
+                        WasmModuleBuilder.EmitStore(Code,
+                            narrowBytes == 1 ? WasmOpCodes.I32Store8 : WasmOpCodes.I32Store16, narrowBytes == 1 ? 0u : 1u, 0);
                     }
                     else
                     {

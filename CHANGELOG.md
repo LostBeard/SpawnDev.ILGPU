@@ -27,9 +27,68 @@ the emulation library was full of early returns inlined into every load, store a
   Ozaki one Karp step plus one Newton step (correctly rounded, half the code); Ozaki division's
   correction steps multiply by a single f32 digit (the QD library's `qd_real * double`).
 
-The 19-op Dekker kernel now compiles in about 3 s on WebGPU and WebGL. A kernel with dozens of heavy
-Ozaki (quad-float) operations - sqrt, %, IEEERemainder, division - is still large: the worst such group
-in the new tests takes 18 s to compile on WebGL (ANGLE -> FXC).
+The 19-op Dekker kernel now compiles in about 3 s on WebGPU and WebGL. Each Ozaki (quad-float) operation
+compiles in 0.07-0.74 s on its own under FXC, but FXC is superlinear in the total: a kernel using Sqrt and
+`%` twice each takes 14 s on WebGL (an Ozaki load + store is ~313 FXC instruction slots; Sqrt, `%` and Round
+add 1000-1500 each).
+
+### Fixed - WebGL: shaders with loops took minutes to compile; loops past 100000 iterations stopped early
+
+Every WebGL loop was emitted as `for (int _loopN = 0; _loopN < 100000; _loopN++)`. D3D's FXC (ANGLE's
+compiler on Windows) analyses any loop whose trip count it can see, superlinearly in the loop body:
+Autolykos2's dataset kernel took 521 s to link in Chrome, after FXC's first attempt failed outright with
+X3511 "unable to unroll loop". The bound is now the `u_loopLimit` uniform (int.MaxValue, set by
+glWorker.js): FXC cannot see a trip count and compiles the same loop in 1.4 s. The literal was also a
+correctness bug - a loop running more than 100000 iterations silently stopped there.
+
+### Fixed - Autolykos2 on WebGL; Blake2b compresses in a round loop
+
+`Autolykos2_DatasetGeneration_SmallN` and `_Mine_SmallN` timed out on WebGL (shader compile). Blake2b's
+Compress runs its 12 rounds as a loop (each round's message schedule picked by a switch over the SIGMA
+rows) instead of 96 straight-line G mixes, and a dataset element is one 65-block loop with a single
+Compress call site (it had three, each inlined by FXC). The dataset kernel now links in 0.6 s on WebGL.
+CUDA got slightly faster, not slower (published Release build, 2^26 elements): dataset generation
+2.72M -> 2.78M elements/s, mining 54.4 -> 55.9 MH/s.
+New: `Autolykos2.DatasetRequirements` / `Autolykos2.MineRequirements` for `device.Satisfies(...)` -
+MineKernel needs atomics and scatter stores, which WebGL does not have (its test is now skipped there).
+New test: dataset elements checked against independently computed BLAKE2b (Python hashlib) vectors,
+including index bit 31, MaxN - 1 and uint.MaxValue.
+
+### Fixed - struct buffers with 64-bit fields or alignment padding (WebGL, WebGPU)
+
+- WebGL could not READ a struct buffer element with a long / ulong / double field: the load fetched one
+  32-bit texel per field (a 64-bit field is two) and the shader failed to compile. Autolykos2's
+  MineKernel reading `Element256` hit it.
+- WebGL and WebGPU both laid out such structs by TIGHT PACKING (each field in the next 32-bit slot,
+  element stride = sum of field widths), ignoring C# alignment padding: in `{ int A; long B; double C;
+  float D; }` B is at byte 8, not 4, so every field after A was read and written 4 bytes off. Offsets and
+  the element size now come from ILGPU's struct layout, which is the managed layout the host uploads.
+- WebGL added a struct SubView's element offset to the texel index unscaled.
+- WebGPU bound a struct with a byte / short field (and no 64-bit field) as a native WGSL struct array,
+  where WGSL widens such a field to i32: `{ byte; sbyte; short; byte; }` is 6 bytes on the host and 16
+  in WGSL, so every element was read and written at the wrong place. Such structs now use the same
+  host-layout u32 packing; a struct whose size is not a multiple of 4 (neighbouring elements share
+  words) binds as atomic<u32> and stores its fields with atomicAnd / atomicOr.
+- byte / sbyte / short / ushort struct fields are read by shift and mask on WebGL and WebGPU (WebGPU
+  stores them by replacing only their own bits).
+- Known limitation: a Half / BFloat16 / FP8 / 4-bit field inside a struct buffer. WebGL and WebGPU (when
+  the struct also has a 64-bit field) fail loudly at kernel compile (NotSupportedException). On WebGPU a
+  struct with such a field and no 64-bit field keeps the native WGSL layout: correct for GPU-only buffers
+  (radix-sort pairs), but not the host's byte layout, so uploading or reading one from the host is wrong.
+- Wasm moved every byte / short struct field with 4-byte loads and stores: storing a struct whose last
+  field is a byte wrote 3 bytes into the NEXT element (another thread's, zeroing it), a struct built in
+  scratch ran into the next scratch slot, and reading a byte field brought the neighbouring fields in
+  as its upper bits. Struct copies, field stores and field loads now use 8 / 16-bit ops.
+
+### Fixed - byte / short / Half / FP8 / 4-bit SubViews at a non-word offset read the wrong elements (WebGL, WebGPU)
+
+A sub-word view that does not start on a 4-byte boundary (`byteView.SubView(5, n)`) read from the wrong
+place. WebGL added the view's element offset to the texel index AFTER dividing the element index by the
+elements per texel (kernel and `[NoInlining]` helper paths); WebGPU passed every view's offset in u32
+words, which the sub-word path added to an element index (a byte SubView(5) read from element 1). WebGPU
+now passes an exact element offset for views whose elements are not whole u32 words, computed from the
+view's element index (the byte index floors for 4-bit types), and binds a struct whose size does not
+divide 256 at a multiple of its size.
 
 ### Fixed - exact 64-bit conversions and rounding for emulated double (WebGPU, WebGL)
 
@@ -72,6 +131,15 @@ leading 1 - 1.5 rounded to 1 instead of 2.
   honours the profile's f64 emulation mode for GLSL.
 - `SpawnDev.ILGPU.DemoConsole -- kernel-dump <method>` writes a test kernel's WGSL, GLSL and Wasm offline.
 - PlaywrightMultiTest: `PMT_DAWN_FEATURES=<toggle,...>` enables Dawn toggles for a run.
+- New tests: `StructBuffer_PaddedMixedFields_LoadAndStore` (padded struct, kernel + NoInlining helper +
+  SubView), `StructBuffer_SubWordFields_LoadAndStore` (incl. a 6-byte struct through a SubView),
+  `StructBuffer_UInt64Fields_Load`, `SubWordView_SubViewAtOddOffset_ReadAndWrite`, `Loop_RunsPast100000Iterations_KernelAndNoInliningHelper`
+  (red-checked: fails on WebGL with the old literal bound), `Autolykos2_DatasetElement_KnownVectors`.
+- The grouped emulated-double math test calls one `[NoInlining]` helper per op; the one helper switching
+  over all 19 ops stays in the all-ops Dekker compile gate. That helper made each Ozaki group cost 6-24 s
+  of FXC (D3D inlines the whole 19-op body at every call site).
+- `DemoConsole -- f64-op-cost` dumps one emulated-double op per kernel for per-op compile timing;
+  `autolykos2-dataset-glsl` also dumps MineKernel.
 
 ### Known limitation (unchanged) - WebGL stores must match the thread's positional layout
 

@@ -19,13 +19,12 @@ namespace SpawnDev.ILGPU.Crypto
     /// </summary>
     /// <remarks>
     /// <para>
-    /// The 12-round compression function is fully unrolled with literal integer SIGMA indices
-    /// (12 hand-written round bodies, not a <c>sigma[round][i]</c> table walked by a runtime
-    /// loop variable). This is deliberate, not a style choice: this fork has a documented
-    /// latent PTX codegen bug where a fixed-size local array read/written via a RUNTIME loop
-    /// index crashes CUDA JIT (see <c>SpawnDev.ILGPU.DemoConsole/LocalArrayDynamicIndexRepro.cs</c>).
-    /// A table-driven message schedule is exactly that shape, so it is avoided by construction
-    /// here rather than risked.
+    /// The 12 rounds of the compression function run as a runtime loop, and each round's message
+    /// schedule is a <c>switch</c> over literal SIGMA rows, not a <c>sigma[round][i]</c> table.
+    /// A table read by the round index is a fixed-size local array indexed at runtime, and this
+    /// fork has a documented latent PTX codegen bug where exactly that shape crashes the CUDA JIT
+    /// (see <c>SpawnDev.ILGPU.DemoConsole/LocalArrayDynamicIndexRepro.cs</c>). See
+    /// <see cref="Compress"/> for why the rounds are not unrolled.
     /// </para>
     /// <para>
     /// Rotations are hand-written as <c>(x &gt;&gt; n) | (x &lt;&lt; (64 - n))</c> - there is no
@@ -85,19 +84,17 @@ namespace SpawnDev.ILGPU.Crypto
         /// bytes hashed so far (including this block); for the single-block callers this
         /// primitive targets, <paramref name="t1"/> is always 0.
         /// </summary>
-        // NoInlining (5.2.14): one Compress body per shader/module instead of one per call site -
-        // Autolykos2's dataset element calls it 65 times (once before its block loop, once in it,
-        // once after). An earlier attempt at NoInlining gave wrong digests on WebGL, WebGPU and
-        // Wasm; those were helper-function codegen bugs, all fixed in 5.2.14 (multi-block helpers
-        // lost their control flow - Compress is multi-block because of `if (isLastBlock)` - Wasm
-        // helper scratch sat at address 0, and Wasm negated a bool parameter bitwise). Every
-        // Autolykos2 test now passes on CPU/CUDA/OpenCL/WebGPU/Wasm with this layout.
+        // NoInlining (5.2.14): one Compress body per shader/module instead of one per call site.
         //
-        // WebGL: DatasetGeneration_SmallN and Mine_SmallN still exceed the 30 s test timeout, in
-        // the driver's shader COMPILE (ANGLE -> D3D FXC), not in execution: measured 2026-09-22,
-        // one n=1 dispatch of a kernel containing a SINGLE Compress takes ~8.7 s on WebGL (1.5 s
-        // on WebGPU); two Compress bodies ~27 s. FXC is superlinear in long straight-line integer
-        // code, and 96 inlined emulated-64-bit G mixes is exactly that. Not a correctness bug.
+        // The 12 rounds are a RUNTIME loop (5.2.15), one round of 8 G mixes per iteration, with the
+        // round's message schedule (SIGMA row) picked by a switch. Fully unrolled - 96 G calls in
+        // straight line - WebGL could not compile it: D3D's FXC (ANGLE's WebGL compiler on Windows)
+        // inlines every function and is superlinear in straight-line code, so one Compress body took
+        // ~8.7 s and Autolykos2's dataset element (three Compress call sites) 252 s, then failed
+        // (measured 2026-09-23 on ANGLE's own HLSL). The loop stays a loop: 12 is not a power-of-two
+        // multiple LoopUnrolling can split under its body-cost cap once the body holds 8 calls.
+        // SIGMA as a constant table indexed by the round would be a local array read by a runtime
+        // index, which crashes the CUDA JIT on this fork (DemoConsole LocalArrayDynamicIndexRepro.cs).
         [MethodImpl(MethodImplOptions.NoInlining)]
         public static void Compress(
             ref ulong h0, ref ulong h1, ref ulong h2, ref ulong h3,
@@ -112,125 +109,85 @@ namespace SpawnDev.ILGPU.Crypto
             ulong v12 = IV4 ^ t0, v13 = IV5 ^ t1, v14 = IV6, v15 = IV7;
             if (isLastBlock) v14 = ~v14;
 
-            // Round 0 - SIGMA[0] = {0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15}
-            G(ref v0, ref v4, ref v8, ref v12, m0, m1);
-            G(ref v1, ref v5, ref v9, ref v13, m2, m3);
-            G(ref v2, ref v6, ref v10, ref v14, m4, m5);
-            G(ref v3, ref v7, ref v11, ref v15, m6, m7);
-            G(ref v0, ref v5, ref v10, ref v15, m8, m9);
-            G(ref v1, ref v6, ref v11, ref v12, m10, m11);
-            G(ref v2, ref v7, ref v8, ref v13, m12, m13);
-            G(ref v3, ref v4, ref v9, ref v14, m14, m15);
+            for (int round = 0; round < 12; round++)
+            {
+                // SIGMA[round % 10]: x(i) = m(SIGMA[round][i]). SIGMA has 10 distinct rows; rounds 10
+                // and 11 repeat rows 0 and 1.
+                ulong x0, x1, x2, x3, x4, x5, x6, x7, x8, x9, x10, x11, x12, x13, x14, x15;
+                switch (round)
+                {
+                case 1:
+                case 11:
+                    x0 = m14; x1 = m10; x2 = m4; x3 = m8;
+                    x4 = m9; x5 = m15; x6 = m13; x7 = m6;
+                    x8 = m1; x9 = m12; x10 = m0; x11 = m2;
+                    x12 = m11; x13 = m7; x14 = m5; x15 = m3;
+                    break;
+                case 2:
+                    x0 = m11; x1 = m8; x2 = m12; x3 = m0;
+                    x4 = m5; x5 = m2; x6 = m15; x7 = m13;
+                    x8 = m10; x9 = m14; x10 = m3; x11 = m6;
+                    x12 = m7; x13 = m1; x14 = m9; x15 = m4;
+                    break;
+                case 3:
+                    x0 = m7; x1 = m9; x2 = m3; x3 = m1;
+                    x4 = m13; x5 = m12; x6 = m11; x7 = m14;
+                    x8 = m2; x9 = m6; x10 = m5; x11 = m10;
+                    x12 = m4; x13 = m0; x14 = m15; x15 = m8;
+                    break;
+                case 4:
+                    x0 = m9; x1 = m0; x2 = m5; x3 = m7;
+                    x4 = m2; x5 = m4; x6 = m10; x7 = m15;
+                    x8 = m14; x9 = m1; x10 = m11; x11 = m12;
+                    x12 = m6; x13 = m8; x14 = m3; x15 = m13;
+                    break;
+                case 5:
+                    x0 = m2; x1 = m12; x2 = m6; x3 = m10;
+                    x4 = m0; x5 = m11; x6 = m8; x7 = m3;
+                    x8 = m4; x9 = m13; x10 = m7; x11 = m5;
+                    x12 = m15; x13 = m14; x14 = m1; x15 = m9;
+                    break;
+                case 6:
+                    x0 = m12; x1 = m5; x2 = m1; x3 = m15;
+                    x4 = m14; x5 = m13; x6 = m4; x7 = m10;
+                    x8 = m0; x9 = m7; x10 = m6; x11 = m3;
+                    x12 = m9; x13 = m2; x14 = m8; x15 = m11;
+                    break;
+                case 7:
+                    x0 = m13; x1 = m11; x2 = m7; x3 = m14;
+                    x4 = m12; x5 = m1; x6 = m3; x7 = m9;
+                    x8 = m5; x9 = m0; x10 = m15; x11 = m4;
+                    x12 = m8; x13 = m6; x14 = m2; x15 = m10;
+                    break;
+                case 8:
+                    x0 = m6; x1 = m15; x2 = m14; x3 = m9;
+                    x4 = m11; x5 = m3; x6 = m0; x7 = m8;
+                    x8 = m12; x9 = m2; x10 = m13; x11 = m7;
+                    x12 = m1; x13 = m4; x14 = m10; x15 = m5;
+                    break;
+                case 9:
+                    x0 = m10; x1 = m2; x2 = m8; x3 = m4;
+                    x4 = m7; x5 = m6; x6 = m1; x7 = m5;
+                    x8 = m15; x9 = m11; x10 = m9; x11 = m14;
+                    x12 = m3; x13 = m12; x14 = m13; x15 = m0;
+                    break;
+                default: // rounds 0 and 10
+                    x0 = m0; x1 = m1; x2 = m2; x3 = m3;
+                    x4 = m4; x5 = m5; x6 = m6; x7 = m7;
+                    x8 = m8; x9 = m9; x10 = m10; x11 = m11;
+                    x12 = m12; x13 = m13; x14 = m14; x15 = m15;
+                    break;
+                }
 
-            // Round 1 - SIGMA[1] = {14,10,4,8,9,15,13,6,1,12,0,2,11,7,5,3}
-            G(ref v0, ref v4, ref v8, ref v12, m14, m10);
-            G(ref v1, ref v5, ref v9, ref v13, m4, m8);
-            G(ref v2, ref v6, ref v10, ref v14, m9, m15);
-            G(ref v3, ref v7, ref v11, ref v15, m13, m6);
-            G(ref v0, ref v5, ref v10, ref v15, m1, m12);
-            G(ref v1, ref v6, ref v11, ref v12, m0, m2);
-            G(ref v2, ref v7, ref v8, ref v13, m11, m7);
-            G(ref v3, ref v4, ref v9, ref v14, m5, m3);
-
-            // Round 2 - SIGMA[2] = {11,8,12,0,5,2,15,13,10,14,3,6,7,1,9,4}
-            G(ref v0, ref v4, ref v8, ref v12, m11, m8);
-            G(ref v1, ref v5, ref v9, ref v13, m12, m0);
-            G(ref v2, ref v6, ref v10, ref v14, m5, m2);
-            G(ref v3, ref v7, ref v11, ref v15, m15, m13);
-            G(ref v0, ref v5, ref v10, ref v15, m10, m14);
-            G(ref v1, ref v6, ref v11, ref v12, m3, m6);
-            G(ref v2, ref v7, ref v8, ref v13, m7, m1);
-            G(ref v3, ref v4, ref v9, ref v14, m9, m4);
-
-            // Round 3 - SIGMA[3] = {7,9,3,1,13,12,11,14,2,6,5,10,4,0,15,8}
-            G(ref v0, ref v4, ref v8, ref v12, m7, m9);
-            G(ref v1, ref v5, ref v9, ref v13, m3, m1);
-            G(ref v2, ref v6, ref v10, ref v14, m13, m12);
-            G(ref v3, ref v7, ref v11, ref v15, m11, m14);
-            G(ref v0, ref v5, ref v10, ref v15, m2, m6);
-            G(ref v1, ref v6, ref v11, ref v12, m5, m10);
-            G(ref v2, ref v7, ref v8, ref v13, m4, m0);
-            G(ref v3, ref v4, ref v9, ref v14, m15, m8);
-
-            // Round 4 - SIGMA[4] = {9,0,5,7,2,4,10,15,14,1,11,12,6,8,3,13}
-            G(ref v0, ref v4, ref v8, ref v12, m9, m0);
-            G(ref v1, ref v5, ref v9, ref v13, m5, m7);
-            G(ref v2, ref v6, ref v10, ref v14, m2, m4);
-            G(ref v3, ref v7, ref v11, ref v15, m10, m15);
-            G(ref v0, ref v5, ref v10, ref v15, m14, m1);
-            G(ref v1, ref v6, ref v11, ref v12, m11, m12);
-            G(ref v2, ref v7, ref v8, ref v13, m6, m8);
-            G(ref v3, ref v4, ref v9, ref v14, m3, m13);
-
-            // Round 5 - SIGMA[5] = {2,12,6,10,0,11,8,3,4,13,7,5,15,14,1,9}
-            G(ref v0, ref v4, ref v8, ref v12, m2, m12);
-            G(ref v1, ref v5, ref v9, ref v13, m6, m10);
-            G(ref v2, ref v6, ref v10, ref v14, m0, m11);
-            G(ref v3, ref v7, ref v11, ref v15, m8, m3);
-            G(ref v0, ref v5, ref v10, ref v15, m4, m13);
-            G(ref v1, ref v6, ref v11, ref v12, m7, m5);
-            G(ref v2, ref v7, ref v8, ref v13, m15, m14);
-            G(ref v3, ref v4, ref v9, ref v14, m1, m9);
-
-            // Round 6 - SIGMA[6] = {12,5,1,15,14,13,4,10,0,7,6,3,9,2,8,11}
-            G(ref v0, ref v4, ref v8, ref v12, m12, m5);
-            G(ref v1, ref v5, ref v9, ref v13, m1, m15);
-            G(ref v2, ref v6, ref v10, ref v14, m14, m13);
-            G(ref v3, ref v7, ref v11, ref v15, m4, m10);
-            G(ref v0, ref v5, ref v10, ref v15, m0, m7);
-            G(ref v1, ref v6, ref v11, ref v12, m6, m3);
-            G(ref v2, ref v7, ref v8, ref v13, m9, m2);
-            G(ref v3, ref v4, ref v9, ref v14, m8, m11);
-
-            // Round 7 - SIGMA[7] = {13,11,7,14,12,1,3,9,5,0,15,4,8,6,2,10}
-            G(ref v0, ref v4, ref v8, ref v12, m13, m11);
-            G(ref v1, ref v5, ref v9, ref v13, m7, m14);
-            G(ref v2, ref v6, ref v10, ref v14, m12, m1);
-            G(ref v3, ref v7, ref v11, ref v15, m3, m9);
-            G(ref v0, ref v5, ref v10, ref v15, m5, m0);
-            G(ref v1, ref v6, ref v11, ref v12, m15, m4);
-            G(ref v2, ref v7, ref v8, ref v13, m8, m6);
-            G(ref v3, ref v4, ref v9, ref v14, m2, m10);
-
-            // Round 8 - SIGMA[8] = {6,15,14,9,11,3,0,8,12,2,13,7,1,4,10,5}
-            G(ref v0, ref v4, ref v8, ref v12, m6, m15);
-            G(ref v1, ref v5, ref v9, ref v13, m14, m9);
-            G(ref v2, ref v6, ref v10, ref v14, m11, m3);
-            G(ref v3, ref v7, ref v11, ref v15, m0, m8);
-            G(ref v0, ref v5, ref v10, ref v15, m12, m2);
-            G(ref v1, ref v6, ref v11, ref v12, m13, m7);
-            G(ref v2, ref v7, ref v8, ref v13, m1, m4);
-            G(ref v3, ref v4, ref v9, ref v14, m10, m5);
-
-            // Round 9 - SIGMA[9] = {10,2,8,4,7,6,1,5,15,11,9,14,3,12,13,0}
-            G(ref v0, ref v4, ref v8, ref v12, m10, m2);
-            G(ref v1, ref v5, ref v9, ref v13, m8, m4);
-            G(ref v2, ref v6, ref v10, ref v14, m7, m6);
-            G(ref v3, ref v7, ref v11, ref v15, m1, m5);
-            G(ref v0, ref v5, ref v10, ref v15, m15, m11);
-            G(ref v1, ref v6, ref v11, ref v12, m9, m14);
-            G(ref v2, ref v7, ref v8, ref v13, m3, m12);
-            G(ref v3, ref v4, ref v9, ref v14, m13, m0);
-
-            // Round 10 = Round 0 (SIGMA has only 10 distinct rows; 10/11 repeat 0/1)
-            G(ref v0, ref v4, ref v8, ref v12, m0, m1);
-            G(ref v1, ref v5, ref v9, ref v13, m2, m3);
-            G(ref v2, ref v6, ref v10, ref v14, m4, m5);
-            G(ref v3, ref v7, ref v11, ref v15, m6, m7);
-            G(ref v0, ref v5, ref v10, ref v15, m8, m9);
-            G(ref v1, ref v6, ref v11, ref v12, m10, m11);
-            G(ref v2, ref v7, ref v8, ref v13, m12, m13);
-            G(ref v3, ref v4, ref v9, ref v14, m14, m15);
-
-            // Round 11 = Round 1
-            G(ref v0, ref v4, ref v8, ref v12, m14, m10);
-            G(ref v1, ref v5, ref v9, ref v13, m4, m8);
-            G(ref v2, ref v6, ref v10, ref v14, m9, m15);
-            G(ref v3, ref v7, ref v11, ref v15, m13, m6);
-            G(ref v0, ref v5, ref v10, ref v15, m1, m12);
-            G(ref v1, ref v6, ref v11, ref v12, m0, m2);
-            G(ref v2, ref v7, ref v8, ref v13, m11, m7);
-            G(ref v3, ref v4, ref v9, ref v14, m5, m3);
+                G(ref v0, ref v4, ref v8, ref v12, x0, x1);
+                G(ref v1, ref v5, ref v9, ref v13, x2, x3);
+                G(ref v2, ref v6, ref v10, ref v14, x4, x5);
+                G(ref v3, ref v7, ref v11, ref v15, x6, x7);
+                G(ref v0, ref v5, ref v10, ref v15, x8, x9);
+                G(ref v1, ref v6, ref v11, ref v12, x10, x11);
+                G(ref v2, ref v7, ref v8, ref v13, x12, x13);
+                G(ref v3, ref v4, ref v9, ref v14, x14, x15);
+            }
 
             h0 ^= v0 ^ v8;
             h1 ^= v1 ^ v9;
