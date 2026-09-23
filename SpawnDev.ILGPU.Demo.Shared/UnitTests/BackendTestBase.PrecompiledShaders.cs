@@ -203,47 +203,65 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 
         // Regression guard (Geordi, 2026-06-13): the WGSL GenerateCode(MethodCall) reduction
         // smart-fallback once matched ONLY Name=="Reduce", so GroupExtensions.AllReduce that reached
-        // the fallback (offline ShaderCompiler / any path where the registered intrinsic does not fire)
-        // emitted `target = f32(0); // Unmapped fallback` — a silent-ZERO precompiled AllReduce shader.
-        // Runtime masked it (intrinsic fired / IL body inlined to an inner Reduce call), so the
-        // correctness tests passed while a build-time precompiled artifact computed 0. Assert the
-        // OFFLINE-generated AllReduce WGSL is a real reduction: never the unmapped stub, and on a
-        // subgroups device it must take the subgroupAdd fast path (same as Reduce). WebGPU-only.
+        // the fallback emitted `target = f32(0); // Unmapped fallback` - a silent-ZERO precompiled
+        // AllReduce shader. Assert the OFFLINE-generated Reduce / AllReduce WGSL is never the unmapped
+        // stub AND is byte-identical to what the LIVE runtime emits for the same launch (explicitly
+        // grouped, LoadStreamKernel). WebGPU-only.
+        //
+        // (This used to require subgroupAdd on a subgroups device. The offline compiler then ran without
+        // the runtime's intrinsic remappings, and the LIVE runtime never took that path: with
+        // EnableWebGPUAlgorithms, Group Reduce / AllReduce are WebGPUGroupExtensions' shared-memory
+        // reduction - thread 0 folds the group sequentially - on every WebGPU device, measured
+        // 2026-09-22. The offline shader now matches the runtime; the missing subgroup fast path is a
+        // runtime performance gap of its own.)
         [TestMethod]
         public async Task PrecompiledShaders_OfflineAllReduce_IsRealReduction() => await RunTest(async accelerator =>
         {
             if (accelerator is not WebGPUAccelerator webgpu)
                 throw new UnsupportedTestException("WebGPU-only WGSL reduction-codegen guard.");
 
-            var profile = CapabilityProfiles.FromAccelerator(webgpu, webgpu.EnabledFeatures);
-            var spec = new KernelSpecialization(64, null);
-
-            var allReduce = ShaderCompiler.Generate(
-                (Action<Index1D, ArrayView<float>, ArrayView<float>>)PrecompiledShaders_GroupAllReduceKernel,
-                profile, spec).Source ?? "";
-            var reduce = ShaderCompiler.Generate(
-                (Action<Index1D, ArrayView<float>, ArrayView<float>>)PrecompiledShaders_GroupReduceKernel,
-                profile, spec).Source ?? "";
-
-            if (allReduce.Contains("Unmapped", StringComparison.Ordinal))
-                throw new Exception(
-                    "Offline AllReduce WGSL contains the 'Unmapped' silent-zero stub — the reduction " +
-                    "smart-fallback regressed (must match AllReduce, not only Reduce). " +
-                    $"len={allReduce.Length}");
-
-            // Sanity: Reduce was always handled; if IT is unmapped the whole fallback broke.
-            if (reduce.Contains("Unmapped", StringComparison.Ordinal))
-                throw new Exception($"Offline Reduce WGSL unexpectedly Unmapped (len={reduce.Length}).");
-
-            // On a subgroups-capable device, AllReduce must take the same subgroupAdd fast path as Reduce.
-            if (webgpu.Backend.HasSubgroups)
+            var live = new Dictionary<string, string>();
+            Action<string, string, WGSLEntry> handler = (name, wgsl, info) =>
             {
-                if (!allReduce.Contains("subgroupAdd", StringComparison.Ordinal))
-                    throw new Exception(
-                        "Subgroups enabled but offline AllReduce WGSL has no subgroupAdd — it is not " +
-                        $"taking the register-only fast path. len={allReduce.Length}");
-                if (!reduce.Contains("subgroupAdd", StringComparison.Ordinal))
-                    throw new Exception($"Subgroups enabled but offline Reduce WGSL has no subgroupAdd (len={reduce.Length}).");
+                if (name.Contains("PrecompiledShaders_GroupAllReduceKernel", StringComparison.Ordinal)) live["AllReduce"] = wgsl;
+                if (name.Contains("PrecompiledShaders_GroupReduceKernel", StringComparison.Ordinal)) live["Reduce"] = wgsl;
+            };
+            WebGPUBackend.OnShaderCompiled += handler;
+            try
+            {
+                _ = accelerator.LoadStreamKernel<Index1D, ArrayView<float>, ArrayView<float>>(PrecompiledShaders_GroupAllReduceKernel);
+                _ = accelerator.LoadStreamKernel<Index1D, ArrayView<float>, ArrayView<float>>(PrecompiledShaders_GroupReduceKernel);
+            }
+            finally { WebGPUBackend.OnShaderCompiled -= handler; }
+
+            var profile = CapabilityProfiles.FromAccelerator(webgpu, webgpu.EnabledFeatures);
+            var offline = new Dictionary<string, string>
+            {
+                ["AllReduce"] = ShaderCompiler.Generate(
+                    (Action<Index1D, ArrayView<float>, ArrayView<float>>)PrecompiledShaders_GroupAllReduceKernel,
+                    profile, null, explicitlyGrouped: true).Source ?? "",
+                ["Reduce"] = ShaderCompiler.Generate(
+                    (Action<Index1D, ArrayView<float>, ArrayView<float>>)PrecompiledShaders_GroupReduceKernel,
+                    profile, null, explicitlyGrouped: true).Source ?? "",
+            };
+            foreach (var (op, wgsl) in offline)
+            {
+                if (wgsl.Contains("Unmapped", StringComparison.Ordinal))
+                    throw new Exception($"Offline {op} WGSL contains the 'Unmapped' silent-zero stub (len={wgsl.Length}).");
+                if (!live.TryGetValue(op, out var liveRaw))
+                    throw new Exception($"Did not capture the live {op} WGSL via OnShaderCompiled.");
+                // Inlined-helper and variable names carry IR ids (AllReduce_49) that depend on what
+                // the context compiled before - normalize them; everything else must match.
+                string Normalize(string w) => System.Text.RegularExpressions.Regex.Replace(w, @"\b([A-Za-z]\w*?)_\d+\b", "$1_#");
+                string offlineWgsl = Normalize(wgsl), liveWgsl = Normalize(liveRaw);
+                if (offlineWgsl != liveWgsl)
+                {
+                    int d = 0;
+                    while (d < Math.Min(offlineWgsl.Length, liveWgsl.Length) && offlineWgsl[d] == liveWgsl[d]) d++;
+                    int from = Math.Max(0, d - 40);
+                    throw new Exception($"Offline {op} WGSL != runtime (offlineLen={offlineWgsl.Length} liveLen={liveWgsl.Length} firstDiff@{d}) " +
+                        $"LIVE>>>{liveWgsl.Substring(from, Math.Min(90, liveWgsl.Length - from))}<<< OFFLINE>>>{offlineWgsl.Substring(from, Math.Min(90, offlineWgsl.Length - from))}<<<");
+                }
             }
             await Task.CompletedTask;
         });

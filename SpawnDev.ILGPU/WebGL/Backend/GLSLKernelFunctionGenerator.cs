@@ -3367,6 +3367,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     BinaryArithmeticKind.Div => "f64_div",
                     BinaryArithmeticKind.Min => "f64_min",
                     BinaryArithmeticKind.Max => "f64_max",
+                    BinaryArithmeticKind.Rem => "f64_rem",
+                    BinaryArithmeticKind.PowF => "f64_pow",
+                    BinaryArithmeticKind.Atan2F => "f64_atan2",
+                    BinaryArithmeticKind.CopySignF => "f64_copysign",
                     _ => null
                 };
                 if (emulFunc != null) { AppendLine($"{prefix}{target} = {emulFunc}({left}, {right});"); return; }
@@ -3397,6 +3401,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     // value's high word had its top bit set, corrupting the result. Found
                     // via NoInliningBlakeShapedCall9InlineTraceTest.
                     BinaryArithmeticKind.Shr => value.IsUnsigned ? "u64_shr" : "i64_shr",
+                    // GLSL min()/max() on a uvec2 compare the two words independently.
+                    BinaryArithmeticKind.Min => value.IsUnsigned ? "u64_min" : "i64_min",
+                    BinaryArithmeticKind.Max => value.IsUnsigned ? "u64_max" : "i64_max",
                     _ => null
                 };
                 if (emulFunc != null)
@@ -3462,14 +3469,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // Use a ternary to handle the zero case correctly.
             if (value.Kind == BinaryArithmeticKind.CopySignF)
             {
-                AppendLine($"{prefix}{target} = ({right} < 0.0) ? -abs({left}) : abs({left});");
+                AppendLine($"{prefix}{target} = {CopySignExpression(left.ToString(), right.ToString())};");
                 return;
             }
 
             // Float remainder — GLSL ES 3.0 does not support % for floats
             if (value.Kind == BinaryArithmeticKind.Rem && (leftType == "float" || leftType.StartsWith("float")))
             {
-                AppendLine($"{prefix}{target} = {left} - {right} * floor({left} / {right});");
+                // C# float % truncates (fmod): -7.5f % 2f == -1.5f. floor() gave the floored modulo (0.5).
+                AppendLine($"{prefix}{target} = {left} - {right} * trunc({left} / {right});");
                 return;
             }
 
@@ -3528,41 +3536,6 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{prefix}{target} = {left} {op} {right};");
         }
 
-        public override void GenerateCode(UnaryArithmeticValue value)
-        {
-            var target = Load(value);
-            var operand = Load(value.Value);
-            var operandType = TypeGenerator[value.Value.Type];
-            string prefix = _hoistedPrimitives.Contains(value) ? "" : $"{TypeGenerator[value.Type]} ";
-
-            bool isEmulatedF64 = Backend.EnableF64Emulation && (operandType == "vec2" || (Backend.UseOzakiF64Emulation && operandType == "vec4"));
-            bool isEmulatedI64 = Backend.EnableI64Emulation && operandType == "uvec2";
-
-            if (isEmulatedF64)
-            {
-                string? emulFunc = value.Kind switch
-                {
-                    UnaryArithmeticKind.Neg => "f64_neg",
-                    UnaryArithmeticKind.Abs => "f64_abs",
-                    _ => null
-                };
-                if (emulFunc != null) { AppendLine($"{prefix}{target} = {emulFunc}({operand});"); return; }
-            }
-
-            if (isEmulatedI64)
-            {
-                string? emulFunc = value.Kind switch
-                {
-                    UnaryArithmeticKind.Neg => "i64_neg",
-                    UnaryArithmeticKind.Abs => "i64_abs",
-                    _ => null
-                };
-                if (emulFunc != null) { AppendLine($"{prefix}{target} = {emulFunc}({operand});"); return; }
-            }
-
-            // Fall back to base class for non-emulated types
-            base.GenerateCode(value);
-        }
 
         public override void GenerateCode(TernaryArithmeticValue value)
         {
@@ -3613,7 +3586,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     if (value.IsUnsignedOrUnordered && value.Kind != CompareKind.NotEqual)
                     {
                         AppendLine(
-                            $"{prefix}{target} = (_f32_is_nan_bits({left}.x) || _f32_is_nan_bits({right}.x)) || {f}({left}, {right});");
+                            $"{prefix}{target} = (f64_is_nan({left}) || f64_is_nan({right})) || {f}({left}, {right});");
                     }
                     else
                     {

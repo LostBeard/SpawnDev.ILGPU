@@ -544,8 +544,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             Allocas allocas,
             WasmCodeGenerator.GeneratorArgs data)
         {
-            // Store helper methods so the kernel generator can inline them
-            data.HelperMethods[method] = allocas;
+            // Store helper methods so the kernel generator can inline them. NOT intrinsic/external
+            // methods: ILGPU seals those with a PLACEHOLDER body that returns a null constant
+            // (IRContext.SealMethodWithoutImplementation). Registered as a helper, that placeholder
+            // was inlined in place of the intrinsic - XMath.RoundToEven (Math.Round after
+            // EnableAlgorithms) returned 0. Unregistered, the call reaches the intrinsic switch in
+            // WasmCodeGenerator.GenerateCode(MethodCall), like WGSLFunctionGenerator's skip flags.
+            if (method.HasImplementation)
+                data.HelperMethods[method] = allocas;
             return new WasmFunctionGenerator(data, method, allocas);
         }
 

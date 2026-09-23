@@ -75,17 +75,30 @@ namespace PlaywrightMultiTest
                 args.Add($"--remote-debugging-port={port}");
                 LogStatus($"[PMT_CDP] DevTools endpoint on http://127.0.0.1:{port} (PMT_CDP_PORT=off to disable)");
             }
+            // PMT_DAWN_FEATURES=<toggle>[,<toggle>...] enables Dawn toggles for the run (e.g. use_dxc,
+            // to compare the D3D12 shader compilers). Chrome honours only ONE --enable-dawn-features
+            // switch, so these merge with PMT_DAWN_DUMP's toggles.
+            var dawnFeatures = new System.Collections.Generic.List<string>();
+            var extraDawn = Environment.GetEnvironmentVariable("PMT_DAWN_FEATURES");
+            if (!string.IsNullOrWhiteSpace(extraDawn))
+            {
+                dawnFeatures.AddRange(extraDawn.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+                LogStatus($"[PMT_DAWN_FEATURES] {extraDawn}");
+            }
             if (Environment.GetEnvironmentVariable("PMT_DAWN_DUMP") == "1")
             {
                 var logFile = Environment.GetEnvironmentVariable("PMT_DAWN_LOG")
                     ?? Path.Combine(Path.GetTempPath(), "chrome_dawn_dump.log");
                 try { if (File.Exists(logFile)) File.Delete(logFile); } catch { }
-                args.Add("--enable-dawn-features=dump_shaders,disable_symbol_renaming");
+                dawnFeatures.Add("dump_shaders");
+                dawnFeatures.Add("disable_symbol_renaming");
                 args.Add("--enable-logging");
                 args.Add($"--log-file={logFile}");
                 args.Add("--v=1");
                 LogStatus($"[PMT_DAWN_DUMP] Tint shader dump ON -> {logFile}");
             }
+            if (dawnFeatures.Count > 0)
+                args.Add($"--enable-dawn-features={string.Join(",", dawnFeatures)}");
             return args.ToArray();
         }
 

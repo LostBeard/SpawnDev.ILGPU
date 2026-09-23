@@ -96,8 +96,42 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             Builder.AppendLine("uvec2 i64_max(uvec2 a, uvec2 b);");
             Builder.AppendLine("uvec2 u64_min(uvec2 a, uvec2 b);");
             Builder.AppendLine("uvec2 u64_max(uvec2 a, uvec2 b);");
-            Builder.AppendLine("vec2 f64_from_ieee754_bits(uint lo, uint hi);");
-            Builder.AppendLine("uvec2 f64_to_ieee754_bits(vec2 v);");
+            // The emulated-f64 type depends on the mode (Dekker vec2, Ozaki vec4). A prototype
+            // with the wrong one clashes with the definition ("differ only in return type"), so
+            // any helper under Ozaki failed to compile when these were hard-coded vec2.
+            string f64t = Backend.UseOzakiF64Emulation ? "vec4" : "vec2";
+            Builder.AppendLine($"{f64t} f64_from_ieee754_bits(uint lo, uint hi);");
+            Builder.AppendLine($"uvec2 f64_to_ieee754_bits({f64t} v);");
+            Builder.AppendLine($"{f64t} f64_from_u64(uvec2 v);");
+            Builder.AppendLine($"{f64t} f64_from_i64(uvec2 v);");
+            Builder.AppendLine($"{f64t} f64_from_u32(uint v);");
+            Builder.AppendLine($"{f64t} f64_from_i32(int v);");
+            Builder.AppendLine($"uvec2 f64_to_i64({f64t} v);");
+            Builder.AppendLine($"uvec2 f64_to_u64({f64t} v);");
+            Builder.AppendLine($"int f64_to_i32({f64t} v);");
+            Builder.AppendLine($"uint f64_to_u32({f64t} v);");
+            // f64 arithmetic a helper body can call (both families define all of these).
+            Builder.AppendLine($"{f64t} f64_from_f32(float v);");
+            Builder.AppendLine($"float f64_to_f32({f64t} v);");
+            Builder.AppendLine($"{f64t} f64_new(float hi, float lo);");
+            Builder.AppendLine($"{f64t} f64_neg({f64t} a);");
+            Builder.AppendLine($"{f64t} f64_abs({f64t} a);");
+            Builder.AppendLine($"{f64t} f64_floor({f64t} v);");
+            Builder.AppendLine($"{f64t} f64_ceil({f64t} v);");
+            Builder.AppendLine($"{f64t} f64_sqrt({f64t} a);");
+            Builder.AppendLine($"bool f64_is_nan({f64t} v);");
+            Builder.AppendLine($"bool f64_is_inf({f64t} v);");
+            Builder.AppendLine($"{f64t} f64_trunc({f64t} v);");
+            Builder.AppendLine($"{f64t} f64_round_even({f64t} v);");
+            Builder.AppendLine($"{f64t} f64_round_away({f64t} v);");
+            foreach (var op in new[] { "add", "sub", "mul", "div", "min", "max", "rem", "pow", "atan2", "copysign", "ieee_rem" })
+                Builder.AppendLine($"{f64t} f64_{op}({f64t} a, {f64t} b);");
+            foreach (var op in new[] { "lt", "le", "gt", "ge", "eq", "ne" })
+                Builder.AppendLine($"bool f64_{op}({f64t} a, {f64t} b);");
+            Builder.AppendLine("float u64_to_f32(uvec2 v);");
+            Builder.AppendLine("float i64_to_f32(uvec2 v);");
+            Builder.AppendLine("uvec2 f32_to_i64(float f);");
+            Builder.AppendLine("uvec2 f32_to_u64(float f);");
             Builder.AppendLine("float _f16_to_f32(uint bits);");
             Builder.AppendLine("uint _f32_to_f16(float v);");
             Builder.AppendLine("float _bf16_to_f32(uint bits);");

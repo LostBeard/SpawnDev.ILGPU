@@ -294,6 +294,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         protected bool IsStateMachineActive { get; set; } = false;
 
         /// <summary>
+        /// The state machine is FORWARD-ONLY: every branch targets a later block, so one pass of
+        /// <c>if (current_block == k)</c> blocks in order runs the method - no <c>loop</c>, no
+        /// <c>continue</c>. D3D's FXC (Chrome's WebGPU/WebGL shader compiler on Windows) cannot
+        /// fold or cheaply compile a <c>loop { switch }</c> it inlines at every call site: a
+        /// 19-op [NoInlining] helper called 19 times took over 10 minutes (the GPU watchdog
+        /// killed the device); forward-only, 0.94 s.
+        /// </summary>
+        protected bool IsForwardStateMachine { get; set; } = false;
+
+        /// <summary>Ends a state-machine block after it set <c>current_block</c>.</summary>
+        private void EmitStateMachineContinue()
+        {
+            if (!IsForwardStateMachine)
+                AppendLine("continue;");
+        }
+
+        /// <summary>
         /// Set by <see cref="GenerateCode(FloatAsIntCast)"/> or
         /// <see cref="GenerateCode(IntAsFloatCast)"/> when the emulated-Half
         /// round-trip path emits <c>_f32_to_f16</c> or <c>_f16_to_f32</c>.
@@ -658,16 +675,37 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Save position before loop - deferred variable declarations will be inserted here
             int deferredInsertPosition = Builder.Length;
 
+            // Forward-only when every edge goes to a later block (an acyclic CFG in block order).
+            IsForwardStateMachine = true;
+            {
+                int index = 0;
+                foreach (var block in blocks)
+                {
+                    if (block.Terminator is TerminatorValue terminatorValue)
+                    {
+                        foreach (var target in terminatorValue.Targets)
+                        {
+                            if (GetBlockIndex(target) <= index)
+                                IsForwardStateMachine = false;
+                        }
+                    }
+                    index++;
+                }
+            }
+
             AppendLine("var current_block : i32 = 0;");
-            AppendLine("loop {");
-            PushIndent();
-            AppendLine("switch (current_block) {");
-            PushIndent();
+            if (!IsForwardStateMachine)
+            {
+                AppendLine("loop {");
+                PushIndent();
+                AppendLine("switch (current_block) {");
+                PushIndent();
+            }
 
             int blockIndex = 0;
             foreach (var block in blocks)
             {
-                AppendLine($"case {blockIndex}: {{");
+                AppendLine(IsForwardStateMachine ? $"if (current_block == {blockIndex}) {{" : $"case {blockIndex}: {{");
                 PushIndent();
 
                 foreach (var valueEntry in block)
@@ -687,14 +725,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 blockIndex++;
             }
 
-            AppendLine("default: { break; }");
-            PopIndent();
-            AppendLine("}"); // end switch
+            if (!IsForwardStateMachine)
+            {
+                AppendLine("default: { break; }");
+                PopIndent();
+                AppendLine("}"); // end switch
 
-            AppendLine("if (current_block == -1) { break; }");
+                AppendLine("if (current_block == -1) { break; }");
 
-            PopIndent();
-            AppendLine("}"); // end loop
+                PopIndent();
+                AppendLine("}"); // end loop
+            }
 
             // CRITICAL: Post-process to hoist ALL variable declarations to function scope.
             // Some code generators bypass Declare() and write "let v_N = expr;" directly.
@@ -1256,6 +1297,33 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return;
             }
 
+            // emu_f64 dispatch - the base path serves [NoInlining] helper functions, where
+            // `double + double` otherwise came out as a component-wise vec2/vec4 add (the kernel
+            // generator has its own copy of this table).
+            if (Backend.EnableF64Emulation
+                && (TypeGenerator[value.Left.Type] == "emu_f64" || TypeGenerator[value.Right.Type] == "emu_f64"))
+            {
+                string? emulF64Func = value.Kind switch
+                {
+                    BinaryArithmeticKind.Add => "f64_add",
+                    BinaryArithmeticKind.Sub => "f64_sub",
+                    BinaryArithmeticKind.Mul => "f64_mul",
+                    BinaryArithmeticKind.Div => "f64_div",
+                    BinaryArithmeticKind.Min => "f64_min",
+                    BinaryArithmeticKind.Max => "f64_max",
+                    BinaryArithmeticKind.Rem => "f64_rem",
+                    BinaryArithmeticKind.PowF => "f64_pow",
+                    BinaryArithmeticKind.Atan2F => "f64_atan2",
+                    BinaryArithmeticKind.CopySignF => "f64_copysign",
+                    _ => null
+                };
+                if (emulF64Func != null)
+                {
+                    AppendLine($"{target} = {emulF64Func}({left}, {right});");
+                    return;
+                }
+            }
+
             // emu_i64 / emu_u64 dispatch — base path is shared with helpers
             // (WGSLFunctionGenerator inherits this). Without this dispatch, a
             // helper that does `long a + long b` would emit `vec2<u32> + vec2<u32>`
@@ -1374,8 +1442,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
             else if (op == "copysign_func")
             {
-                // WGSL has no copysign builtin; emulate: sign(right) * abs(left)
-                AppendLine($"{target} = sign({right}) * abs({left});");
+                // WGSL has no copysign builtin. Test the SIGN BIT of right: sign(right) * abs(left)
+                // zeroed the result for right == 0 and dropped the sign of -0.0.
+                AppendLine($"{target} = {CopySignExpression(left.ToString(), right.ToString())};");
             }
             else if (value.Kind == BinaryArithmeticKind.Shl || value.Kind == BinaryArithmeticKind.Shr)
             {
@@ -1437,6 +1506,30 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             GenerateUnOp(value);
         }
 
+        /// <summary>
+        /// Transcendental on an emulated f64, computed in f32 (f32 accuracy - the emulation
+        /// libraries have no double-precision transcendentals). Applying the builtin to the
+        /// emulated vector itself works per COMPONENT: cos(0.5) came out 1.8776 (cos(hi) + cos(lo)).
+        /// </summary>
+        private static string? EmulatedF64ViaF32(UnaryArithmeticKind kind, string operand) => kind switch
+        {
+            UnaryArithmeticKind.SinF => $"f64_from_f32(sin(f64_to_f32({operand})))",
+            UnaryArithmeticKind.CosF => $"f64_from_f32(cos(f64_to_f32({operand})))",
+            UnaryArithmeticKind.TanF => $"f64_from_f32(tan(f64_to_f32({operand})))",
+            UnaryArithmeticKind.AsinF => $"f64_from_f32(asin(f64_to_f32({operand})))",
+            UnaryArithmeticKind.AcosF => $"f64_from_f32(acos(f64_to_f32({operand})))",
+            UnaryArithmeticKind.AtanF => $"f64_from_f32(atan(f64_to_f32({operand})))",
+            UnaryArithmeticKind.SinhF => $"f64_from_f32(sinh(f64_to_f32({operand})))",
+            UnaryArithmeticKind.CoshF => $"f64_from_f32(cosh(f64_to_f32({operand})))",
+            UnaryArithmeticKind.TanhF => $"f64_from_f32(tanh(f64_to_f32({operand})))",
+            UnaryArithmeticKind.ExpF => $"f64_from_f32(exp(f64_to_f32({operand})))",
+            UnaryArithmeticKind.Exp2F => $"f64_from_f32(exp2(f64_to_f32({operand})))",
+            UnaryArithmeticKind.LogF => $"f64_from_f32(log(f64_to_f32({operand})))",
+            UnaryArithmeticKind.Log2F => $"f64_from_f32(log2(f64_to_f32({operand})))",
+            UnaryArithmeticKind.Log10F => $"f64_from_f32(log(f64_to_f32({operand})) / 2.302585093)",
+            _ => null
+        };
+
         private void GenerateUnOp(UnaryArithmeticValue value)
         {
             var target = Load(value);
@@ -1448,6 +1541,35 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (Backend.EnableI64Emulation && (operandType == "emu_i64" || operandType == "emu_u64") && value.Kind == UnaryArithmeticKind.Neg)
             {
                 AppendLine($"{target} = i64_neg({operand});");
+                return;
+            }
+
+            // Emulated f64: the builtins below work per COMPONENT of the (hi, lo[, ...]) vector,
+            // which is only right for Neg. Abs of hi = 12345679, lo = -0.25 gave 12345679.25.
+            if (Backend.EnableF64Emulation && operandType == "emu_f64")
+            {
+                string? f64Expr = value.Kind switch
+                {
+                    UnaryArithmeticKind.Neg => $"f64_neg({operand})",
+                    UnaryArithmeticKind.Abs => $"f64_abs({operand})",
+                    UnaryArithmeticKind.FloorF => $"f64_floor({operand})",
+                    UnaryArithmeticKind.CeilingF => $"f64_ceil({operand})",
+                    UnaryArithmeticKind.SqrtF => $"f64_sqrt({operand})",
+                    UnaryArithmeticKind.RsqrtF => $"f64_div(f64_from_f32(1.0), f64_sqrt({operand}))",
+                    UnaryArithmeticKind.RcpF => $"f64_div(f64_from_f32(1.0), {operand})",
+                    _ => EmulatedF64ViaF32(value.Kind, operand.ToString())
+                };
+                if (f64Expr != null)
+                {
+                    AppendLine($"{target} = {f64Expr};");
+                    return;
+                }
+            }
+            // Emulated 64-bit integer Abs: abs() of the unsigned words was an identity (WGSL) or
+            // no overload at all (GLSL).
+            if (Backend.EnableI64Emulation && (operandType == "emu_i64" || operandType == "emu_u64") && value.Kind == UnaryArithmeticKind.Abs)
+            {
+                AppendLine($"{target} = i64_abs({operand});");
                 return;
             }
 
@@ -1701,6 +1823,110 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
         /// <summary>
+        /// The expression for a Math/XMath call on EMULATED f64 operands (emu_f64 is
+        /// a vector of f32 components), or null if <paramref name="name"/> is not a math function.
+        /// The built-ins would run per COMPONENT - round(hi) + round(lo) is not round(hi + lo)
+        /// (2.5000000001 = 2.5 + 1e-10 came out 2), and floor/abs/min/max/sign likewise - so the
+        /// exact operations go to the emulation library and the transcendentals through f32
+        /// (f32 accuracy, the same contract as the unary emulated-f64 path).
+        /// </summary>
+        internal static string? EmulatedF64MathExpression(string name, IReadOnlyList<string> a)
+        {
+            int n = a.Count;
+            if (n == 1)
+            {
+                string? exact = name switch
+                {
+                    _ when name.Contains("RoundAwayFromZero") => $"f64_round_away({a[0]})",
+                    _ when name.Contains("Round") => $"f64_round_even({a[0]})",
+                    _ when name.Contains("Truncate") => $"f64_trunc({a[0]})",
+                    _ when name.Contains("Floor") => $"f64_floor({a[0]})",
+                    _ when name.Contains("Ceiling") => $"f64_ceil({a[0]})",
+                    _ when name.Contains("Rsqrt") || name.Contains("ReciprocalSqrt") => $"f64_div(f64_from_f32(1.0), f64_sqrt({a[0]}))",
+                    _ when name.Contains("Rcp") => $"f64_div(f64_from_f32(1.0), {a[0]})",
+                    _ when name.Contains("Sqrt") => $"f64_sqrt({a[0]})",
+                    _ when name.Contains("Abs") => $"f64_abs({a[0]})",
+                    _ when name.Contains("Sign") => $"select(select(0, 1, f64_gt({a[0]}, f64_from_f32(0.0))), -1, f64_lt({a[0]}, f64_from_f32(0.0)))",
+                    _ => null
+                };
+                if (exact != null) return exact;
+                string? f32Func = name switch
+                {
+                    _ when name.Contains("Asin") => "asin",
+                    _ when name.Contains("Acos") => "acos",
+                    _ when name.Contains("Atan") => "atan",
+                    _ when name.Contains("Sinh") => "sinh",
+                    _ when name.Contains("Cosh") => "cosh",
+                    _ when name.Contains("Tanh") => "tanh",
+                    _ when name.Contains("Sin") => "sin",
+                    _ when name.Contains("Cos") => "cos",
+                    _ when name.Contains("Tan") => "tan",
+                    _ when name.Contains("Exp2") => "exp2",
+                    _ when name.Contains("Exp") => "exp",
+                    _ when name.Contains("Log10") => "log10",
+                    _ when name.Contains("Log2") => "log2",
+                    _ when name.Contains("Log") => "log",
+                    _ => null
+                };
+                if (f32Func == null) return null;
+                string x = $"f64_to_f32({a[0]})";
+                string call = f32Func == "log10" ? $"(log({x}) * 0.4342944819)" : $"{f32Func}({x})";
+                return $"f64_from_f32({call})";
+            }
+            if (n == 2)
+            {
+                return name switch
+                {
+                    _ when name.Contains("IEEERemainder") => $"f64_ieee_rem({a[0]}, {a[1]})",
+                    _ when name.Contains("Atan2") => $"f64_atan2({a[0]}, {a[1]})",
+                    _ when name.Contains("Pow") => $"f64_pow({a[0]}, {a[1]})",
+                    _ when name.Contains("CopySign") => $"f64_copysign({a[0]}, {a[1]})",
+                    _ when name.Contains("Min") => $"f64_min({a[0]}, {a[1]})",
+                    _ when name.Contains("Max") => $"f64_max({a[0]}, {a[1]})",
+                    _ => null
+                };
+            }
+            if (n == 3)
+            {
+                return name switch
+                {
+                    _ when name.Contains("Clamp") => $"f64_min(f64_max({a[0]}, {a[1]}), {a[2]})",
+                    _ when name.Contains("FusedMultiplyAdd") => $"f64_add(f64_mul({a[0]}, {a[1]}), {a[2]})",
+                    _ => null
+                };
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Registered Math intrinsic handlers (GenerateRound, GenerateMin, ...) emit the WGSL
+        /// built-in; on an emulated-f64 operand that built-in runs per component. Emits the
+        /// exact form instead and returns true, or returns false for a non-emulated call.
+        /// </summary>
+        private static bool TryEmitEmulatedF64Intrinsic(WGSLCodeGenerator cg, Value value, string name)
+        {
+            if (value is not MethodCall mc || !cg.Backend.EnableF64Emulation || mc.Count == 0
+                || cg.TypeGenerator[mc[0].Resolve().Type] != "emu_f64")
+                return false;
+            var target = cg.LoadIntrinsicValue(value);
+            var args = new List<string>(mc.Count);
+            for (int i = 0; i < mc.Count; i++)
+                args.Add(cg.LoadIntrinsicValue(mc[i].Resolve()).ToString());
+            var expr = EmulatedF64MathExpression(name, args);
+            if (expr == null) return false;
+            cg.Declare(target);
+            cg.AppendLine($"{target} = {expr};");
+            return true;
+        }
+
+        /// <summary>
+        /// Math.CopySign for a scalar f32/f16: |x| carrying the SIGN BIT of y. The sign is read
+        /// from the bits (via f32, so an f16 y works too) - a `y >= 0.0` test sends -0.0 to +.
+        /// </summary>
+        protected static string CopySignExpression(string x, string y) =>
+            $"select(abs({x}), -abs({x}), (bitcast<u32>(f32({y})) >> 31u) != 0u)";
+
+        /// <summary>
         /// The WGSL expression for a <see cref="ConvertValue"/> - shared by kernel bodies and
         /// [NoInlining] helper functions so a conversion means the same thing in both. The
         /// helper path used to have its own, much thinner version: every 32-to-64-bit widening
@@ -1721,6 +1947,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             // Detect unsigned source conversion (e.g. uint → float)
             bool isSourceUnsigned = (value.Flags & ConvertFlags.SourceUnsigned) == ConvertFlags.SourceUnsigned;
+            bool isTargetUnsigned = (value.Flags & ConvertFlags.TargetUnsigned) == ConvertFlags.TargetUnsigned;
 
             // Emulated type detection
             bool isEmulatedF64Target = Backend.EnableF64Emulation && targetType == "emu_f64";
@@ -1738,8 +1965,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
                 else if (isEmulatedI64Source)
                 {
-                    // emu_i64 → emu_f64: extract i32 then convert through f32
-                    return $"f64_from_f32(f32(i64_to_i32({source})))";
+                    // Exact, rounded to nearest in the integer domain (F64ExactConversionFunctions).
+                    // Was f64_from_f32(f32(i64_to_i32(x))): the high word was simply dropped.
+                    return isSourceUnsigned ? $"f64_from_u64({source})" : $"f64_from_i64({source})";
                 }
                 else if (isVectorSource)
                 {
@@ -1750,14 +1978,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     return $"f64_from_f32({source})";
                 }
-                else if (isSourceUnsigned && sourceType == "i32")
+                else if (sourceType == "u32" || (isSourceUnsigned && sourceType == "i32"))
                 {
-                    // unsigned int → emu_f64: bitcast to u32 first to preserve unsigned value
-                    return $"f64_from_f32(f32(bitcast<u32>({source})))";
+                    // Exact (every 32-bit integer is a double). Was f64_from_f32(f32(x)), which
+                    // rounded anything past 24 bits: (double)int.MaxValue came out 2147483648.
+                    return sourceType == "u32" ? $"f64_from_u32({source})" : $"f64_from_u32(bitcast<u32>({source}))";
+                }
+                else if (sourceType == "i32")
+                {
+                    return $"f64_from_i32({source})";
                 }
                 else
                 {
-                    // Integer or other scalar → emu_f64: convert to f32 first
+                    // bool / f16 / other scalar → emu_f64 through f32 (exact for these)
                     return $"f64_from_f32(f32({source}))";
                 }
             }
@@ -1772,8 +2005,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
                 else if (isEmulatedF64Source)
                 {
-                    // emu_f64 → emu_i64: extract f32, cast to i32, then widen
-                    return $"i64_from_i32(i32(f64_to_f32({source})))";
+                    // Truncating, saturating like .NET 9+ (NaN -> 0). Was i64_from_i32(i32(f32(x))):
+                    // rounded to 24 bits, then clipped to 32.
+                    return isTargetUnsigned ? $"f64_to_u64({source})" : $"f64_to_i64({source})";
                 }
                 else if (isVectorSource)
                 {
@@ -1812,14 +2046,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // the i32 branch above is the one actually exercised by uint arithmetic in practice.
                     return $"u64_from_u32({source})";
                 }
-                else if (sourceType == "f32")
+                else if (sourceType == "f32" || sourceType == "f16")
                 {
-                    // f32 → emu_i64: cast to i32 first
-                    return $"i64_from_i32(i32({source}))";
+                    // Truncating, saturating (.NET 9+). Was i64_from_i32(i32(x)): clipped to 32 bits.
+                    string f = sourceType == "f32" ? source.ToString() : $"f32({source})";
+                    return isTargetUnsigned ? $"f32_to_u64({f})" : $"f32_to_i64({f})";
                 }
                 else
                 {
-                    // Other scalar → emu_i64: cast to i32 first
+                    // Other scalar (bool) → emu_i64
                     return $"i64_from_i32(i32({source}))";
                 }
             }
@@ -1831,9 +2066,25 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     return $"f64_to_f32({source})";
                 }
+                else if (targetType == "i32")
+                {
+                    // Truncating, saturating (.NET 9+). Was i32(f64_to_f32(x)): the value was rounded
+                    // to 24 bits BEFORE truncation, so (int)12345678.75 came out 12345679.
+                    string r = isTargetUnsigned ? $"bitcast<i32>(f64_to_u32({source}))" : $"f64_to_i32({source})";
+                    var dst = value.Type.BasicValueType;
+                    if (dst == BasicValueType.Int16)
+                        return isTargetUnsigned ? $"({r} & 0xFFFFi)" : $"extractBits({r}, 0u, 16u)";
+                    if (dst == BasicValueType.Int8)
+                        return isTargetUnsigned ? $"({r} & 0xFFi)" : $"extractBits({r}, 0u, 8u)";
+                    return r;
+                }
+                else if (targetType == "u32")
+                {
+                    return $"f64_to_u32({source})";
+                }
                 else
                 {
-                    // emu_f64 → i32/u32/etc: extract to f32, then cast
+                    // bool / f16 targets: through f32
                     return $"{targetType}(f64_to_f32({source}))";
                 }
             }
@@ -1849,10 +2100,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     return $"u64_to_u32({source})";
                 }
-                else if (targetType == "f32")
+                else if (targetType == "f32" || targetType == "f16")
                 {
-                    // emu_i64 → f32: extract low word as i32, then cast to f32
-                    return $"f32(i64_to_i32({source}))";
+                    // Rounded to nearest over all 64 bits. Was f32(i64_to_i32(x)): the high word
+                    // was dropped, so (float)(2^40 + 1) came out 1.
+                    string f = isSourceUnsigned ? $"u64_to_f32({source})" : $"i64_to_f32({source})";
+                    return targetType == "f32" ? f : $"f16({f})";
                 }
                 else
                 {
@@ -1883,7 +2136,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             string castExpr = $"{targetType}({source})";
             if (targetType == "i32")
             {
-                bool isTargetUnsigned = (value.Flags & ConvertFlags.TargetUnsigned) == ConvertFlags.TargetUnsigned;
                 var dstBasicType = value.Type.BasicValueType;
                 // WGSL `extractBits` built-in: signed extract sign-extends.
                 // Single intrinsic call vs shift chain - smaller WGSL, faster
@@ -2565,7 +2817,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             EmitPhiAssignments(branch.BasicBlock, branch.Target);
             int targetIdx = GetBlockIndex(branch.Target);
             AppendLine($"current_block = {targetIdx};");
-            AppendLine("continue;");
+            EmitStateMachineContinue();
         }
 
         public virtual void GenerateCode(IfBranch branch)
@@ -2585,7 +2837,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             AppendLine($"current_block = {falseIdx};");
             PopIndent();
             AppendLine("}");
-            AppendLine("continue;");
+            EmitStateMachineContinue();
         }
 
         public virtual void GenerateCode(SwitchBranch branch)
@@ -2616,7 +2868,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             PopIndent();
             AppendLine("}");
-            AppendLine("continue;");
+            EmitStateMachineContinue();
         }
 
         protected void EmitPhiAssignments(BasicBlock sourceBlock, BasicBlock targetBlock)
@@ -2715,6 +2967,37 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             Declare(target);
 
             string name = methodCall.Target.Name;
+
+            if (Backend.EnableF64Emulation && methodCall.Count > 0 && TypeGenerator[methodCall[0].Type] == "emu_f64")
+            {
+                var emuArgs = new List<string>(methodCall.Count);
+                for (int i = 0; i < methodCall.Count; i++)
+                    emuArgs.Add(Load(methodCall[i]).ToString());
+                var emuExpr = EmulatedF64MathExpression(name, emuArgs);
+                if (emuExpr != null)
+                {
+                    AppendLine($"{target} = {emuExpr};");
+                    return;
+                }
+            }
+            // XMath.RoundAwayFromZero: WGSL round() is ties-to-even (right for Round/RoundToEven,
+            // which the table below maps), so the away-from-zero tie needs its own form. x - trunc(x)
+            // is exact, so a genuine .5 tie is detected exactly.
+            if (methodCall.Count == 1 && name.Contains("RoundAwayFromZero"))
+            {
+                var x = Load(methodCall[0]);
+                AppendLine($"{target} = select(trunc({x}), trunc({x}) + sign({x}), abs({x} - trunc({x})) >= 0.5);");
+                return;
+            }
+            // XMath.IEEERemainder: x - y * RoundToEven(x / y).
+            if (methodCall.Count == 2 && name.Contains("IEEERemainder"))
+            {
+                var x = Load(methodCall[0]);
+                var y = Load(methodCall[1]);
+                AppendLine($"{target} = {x} - {y} * round({x} / {y});");
+                return;
+            }
+
             // Map common intrinsics if they appear as method calls
             string? wgslFunc = name switch
             {
@@ -3693,9 +3976,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             if (IsStateMachineActive)
             {
-                // Break out of the loop
+                // Leave the state machine (no later block matches -1).
                 AppendLine("current_block = -1;");
-                AppendLine("break;");
+                if (!IsForwardStateMachine)
+                    AppendLine("break;");
             }
             else
             {
@@ -3763,6 +4047,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         public static void GenerateAbs(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
+            if (TryEmitEmulatedF64Intrinsic(codeGenerator, value, "Abs")) return;
             if (value is MethodCall methodCall)
             {
                 var target = codeGenerator.LoadIntrinsicValue(value);
@@ -3774,6 +4059,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         public static void GenerateSign(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
+            if (TryEmitEmulatedF64Intrinsic(codeGenerator, value, "Sign")) return;
             if (value is MethodCall methodCall)
             {
                 var target = codeGenerator.LoadIntrinsicValue(value);
@@ -3790,6 +4076,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         public static void GenerateRound(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
+            if (TryEmitEmulatedF64Intrinsic(codeGenerator, value, "Round")) return;
             if (value is MethodCall methodCall)
             {
                 var target = codeGenerator.LoadIntrinsicValue(value);
@@ -3801,6 +4088,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         public static void GenerateTruncate(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
+            if (TryEmitEmulatedF64Intrinsic(codeGenerator, value, "Truncate")) return;
             if (value is MethodCall methodCall)
             {
                 var target = codeGenerator.LoadIntrinsicValue(value);
@@ -3812,6 +4100,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         public static void GenerateAtan2(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
+            if (TryEmitEmulatedF64Intrinsic(codeGenerator, value, "Atan2")) return;
             if (value is MethodCall methodCall)
             {
                 var target = codeGenerator.LoadIntrinsicValue(value);
@@ -3824,6 +4113,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         public static void GenerateMax(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
+            if (TryEmitEmulatedF64Intrinsic(codeGenerator, value, "Max")) return;
             if (value is MethodCall methodCall)
             {
                 var target = codeGenerator.LoadIntrinsicValue(value);
@@ -3836,6 +4126,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         public static void GenerateMin(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
+            if (TryEmitEmulatedF64Intrinsic(codeGenerator, value, "Min")) return;
             if (value is MethodCall methodCall)
             {
                 var target = codeGenerator.LoadIntrinsicValue(value);
@@ -3848,6 +4139,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         public static void GeneratePow(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
+            if (TryEmitEmulatedF64Intrinsic(codeGenerator, value, "Pow")) return;
             if (value is MethodCall methodCall)
             {
                 var target = codeGenerator.LoadIntrinsicValue(value);
@@ -3861,6 +4153,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         public static void GenerateClamp(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
+            if (TryEmitEmulatedF64Intrinsic(codeGenerator, value, "Clamp")) return;
             if (value is MethodCall methodCall)
             {
                 var target = codeGenerator.LoadIntrinsicValue(value);
@@ -3874,6 +4167,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         public static void GenerateFusedMultiplyAdd(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
+            if (TryEmitEmulatedF64Intrinsic(codeGenerator, value, "FusedMultiplyAdd")) return;
             if (value is MethodCall methodCall)
             {
                 var target = codeGenerator.LoadIntrinsicValue(value);

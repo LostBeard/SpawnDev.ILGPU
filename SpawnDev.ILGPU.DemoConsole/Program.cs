@@ -41,6 +41,10 @@ try
     if (args.Length > 0 && args[0] == "fromrawbits-dump")
         return await FromRawBitsDump.Run();
 
+    // Offline WGSL/GLSL/Wasm dump of any BackendTestBase kernel method (KernelDump.cs).
+    if (args.Length > 0 && args[0] == "kernel-dump")
+        return await KernelDump.Run(args);
+
     // Offline Wasm compile dump (H8 shared-alloca audit). No browser, no dispatch.
     if (args.Length > 0 && args[0] == "wasm-dump")
         return await WasmCompileDump.Run();

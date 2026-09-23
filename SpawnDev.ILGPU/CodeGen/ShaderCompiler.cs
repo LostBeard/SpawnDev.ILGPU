@@ -4,10 +4,13 @@ using System.Reflection;
 using ILGPU;
 using ILGPU.Backends;
 using ILGPU.Backends.EntryPoints;
+using ILGPU.Algorithms;
 using ILGPU.Runtime;
 using SpawnDev.ILGPU.WebGPU.Backend;
 using SpawnDev.ILGPU.Wasm.Backend;
 using SpawnDev.ILGPU.WebGL.Backend;
+using SpawnDev.ILGPU.Wasm.Algorithms;
+using SpawnDev.ILGPU.WebGPU.Algorithms;
 
 namespace SpawnDev.ILGPU;
 
@@ -36,9 +39,23 @@ public static class ShaderCompiler
         Delegate kernel,
         CapabilityProfile profile,
         KernelSpecialization? specialization = null)
+        => Generate(kernel, profile, specialization, explicitlyGrouped: false);
+
+    /// <summary>
+    /// Generate the shader/binary for a kernel delegate, stating how it is LAUNCHED:
+    /// <paramref name="explicitlyGrouped"/> = true for a kernel loaded with LoadKernel /
+    /// LoadStreamKernel and an explicit group size (Group/shared-memory algorithms such as
+    /// GroupExtensions.AllReduce need that), false for LoadAutoGrouped*. An Index1D-first kernel
+    /// can be either, so the other overloads guess implicit for it.
+    /// </summary>
+    public static GeneratedKernel Generate(
+        Delegate kernel,
+        CapabilityProfile profile,
+        KernelSpecialization? specialization,
+        bool explicitlyGrouped)
     {
         if (kernel is null) throw new ArgumentNullException(nameof(kernel));
-        return Generate(kernel.Method, profile, specialization);
+        return Generate(kernel.Method, profile, specialization, explicitlyGrouped);
     }
 
     /// <summary>
@@ -48,16 +65,28 @@ public static class ShaderCompiler
         MethodInfo kernelMethod,
         CapabilityProfile profile,
         KernelSpecialization? specialization = null)
+        => Generate(kernelMethod, profile, specialization, explicitlyGrouped: false);
+
+    /// <summary>
+    /// Generate the shader/binary for a kernel method, stating how it is launched (see the
+    /// delegate overload).
+    /// </summary>
+    public static GeneratedKernel Generate(
+        MethodInfo kernelMethod,
+        CapabilityProfile profile,
+        KernelSpecialization? specialization,
+        bool explicitlyGrouped)
     {
         if (kernelMethod is null) throw new ArgumentNullException(nameof(kernelMethod));
         if (profile is null) throw new ArgumentNullException(nameof(profile));
 
         var spec = specialization ?? KernelSpecialization.Empty;
+        var entry = DescribeEntryPoint(kernelMethod, explicitlyGrouped);
         return profile.Backend switch
         {
-            AcceleratorType.WebGPU => GenerateWebGPU(kernelMethod, profile, spec),
-            AcceleratorType.Wasm => GenerateWasm(kernelMethod, profile, spec),
-            AcceleratorType.WebGL => GenerateWebGL(kernelMethod, profile, spec),
+            AcceleratorType.WebGPU => GenerateWebGPU(kernelMethod, entry, profile, spec),
+            AcceleratorType.Wasm => GenerateWasm(kernelMethod, entry, profile, spec),
+            AcceleratorType.WebGL => GenerateWebGL(kernelMethod, entry, profile, spec),
             _ => throw new NotSupportedException(
                 $"Offline shader generation is not supported for backend {profile.Backend}. " +
                 "This feature targets the three browser transpilers (WebGPU/WebGL/Wasm)."),
@@ -68,8 +97,10 @@ public static class ShaderCompiler
     /// Builds an <see cref="EntryPointDescription"/> for a kernel method, detecting whether
     /// it is implicitly grouped (first parameter is an index type) or explicitly grouped.
     /// </summary>
-    private static EntryPointDescription DescribeEntryPoint(MethodInfo method)
+    private static EntryPointDescription DescribeEntryPoint(MethodInfo method, bool explicitlyGrouped)
     {
+        if (explicitlyGrouped)
+            return EntryPointDescription.FromExplicitlyGroupedKernel(method);
         // Implicitly grouped kernels take an Index1D/2D/3D first parameter. The factory
         // throws NotSupportedException when the first parameter is not an index type - in
         // that case the kernel is explicitly grouped (uses Grid/Group intrinsics).
@@ -85,6 +116,7 @@ public static class ShaderCompiler
 
     private static GeneratedKernel GenerateWebGPU(
         MethodInfo method,
+        EntryPointDescription entry,
         CapabilityProfile profile,
         KernelSpecialization spec)
     {
@@ -106,13 +138,14 @@ public static class ShaderCompiler
 
         var diagnostics = new List<GeneratedKernelDiagnostic>();
 
-        // A minimal, device-free ILGPU context is all the transpiler needs (IR + intrinsics).
-        using var context = Context.Create(b => b.Default());
+        // A device-free ILGPU context is all the transpiler needs (IR + intrinsics) - but it must
+        // carry the SAME intrinsic remappings as the runtime context (AllAcceleratorsAsync), or
+        // the generated shader is not the one the browser runs (see RuntimeEquivalentContext).
+        using var context = RuntimeEquivalentContext(AcceleratorType.WebGPU);
         using var backend = new WebGPUBackend(context, options, features);
         if (profile.MaxNumThreadsPerGroup > 0)
             backend.DefaultMaxWorkgroupSize = profile.MaxNumThreadsPerGroup;
 
-        var entry = DescribeEntryPoint(method);
         var compiled = (WebGPUCompiledKernel)backend.Compile(entry, spec);
 
         var wgsl = compiled.WGSLSource;
@@ -149,8 +182,24 @@ public static class ShaderCompiler
         };
     }
 
+    /// <summary>
+    /// A device-free context with the intrinsic remappings the RUNTIME context has
+    /// (<see cref="SpawnDevContextExtensions.AllAcceleratorsAsync"/>): EnableAlgorithms plus the
+    /// backend's own algorithm intrinsics. EnableAlgorithms remaps Math.Round/Truncate/... to
+    /// XMath, so without it the offline shader was compiled from different IR than the one the
+    /// browser actually runs - a precompiled artifact or a debugging dump could not reproduce a
+    /// runtime miscompile.
+    /// </summary>
+    private static Context RuntimeEquivalentContext(AcceleratorType backend) => Context.Create(b =>
+    {
+        b.Default().EnableAlgorithms();
+        if (backend == AcceleratorType.Wasm) b.EnableWasmAlgorithms();
+        else if (backend == AcceleratorType.WebGPU) b.EnableWebGPUAlgorithms();
+    });
+
     private static GeneratedKernel GenerateWasm(
         MethodInfo method,
+        EntryPointDescription entry,
         CapabilityProfile profile,
         KernelSpecialization spec)
     {
@@ -158,10 +207,9 @@ public static class ShaderCompiler
         // negotiated adapter feature the way WebGPU does, so the binary depends only on the
         // kernel IL (worker-count and group dispatch are runtime params, not baked). No JS at
         // generate time (the JS lives in WasmAccelerator/dispatch, not WasmBackend.Compile).
-        using var context = Context.Create(b => b.Default());
+        using var context = RuntimeEquivalentContext(AcceleratorType.Wasm);
         using var backend = new WasmBackend(context, new WasmBackendOptions());
 
-        var entry = DescribeEntryPoint(method);
         // WasmBackend stashes the emitted module bytes on a static after Compile (the same
         // path WasmCompileDump reads). Clear-then-read brackets this single call. (A per-kernel
         // binary accessor is a cleanliness follow-up; see task #4 determinism notes.)
@@ -188,15 +236,17 @@ public static class ShaderCompiler
 
     private static GeneratedKernel GenerateWebGL(
         MethodInfo method,
+        EntryPointDescription entry,
         CapabilityProfile profile,
         KernelSpecialization spec)
     {
         // WebGL emulates f16/f64/i64 and has no shared memory/atomics/barriers - the GLSL is a
-        // pure function of the kernel IL. No JS at generate time.
-        using var context = Context.Create(b => b.Default());
-        using var backend = new WebGLBackend(context, WebGLBackendOptions.Default);
+        // pure function of the kernel IL (and the profile's f64 emulation mode - Dekker vec2 vs
+        // Ozaki vec4). No JS at generate time. Float64Mode used to be ignored here, so an Ozaki
+        // profile silently got Dekker GLSL.
+        using var context = RuntimeEquivalentContext(AcceleratorType.WebGL);
+        using var backend = new WebGLBackend(context, new WebGLBackendOptions { F64Emulation = profile.Float64Mode });
 
-        var entry = DescribeEntryPoint(method);
         var compiled = (WebGLCompiledKernel)backend.Compile(entry, spec);
 
         var metadata = new GeneratedKernelMetadata

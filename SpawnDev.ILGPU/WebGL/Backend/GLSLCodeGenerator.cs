@@ -1431,10 +1431,59 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var right = Load(value.Right);
             Declare(target);
 
+            // emu_f64 dispatch - the base path serves [NoInlining] helper functions, where
+            // `double + double` otherwise came out component-wise (vec2 +, min(vec2, vec2)). Runs
+            // FIRST: the Min/Max branch below would otherwise catch emulated operands.
+            {
+                string lt = TypeGenerator[value.Left.Type], rt = TypeGenerator[value.Right.Type];
+                bool emuF64 = Backend.EnableF64Emulation && (lt == "vec2" || rt == "vec2"
+                    || (Backend.UseOzakiF64Emulation && (lt == "vec4" || rt == "vec4")));
+                string? emulF64Func = !emuF64 ? null : value.Kind switch
+                {
+                    BinaryArithmeticKind.Add => "f64_add",
+                    BinaryArithmeticKind.Sub => "f64_sub",
+                    BinaryArithmeticKind.Mul => "f64_mul",
+                    BinaryArithmeticKind.Div => "f64_div",
+                    BinaryArithmeticKind.Min => "f64_min",
+                    BinaryArithmeticKind.Max => "f64_max",
+                    BinaryArithmeticKind.Rem => "f64_rem",
+                    BinaryArithmeticKind.PowF => "f64_pow",
+                    BinaryArithmeticKind.Atan2F => "f64_atan2",
+                    BinaryArithmeticKind.CopySignF => "f64_copysign",
+                    _ => null
+                };
+                if (emulF64Func != null)
+                {
+                    AppendLine($"{target} = {emulF64Func}({left}, {right});");
+                    return;
+                }
+                // Emulated 64-bit integer Min/Max: GLSL min()/max() on uvec2 are per word.
+                if (Backend.EnableI64Emulation && (lt == "uvec2" || rt == "uvec2")
+                    && (value.Kind == BinaryArithmeticKind.Min || value.Kind == BinaryArithmeticKind.Max))
+                {
+                    string fn = (value.IsUnsigned ? "u64_" : "i64_") + (value.Kind == BinaryArithmeticKind.Min ? "min" : "max");
+                    AppendLine($"{target} = {fn}({left}, {right});");
+                    return;
+                }
+            }
+            string leftType = TypeGenerator[value.Left.Type];
+            bool leftIsEmuI64 = Backend.EnableI64Emulation
+                && (leftType == "uvec2" && value.Left.BasicValueType == BasicValueType.Int64);
+            if (leftIsEmuI64
+                && (value.Kind == BinaryArithmeticKind.Shl || value.Kind == BinaryArithmeticKind.Shr))
+            {
+                string shiftFn = value.Kind == BinaryArithmeticKind.Shl
+                    ? "i64_shl"
+                    : (value.IsUnsigned ? "u64_shr" : "i64_shr");
+                AppendLine($"{target} = {ConstantEmulatedShiftOrCall(shiftFn, left.ToString(), value.Right, right.ToString())};");
+                return;
+            }
+
             // Float remainder
             if (value.Kind == BinaryArithmeticKind.Rem && TypeGenerator[value.Left.Type].StartsWith("float"))
             {
-                AppendLine($"{target} = {left} - {right} * floor({left} / {right});");
+                // C# float % truncates (fmod): -7.5f % 2f == -1.5f. floor() gave the floored modulo (0.5).
+                AppendLine($"{target} = {left} - {right} * trunc({left} / {right});");
                 return;
             }
 
@@ -1505,8 +1554,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
             if (value.Kind == BinaryArithmeticKind.CopySignF)
             {
-                // copysign(x, y) = abs(x) * sign(y)
-                AppendLine($"{target} = abs({left}) * sign({right});");
+                // Sign BIT of y: abs(x) * sign(y) zeroed the result for y == 0 and dropped -0.0.
+                AppendLine($"{target} = {CopySignExpression(left.ToString(), right.ToString())};");
                 return;
             }
 
@@ -1535,18 +1584,6 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // it is exactly as wrong for the same reason. And/Or/Xor are NOT touched: those are
             // genuinely bitwise-independent per word, so the native component-wise operators
             // already give the correct 64-bit result.
-            string leftType = TypeGenerator[value.Left.Type];
-            bool leftIsEmuI64 = Backend.EnableI64Emulation
-                && (leftType == "uvec2" && value.Left.BasicValueType == BasicValueType.Int64);
-            if (leftIsEmuI64
-                && (value.Kind == BinaryArithmeticKind.Shl || value.Kind == BinaryArithmeticKind.Shr))
-            {
-                string shiftFn = value.Kind == BinaryArithmeticKind.Shl
-                    ? "i64_shl"
-                    : (value.IsUnsigned ? "u64_shr" : "i64_shr");
-                AppendLine($"{target} = {ConstantEmulatedShiftOrCall(shiftFn, left.ToString(), value.Right, right.ToString())};");
-                return;
-            }
             if (leftIsEmuI64 && value.Kind is BinaryArithmeticKind.Add or BinaryArithmeticKind.Sub or BinaryArithmeticKind.Mul)
             {
                 string emulFn = value.Kind switch
@@ -1622,6 +1659,30 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         public virtual void GenerateCode(UnaryArithmeticValue value) => GenerateUnOp(value);
 
+        /// <summary>
+        /// Transcendental on an emulated f64, computed in f32 (f32 accuracy - the emulation
+        /// libraries have no double-precision transcendentals). Applying the builtin to the
+        /// emulated vector itself works per COMPONENT: cos(0.5) came out 1.8776 (cos(hi) + cos(lo)).
+        /// </summary>
+        private static string? EmulatedF64ViaF32(UnaryArithmeticKind kind, string operand) => kind switch
+        {
+            UnaryArithmeticKind.SinF => $"f64_from_f32(sin(f64_to_f32({operand})))",
+            UnaryArithmeticKind.CosF => $"f64_from_f32(cos(f64_to_f32({operand})))",
+            UnaryArithmeticKind.TanF => $"f64_from_f32(tan(f64_to_f32({operand})))",
+            UnaryArithmeticKind.AsinF => $"f64_from_f32(asin(f64_to_f32({operand})))",
+            UnaryArithmeticKind.AcosF => $"f64_from_f32(acos(f64_to_f32({operand})))",
+            UnaryArithmeticKind.AtanF => $"f64_from_f32(atan(f64_to_f32({operand})))",
+            UnaryArithmeticKind.SinhF => $"f64_from_f32(sinh(f64_to_f32({operand})))",
+            UnaryArithmeticKind.CoshF => $"f64_from_f32(cosh(f64_to_f32({operand})))",
+            UnaryArithmeticKind.TanhF => $"f64_from_f32(tanh(f64_to_f32({operand})))",
+            UnaryArithmeticKind.ExpF => $"f64_from_f32(exp(f64_to_f32({operand})))",
+            UnaryArithmeticKind.Exp2F => $"f64_from_f32(exp2(f64_to_f32({operand})))",
+            UnaryArithmeticKind.LogF => $"f64_from_f32(log(f64_to_f32({operand})))",
+            UnaryArithmeticKind.Log2F => $"f64_from_f32(log2(f64_to_f32({operand})))",
+            UnaryArithmeticKind.Log10F => $"f64_from_f32(log(f64_to_f32({operand})) / 2.302585093)",
+            _ => null
+        };
+
         private void GenerateUnOp(UnaryArithmeticValue value)
         {
             var target = Load(value);
@@ -1635,6 +1696,36 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 return;
             }
 
+            bool isEmuF64 = operandType == "vec2" || (Backend.UseOzakiF64Emulation && operandType == "vec4");
+            // Emulated f64: the builtins below work per COMPONENT of the (hi, lo[, ...]) vector,
+            // which is only right for Neg. Abs of hi = 12345679, lo = -0.25 gave 12345679.25.
+            if (Backend.EnableF64Emulation && isEmuF64)
+            {
+                string? f64Expr = value.Kind switch
+                {
+                    UnaryArithmeticKind.Neg => $"f64_neg({operand})",
+                    UnaryArithmeticKind.Abs => $"f64_abs({operand})",
+                    UnaryArithmeticKind.FloorF => $"f64_floor({operand})",
+                    UnaryArithmeticKind.CeilingF => $"f64_ceil({operand})",
+                    UnaryArithmeticKind.SqrtF => $"f64_sqrt({operand})",
+                    UnaryArithmeticKind.RsqrtF => $"f64_div(f64_from_f32(1.0), f64_sqrt({operand}))",
+                    UnaryArithmeticKind.RcpF => $"f64_div(f64_from_f32(1.0), {operand})",
+                    _ => EmulatedF64ViaF32(value.Kind, operand.ToString())
+                };
+                if (f64Expr != null)
+                {
+                    AppendLine($"{target} = {f64Expr};");
+                    return;
+                }
+            }
+            // Emulated 64-bit integer Abs: abs() of the unsigned words was an identity (WGSL) or
+            // no overload at all (GLSL).
+            if (Backend.EnableI64Emulation && operandType == "uvec2" && value.Kind == UnaryArithmeticKind.Abs)
+            {
+                AppendLine($"{target} = i64_abs({operand});");
+                return;
+            }
+
             // Emulated emu_f64 source needs different intrinsic codegen for IsNaN
             // / IsInfinity: GLSL `isnan` / `isinf` operate on `float` only, not on
             // `vec2`. Route to f64_is_nan / f64_is_inf helpers from
@@ -1643,7 +1734,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // so a bool target type is handled correctly - emitting
             // `bool_target = (int)` directly trips "cannot convert from 'int' to
             // 'bool'" GLSL parser errors.
-            if (Backend.EnableF64Emulation && operandType == "vec2")
+            if (Backend.EnableF64Emulation && isEmuF64)
             {
                 // f64 IsNaN/IsInf return bool. Emit a bool expression and only
                 // wrap with the int-ternary when the IR target type is numeric -
@@ -1831,7 +1922,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 if (f != null)
                 {
                     if (value.IsUnsignedOrUnordered && value.Kind != CompareKind.NotEqual)
-                        AppendLine($"{target} = (_f32_is_nan_bits({left}.x) || _f32_is_nan_bits({right}.x)) || {f}({left}, {right});");
+                        AppendLine($"{target} = (f64_is_nan({left}) || f64_is_nan({right})) || {f}({left}, {right});");
                     else
                         AppendLine($"{target} = {f}({left}, {right});");
                     return;
@@ -1910,6 +2001,110 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         }
 
         /// <summary>
+        /// The expression for a Math/XMath call on EMULATED f64 operands (vec2 Dekker / vec4 Ozaki is
+        /// a vector of f32 components), or null if <paramref name="name"/> is not a math function.
+        /// The built-ins would run per COMPONENT - round(hi) + round(lo) is not round(hi + lo)
+        /// (2.5000000001 = 2.5 + 1e-10 came out 2), and floor/abs/min/max/sign likewise - so the
+        /// exact operations go to the emulation library and the transcendentals through f32
+        /// (f32 accuracy, the same contract as the unary emulated-f64 path).
+        /// </summary>
+        internal static string? EmulatedF64MathExpression(string name, IReadOnlyList<string> a)
+        {
+            int n = a.Count;
+            if (n == 1)
+            {
+                string? exact = name switch
+                {
+                    _ when name.Contains("RoundAwayFromZero") => $"f64_round_away({a[0]})",
+                    _ when name.Contains("Round") => $"f64_round_even({a[0]})",
+                    _ when name.Contains("Truncate") => $"f64_trunc({a[0]})",
+                    _ when name.Contains("Floor") => $"f64_floor({a[0]})",
+                    _ when name.Contains("Ceiling") => $"f64_ceil({a[0]})",
+                    _ when name.Contains("Rsqrt") || name.Contains("ReciprocalSqrt") => $"f64_div(f64_from_f32(1.0), f64_sqrt({a[0]}))",
+                    _ when name.Contains("Rcp") => $"f64_div(f64_from_f32(1.0), {a[0]})",
+                    _ when name.Contains("Sqrt") => $"f64_sqrt({a[0]})",
+                    _ when name.Contains("Abs") => $"f64_abs({a[0]})",
+                    _ when name.Contains("Sign") => $"(f64_lt({a[0]}, f64_from_f32(0.0)) ? -1 : (f64_gt({a[0]}, f64_from_f32(0.0)) ? 1 : 0))",
+                    _ => null
+                };
+                if (exact != null) return exact;
+                string? f32Func = name switch
+                {
+                    _ when name.Contains("Asin") => "asin",
+                    _ when name.Contains("Acos") => "acos",
+                    _ when name.Contains("Atan") => "atan",
+                    _ when name.Contains("Sinh") => "sinh",
+                    _ when name.Contains("Cosh") => "cosh",
+                    _ when name.Contains("Tanh") => "tanh",
+                    _ when name.Contains("Sin") => "sin",
+                    _ when name.Contains("Cos") => "cos",
+                    _ when name.Contains("Tan") => "tan",
+                    _ when name.Contains("Exp2") => "exp2",
+                    _ when name.Contains("Exp") => "exp",
+                    _ when name.Contains("Log10") => "log10",
+                    _ when name.Contains("Log2") => "log2",
+                    _ when name.Contains("Log") => "log",
+                    _ => null
+                };
+                if (f32Func == null) return null;
+                string x = $"f64_to_f32({a[0]})";
+                string call = f32Func == "log10" ? $"(log({x}) * 0.4342944819)" : $"{f32Func}({x})";
+                return $"f64_from_f32({call})";
+            }
+            if (n == 2)
+            {
+                return name switch
+                {
+                    _ when name.Contains("IEEERemainder") => $"f64_ieee_rem({a[0]}, {a[1]})",
+                    _ when name.Contains("Atan2") => $"f64_atan2({a[0]}, {a[1]})",
+                    _ when name.Contains("Pow") => $"f64_pow({a[0]}, {a[1]})",
+                    _ when name.Contains("CopySign") => $"f64_copysign({a[0]}, {a[1]})",
+                    _ when name.Contains("Min") => $"f64_min({a[0]}, {a[1]})",
+                    _ when name.Contains("Max") => $"f64_max({a[0]}, {a[1]})",
+                    _ => null
+                };
+            }
+            if (n == 3)
+            {
+                return name switch
+                {
+                    _ when name.Contains("Clamp") => $"f64_min(f64_max({a[0]}, {a[1]}), {a[2]})",
+                    _ when name.Contains("FusedMultiplyAdd") => $"f64_add(f64_mul({a[0]}, {a[1]}), {a[2]})",
+                    _ => null
+                };
+            }
+            return null;
+        }
+
+        /// <summary>
+        /// Registered Math intrinsic handlers emit the GLSL built-in, which on an emulated-f64
+        /// vec2/vec4 runs per component. Emits the exact form instead and returns true, or returns
+        /// false for a non-emulated call.
+        /// </summary>
+        private static bool TryEmitEmulatedF64Intrinsic(WebGLBackend backend, GLSLCodeGenerator cg, Value value, string name)
+        {
+            if (value is not MethodCall mc || !backend.EnableF64Emulation || mc.Count == 0
+                || mc[0].Resolve().BasicValueType != BasicValueType.Float64)
+                return false;
+            var target = cg.LoadIntrinsicValue(value);
+            var args = new List<string>(mc.Count);
+            for (int i = 0; i < mc.Count; i++)
+                args.Add(cg.LoadIntrinsicValue(mc[i].Resolve()).ToString());
+            var expr = EmulatedF64MathExpression(name, args);
+            if (expr == null) return false;
+            cg.Declare(target);
+            cg.AppendLine($"{target} = {expr};");
+            return true;
+        }
+
+        /// <summary>
+        /// Math.CopySign for a scalar float: |x| carrying the SIGN BIT of y (a `y < 0.0` test
+        /// misses -0.0).
+        /// </summary>
+        protected static string CopySignExpression(string x, string y) =>
+            $"(((floatBitsToUint({y}) >> 31u) != 0u) ? -abs({x}) : abs({x}))";
+
+        /// <summary>
         /// The GLSL expression for a <see cref="ConvertValue"/> - shared by kernel bodies and
         /// [NoInlining] helper functions so a conversion means the same thing in both. (Helpers
         /// used to emit a plain constructor cast, so `(ulong)someUint` in a helper became
@@ -1930,19 +2125,27 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // typed "int" (IR Int32 carries no signedness; the convert's flag does).
             bool isSourceUnsigned = (value.Flags & ConvertFlags.SourceUnsigned) == ConvertFlags.SourceUnsigned;
             bool isUnsigned32Source = sourceType == "uint" || (isSourceUnsigned && sourceType == "int");
+            bool isTargetUnsigned = (value.Flags & ConvertFlags.TargetUnsigned) == ConvertFlags.TargetUnsigned;
 
+            // Every integer <-> emulated-f64 and 64-bit-integer <-> float conversion below runs in the
+            // integer domain (GLSLEmulationLibrary's exact conversion functions): the old versions
+            // went through float or a 32-bit int, so (double)int.MaxValue came out 2147483648,
+            // (int)12345678.75 came out 12345679 and (float)(2^40 + 1) came out 1. Float -> integer
+            // truncates and SATURATES like .NET 9+ (NaN -> 0).
             if (isEmulatedF64Target)
             {
                 if (isEmulatedF64Source) return source.ToString();
-                if (isEmulatedI64Source) return $"f64_from_f32(float(i64_to_i32({source})))";
+                if (isEmulatedI64Source) return isSourceUnsigned ? $"f64_from_u64({source})" : $"f64_from_i64({source})";
                 if (sourceType == "float") return $"f64_from_f32({source})";
-                if (isUnsigned32Source) return $"f64_from_f32(float(uint({source})))";
+                if (isUnsigned32Source) return $"f64_from_u32(uint({source}))";
+                if (sourceType == "int") return $"f64_from_i32({source})";
                 return $"f64_from_f32(float({source}))";
             }
             if (isEmulatedI64Target)
             {
                 if (isEmulatedI64Source) return source.ToString();
-                if (isEmulatedF64Source) return $"i64_from_i32(int(f64_to_f32({source})))";
+                if (isEmulatedF64Source) return isTargetUnsigned ? $"f64_to_u64({source})" : $"f64_to_i64({source})";
+                if (sourceType == "float") return isTargetUnsigned ? $"f32_to_u64({source})" : $"f32_to_i64({source})";
                 // Zero-extend an unsigned 32-bit source (C# uint -> ulong/long); only a signed
                 // source sign-extends. i64_from_i32 on a uint >= 2^31 set the high word to all ones.
                 if (isUnsigned32Source) return $"u64_from_u32(uint({source}))";
@@ -1952,13 +2155,22 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (isEmulatedF64Source)
             {
                 if (targetType == "float") return $"f64_to_f32({source})";
+                if (targetType == "int")
+                {
+                    string r = isTargetUnsigned ? $"int(f64_to_u32({source}))" : $"f64_to_i32({source})";
+                    var dst = value.Type.BasicValueType;
+                    if (dst == BasicValueType.Int16) return isTargetUnsigned ? $"({r} & 0xFFFF)" : SignExtend16(r);
+                    if (dst == BasicValueType.Int8) return isTargetUnsigned ? $"({r} & 0xFF)" : SignExtend8(r);
+                    return r;
+                }
+                if (targetType == "uint") return $"f64_to_u32({source})";
                 return $"{targetType}(f64_to_f32({source}))";
             }
             if (isEmulatedI64Source)
             {
                 if (targetType == "int") return $"i64_to_i32({source})";
                 if (targetType == "uint") return $"u64_to_u32({source})";
-                if (targetType == "float") return $"float(i64_to_i32({source}))";
+                if (targetType == "float") return isSourceUnsigned ? $"u64_to_f32({source})" : $"i64_to_f32({source})";
                 return $"{targetType}(i64_to_i32({source}))";
             }
 
@@ -1978,7 +2190,6 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // downstream stages (Tuvok's Vp9Idct16x16Kernel residual).
             if (targetType == "int")
             {
-                bool isTargetUnsigned = (value.Flags & ConvertFlags.TargetUnsigned) == ConvertFlags.TargetUnsigned;
                 var dstBasicType = value.Type.BasicValueType;
                 if (dstBasicType == BasicValueType.Int16)
                     castExpr = isTargetUnsigned ? $"({castExpr} & 0xFFFF)" : SignExtend16(castExpr);
@@ -2509,6 +2720,35 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // helper that emitted ` = mix(a, b, c);`, a syntax error; for a non-void one, a
             // silently wrong value. Same order as the WGSL helper and kernel generators.
             string name = methodCall.Target.Name;
+
+            if (Backend.EnableF64Emulation && methodCall.Count > 0 && methodCall[0].BasicValueType == BasicValueType.Float64)
+            {
+                var emuArgs = new List<string>(methodCall.Count);
+                for (int i = 0; i < methodCall.Count; i++)
+                    emuArgs.Add(Load(methodCall[i]).ToString());
+                var emuExpr = EmulatedF64MathExpression(name, emuArgs);
+                if (emuExpr != null)
+                {
+                    AppendLine($"{target} = {emuExpr};");
+                    return;
+                }
+            }
+            // XMath.RoundAwayFromZero (x - trunc(x) is exact, so a .5 tie is detected exactly).
+            if (methodCall.Count == 1 && name.Contains("RoundAwayFromZero"))
+            {
+                var x = Load(methodCall[0]);
+                AppendLine($"{target} = (abs({x} - trunc({x})) >= 0.5) ? trunc({x}) + sign({x}) : trunc({x});");
+                return;
+            }
+            // XMath.IEEERemainder: x - y * RoundToEven(x / y).
+            if (methodCall.Count == 2 && name.Contains("IEEERemainder"))
+            {
+                var x = Load(methodCall[0]);
+                var y = Load(methodCall[1]);
+                AppendLine($"{target} = {x} - {y} * roundEven({x} / {y});");
+                return;
+            }
+
             string? glslFunc = name switch
             {
                 var n when n.Contains("Rsqrt") => "inversesqrt",
@@ -2535,7 +2775,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 var n when n.Contains("Max") => "max",
                 var n when n.Contains("Clamp") => "clamp",
                 var n when n.Contains("Sign") => "sign",
-                var n when n.Contains("Round") => "round",
+                var n when n.Contains("Round") => "roundEven", // GLSL round() leaves a .5 tie to the implementation
                 var n when n.Contains("Truncate") => "trunc",
                 var n when n.Contains("Lerp") || n.Contains("Mix") => "mix",
                 _ => null
@@ -2803,6 +3043,23 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         #region Math Intrinsics
 
+        /// <summary>
+        /// The emulation-library prefix for a Math.Abs/Min/Max intrinsic whose operands are an
+        /// EMULATED 64-bit type ("f64" for double, "i64"/"u64" for long/ulong), or null for native
+        /// types. The GLSL builtins work per component of the vec2/vec4/uvec2 representation, so
+        /// Math.Abs(double) of hi = 12345679, lo = -0.25 gave 12345679.25 and Math.Min(long, long)
+        /// compared the two 32-bit words independently.
+        /// </summary>
+        private static string? Emulated64Prefix(WebGLBackend backend, GLSLCodeGenerator cg, MethodCall mc)
+        {
+            string type = cg.TypeGenerator[mc.Type];
+            if (backend.EnableF64Emulation && (type == "vec2" || (backend.UseOzakiF64Emulation && type == "vec4")))
+                return "f64";
+            if (backend.EnableI64Emulation && type == "uvec2")
+                return (mc.Target.Source as System.Reflection.MethodInfo)?.ReturnType == typeof(ulong) ? "u64" : "i64";
+            return null;
+        }
+
         public static void GenerateAbs(WebGLBackend backend, GLSLCodeGenerator cg, Value value)
         {
             if (value is MethodCall mc)
@@ -2810,12 +3067,16 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 var t = cg.LoadIntrinsicValue(value);
                 var o = cg.LoadIntrinsicValue(mc[0].Resolve());
                 cg.Declare(t);
-                cg.AppendLine($"{t} = abs({o});");
+                string? emu = Emulated64Prefix(backend, cg, mc);
+                if (emu == "u64") cg.AppendLine($"{t} = {o};"); // |ulong| is itself
+                else if (emu != null) cg.AppendLine($"{t} = {emu}_abs({o});");
+                else cg.AppendLine($"{t} = abs({o});");
             }
         }
 
         public static void GenerateSign(WebGLBackend backend, GLSLCodeGenerator cg, Value value)
         {
+            if (TryEmitEmulatedF64Intrinsic(backend, cg, value, "Sign")) return;
             if (value is MethodCall mc)
             {
                 var t = cg.LoadIntrinsicValue(value);
@@ -2827,17 +3088,21 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         public static void GenerateRound(WebGLBackend backend, GLSLCodeGenerator cg, Value value)
         {
+            if (TryEmitEmulatedF64Intrinsic(backend, cg, value, "Round")) return;
             if (value is MethodCall mc)
             {
                 var t = cg.LoadIntrinsicValue(value);
                 var o = cg.LoadIntrinsicValue(mc[0].Resolve());
                 cg.Declare(t);
-                cg.AppendLine($"{t} = round({o});");
+                // Math.Round / MathF.Round round halves to EVEN; GLSL ES round() leaves the
+                // direction of a .5 to the implementation, roundEven() does not.
+                cg.AppendLine($"{t} = roundEven({o});");
             }
         }
 
         public static void GenerateTruncate(WebGLBackend backend, GLSLCodeGenerator cg, Value value)
         {
+            if (TryEmitEmulatedF64Intrinsic(backend, cg, value, "Truncate")) return;
             if (value is MethodCall mc)
             {
                 var t = cg.LoadIntrinsicValue(value);
@@ -2849,6 +3114,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         public static void GenerateAtan2(WebGLBackend backend, GLSLCodeGenerator cg, Value value)
         {
+            if (TryEmitEmulatedF64Intrinsic(backend, cg, value, "Atan2")) return;
             if (value is MethodCall mc)
             {
                 var t = cg.LoadIntrinsicValue(value);
@@ -2867,7 +3133,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 var a = cg.LoadIntrinsicValue(mc[0].Resolve());
                 var b = cg.LoadIntrinsicValue(mc[1].Resolve());
                 cg.Declare(t);
-                cg.AppendLine($"{t} = max({a}, {b});");
+                string? emu = Emulated64Prefix(backend, cg, mc);
+                cg.AppendLine(emu != null ? $"{t} = {emu}_max({a}, {b});" : $"{t} = max({a}, {b});");
             }
         }
 
@@ -2879,12 +3146,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 var a = cg.LoadIntrinsicValue(mc[0].Resolve());
                 var b = cg.LoadIntrinsicValue(mc[1].Resolve());
                 cg.Declare(t);
-                cg.AppendLine($"{t} = min({a}, {b});");
+                string? emu = Emulated64Prefix(backend, cg, mc);
+                cg.AppendLine(emu != null ? $"{t} = {emu}_min({a}, {b});" : $"{t} = min({a}, {b});");
             }
         }
 
         public static void GeneratePow(WebGLBackend backend, GLSLCodeGenerator cg, Value value)
         {
+            if (TryEmitEmulatedF64Intrinsic(backend, cg, value, "Pow")) return;
             if (value is MethodCall mc)
             {
                 var t = cg.LoadIntrinsicValue(value);
@@ -2897,6 +3166,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         public static void GenerateClamp(WebGLBackend backend, GLSLCodeGenerator cg, Value value)
         {
+            if (TryEmitEmulatedF64Intrinsic(backend, cg, value, "Clamp")) return;
             if (value is MethodCall mc)
             {
                 var t = cg.LoadIntrinsicValue(value);
@@ -2910,6 +3180,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         public static void GenerateFusedMultiplyAdd(WebGLBackend backend, GLSLCodeGenerator cg, Value value)
         {
+            if (TryEmitEmulatedF64Intrinsic(backend, cg, value, "FusedMultiplyAdd")) return;
             if (value is MethodCall mc)
             {
                 var t = cg.LoadIntrinsicValue(value);

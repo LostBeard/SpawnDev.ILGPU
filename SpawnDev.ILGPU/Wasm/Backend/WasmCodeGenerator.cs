@@ -1113,7 +1113,26 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             EmitGetLocal(src);
 
-            byte? opcode = (srcType, dstType, isSourceUnsigned) switch
+            // Float -> integer uses the SATURATING trunc_sat family (0xFC prefix): .NET 9+
+            // conversions saturate (NaN -> 0, out of range -> MinValue/MaxValue), while the plain
+            // trunc opcodes TRAP ("float unrepresentable in integer range") and killed the whole
+            // dispatch. The unsigned variant is chosen by the TARGET's signedness - the plain
+            // signed opcode trapped on an in-range (uint)2147483648.0.
+            uint? truncSat = (srcType, dstType) switch
+            {
+                (WasmOpCodes.F32, WasmOpCodes.I32) => isTargetUnsigned ? 1u : 0u, // i32.trunc_sat_f32_s/u
+                (WasmOpCodes.F64, WasmOpCodes.I32) => isTargetUnsigned ? 3u : 2u, // i32.trunc_sat_f64_s/u
+                (WasmOpCodes.F32, WasmOpCodes.I64) => isTargetUnsigned ? 5u : 4u, // i64.trunc_sat_f32_s/u
+                (WasmOpCodes.F64, WasmOpCodes.I64) => isTargetUnsigned ? 7u : 6u, // i64.trunc_sat_f64_s/u
+                _ => null
+            };
+            if (truncSat.HasValue)
+            {
+                Code.Add(0xFC);
+                WasmModuleBuilder.EmitU32Leb128(Code, truncSat.Value);
+            }
+
+            byte? opcode = truncSat.HasValue ? null : (srcType, dstType, isSourceUnsigned) switch
             {
                 (WasmOpCodes.I32, WasmOpCodes.I64, false) => WasmOpCodes.I64ExtendI32S,
                 (WasmOpCodes.I32, WasmOpCodes.I64, true) => WasmOpCodes.I64ExtendI32U,
@@ -1122,13 +1141,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 (WasmOpCodes.I32, WasmOpCodes.F64, false) => WasmOpCodes.F64ConvertI32S,
                 (WasmOpCodes.I32, WasmOpCodes.F64, true) => WasmOpCodes.F64ConvertI32U,
                 (WasmOpCodes.I64, WasmOpCodes.I32, _) => WasmOpCodes.I32WrapI64,
-                (WasmOpCodes.I64, WasmOpCodes.F32, _) => WasmOpCodes.F32ConvertI64S,
-                (WasmOpCodes.I64, WasmOpCodes.F64, _) => WasmOpCodes.F64ConvertI64S,
-                (WasmOpCodes.F32, WasmOpCodes.I32, _) => WasmOpCodes.I32TruncF32S,
-                (WasmOpCodes.F32, WasmOpCodes.I64, _) => WasmOpCodes.I64TruncF32S,
+                // A ulong source must use the unsigned convert: the signed one read
+                // ulong.MaxValue as -1.
+                (WasmOpCodes.I64, WasmOpCodes.F32, false) => WasmOpCodes.F32ConvertI64S,
+                (WasmOpCodes.I64, WasmOpCodes.F32, true) => WasmOpCodes.F32ConvertI64U,
+                (WasmOpCodes.I64, WasmOpCodes.F64, false) => WasmOpCodes.F64ConvertI64S,
+                (WasmOpCodes.I64, WasmOpCodes.F64, true) => WasmOpCodes.F64ConvertI64U,
                 (WasmOpCodes.F32, WasmOpCodes.F64, _) => WasmOpCodes.F64PromoteF32,
-                (WasmOpCodes.F64, WasmOpCodes.I32, _) => WasmOpCodes.I32TruncF64S,
-                (WasmOpCodes.F64, WasmOpCodes.I64, _) => WasmOpCodes.I64TruncF64S,
                 (WasmOpCodes.F64, WasmOpCodes.F32, _) => WasmOpCodes.F32DemoteF64,
                 _ => null
             };
@@ -1812,6 +1831,38 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public virtual void GenerateCode(DebugAssertOperation debug) { }
         public virtual void GenerateCode(WriteToOutput writeToOutput) { }
 
+        /// <summary>
+        /// Math.Round / Truncate / Sign are redirected to <see cref="WasmIntrinsics"/> wrappers (the
+        /// .NET bodies contain throws), which are ordinary methods WITH bodies - so the call used to
+        /// be compiled as a helper from the wrapper's C#, never reaching the native opcodes below.
+        /// These three are emitted directly: f32/f64.nearest (round half to even), trunc, and the
+        /// sign comparison.
+        /// </summary>
+        protected internal static bool IsNativeMathWrapper(global::ILGPU.IR.Method method) =>
+            method.HasSource
+            && method.Source.DeclaringType == typeof(WasmIntrinsics)
+            && method.Source.Name is "Round" or "Truncate" or "Sign";
+
+        /// <summary>True when the intrinsic's .NET return (or first parameter) type is unsigned.</summary>
+        private static bool IsUnsignedIntrinsic(global::ILGPU.IR.Method method)
+        {
+            var mi = method.Source as System.Reflection.MethodInfo;
+            var t = mi == null ? null
+                : (mi.ReturnType == typeof(int) && mi.GetParameters().Length > 0 ? mi.GetParameters()[0].ParameterType : mi.ReturnType);
+            return t == typeof(byte) || t == typeof(ushort) || t == typeof(uint) || t == typeof(ulong);
+        }
+
+        private void EmitZeroConst(byte wasmType)
+        {
+            switch (wasmType)
+            {
+                case WasmOpCodes.F64: WasmModuleBuilder.EmitF64Const(Code, 0.0); break;
+                case WasmOpCodes.F32: WasmModuleBuilder.EmitF32Const(Code, 0.0f); break;
+                case WasmOpCodes.I64: WasmModuleBuilder.EmitI64Const(Code, 0); break;
+                default: WasmModuleBuilder.EmitI32Const(Code, 0); break;
+            }
+        }
+
         // Misc
         public virtual void GenerateCode(MethodCall methodCall)
         {
@@ -1819,7 +1870,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             // Check if this is an intrinsic/external method that needs inline code generation
             if (method.HasSource && (method.HasFlags(global::ILGPU.IR.MethodFlags.Intrinsic) ||
-                                     method.HasFlags(global::ILGPU.IR.MethodFlags.External)))
+                                     method.HasFlags(global::ILGPU.IR.MethodFlags.External) ||
+                                     IsNativeMathWrapper(method)))
             {
                 var sourceName = method.Source.Name;
 
@@ -1851,6 +1903,23 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                             EmitGetLocal(argValues[0]);
                             if (wasmType == WasmOpCodes.F64) Code.Add(WasmOpCodes.F64Abs);
                             else if (wasmType == WasmOpCodes.F32) Code.Add(WasmOpCodes.F32Abs);
+                            else if (IsUnsignedIntrinsic(method))
+                            {
+                                // |unsigned| is the value itself (already on the stack).
+                            }
+                            else if (wasmType == WasmOpCodes.I64)
+                            {
+                                // (x ^ (x >> 63)) - (x >> 63)
+                                WasmModuleBuilder.EmitLocalTee(Code, target);
+                                WasmModuleBuilder.EmitLocalGet(Code, target);
+                                WasmModuleBuilder.EmitI64Const(Code, 63);
+                                Code.Add(WasmOpCodes.I64ShrS);
+                                Code.Add(WasmOpCodes.I64Xor);
+                                WasmModuleBuilder.EmitLocalGet(Code, target);
+                                WasmModuleBuilder.EmitI64Const(Code, 63);
+                                Code.Add(WasmOpCodes.I64ShrS);
+                                Code.Add(WasmOpCodes.I64Sub);
+                            }
                             else
                             {
                                 WasmModuleBuilder.EmitLocalTee(Code, target);
@@ -1874,49 +1943,67 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                             Code.Add(wasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Ceil : WasmOpCodes.F32Ceil);
                             break;
                         case "Min":
-                            EmitGetLocal(argValues[0]);
-                            EmitGetLocal(argValues[1]);
-                            if (wasmType == WasmOpCodes.F64) Code.Add(WasmOpCodes.F64Min);
-                            else if (wasmType == WasmOpCodes.F32) Code.Add(WasmOpCodes.F32Min);
-                            else
-                            {
-                                // i32 min via select
-                                WasmModuleBuilder.EmitLocalTee(Code, target);
-                                var tempB = AllocateNewLocal(WasmOpCodes.I32);
-                                WasmModuleBuilder.EmitLocalSet(Code, tempB); // pop argValues[1]
-                                // stack: argValues[0]
-                                // Actually stack already has both from EmitGetLocal. Let me redo:
-                                // After EmitGetLocal(0), EmitGetLocal(1): stack = [a, b]
-                                // We need: select(a, b, a<b)
-                                var tempA = AllocateNewLocal(WasmOpCodes.I32);
-                                // Reconfigure - push a, b, then a<b condition
-                                Code.Add(WasmOpCodes.Drop); // drop b
-                                Code.Add(WasmOpCodes.Drop); // drop a  
-                                EmitGetLocal(argValues[0]);
-                                EmitGetLocal(argValues[1]);
-                                EmitGetLocal(argValues[0]);
-                                EmitGetLocal(argValues[1]);
-                                Code.Add(WasmOpCodes.I32LtS);
-                                Code.Add(WasmOpCodes.Select);
-                            }
-                            break;
                         case "Max":
                             EmitGetLocal(argValues[0]);
                             EmitGetLocal(argValues[1]);
-                            if (wasmType == WasmOpCodes.F64) Code.Add(WasmOpCodes.F64Max);
-                            else if (wasmType == WasmOpCodes.F32) Code.Add(WasmOpCodes.F32Max);
+                            if (wasmType == WasmOpCodes.F64)
+                                Code.Add(sourceName == "Min" ? WasmOpCodes.F64Min : WasmOpCodes.F64Max);
+                            else if (wasmType == WasmOpCodes.F32)
+                                Code.Add(sourceName == "Min" ? WasmOpCodes.F32Min : WasmOpCodes.F32Max);
                             else
                             {
-                                Code.Add(WasmOpCodes.Drop);
-                                Code.Add(WasmOpCodes.Drop);
+                                // select(a, b, a < b) for Min / a > b for Max, compared at the operand
+                                // WIDTH and SIGNEDNESS. (This used to tee/set/drop its way into a stack
+                                // underflow, and compared i64 and unsigned operands as signed i32.)
                                 EmitGetLocal(argValues[0]);
                                 EmitGetLocal(argValues[1]);
-                                EmitGetLocal(argValues[0]);
-                                EmitGetLocal(argValues[1]);
-                                Code.Add(WasmOpCodes.I32GtS);
+                                bool u = IsUnsignedIntrinsic(method);
+                                bool wide = wasmType == WasmOpCodes.I64;
+                                Code.Add(sourceName == "Min"
+                                    ? (wide ? (u ? WasmOpCodes.I64LtU : WasmOpCodes.I64LtS) : (u ? WasmOpCodes.I32LtU : WasmOpCodes.I32LtS))
+                                    : (wide ? (u ? WasmOpCodes.I64GtU : WasmOpCodes.I64GtS) : (u ? WasmOpCodes.I32GtU : WasmOpCodes.I32GtS)));
                                 Code.Add(WasmOpCodes.Select);
                             }
                             break;
+                        // Round / Truncate are native: nearest = round half to EVEN (Math.Round's
+                        // default), trunc = toward zero. They used to call the JS Math imports - JS
+                        // Math.round rounds halves UP and there is no JS "truncate", so no call was
+                        // emitted at all (MathF.Round(2.5f) came back 0).
+                        case "Round":
+                            EmitGetLocal(argValues[0]);
+                            Code.Add(wasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Nearest : WasmOpCodes.F32Nearest);
+                            break;
+                        case "Truncate":
+                            EmitGetLocal(argValues[0]);
+                            Code.Add(wasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Trunc : WasmOpCodes.F32Trunc);
+                            break;
+                        case "Sign":
+                            {
+                                // (x > 0) - (x < 0) as an i32 (Math.Sign returns int; NaN gives 0).
+                                var argType = GetWasmTypeFromIR(argValues[0].Type);
+                                bool u = IsUnsignedIntrinsic(method);
+                                EmitGetLocal(argValues[0]);
+                                EmitZeroConst(argType);
+                                Code.Add(argType switch
+                                {
+                                    WasmOpCodes.F64 => WasmOpCodes.F64Gt,
+                                    WasmOpCodes.F32 => WasmOpCodes.F32Gt,
+                                    WasmOpCodes.I64 => u ? WasmOpCodes.I64GtU : WasmOpCodes.I64GtS,
+                                    _ => u ? WasmOpCodes.I32GtU : WasmOpCodes.I32GtS,
+                                });
+                                EmitGetLocal(argValues[0]);
+                                EmitZeroConst(argType);
+                                Code.Add(argType switch
+                                {
+                                    WasmOpCodes.F64 => WasmOpCodes.F64Lt,
+                                    WasmOpCodes.F32 => WasmOpCodes.F32Lt,
+                                    WasmOpCodes.I64 => u ? WasmOpCodes.I64LtU : WasmOpCodes.I64LtS,
+                                    _ => u ? WasmOpCodes.I32LtU : WasmOpCodes.I32LtS,
+                                });
+                                Code.Add(WasmOpCodes.I32Sub);
+                                if (wasmType == WasmOpCodes.I64) Code.Add(WasmOpCodes.I64ExtendI32S);
+                                break;
+                            }
                         case "ReciprocalSqrt":
                         case "Rsqrt":
                             if (wasmType == WasmOpCodes.F64)
@@ -1962,9 +2049,6 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         case "Log":
                         case "Log2":
                         case "Log10":
-                        case "Round":
-                        case "Truncate":
-                        case "Sign":
                             {
                                 string mathName = sourceName.ToLowerInvariant();
                                 EmitGetLocal(argValues[0]);
@@ -1987,15 +2071,53 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                                 break;
                             }
                         case "IEEERemainder":
+                            {
+                                // x - y * nearest(x / y). (This emitted x / y alone, marked "approximate".)
+                                bool d = wasmType == WasmOpCodes.F64;
+                                EmitGetLocal(argValues[0]);
+                                EmitGetLocal(argValues[1]);
+                                EmitGetLocal(argValues[0]);
+                                EmitGetLocal(argValues[1]);
+                                Code.Add(d ? WasmOpCodes.F64Div : WasmOpCodes.F32Div);
+                                Code.Add(d ? WasmOpCodes.F64Nearest : WasmOpCodes.F32Nearest);
+                                Code.Add(d ? WasmOpCodes.F64Mul : WasmOpCodes.F32Mul);
+                                Code.Add(d ? WasmOpCodes.F64Sub : WasmOpCodes.F32Sub);
+                                break;
+                            }
+                        // XMath.RoundToEven / RoundAwayFromZero are [IntrinsicImplementation]s, so they
+                        // arrive here by name. They used to fall to the default below and return 0.
+                        case "RoundToEven":
                             EmitGetLocal(argValues[0]);
-                            EmitGetLocal(argValues[1]);
-                            Code.Add(wasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Div : WasmOpCodes.F32Div);
-                            // Approximate: just use remainder for now
+                            Code.Add(wasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Nearest : WasmOpCodes.F32Nearest);
                             break;
+                        case "RoundAwayFromZero":
+                            {
+                                // t = trunc(x); |x - t| >= 0.5 ? t + copysign(1, x) : t  (x - t is exact)
+                                bool d = wasmType == WasmOpCodes.F64;
+                                EmitGetLocal(argValues[0]);
+                                Code.Add(d ? WasmOpCodes.F64Trunc : WasmOpCodes.F32Trunc);
+                                WasmModuleBuilder.EmitLocalSet(Code, target);
+                                WasmModuleBuilder.EmitLocalGet(Code, target);
+                                if (d) WasmModuleBuilder.EmitF64Const(Code, 1.0); else WasmModuleBuilder.EmitF32Const(Code, 1.0f);
+                                EmitGetLocal(argValues[0]);
+                                Code.Add(d ? WasmOpCodes.F64Copysign : WasmOpCodes.F32Copysign);
+                                Code.Add(d ? WasmOpCodes.F64Add : WasmOpCodes.F32Add);
+                                WasmModuleBuilder.EmitLocalGet(Code, target);
+                                EmitGetLocal(argValues[0]);
+                                WasmModuleBuilder.EmitLocalGet(Code, target);
+                                Code.Add(d ? WasmOpCodes.F64Sub : WasmOpCodes.F32Sub);
+                                Code.Add(d ? WasmOpCodes.F64Abs : WasmOpCodes.F32Abs);
+                                if (d) WasmModuleBuilder.EmitF64Const(Code, 0.5); else WasmModuleBuilder.EmitF32Const(Code, 0.5f);
+                                Code.Add(d ? WasmOpCodes.F64Ge : WasmOpCodes.F32Ge);
+                                Code.Add(WasmOpCodes.Select);
+                                break;
+                            }
                         default:
-                            handled = false;
-                            if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] WARNING: Unhandled intrinsic method: {sourceName}");
-                            break;
+                            // A value-returning intrinsic with no Wasm implementation. This used to fall
+                            // through to "return 0" below - a silently wrong result (XMath.RoundToEven
+                            // came back 0). Fail the compile instead.
+                            throw new NotSupportedException(
+                                $"Wasm backend: intrinsic '{method.Source.DeclaringType?.FullName}.{sourceName}' has no Wasm implementation.");
                     }
 
                     if (handled)

@@ -50,11 +50,426 @@ fn _f32_neg_inf() -> f32 { return bitcast<f32>(0xFF800000u | _ilgpu_runtime_zero
 fn _f32_qnan()    -> f32 { return bitcast<f32>(0x7FC00000u | _ilgpu_runtime_zero); }
 ";
 
+        /// <summary>
+        /// Exact f64 &lt;-&gt; IEEE-754 bit pattern and f64 &lt;-&gt; integer conversions, shared by BOTH
+        /// f64 emulation modes (appended to <see cref="F64Functions"/> and
+        /// <see cref="OzakiF64Functions"/>). Everything happens in the integer domain on the IEEE bit
+        /// pattern; the only representation-specific step is splitting a 53-bit significand into
+        /// exact f32 components (Dekker keeps two, Ozaki all three) and summing the components back.
+        /// Self-contained: uses raw vec2&lt;u32&gt; (lo, hi) so an int -&gt; double conversion works even
+        /// when the i64 family is not included.
+        /// </summary>
+        public const string F64ExactConversionFunctions = @"
+// ---- exact f64 <-> bits / integer conversion core (shared by Dekker and Ozaki) ----
+// BRANCH-FREE throughout (every case computed, the result chosen by select): these are inlined
+// into every emulated-double load, store and conversion, and D3D's FXC (Chrome's WebGPU/WebGL
+// shader compiler on Windows) compiles branches superlinearly - an early-return version made a
+// kernel with 38 stores take 12.5 s to compile, and a bigger one never finished before the GPU
+// watchdog killed the device.
+fn _f64u_add(a: vec2<u32>, b: vec2<u32>) -> vec2<u32> {
+    let lo = a.x + b.x;
+    return vec2<u32>(lo, a.y + b.y + select(0u, 1u, lo < a.x));
+}
+
+fn _f64u_sub(a: vec2<u32>, b: vec2<u32>) -> vec2<u32> {
+    return vec2<u32>(a.x - b.x, a.y - b.y - select(0u, 1u, a.x < b.x));
+}
+
+// 64-bit shifts, 0 <= n (n >= 64 gives 0). WGSL masks a shift amount to 5 bits, so the
+// 0 / 32..63 / 64+ ranges are selected explicitly.
+fn _f64u_shl(a: vec2<u32>, n: u32) -> vec2<u32> {
+    let s = n & 31u;
+    let small = vec2<u32>(a.x << s, (a.y << s) | select(a.x >> ((32u - s) & 31u), 0u, s == 0u));
+    let r = select(small, vec2<u32>(0u, a.x << s), n >= 32u);
+    return select(r, vec2<u32>(0u, 0u), n >= 64u);
+}
+
+fn _f64u_shr(a: vec2<u32>, n: u32) -> vec2<u32> {
+    let s = n & 31u;
+    let small = vec2<u32>((a.x >> s) | select(a.y << ((32u - s) & 31u), 0u, s == 0u), a.y >> s);
+    let r = select(small, vec2<u32>(a.y >> s, 0u), n >= 32u);
+    return select(r, vec2<u32>(0u, 0u), n >= 64u);
+}
+
+// Index of the highest set bit of a NON-ZERO 64-bit value.
+fn _f64u_msb(a: vec2<u32>) -> u32 {
+    return select(firstLeadingBit(a.x), 32u + firstLeadingBit(a.y), a.y != 0u);
+}
+
+// a >> n (n >= 1) rounded to nearest, ties to even. sticky = the true value is strictly
+// greater than a (fraction below a's LSB that is not represented in a).
+fn _f64u_shr_rne(a: vec2<u32>, n: u32, sticky: bool) -> vec2<u32> {
+    let q = _f64u_shr(a, n);
+    let h = _f64u_shr(a, n - 1u);
+    let below = _f64u_shl(h, n - 1u);
+    let rest = sticky || below.x != a.x || below.y != a.y;
+    let up = (h.x & 1u) == 1u && (rest || (q.x & 1u) == 1u);
+    return select(q, _f64u_add(q, vec2<u32>(1u, 0u)), up);
+}
+
+// Adds one lower f32 component into the magnitude accumulator (x, y) = |hi| scaled so the hi
+// LSB is bit 39; z = sticky (true value strictly above the accumulator). A component with the
+// sign of hi adds, one with the opposite sign subtracts (a normalized Dekker/Ozaki low word
+// often has the opposite sign). Bits below the accumulator LSB are floored + sticky: in a
+// normalized expansion every later component is smaller than the first dropped part, so it
+// cannot move the floor.
+fn _f64_acc_component(st: vec3<u32>, c: f32, hi_sign: u32, ehn: u32) -> vec3<u32> {
+    let b = bitcast<u32>(c);
+    let e = (b >> 23u) & 0xFFu;
+    let en = max(e, 1u);
+    let m = select(b & 0x7FFFFFu, (b & 0x7FFFFFu) | 0x800000u, e != 0u);
+    let pos = 39 - (i32(ehn) - i32(en));
+    let left = pos >= 0;
+    let mid = !left && -pos < 24;
+    let rs = u32(clamp(-pos, 0, 31));
+    let part = select(select(vec2<u32>(0u, 0u), vec2<u32>(m >> rs, 0u), mid), _f64u_shl(vec2<u32>(m, 0u), u32(max(pos, 0))), left);
+    let dropped = !left && (!mid || (m & ((1u << rs) - 1u)) != 0u);
+    let acc = vec2<u32>(st.x, st.y);
+    let added = _f64u_add(acc, part);
+    let subbed = _f64u_sub(_f64u_sub(acc, part), vec2<u32>(select(0u, 1u, dropped), 0u));
+    let next = vec3<u32>(select(subbed, added, (b & 0x80000000u) == hi_sign), select(st.z, 1u, dropped));
+    let skip = (b & 0x7FFFFFFFu) == 0u || (st.z != 0u && dropped && part.x == 0u && part.y == 0u);
+    return select(next, st, skip);
+}
+
+// Exact sum of up to four f32 components (hi first) as an IEEE-754 double bit pattern,
+// rounded to nearest-even at 53 bits. Returns vec2<u32>(lo, hi).
+fn _f64_components_to_bits(c: vec4<f32>) -> vec2<u32> {
+    let hb = bitcast<u32>(c.x);
+    let sign = hb & 0x80000000u;
+    let eh = (hb >> 23u) & 0xFFu;
+    let ehn = max(eh, 1u);
+    let mh = select(hb & 0x7FFFFFu, (hb & 0x7FFFFFu) | 0x800000u, eh != 0u);
+    var st = vec3<u32>(0u, mh << 7u, 0u); // mh << 39
+    st = _f64_acc_component(st, c.y, sign, ehn);
+    st = _f64_acc_component(st, c.z, sign, ehn);
+    st = _f64_acc_component(st, c.w, sign, ehn);
+    let acc = vec2<u32>(st.x, st.y);
+    let p = _f64u_msb(acc);
+    let big = p > 52u;
+    let mr = _f64u_shr_rne(acc, p - 52u, st.z != 0u);
+    let carry = (mr.y >> 21u) != 0u; // rounding carried into bit 53
+    let m = select(_f64u_shl(acc, 52u - p), select(mr, _f64u_shr(mr, 1u), carry), big);
+    let pf = p + select(0u, 1u, big && carry);
+    let biased = pf + ehn + 834u; // (p - 62) + (ehn - 127) + 1023
+    let normal = vec2<u32>(m.x, sign | (biased << 20u) | (m.y & 0xFFFFFu));
+    let zero = (acc.x | acc.y) == 0u || (hb & 0x7FFFFFFFu) == 0u;
+    let finite = select(normal, vec2<u32>(0u, sign), zero);
+    let special = vec2<u32>(0u, sign | select(0x7FF00000u, 0x7FF80000u, (hb & 0x7FFFFFu) != 0u));
+    return select(finite, special, eh == 0xFFu);
+}
+
+// 2^k * x without the f32 exponent range limiting the scale factor.
+fn _f64_scale(x: f32, k: i32) -> f32 {
+    return ldexp(x, k);
+}
+
+// Exact split of an IEEE-754 double (bits lo, hi) into non-overlapping f32 components:
+// 24 + 24 + 5 significand bits (c.w = 0). Specials and values outside the f32 exponent range
+// come back in c.x alone (the double-float representations cannot hold them anyway).
+fn _f64_bits_to_components(lo: u32, hi: u32) -> vec4<f32> {
+    let sign = hi & 0x80000000u;
+    let exponent = (hi >> 20u) & 0x7FFu;
+    let m_hi20 = hi & 0xFFFFFu;
+    let e = i32(exponent) - 1023;
+    let f32_exp = e + 127;
+    let fe = u32(clamp(f32_exp, 1, 254));
+    // M = 1.m (53 bits): c0 = bits 52..29, c1 = bits 28..5, c2 = bits 4..0
+    let c0 = 0x800000u | (m_hi20 << 3u) | (lo >> 29u);
+    let c1 = (lo >> 5u) & 0xFFFFFFu;
+    let c2 = lo & 0x1Fu;
+    let s = select(1.0, -1.0, sign != 0u);
+    let f0 = bitcast<f32>(sign | (fe << 23u) | (c0 & 0x7FFFFFu));
+    let normal = vec4<f32>(f0, s * _f64_scale(f32(c1), e - 47), s * _f64_scale(f32(c2), e - 52), 0.0);
+    let approx = vec4<f32>(bitcast<f32>(sign | (fe << 23u) | (m_hi20 << 3u)), 0.0, 0.0, 0.0);
+    let special = vec4<f32>(bitcast<f32>(sign | select(0x7F800000u, 0x7FC00000u, (m_hi20 | lo) != 0u)), 0.0, 0.0, 0.0);
+    let zero = vec4<f32>(bitcast<f32>(sign), 0.0, 0.0, 0.0);
+    var r = select(normal, approx, f32_exp <= 0 || f32_exp >= 255);
+    r = select(r, special, exponent == 0x7FFu);
+    return select(r, zero, exponent == 0u && m_hi20 == 0u && lo == 0u);
+}
+
+// Unsigned 64-bit integer -> double bits, rounded to nearest-even at 53 bits.
+fn _f64_u64_to_bits(v: vec2<u32>) -> vec2<u32> {
+    let p = _f64u_msb(v);
+    let big = p > 52u;
+    let mr = _f64u_shr_rne(v, p - 52u, false);
+    let carry = (mr.y >> 21u) != 0u;
+    let m = select(_f64u_shl(v, 52u - p), select(mr, _f64u_shr(mr, 1u), carry), big);
+    let pf = p + select(0u, 1u, big && carry);
+    return select(vec2<u32>(m.x, ((pf + 1023u) << 20u) | (m.y & 0xFFFFFu)), vec2<u32>(0u, 0u), v.x == 0u && v.y == 0u);
+}
+
+fn f64_from_u64(v: vec2<u32>) -> emu_f64 {
+    let b = _f64_u64_to_bits(v);
+    return f64_from_ieee754_bits(b.x, b.y);
+}
+
+fn f64_from_i64(v: vec2<u32>) -> emu_f64 {
+    let neg = (v.y & 0x80000000u) != 0u;
+    let b = _f64_u64_to_bits(select(v, _f64u_sub(vec2<u32>(0u, 0u), v), neg));
+    return f64_from_ieee754_bits(b.x, b.y | select(0u, 0x80000000u, neg));
+}
+
+fn f64_from_u32(v: u32) -> emu_f64 {
+    return f64_from_u64(vec2<u32>(v, 0u));
+}
+
+fn f64_from_i32(v: i32) -> emu_f64 {
+    return f64_from_i64(vec2<u32>(bitcast<u32>(v), select(0u, 0xFFFFFFFFu, v < 0)));
+}
+
+fn _f64_bits_is_nan(b: vec2<u32>) -> bool {
+    return ((b.y >> 20u) & 0x7FFu) == 0x7FFu && ((b.y & 0xFFFFFu) | b.x) != 0u;
+}
+
+// |value| truncated toward zero; z = 1 when |value| >= 2^64 (incl. infinity).
+fn _f64_bits_trunc_mag(b: vec2<u32>) -> vec3<u32> {
+    let exponent = (b.y >> 20u) & 0x7FFu;
+    let e = exponent - 1023u; // wraps below 1023; that case is selected away
+    let m = vec2<u32>(b.x, (b.y & 0xFFFFFu) | 0x100000u);
+    let r = vec3<u32>(select(_f64u_shr(m, 52u - e), _f64u_shl(m, e - 52u), e >= 52u), 0u);
+    let sat = select(r, vec3<u32>(0xFFFFFFFFu, 0xFFFFFFFFu, 1u), e >= 64u);
+    return select(sat, vec3<u32>(0u, 0u, 0u), exponent < 1023u);
+}
+
+// double -> long, truncating toward zero and SATURATING like .NET 9+ (NaN -> 0).
+fn f64_to_i64(v: emu_f64) -> vec2<u32> {
+    let b = f64_to_ieee754_bits(v);
+    let t = _f64_bits_trunc_mag(b);
+    let neg_ovf = t.z != 0u || t.y > 0x80000000u || (t.y == 0x80000000u && t.x != 0u);
+    let neg = select(_f64u_sub(vec2<u32>(0u, 0u), t.xy), vec2<u32>(0u, 0x80000000u), neg_ovf);
+    let pos = select(t.xy, vec2<u32>(0xFFFFFFFFu, 0x7FFFFFFFu), t.z != 0u || t.y >= 0x80000000u);
+    let r = select(pos, neg, (b.y & 0x80000000u) != 0u);
+    return select(r, vec2<u32>(0u, 0u), _f64_bits_is_nan(b));
+}
+
+// double -> ulong, truncating, saturating (NaN and negatives -> 0).
+fn f64_to_u64(v: emu_f64) -> vec2<u32> {
+    let b = f64_to_ieee754_bits(v);
+    return select(_f64_bits_trunc_mag(b).xy, vec2<u32>(0u, 0u), _f64_bits_is_nan(b) || (b.y & 0x80000000u) != 0u);
+}
+
+fn f64_to_i32(v: emu_f64) -> i32 {
+    let r = f64_to_i64(v);
+    let hi = bitcast<i32>(r.y);
+    let r32 = select(bitcast<i32>(r.x), 2147483647, hi > 0 || (hi == 0 && r.x > 0x7FFFFFFFu));
+    return select(r32, bitcast<i32>(0x80000000u), hi < -1 || (hi == -1 && r.x < 0x80000000u));
+}
+
+fn f64_to_u32(v: emu_f64) -> u32 {
+    let r = f64_to_u64(v);
+    return select(r.x, 0xFFFFFFFFu, r.y != 0u);
+}
+
+// ---- exact Floor / Ceiling / Round on the IEEE bit pattern ----
+// Rounds the double (bits lo, hi) to an integer: toward -inf (ceil_mode false) or +inf.
+fn _f64_bits_round_int(b: vec2<u32>, ceil_mode: bool) -> vec2<u32> {
+    let exponent = (b.y >> 20u) & 0x7FFu;
+    let neg = (b.y & 0x80000000u) != 0u;
+    // |x| < 1: +-0 stays, otherwise 0 / +-1 by direction.
+    let small = select(select(vec2<u32>(0u, 0u), vec2<u32>(0u, 0x3FF00000u), ceil_mode),
+                       select(vec2<u32>(0u, 0xBFF00000u), vec2<u32>(0u, 0x80000000u), ceil_mode), neg);
+    let small_r = select(small, b, (b.x | (b.y & 0x7FFFFFFFu)) == 0u);
+    let fracbits = 1075u - exponent; // 1..52 where used
+    let kept = _f64u_shl(_f64u_shr(b, fracbits), fracbits);
+    let bumped = select(kept, _f64u_add(kept, _f64u_shl(vec2<u32>(1u, 0u), fracbits)), neg != ceil_mode);
+    let mid = select(bumped, b, kept.x == b.x && kept.y == b.y);
+    let r = select(mid, small_r, exponent < 1023u);
+    return select(r, b, exponent == 0x7FFu || exponent >= 1075u); // NaN, Inf, already integral
+}
+
+// Round to the nearest integer on the IEEE bit pattern; a tie goes to EVEN (Math.Round default)
+// or AWAY from zero. Rounding the hi/lo components separately is wrong: 2.5000000001 is
+// 2.5 + 1e-10, and round(2.5) + round(1e-10) = 2.
+fn _f64_bits_round_nearest(b: vec2<u32>, away: bool) -> vec2<u32> {
+    let exponent = (b.y >> 20u) & 0x7FFu;
+    let sign_only = vec2<u32>(0u, b.y & 0x80000000u);
+    // 0.5 <= |x| < 1: +-1, except an exact +-0.5 rounding to even (0).
+    let half_range = select(vec2<u32>(0u, sign_only.y | 0x3FF00000u), sign_only, !away && b.x == 0u && (b.y & 0xFFFFFu) == 0u);
+    let fracbits = 1075u - exponent; // 1..52 where used
+    let one = _f64u_shl(vec2<u32>(1u, 0u), fracbits);
+    let kept = _f64u_shl(_f64u_shr(b, fracbits), fracbits);
+    let frac = _f64u_sub(b, kept);
+    let half_v = _f64u_shl(vec2<u32>(1u, 0u), fracbits - 1u);
+    let above = frac.y > half_v.y || (frac.y == half_v.y && frac.x > half_v.x);
+    let tie = frac.x == half_v.x && frac.y == half_v.y;
+    let odd = ((kept.x & one.x) | (kept.y & one.y)) != 0u;
+    // Sign-magnitude: adding one unit to the magnitude moves away from zero (a carry into the
+    // exponent is the correct next power of two).
+    let mid = select(kept, _f64u_add(kept, one), above || (tie && (away || odd)));
+    var r = select(mid, half_range, exponent == 1022u);
+    r = select(r, sign_only, exponent < 1022u); // |x| < 0.5 -> +-0
+    return select(r, b, exponent == 0x7FFu || exponent >= 1075u); // NaN, Inf, already integral
+}
+
+// Math.IEEERemainder: x - y * RoundToEven(x / y), in the emulated precision.
+fn f64_ieee_rem(a: emu_f64, b: emu_f64) -> emu_f64 {
+    return f64_sub(a, f64_mul(b, f64_round_even(f64_div(a, b))));
+}
+
+
+
+// Math.CopySign: |a| with the SIGN BIT of b (the leading component carries it), so a
+// negative zero or NaN sign in b is honoured - a `b >= 0` test gets -0.0 wrong.
+fn f64_copysign(a: emu_f64, b: emu_f64) -> emu_f64 {
+    let m = f64_abs(a);
+    return select(m, f64_neg(m), (bitcast<u32>(b.x) >> 31u) != 0u);
+}
+
+// C# double % : x - y * trunc(x / y), in the emulated precision.
+fn f64_rem(a: emu_f64, b: emu_f64) -> emu_f64 {
+    return f64_sub(a, f64_mul(b, f64_trunc(f64_div(a, b))));
+}
+
+// Pow / Atan2 through f32 (f32 accuracy; no double-precision transcendentals). Same negative-base
+// rule as the f32 pow path: |x|^y, negated for an odd integral exponent.
+fn f64_pow(a: emu_f64, b: emu_f64) -> emu_f64 {
+    let x = f64_to_f32(a);
+    let y = f64_to_f32(b);
+    return f64_from_f32(pow(abs(x), y) * select(1.0, -1.0, x < 0.0 && (abs(y) % 2.0) >= 1.0));
+}
+
+fn f64_atan2(a: emu_f64, b: emu_f64) -> emu_f64 {
+    return f64_from_f32(atan2(f64_to_f32(a), f64_to_f32(b)));
+}
+
+";
+
         #region emu_f64 Emulation (Double-Float using vec2<f32>)
 
         /// <summary>
         /// WGSL type alias for emulated emu_f64.
         /// </summary>
+        /// <summary>
+        /// Sqrt (Karp step + one Newton), and Floor / Ceiling / Truncate / Round on the IEEE bit pattern (exact for any representation;
+        /// the Ozaki family uses them). Dekker has straight-line f32 versions
+        /// (<see cref="DekkerRoundingFunctions"/>).
+        /// </summary>
+        public const string OzakiRoundingAndSqrtFunctions = @"
+// Square root: the f32 estimate y0 corrected once by (a - y0^2) / (2 y0) with y0^2 exact
+// (two_prod) - about 48 bits, no divide - then one Newton step y = (y + a / y) / 2 in the full
+// representation. Correctly rounded like the two divide-based Newton steps it replaces, with
+// half the code (FXC compile time grows superlinearly in inlined code).
+fn f64_sqrt(a: emu_f64) -> emu_f64 {
+    let hi = a.x;
+    let ok = hi > 0.0 && (bitcast<u32>(hi) & 0x7FFFFFFFu) != 0x7F800000u;
+    let x = select(f64_from_f32(1.0), a, ok);
+    let y0 = sqrt(x.x);
+    let p = f64_two_prod(y0, y0);
+    let r0 = f64_sub(x, emu_f64(p.x, p.y, 0.0, 0.0));
+    let y1 = f64_add(f64_from_f32(y0), f64_from_f32(r0.x * (0.5 / y0)));
+    let y = f64_mul(f64_add(y1, f64_div(x, y1)), f64_from_f32(0.5));
+    // Negative -> NaN; +-0, +Inf and NaN are their own roots.
+    let special = select(a, f64_from_f32(bitcast<f32>(0xFFC00000u | (bitcast<u32>(hi) & 0u))), hi < 0.0);
+    return select(special, y, ok);
+}
+
+fn f64_floor(v: emu_f64) -> emu_f64 {
+    let r = _f64_bits_round_int(f64_to_ieee754_bits(v), false);
+    return f64_from_ieee754_bits(r.x, r.y);
+}
+fn f64_ceil(v: emu_f64) -> emu_f64 {
+    let r = _f64_bits_round_int(f64_to_ieee754_bits(v), true);
+    return f64_from_ieee754_bits(r.x, r.y);
+}
+fn f64_round_even(v: emu_f64) -> emu_f64 {
+    let r = _f64_bits_round_nearest(f64_to_ieee754_bits(v), false);
+    return f64_from_ieee754_bits(r.x, r.y);
+}
+fn f64_round_away(v: emu_f64) -> emu_f64 {
+    let r = _f64_bits_round_nearest(f64_to_ieee754_bits(v), true);
+    return f64_from_ieee754_bits(r.x, r.y);
+}
+fn f64_trunc(v: emu_f64) -> emu_f64 {
+    let b = f64_to_ieee754_bits(v);
+    let r = _f64_bits_round_int(b, (b.y & 0x80000000u) != 0u); // toward zero
+    return f64_from_ieee754_bits(r.x, r.y);
+}
+";
+
+        /// <summary>Dekker (vec2) Sqrt / Floor / Ceiling / Truncate / Round in straight-line f32 arithmetic.</summary>
+        public const string DekkerRoundingFunctions = @"
+// Square root by Karp's method: the f32 estimate y0 corrected by (a - y0^2) / (2 y0) with y0^2
+// taken exactly (two_prod), then once more from the refined value - no double-float divides.
+// Worst relative error 7.8e-15 (the two divide-based Newton steps it replaces: 1.1e-14), even
+// with a 2-ULP hardware sqrt, in under half the code.
+fn f64_sqrt(a: emu_f64) -> emu_f64 {
+    let hi = a.x;
+    let ok = hi > 0.0 && (bitcast<u32>(hi) & 0x7FFFFFFFu) != 0x7F800000u;
+    let x = select(emu_f64(1.0, 0.0), a, ok);
+    let y0 = sqrt(x.x);
+    let r0 = f64_sub(x, f64_two_prod(y0, y0));
+    let y1 = f64_add(emu_f64(y0, 0.0), emu_f64(r0.x * (0.5 / y0), 0.0));
+    let r1 = f64_sub(x, f64_mul(y1, y1));
+    let y = f64_add(y1, emu_f64(r1.x * (0.5 / y1.x), 0.0));
+    // Negative -> NaN; +-0, +Inf and NaN are their own roots.
+    let special = select(a, f64_from_f32(bitcast<f32>(0xFFC00000u | (bitcast<u32>(hi) & 0u))), hi < 0.0);
+    return select(special, y, ok);
+}
+
+// Integer rounding of a normalized pair (|lo| <= ulp(hi) / 2) in f32 arithmetic: a NON-integral hi
+// (|hi| < 2^23) is at least one ULP from every integer, so lo cannot carry the value across one -
+// the result is hi's own; an integral hi carries the whole fraction in lo. STRAIGHT-LINE (see
+// f64_to_ieee754_bits): the old versions went through the IEEE bit pattern and back, the largest
+// functions in the library once FXC inlined them.
+fn _f64_is_finite_hi(v: emu_f64) -> bool {
+    return (bitcast<u32>(v.x) & 0x7F800000u) != 0x7F800000u;
+}
+
+// hi + k for an integral hi and an integral k (k == 0 keeps hi's zero sign).
+fn _f64_int_plus(hi: f32, k: f32) -> emu_f64 {
+    return select(emu_f64(hi, 0.0), f64_add(emu_f64(hi, 0.0), emu_f64(k, 0.0)), k != 0.0);
+}
+
+fn f64_floor(v: emu_f64) -> emu_f64 {
+    let fh = floor(v.x);
+    return select(emu_f64(fh, 0.0), _f64_int_plus(fh, floor(v.y)), fh == v.x && _f64_is_finite_hi(v));
+}
+
+fn f64_ceil(v: emu_f64) -> emu_f64 {
+    let ch = ceil(v.x);
+    return select(emu_f64(ch, 0.0), _f64_int_plus(ch, ceil(v.y)), ch == v.x && _f64_is_finite_hi(v));
+}
+
+fn f64_trunc(v: emu_f64) -> emu_f64 {
+    return select(f64_floor(v), f64_ceil(v), v.x < 0.0);
+}
+
+// Nearest integer; a tie goes to EVEN or AWAY from zero.
+fn _f64_round_nearest(v: emu_f64, away: bool) -> emu_f64 {
+    let hi = v.x;
+    let lo = v.y;
+    // hi integral: round lo (round() is ties-to-even on lo alone; d = lo - rl is exact). On a tie
+    // the other candidate is rl + 2d, chosen when hi + rl is odd (even) or nearer zero (away).
+    let rl = round(lo);
+    let dl = lo - rl;
+    let hi_odd = hi - 2.0 * floor(hi * 0.5) != 0.0;
+    let rl_odd = rl - 2.0 * floor(rl * 0.5) != 0.0;
+    let other_l = rl + 2.0 * dl;
+    let total_neg = hi < 0.0 || (hi == 0.0 && lo < 0.0);
+    let away_l = select(other_l > rl, other_l < rl, total_neg);
+    let pick_l = abs(dl) == 0.5 && select(hi_odd != rl_odd, away_l, away);
+    let int_hi = _f64_int_plus(hi, select(rl, other_l, pick_l));
+    // hi not integral: a .5 tie in hi is decided by lo's sign, then by the tie rule.
+    let rh = round(hi);
+    let dh = hi - rh;
+    let other_h = rh + 2.0 * dh;
+    let away_h = abs(other_h) > abs(rh);
+    let pick_h = abs(dh) == 0.5 && ((dh > 0.0 && lo > 0.0) || (dh < 0.0 && lo < 0.0) || (lo == 0.0 && away && away_h));
+    let frac_hi = emu_f64(select(rh, other_h, pick_h), 0.0);
+    return select(frac_hi, int_hi, floor(hi) == hi && _f64_is_finite_hi(v));
+}
+
+fn f64_round_even(v: emu_f64) -> emu_f64 {
+    return _f64_round_nearest(v, false);
+}
+
+fn f64_round_away(v: emu_f64) -> emu_f64 {
+    return _f64_round_nearest(v, true);
+}
+";
+
         public const string F64TypeAlias = "alias emu_f64 = vec2<f32>;";
 
         /// <summary>
@@ -66,140 +481,68 @@ fn _f32_qnan()    -> f32 { return bitcast<f32>(0x7FC00000u | _ilgpu_runtime_zero
 // emu_f64 Emulation Functions (Double-Float: vec2<f32> where x=high, y=low)
 // ============================================================================
 
-// --- IEEE 754 double bits to double-float conversion ---
-// Properly splits a 64-bit IEEE 754 double into a double-float emu_f64(hi, lo)
-// preserving ~48 bits of mantissa precision via Dekker-style two-sum.
-// When CPU sends a raw 64-bit double, we receive it as vec2<u32> (lo, hi bits)
+// --- IEEE 754 double bits <-> double-float (hi, lo) ---
+// Exact split of the 53-bit significand (_f64_bits_to_components); the 29 bits below hi are
+// rounded to nearest into lo - the representation keeps ~48 bits.
 fn f64_from_ieee754_bits(lo: u32, hi: u32) -> emu_f64 {
-    let sign_bit = (hi >> 31u) & 1u;
-    let exponent = (hi >> 20u) & 0x7FFu;
-    let mantissa_hi20 = hi & 0xFFFFFu;
-    let mantissa_lo32 = lo;
-
-    // Zero (preserve sign of zero - f32 also has signed zero)
-    if (exponent == 0u && mantissa_hi20 == 0u && mantissa_lo32 == 0u) {
-        let zero_bits = sign_bit << 31u;
-        return emu_f64(bitcast<f32>(zero_bits), 0.0);
-    }
-    // Inf/NaN: preserve in f32 high word so IsNaN/IsInf propagation works.
-    // Map +Inf/-Inf to f32 Inf, NaN to f32 NaN (sign preserved via sign_bit).
-    if (exponent == 0x7FFu) {
-        let is_nan = (mantissa_hi20 != 0u) || (mantissa_lo32 != 0u);
-        if (is_nan) {
-            // Produce f32 NaN with sign preserved
-            let nan_bits = (sign_bit << 31u) | 0x7FC00000u; // quiet NaN
-            return emu_f64(bitcast<f32>(nan_bits), 0.0);
-        } else {
-            // Produce f32 Inf with sign preserved
-            let inf_bits = (sign_bit << 31u) | 0x7F800000u;
-            return emu_f64(bitcast<f32>(inf_bits), 0.0);
-        }
-    }
-
-    let exp_bias: i32 = 1023;
-    let exp_val: i32 = i32(exponent) - exp_bias;
-    let f32_exp_bias: i32 = 127;
-    let f32_exp: i32 = exp_val + f32_exp_bias;
-
-    // Out of f32 exponent range
-    if (f32_exp <= 0 || f32_exp >= 255) {
-        let f32_bits_approx = (sign_bit << 31u) | (u32(clamp(f32_exp, 1, 254)) << 23u) | (mantissa_hi20 << 3u);
-        let val_approx = bitcast<f32>(f32_bits_approx);
-        return emu_f64(val_approx, 0.0);
-    }
-
-    // Build high part: sign + exponent + top 23 bits of 52-bit mantissa
-    // We take all 20 bits from mantissa_hi20 + top 3 bits from mantissa_lo32
-    let top23 = (mantissa_hi20 << 3u) | (mantissa_lo32 >> 29u);
-    let f32_bits_h = (sign_bit << 31u) | (u32(f32_exp) << 23u) | top23;
-    let val_hi = bitcast<f32>(f32_bits_h);
-
-    // Build low part: remaining 29 bits of mantissa, scaled properly
-    let remaining = mantissa_lo32 & 0x1FFFFFFFu;
-    if (remaining == 0u) {
-        return emu_f64(val_hi, 0.0);
-    }
-
-    // remaining represents bits at position 2^(exp_val - 52) relative to 1.0
-    // = remaining * 2^(-29) * 2^(exp_val - 23)
-    let lo_exp: i32 = exp_val - 29 + f32_exp_bias;
-    var val_lo: f32 = 0.0;
-    if (lo_exp > 0 && lo_exp < 255) {
-        let rem_f = f32(remaining);
-        let scale_exp: i32 = exp_val - 23 + f32_exp_bias;
-        if (scale_exp > 0 && scale_exp < 255) {
-            let scale_bits = u32(scale_exp) << 23u;
-            let scale = bitcast<f32>(scale_bits);
-            val_lo = (rem_f / 536870912.0) * scale;
-        }
-    }
-
-    if (sign_bit != 0u) {
-        val_lo = -val_lo;
-    }
-
-    // Inline two-sum normalization (Knuth's algorithm)
-    // Cannot call f64_add here as it may be declared later in the library
-    let s = val_hi + val_lo;
-    let e = val_lo - (s - val_hi);
-    return emu_f64(s, e);
+    let c = _f64_bits_to_components(lo, hi);
+    let l = c.y + c.z;
+    let s = c.x + l;
+    // c.x alone when exact, zero, Inf or NaN (the error term of an Inf would be NaN).
+    return select(emu_f64(s, l - (s - c.x)), emu_f64(c.x, 0.0), c.y == 0.0 && c.z == 0.0);
 }
 
-// Store emu_f64 back to IEEE 754 bits for buffer write
-// Reconstructs an approximate IEEE 754 double from both hi and lo float components
+// Store emu_f64 back to IEEE 754 bits: exact sum of hi + lo (lo of EITHER sign - the old
+// version OR'ed |lo| into the mantissa, so 33554431.0 + 0.0 stored as 33554433.0).
+// Exact IEEE-754 bits of the pair hi + lo, rounded to nearest-even. hi's own bits, then lo as a
+// whole number of double ULPs added to the magnitude bits. STRAIGHT-LINE on purpose: this is
+// inlined into every emulated-double store, and D3D's FXC (Chrome's WebGPU/WebGL shader
+// compiler on Windows) compiles branches superlinearly - the branchy generic normaliser
+// (_f64_components_to_bits) made 38 stores take 12.5 s to compile and a 19-op kernel with a
+// NoInlining helper over 10 minutes, which the GPU watchdog kills (device lost). This: 0.69 s.
 fn f64_to_ieee754_bits(v: emu_f64) -> vec2<u32> {
-    let val_hi = v.x;
-    let val_lo = v.y;
-
-    // Zero check via bit pattern (so -0.0 and +0.0 are distinguished -
-    // f32 == compares -0.0 and +0.0 as equal under IEEE).
-    let f32_bits_h_check = bitcast<u32>(val_hi);
-    if ((f32_bits_h_check & 0x7FFFFFFFu) == 0u && val_lo == 0.0) {
-        // Preserve sign of zero in f64 high word.
-        return vec2<u32>(0u, f32_bits_h_check & 0x80000000u);
-    }
-
-    let f32_bits_h = bitcast<u32>(val_hi);
-    let sign = (f32_bits_h >> 31u) & 1u;
-    let f32_exp = (f32_bits_h >> 23u) & 0xFFu;
-    let f32_mantissa = f32_bits_h & 0x7FFFFFu;
-
-    // Handle Inf/NaN: f32 exponent 0xFF maps to f64 exponent 0x7FF
-    if (f32_exp == 0xFFu) {
-        let is_nan = (f32_mantissa != 0u);
-        if (is_nan) {
-            return vec2<u32>(0u, (sign << 31u) | 0x7FF80000u); // quiet NaN
-        } else {
-            return vec2<u32>(0u, (sign << 31u) | 0x7FF00000u); // Inf
-        }
-    }
-
-    let f32_bias: i32 = 127;
-    let f64_bias: i32 = 1023;
-    let exp_val: i32 = i32(f32_exp) - f32_bias;
-    let f64_exp: u32 = u32(exp_val + f64_bias);
-
-    // High part: top 23 bits of f32 mantissa -> top 23 bits of 52-bit double mantissa
-    var mantissa_hi20 = f32_mantissa >> 3u;
-    var mantissa_lo32 = (f32_mantissa & 0x7u) << 29u;
-
-    // Recover extra bits from val_lo
-    if (val_lo != 0.0) {
-        let scale_exp: i32 = exp_val - 23 + f32_bias;
-        if (scale_exp > 0 && scale_exp < 255) {
-            let scale_bits = u32(scale_exp) << 23u;
-            let scale = bitcast<f32>(scale_bits);
-            let abs_lo = abs(val_lo);
-            let rem_f = (abs_lo / scale) * 536870912.0;
-            let remaining = u32(clamp(rem_f + 0.5, 0.0, 536870911.0));
-            mantissa_lo32 = mantissa_lo32 | (remaining & 0x1FFFFFFFu);
-        }
-    }
-
-    let out_hi = (sign << 31u) | (f64_exp << 20u) | mantissa_hi20;
-    let out_lo = mantissa_lo32;
-    return vec2<u32>(out_lo, out_hi);
+    // TwoSum renormalisation: afterwards |lo| <= ulp(hi) / 2, whatever produced the pair.
+    let s = v.x + v.y;
+    let bb = s - v.x;
+    let e = (v.x - (s - bb)) + (v.y - bb);
+    let s_finite = (bitcast<u32>(s) & 0x7F800000u) != 0x7F800000u;
+    let hi = select(v.x, s, s_finite);
+    let lo = select(0.0, e, s_finite);
+    let hb = bitcast<u32>(hi);
+    let sign = hb & 0x80000000u;
+    let eh = (hb >> 23u) & 0xFFu;
+    let mant = hb & 0x7FFFFFu;
+    // hi as a double. A subnormal hi (eh == 0) normalises: value = mant * 2^-149.
+    let p = firstLeadingBit(mant);
+    let sub_shift = 52u - p;
+    let sub_w_hi = select(mant >> ((32u - sub_shift) & 31u), mant << ((sub_shift - 32u) & 31u), sub_shift >= 32u);
+    let sub_w_lo = select(mant << (sub_shift & 31u), 0u, sub_shift >= 32u);
+    let is_sub = eh == 0u;
+    let w_hi = select(((eh + 896u) << 20u) | (mant >> 3u), ((p + 874u) << 20u) | (sub_w_hi & 0xFFFFFu), is_sub);
+    let w_lo = select((mant & 7u) << 29u, sub_w_lo, is_sub);
+    // lo as a whole number of double ULPs of hi (a power-of-two scale, so exact in f32), added to
+    // or subtracted from the magnitude bits: consecutive doubles have consecutive bit patterns.
+    // Below an exact power of two the ULP halves, so a shrinking lo counts half-size ULPs.
+    let down = lo != 0.0 && ((bitcast<u32>(lo) ^ hb) & 0x80000000u) != 0u;
+    let sc = select(179, 180, down && mant == 0u) - i32(eh);
+    let sc1 = sc / 2;
+    let lm = abs(lo) * bitcast<f32>(u32(sc1 + 127) << 23u) * bitcast<f32>(u32(sc - sc1 + 127) << 23u);
+    let li = floor(lm);
+    let frac = lm - li;
+    let liu = u32(li);
+    // Round to nearest, ties to even (w_lo +/- liu has the parity of w_lo + liu).
+    let k = liu + select(0u, 1u, frac > 0.5 || (frac == 0.5 && ((w_lo + liu) & 1u) == 1u));
+    let up = vec2<u32>(w_lo + k, w_hi + select(0u, 1u, w_lo + k < w_lo));
+    let dn = vec2<u32>(w_lo - k, w_hi - select(0u, 1u, w_lo < k));
+    let mag = select(up, dn, down);
+    let special = select(0x7FF00000u, 0x7FF80000u, mant != 0u);
+    // A zero keeps v.x's sign when v.x is itself the zero (-0.0 loads as (-0, +0), and TwoSum
+    // would make that +0); a zero from x + (-x) is +0.
+    let zero_sign = select(sign, bitcast<u32>(v.x) & 0x80000000u, v.x == 0.0);
+    let finite = select(vec2<u32>(mag.x, sign | mag.y), vec2<u32>(0u, zero_sign), (hb & 0x7FFFFFFFu) == 0u);
+    return select(finite, vec2<u32>(0u, sign | special), eh == 0xFFu);
 }
+
 
 // Create emu_f64 from a single f32 value
 fn f64_from_f32(v: f32) -> emu_f64 {
@@ -221,14 +564,15 @@ fn f64_neg(a: emu_f64) -> emu_f64 {
     return emu_f64(-a.x, -a.y);
 }
 
-// emu_f64 addition using Dekker's algorithm
 fn f64_add(a: emu_f64, b: emu_f64) -> emu_f64 {
+    // A non-finite sum returns the IEEE result (the error terms would compute Inf - Inf = NaN).
+    // select, not an early return: FXC compiles branches superlinearly (see f64_to_ieee754_bits).
     let s = a.x + b.x;
     let v = s - a.x;
     let e = (a.x - (s - v)) + (b.x - v) + a.y + b.y;
     let z_hi = s + e;
     let z_lo = e - (z_hi - s);
-    return emu_f64(z_hi, z_lo);
+    return select(emu_f64(z_hi, z_lo), emu_f64(s, 0.0), (bitcast<u32>(s) & 0x7F800000u) == 0x7F800000u);
 }
 
 // emu_f64 subtraction
@@ -253,21 +597,22 @@ fn f64_two_prod(a: f32, b: f32) -> emu_f64 {
     return emu_f64(p, e);
 }
 
-// emu_f64 multiplication
 fn f64_mul(a: emu_f64, b: emu_f64) -> emu_f64 {
+    // Non-finite product: the IEEE result (see f64_add).
     let p = f64_two_prod(a.x, b.x);
     let e = a.x * b.y + a.y * b.x + p.y;
     let z_hi = p.x + e;
     let z_lo = e - (z_hi - p.x);
-    return emu_f64(z_hi, z_lo);
+    return select(emu_f64(z_hi, z_lo), emu_f64(p.x, 0.0), (bitcast<u32>(p.x) & 0x7F800000u) == 0x7F800000u);
 }
 
-// emu_f64 division (approximate)
 fn f64_div(a: emu_f64, b: emu_f64) -> emu_f64 {
+    // Non-finite quotient or divisor: the IEEE result (see f64_add).
     let q = a.x / b.x;
     let r = f64_sub(a, f64_mul(b, f64_from_f32(q)));
     let q2 = r.x / b.x;
-    return f64_add(f64_from_f32(q), f64_from_f32(q2));
+    let non_finite = (bitcast<u32>(q) & 0x7F800000u) == 0x7F800000u || (bitcast<u32>(b.x) & 0x7F800000u) == 0x7F800000u;
+    return select(f64_add(f64_from_f32(q), f64_from_f32(q2)), emu_f64(q, 0.0), non_finite);
 }
 
 // emu_f64 comparison helpers - IEEE-strict NaN handling.
@@ -288,32 +633,27 @@ fn _f32_is_nan_bits(v: f32) -> bool {
 
 // emu_f64 comparison: less than (IEEE: FALSE if either operand is NaN)
 fn f64_lt(a: emu_f64, b: emu_f64) -> bool {
-    if (_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) { return false; }
-    return (a.x < b.x) || (a.x == b.x && a.y < b.y);
+    return !(_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) && ((a.x < b.x) || (a.x == b.x && a.y < b.y));
 }
 
 // emu_f64 comparison: less than or equal (IEEE: FALSE if either is NaN)
 fn f64_le(a: emu_f64, b: emu_f64) -> bool {
-    if (_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) { return false; }
-    return (a.x < b.x) || (a.x == b.x && a.y <= b.y);
+    return !(_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) && ((a.x < b.x) || (a.x == b.x && a.y <= b.y));
 }
 
 // emu_f64 comparison: greater than (IEEE: FALSE if either is NaN)
 fn f64_gt(a: emu_f64, b: emu_f64) -> bool {
-    if (_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) { return false; }
-    return (a.x > b.x) || (a.x == b.x && a.y > b.y);
+    return !(_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) && ((a.x > b.x) || (a.x == b.x && a.y > b.y));
 }
 
 // emu_f64 comparison: greater than or equal (IEEE: FALSE if either is NaN)
 fn f64_ge(a: emu_f64, b: emu_f64) -> bool {
-    if (_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) { return false; }
-    return (a.x > b.x) || (a.x == b.x && a.y >= b.y);
+    return !(_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) && ((a.x > b.x) || (a.x == b.x && a.y >= b.y));
 }
 
 // emu_f64 comparison: equal (IEEE: FALSE if either is NaN)
 fn f64_eq(a: emu_f64, b: emu_f64) -> bool {
-    if (_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) { return false; }
-    return a.x == b.x && a.y == b.y;
+    return !(_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) && (a.x == b.x && a.y == b.y);
 }
 
 // emu_f64 IEEE IsNaN: detect f32 NaN bit pattern in high lane (avoid relying
@@ -332,30 +672,21 @@ fn f64_is_inf(v: emu_f64) -> bool {
 
 // emu_f64 comparison: not equal (IEEE: TRUE if either operand is NaN)
 fn f64_ne(a: emu_f64, b: emu_f64) -> bool {
-    if (_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) { return true; }
-    return a.x != b.x || a.y != b.y;
+    return (_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) || (a.x != b.x || a.y != b.y);
 }
 
-// emu_f64 absolute value
 fn f64_abs(a: emu_f64) -> emu_f64 {
-    if (a.x < 0.0 || (a.x == 0.0 && a.y < 0.0)) {
-        return f64_neg(a);
-    }
-    return a;
+    return select(a, f64_neg(a), a.x < 0.0 || (a.x == 0.0 && a.y < 0.0));
 }
 
-// emu_f64 minimum
 fn f64_min(a: emu_f64, b: emu_f64) -> emu_f64 {
-    if (f64_lt(a, b)) { return a; }
-    return b;
+    return select(b, a, f64_lt(a, b));
 }
 
-// emu_f64 maximum
 fn f64_max(a: emu_f64, b: emu_f64) -> emu_f64 {
-    if (f64_gt(a, b)) { return a; }
-    return b;
+    return select(b, a, f64_gt(a, b));
 }
-";
+" + F64ExactConversionFunctions + DekkerRoundingFunctions;
 
         #endregion
 
@@ -629,6 +960,63 @@ fn i64_abs(a: emu_i64) -> emu_i64 {
     }
     return a;
 }
+
+// Index of the highest set bit of a NON-ZERO 64-bit value.
+fn _u64_msb(a: emu_u64) -> u32 {
+    if (a.y != 0u) { return 32u + firstLeadingBit(a.y); }
+    return firstLeadingBit(a.x);
+}
+
+// ulong -> float, rounded to nearest-even (was: low 32 bits only).
+fn u64_to_f32(v: emu_u64) -> f32 {
+    if (v.x == 0u && v.y == 0u) { return 0.0; }
+    var p = _u64_msb(v);
+    if (p <= 23u) { return f32(v.x); }
+    let n = p - 23u;
+    var mant = u64_shr(v, n).x;
+    let half_bit = u64_shr(v, n - 1u).x & 1u;
+    let below = i64_shl(u64_shr(v, n - 1u), n - 1u);
+    let rest = below.x != v.x || below.y != v.y;
+    if (half_bit == 1u && (rest || (mant & 1u) == 1u)) {
+        mant = mant + 1u;
+        if (mant == 0x1000000u) { mant = 0x800000u; p = p + 1u; }
+    }
+    return bitcast<f32>(((p + 127u) << 23u) | (mant & 0x7FFFFFu));
+}
+
+fn i64_to_f32(v: emu_i64) -> f32 {
+    if ((v.y & 0x80000000u) != 0u) { return -u64_to_f32(i64_neg(v)); }
+    return u64_to_f32(v);
+}
+
+// float -> long, truncating, saturating like .NET 9+ (NaN -> 0).
+fn f32_to_i64(f: f32) -> emu_i64 {
+    let b = bitcast<u32>(f);
+    let exponent = (b >> 23u) & 0xFFu;
+    if (exponent == 0xFFu && (b & 0x7FFFFFu) != 0u) { return emu_i64(0u, 0u); }
+    let neg = (b & 0x80000000u) != 0u;
+    if (exponent < 127u) { return emu_i64(0u, 0u); }
+    let e = exponent - 127u;
+    if (e >= 63u) { return select(emu_i64(0xFFFFFFFFu, 0x7FFFFFFFu), emu_i64(0u, 0x80000000u), neg); }
+    let m = emu_i64((b & 0x7FFFFFu) | 0x800000u, 0u);
+    var r = m;
+    if (e >= 23u) { r = i64_shl(m, e - 23u); } else { r = u64_shr(m, 23u - e); }
+    if (neg) { return i64_neg(r); }
+    return r;
+}
+
+// float -> ulong, truncating, saturating (NaN and negatives -> 0).
+fn f32_to_u64(f: f32) -> emu_u64 {
+    let b = bitcast<u32>(f);
+    let exponent = (b >> 23u) & 0xFFu;
+    if ((exponent == 0xFFu && (b & 0x7FFFFFu) != 0u) || (b & 0x80000000u) != 0u || exponent < 127u) { return emu_u64(0u, 0u); }
+    let e = exponent - 127u;
+    if (e >= 64u) { return emu_u64(0xFFFFFFFFu, 0xFFFFFFFFu); }
+    let m = emu_u64((b & 0x7FFFFFu) | 0x800000u, 0u);
+    if (e >= 23u) { return i64_shl(m, e - 23u); }
+    return u64_shr(m, 23u - e);
+}
+
 ";
 
         #endregion
@@ -732,122 +1120,19 @@ fn f32_quick_renorm(c: vec4<f32>, e: f32) -> vec4<f32> {
     return vec4<f32>(c0, c1, c2, c3);
 }
 
-// --- IEEE 754 double bits to double-float conversion ---
+// --- IEEE 754 double bits <-> quad-float ---
+// Exact: the 53-bit significand becomes three non-overlapping f32 components (24 + 24 + 5
+// bits). The old version kept only two (dropping 5 significand bits) and stored back from x
+// and y alone, OR'ing |y| into the mantissa regardless of its sign.
 fn f64_from_ieee754_bits(lo: u32, hi: u32) -> emu_f64 {
-    let sign_bit = (hi >> 31u) & 1u;
-    let exponent = (hi >> 20u) & 0x7FFu;
-    let mantissa_hi20 = hi & 0xFFFFFu;
-    let mantissa_lo32 = lo;
-
-    // Zero (preserve sign of zero - f32 also has signed zero)
-    if (exponent == 0u && mantissa_hi20 == 0u && mantissa_lo32 == 0u) {
-        let zero_bits = sign_bit << 31u;
-        return emu_f64(bitcast<f32>(zero_bits), 0.0, 0.0, 0.0);
-    }
-    // Inf/NaN: preserve in f32 high word so IsNaN/IsInf propagation works.
-    if (exponent == 0x7FFu) {
-        let is_nan = (mantissa_hi20 != 0u) || (mantissa_lo32 != 0u);
-        if (is_nan) {
-            let nan_bits = (sign_bit << 31u) | 0x7FC00000u;
-            return emu_f64(bitcast<f32>(nan_bits), 0.0, 0.0, 0.0);
-        } else {
-            let inf_bits = (sign_bit << 31u) | 0x7F800000u;
-            return emu_f64(bitcast<f32>(inf_bits), 0.0, 0.0, 0.0);
-        }
-    }
-
-    let exp_bias: i32 = 1023;
-    let exp_val: i32 = i32(exponent) - exp_bias;
-    let f32_exp_bias: i32 = 127;
-    let f32_exp: i32 = exp_val + f32_exp_bias;
-
-    if (f32_exp <= 0 || f32_exp >= 255) {
-        let f32_bits_approx = (sign_bit << 31u) | (u32(clamp(f32_exp, 1, 254)) << 23u) | (mantissa_hi20 << 3u);
-        let val_approx = bitcast<f32>(f32_bits_approx);
-        return emu_f64(val_approx, 0.0, 0.0, 0.0);
-    }
-
-    let top23 = (mantissa_hi20 << 3u) | (mantissa_lo32 >> 29u);
-    let f32_bits_h = (sign_bit << 31u) | (u32(f32_exp) << 23u) | top23;
-    let val_hi = bitcast<f32>(f32_bits_h);
-
-    let remaining = mantissa_lo32 & 0x1FFFFFFFu;
-    if (remaining == 0u) {
-        return emu_f64(val_hi, 0.0, 0.0, 0.0);
-    }
-
-    let lo_exp: i32 = exp_val - 29 + f32_exp_bias;
-    var val_lo: f32 = 0.0;
-    if (lo_exp > 0 && lo_exp < 255) {
-        let rem_f = f32(remaining);
-        let scale_exp: i32 = exp_val - 23 + f32_exp_bias;
-        if (scale_exp > 0 && scale_exp < 255) {
-            let scale_bits = u32(scale_exp) << 23u;
-            let scale = bitcast<f32>(scale_bits);
-            val_lo = (rem_f / 536870912.0) * scale;
-        }
-    }
-
-    if (sign_bit != 0u) {
-        val_lo = -val_lo;
-    }
-
-    let ts = f32_quick_two_sum(val_hi, val_lo);
-    return f32_quick_renorm(vec4<f32>(ts.x, ts.y, 0.0, 0.0), 0.0);
+    let c = _f64_bits_to_components(lo, hi);
+    return select(f32_quick_renorm(c, 0.0), c, c.y == 0.0 && c.z == 0.0);
 }
 
-// Store emu_f64 back to IEEE 754 bits for buffer write
 fn f64_to_ieee754_bits(v: emu_f64) -> vec2<u32> {
-    // Only uses the top 2 floats right now to map back to IEEE 754
-    let val_hi = v.x;
-    let val_lo = v.y;
-
-    // Zero check via bit pattern (so -0.0 and +0.0 are distinguished -
-    // f32 == compares -0.0 and +0.0 as equal under IEEE).
-    let f32_bits_h_check = bitcast<u32>(val_hi);
-    if ((f32_bits_h_check & 0x7FFFFFFFu) == 0u && val_lo == 0.0) {
-        return vec2<u32>(0u, f32_bits_h_check & 0x80000000u);
-    }
-
-    let f32_bits_h = bitcast<u32>(val_hi);
-    let sign = (f32_bits_h >> 31u) & 1u;
-    let f32_exp = (f32_bits_h >> 23u) & 0xFFu;
-    let f32_mantissa = f32_bits_h & 0x7FFFFFu;
-
-    // Handle Inf/NaN: f32 exponent 0xFF maps to f64 exponent 0x7FF
-    if (f32_exp == 0xFFu) {
-        let is_nan = (f32_mantissa != 0u);
-        if (is_nan) {
-            return vec2<u32>(0u, (sign << 31u) | 0x7FF80000u); // quiet NaN
-        } else {
-            return vec2<u32>(0u, (sign << 31u) | 0x7FF00000u); // Inf
-        }
-    }
-
-    let f32_bias: i32 = 127;
-    let f64_bias: i32 = 1023;
-    let exp_val: i32 = i32(f32_exp) - f32_bias;
-    let f64_exp: u32 = u32(exp_val + f64_bias);
-
-    var mantissa_hi20 = f32_mantissa >> 3u;
-    var mantissa_lo32 = (f32_mantissa & 0x7u) << 29u;
-
-    if (val_lo != 0.0) {
-        let scale_exp: i32 = exp_val - 23 + f32_bias;
-        if (scale_exp > 0 && scale_exp < 255) {
-            let scale_bits = u32(scale_exp) << 23u;
-            let scale = bitcast<f32>(scale_bits);
-            let abs_lo = abs(val_lo);
-            let rem_f = (abs_lo / scale) * 536870912.0;
-            let remaining = u32(clamp(rem_f + 0.5, 0.0, 536870911.0));
-            mantissa_lo32 = mantissa_lo32 | (remaining & 0x1FFFFFFFu);
-        }
-    }
-
-    let out_hi = (sign << 31u) | (f64_exp << 20u) | mantissa_hi20;
-    let out_lo = mantissa_lo32;
-    return vec2<u32>(out_lo, out_hi);
+    return _f64_components_to_bits(v);
 }
+
 
 fn f64_from_f32(v: f32) -> emu_f64 {
     return emu_f64(v, 0.0, 0.0, 0.0);
@@ -866,6 +1151,10 @@ fn f64_neg(a: emu_f64) -> emu_f64 {
 }
 
 fn f64_add(a: emu_f64, b: emu_f64) -> emu_f64 {
+    // Non-finite result (or divisor): the error-term arithmetic below would compute
+    // Inf - Inf = NaN (Inf + 1 came out NaN). Return the IEEE result directly.
+    let _nf = a.x + b.x;
+    let _nf_hit = (bitcast<u32>(_nf) & 0x7F800000u) == 0x7F800000u;
     var s0 = a.x + b.x;
     var s1 = a.y + b.y;
     var s2 = a.z + b.z;
@@ -907,7 +1196,7 @@ fn f64_add(a: emu_f64, b: emu_f64) -> emu_f64 {
     
     t0 = t0 + t1 + t3;
 
-    return f32_quick_renorm(vec4<f32>(s0, s1, s2, s3), t0);
+    return select(f32_quick_renorm(vec4<f32>(s0, s1, s2, s3), t0), emu_f64(_nf, 0.0, 0.0, 0.0), _nf_hit);
 }
 
 fn f64_sub(a: emu_f64, b: emu_f64) -> emu_f64 {
@@ -930,6 +1219,10 @@ fn f64_two_prod(a: f32, b: f32) -> vec2<f32> {
 }
 
 fn f64_mul(a: emu_f64, b: emu_f64) -> emu_f64 {
+    // Non-finite result (or divisor): the error-term arithmetic below would compute
+    // Inf - Inf = NaN (Inf + 1 came out NaN). Return the IEEE result directly.
+    let _nf = a.x * b.x;
+    let _nf_hit = (bitcast<u32>(_nf) & 0x7F800000u) == 0x7F800000u;
     let pt0 = f64_two_prod(a.x, b.x); let p0 = pt0.x; var q0 = pt0.y;
     let pt1 = f64_two_prod(a.x, b.y); let p1 = pt1.x; var q1 = pt1.y;
     let pt2 = f64_two_prod(a.y, b.x); var p2 = pt2.x; var q2 = pt2.y;
@@ -961,55 +1254,68 @@ fn f64_mul(a: emu_f64, b: emu_f64) -> emu_f64 {
     
     s1 += a.x*b.w + a.y*b.z + a.z*b.y + a.w*b.x + nq0 + q3 + q4 + q5;
     
-    return f32_quick_renorm(vec4<f32>(p0, np1, s0, s1), s2);
+    return select(f32_quick_renorm(vec4<f32>(p0, np1, s0, s1), s2), emu_f64(_nf, 0.0, 0.0, 0.0), _nf_hit);
+}
+
+// Quad-float times a single f32 (the QD library's qd_real * double): three two_prods instead of
+// the full product's six plus its three_sum tree. Division's correction steps multiply by one
+// f32 quotient digit each, and the full f64_mul made f64_div the largest function FXC inlined.
+fn _f64_mul_f32(a: emu_f64, b: f32) -> emu_f64 {
+    let t0 = f64_two_prod(a.x, b);
+    let t1 = f64_two_prod(a.y, b);
+    let t2 = f64_two_prod(a.z, b);
+    let p3 = a.w * b;
+    let ts = f32_two_sum(t0.y, t1.x);
+    let th = f32_three_sum(ts.y, t1.y, t2.x); // (s2, q1, p2)
+    let u1 = f32_two_sum(th.y, t2.y);
+    let u2 = f32_two_sum(p3, u1.x);
+    return f32_quick_renorm(vec4<f32>(t0.x, ts.x, th.x, u2.x), (u1.y + u2.y) + th.z);
 }
 
 fn f64_div(a: emu_f64, b: emu_f64) -> emu_f64 {
+    // Non-finite result (or divisor): the error-term arithmetic below would compute
+    // Inf - Inf = NaN (Inf + 1 came out NaN). Return the IEEE result directly.
+    let _nf = a.x / b.x;
+    let _nf_hit = (bitcast<u32>(_nf) & 0x7F800000u) == 0x7F800000u || (bitcast<u32>(b.x) & 0x7F800000u) == 0x7F800000u;
     let q0 = a.x / b.x;
-    var r = f64_sub(a, f64_mul(b, f64_from_f32(q0)));
+    var r = f64_sub(a, _f64_mul_f32(b, q0));
     
     let q1 = r.x / b.x;
-    r = f64_sub(r, f64_mul(b, f64_from_f32(q1)));
+    r = f64_sub(r, _f64_mul_f32(b, q1));
     
     let q2 = r.x / b.x;
-    r = f64_sub(r, f64_mul(b, f64_from_f32(q2)));
+    r = f64_sub(r, _f64_mul_f32(b, q2));
     
     let q3 = r.x / b.x;
     let qs1 = f64_add(f64_from_f32(q0), f64_from_f32(q1));
     let qs2 = f64_add(f64_from_f32(q2), f64_from_f32(q3));
-    return f64_add(qs1, qs2);
+    return select(f64_add(qs1, qs2), emu_f64(_nf, 0.0, 0.0, 0.0), _nf_hit);
 }
 
 // Ozaki emu_f64 comparisons - IEEE-strict NaN handling via bit pattern.
 // See `_f32_is_nan_bits` in the Dekker section for rationale.
 fn f64_lt(a: emu_f64, b: emu_f64) -> bool {
-    if (_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) { return false; }
-    return (a.x < b.x) || (a.x == b.x && a.y < b.y);
+    return !(_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) && ((a.x < b.x) || (a.x == b.x && a.y < b.y));
 }
 
 fn f64_le(a: emu_f64, b: emu_f64) -> bool {
-    if (_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) { return false; }
-    return (a.x < b.x) || (a.x == b.x && a.y <= b.y);
+    return !(_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) && ((a.x < b.x) || (a.x == b.x && a.y <= b.y));
 }
 
 fn f64_gt(a: emu_f64, b: emu_f64) -> bool {
-    if (_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) { return false; }
-    return (a.x > b.x) || (a.x == b.x && a.y > b.y);
+    return !(_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) && ((a.x > b.x) || (a.x == b.x && a.y > b.y));
 }
 
 fn f64_ge(a: emu_f64, b: emu_f64) -> bool {
-    if (_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) { return false; }
-    return (a.x > b.x) || (a.x == b.x && a.y >= b.y);
+    return !(_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) && ((a.x > b.x) || (a.x == b.x && a.y >= b.y));
 }
 
 fn f64_eq(a: emu_f64, b: emu_f64) -> bool {
-    if (_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) { return false; }
-    return a.x == b.x && a.y == b.y;
+    return !(_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) && (a.x == b.x && a.y == b.y);
 }
 
 fn f64_ne(a: emu_f64, b: emu_f64) -> bool {
-    if (_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) { return true; }
-    return a.x != b.x || a.y != b.y;
+    return (_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) || (a.x != b.x || a.y != b.y);
 }
 
 // Ozaki IEEE IsNaN / IsInfinity: bit-pattern checks, same as Dekker.
@@ -1023,22 +1329,17 @@ fn f64_is_inf(v: emu_f64) -> bool {
 }
 
 fn f64_abs(a: emu_f64) -> emu_f64 {
-    if (a.x < 0.0 || (a.x == 0.0 && a.y < 0.0)) {
-        return f64_neg(a);
-    }
-    return a;
+    return select(a, f64_neg(a), a.x < 0.0 || (a.x == 0.0 && a.y < 0.0));
 }
 
 fn f64_min(a: emu_f64, b: emu_f64) -> emu_f64 {
-    if (f64_lt(a, b)) { return a; }
-    return b;
+    return select(b, a, f64_lt(a, b));
 }
 
 fn f64_max(a: emu_f64, b: emu_f64) -> emu_f64 {
-    if (f64_gt(a, b)) { return a; }
-    return b;
+    return select(b, a, f64_gt(a, b));
 }
-";
+" + F64ExactConversionFunctions + OzakiRoundingAndSqrtFunctions;
 
         #endregion
 

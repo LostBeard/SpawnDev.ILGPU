@@ -27,6 +27,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         public override void GenerateCode()
         {
+            // An intrinsic/external method's body is ILGPU's placeholder, never real code.
+            if (!Method.HasImplementation) return;
             // Visit all blocks (for helper functions)
             foreach (var block in Method.Blocks)
             {

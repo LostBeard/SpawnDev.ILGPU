@@ -3629,6 +3629,14 @@ EmitSaveAllLocals();
         {
             var targetMethod = methodCall.Target;
 
+            // Native-opcode math wrappers (Round/Truncate/Sign) are emitted by the base, never
+            // compiled from their C# bodies as helpers.
+            if (IsNativeMathWrapper(targetMethod))
+            {
+                base.GenerateCode(methodCall);
+                return;
+            }
+
             // Registered helpers (same compilation unit). Cross-assembly struct accessors
             // (e.g. SpawnDev.ILGPU.ML.Tensors.TensorView.Get2D) stay as MethodCall in the
             // kernel IR but are not in HelperMethods — base.GenerateCode returns 0 for them.

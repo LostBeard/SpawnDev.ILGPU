@@ -812,18 +812,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             RegAll(typeof(Math), "Pow", WGSLCodeGenerator.GeneratePow);
             RegAll(typeof(MathF), "Pow", WGSLCodeGenerator.GeneratePow);
 
-            // Ternary
-            RegAll(typeof(Math), "Max", WGSLCodeGenerator.GenerateClamp); // Using GenerateClamp just to match handler signature, but target is Max?
-                                                                          // Wait, RegAll finds 'Max' method in 'WebGPUIntrinsics'. I want to map Math.Clamp -> WebGPUIntrinsics.Max
-
-            // Manual Redirect for test
-            var mClamp = typeof(MathF).GetMethod("Clamp", new[] { typeof(float), typeof(float), typeof(float) });
-            var wMax = typeof(WebGPUIntrinsics).GetMethod("Max", new[] { typeof(float), typeof(float) });
-            // Signature mismatch... Max takes 2 args. 
-
-            // Revert to standard RegAll for Clamp, but I will modify RegAll to force a different target.
-
-            // Actually, keep standard RegAll. I suspect FixIntrinsicManager.
+            // Ternary. (Math.Max used to be registered to GenerateClamp here, which turned a
+            // two-argument Max into a three-argument clamp.)
             RegAll(typeof(Math), "Clamp", WGSLCodeGenerator.GenerateClamp);
             RegAll(typeof(MathF), "Clamp", WGSLCodeGenerator.GenerateClamp);
 

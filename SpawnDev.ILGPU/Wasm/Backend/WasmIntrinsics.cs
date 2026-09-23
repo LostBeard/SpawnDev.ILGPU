@@ -34,11 +34,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         /// <summary>Rounds a float to the nearest integer value.</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
-        public static float Round(float val) => MathF.Floor(val + 0.5f);
+        // Kernel calls to this wrapper are emitted as the native f32.nearest (round half to even)
+        // by WasmCodeGenerator (IsNativeMathWrapper) - this body only runs on the host. It was
+        // Floor(val + 0.5), which rounds halves UP (2.5 -> 3) instead of to even like MathF.Round.
+        public static float Round(float val) => MathF.Round(val);
 
         /// <summary>Truncates a float toward zero.</summary>
         [MethodImpl(MethodImplOptions.NoInlining)]
-        public static float Truncate(float val) => val >= 0 ? MathF.Floor(val) : MathF.Ceiling(val);
+        public static float Truncate(float val) => MathF.Truncate(val);
 
         // ── Binary float ──
 

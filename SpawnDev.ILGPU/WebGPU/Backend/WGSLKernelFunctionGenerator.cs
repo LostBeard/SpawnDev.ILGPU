@@ -6529,6 +6529,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     BinaryArithmeticKind.Div => "f64_div",
                     BinaryArithmeticKind.Min => "f64_min",
                     BinaryArithmeticKind.Max => "f64_max",
+                    BinaryArithmeticKind.Rem => "f64_rem",
+                    BinaryArithmeticKind.PowF => "f64_pow",
+                    BinaryArithmeticKind.Atan2F => "f64_atan2",
+                    BinaryArithmeticKind.CopySignF => "f64_copysign",
                     _ => null
                 };
 
@@ -6625,7 +6629,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // CopySign: WGSL has no copysign built-in.
             if (value.Kind == BinaryArithmeticKind.CopySignF)
             {
-                AppendLine($"{prefix}{target} = select(-abs({left}), abs({left}), {right} >= 0.0);");
+                AppendLine($"{prefix}{target} = {CopySignExpression(left.ToString(), right.ToString())};");
                 return;
             }
 
@@ -6771,101 +6775,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     break; // Not an unconditional branch, stop tracing
                 }
-            }
-        }
-        public override void GenerateCode(UnaryArithmeticValue value)
-        {
-            var target = Load(value);
-            var source = Load(value.Value);
-            string prefix = GetPrefix(value);
-
-            // Emu_f64 source needs different intrinsic codegen: the f32 syntax
-            // (e.g. `source != 0.0`) doesn't compile against vec2<f32>/vec4<f32>.
-            // IsInfF / IsNaNF route through helpers that read the high f32 lane
-            // (which carries IEEE-correct Inf/NaN encoding for both Dekker and
-            // Ozaki - see WGSLEmulationLibrary.f64_from_ieee754_bits Inf/NaN
-            // branches that preserve sign in the .x lane).
-            string sourceType = TypeGenerator[value.Value.Type];
-            bool isEmuF64Source = Backend.EnableF64Emulation && sourceType == "emu_f64";
-            if (isEmuF64Source)
-            {
-                string? f64Func = value.Kind switch
-                {
-                    UnaryArithmeticKind.IsNaNF => $"f64_is_nan({source})",
-                    UnaryArithmeticKind.IsInfF => $"f64_is_inf({source})",
-                    _ => null
-                };
-                if (f64Func != null)
-                {
-                    AppendLine($"{prefix}{target} = {f64Func};");
-                    return;
-                }
-            }
-
-            // Handle math intrinsics that need function calls
-            string? funcCall = value.Kind switch
-            {
-                UnaryArithmeticKind.Abs => $"abs({source})",
-                UnaryArithmeticKind.SinF => $"sin({source})",
-                UnaryArithmeticKind.CosF => $"cos({source})",
-                UnaryArithmeticKind.TanF => $"tan({source})",
-                UnaryArithmeticKind.AsinF => $"asin({source})",
-                UnaryArithmeticKind.AcosF => $"acos({source})",
-                UnaryArithmeticKind.AtanF => $"atan({source})",
-                UnaryArithmeticKind.SinhF => $"sinh({source})",
-                UnaryArithmeticKind.CoshF => $"cosh({source})",
-                UnaryArithmeticKind.TanhF => $"tanh({source})",
-                UnaryArithmeticKind.ExpF => $"exp({source})",
-                UnaryArithmeticKind.Exp2F => $"exp2({source})",
-                UnaryArithmeticKind.LogF => $"log({source})",
-                UnaryArithmeticKind.Log2F => $"log2({source})",
-                UnaryArithmeticKind.SqrtF => $"sqrt({source})",
-                UnaryArithmeticKind.RsqrtF => $"1.0 / sqrt({source})",
-                UnaryArithmeticKind.RcpF => $"1.0 / {source}",
-                UnaryArithmeticKind.FloorF => $"floor({source})",
-                UnaryArithmeticKind.CeilingF => $"ceil({source})",
-                UnaryArithmeticKind.Log10F => $"(log({source}) / 2.302585093)",
-                // IsNaN on f32: NaN is the only value where x != x
-                UnaryArithmeticKind.IsNaNF => sourceType == "emu_f64" ? $"f64_is_nan({source})" : $"({source} != {source})",
-                // IsInf on f32: infinity-detect via (x != 0.0 && x == x * 2.0)
-                // - x != 0.0 excludes 0
-                // - x == x * 2.0 only +/-Inf satisfies (any finite x doubles)
-                // - x == x excludes NaN (since NaN != NaN)
-                UnaryArithmeticKind.IsInfF => sourceType == "emu_f64" ? $"f64_is_inf({source})" : $"({source} != 0.0 && {source} == {source} * 2.0 && {source} == {source})",
-                _ => null
-            };
-
-            if (funcCall != null)
-            {
-                AppendLine($"{prefix}{target} = {funcCall};");
-                return;
-            }
-
-            // Handle emulated emu_i64/emu_u64 negation (sourceType already
-            // computed at top of method for the IsInf/IsNaN emu_f64 routing)
-            if (Backend.EnableI64Emulation && (sourceType == "emu_i64" || sourceType == "emu_u64") && value.Kind == UnaryArithmeticKind.Neg)
-            {
-                AppendLine($"{prefix}{target} = i64_neg({source});");
-                return;
-            }
-
-            // Handle simple unary operators
-            string op = value.Kind switch
-            {
-                UnaryArithmeticKind.Neg => "-",
-                UnaryArithmeticKind.Not => TypeGenerator[value.Value.Type] == "bool" ? "!" : "~",
-                _ => ""
-            };
-
-            if (!string.IsNullOrEmpty(op))
-            {
-                AppendLine($"{prefix}{target} = {op}({source});");
-            }
-            else
-            {
-                // Fallback for unsupported operations
-                AppendLine($"// [WGSL] Unhandled UnaryArithmeticKind: {value.Kind}");
-                AppendLine($"{prefix}{target} = {source};");
             }
         }
         public override void GenerateCode(UnconditionalBranch branch)

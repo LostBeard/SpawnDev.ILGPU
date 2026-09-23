@@ -1,4 +1,5 @@
 using ILGPU;
+using ILGPU.Algorithms;
 using ILGPU.Runtime;
 using SpawnDev.SpawnJS.Cryptography;
 using SpawnDev.UnitTesting;
@@ -20,7 +21,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
 
         protected override async Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()
         {
-            var builder = Context.Create();
+            var builder = Context.Create().EnableAlgorithms(); // as production AllAcceleratorsAsync does
             await builder.WebGL();
             var context = builder.ToContext();
             var devices = context.GetWebGLDevices();
@@ -32,7 +33,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
 
         protected override async Task<(Context context, Accelerator accelerator)> CreateEmulatedAcceleratorAsync()
         {
-            var builder = Context.Create();
+            var builder = Context.Create().EnableAlgorithms(); // as production AllAcceleratorsAsync does
             await builder.WebGL();
             var context = builder.ToContext();
             var devices = context.GetWebGLDevices();
@@ -270,7 +271,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         /// </summary>
         private async Task<(Context context, Accelerator accelerator)> CreateOzakiAcceleratorAsync()
         {
-            var builder = Context.Create();
+            var builder = Context.Create().EnableAlgorithms(); // as production AllAcceleratorsAsync does
             await builder.WebGL();
             var context = builder.ToContext();
             var devices = context.GetWebGLDevices();
