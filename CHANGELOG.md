@@ -1,6 +1,84 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.15 - Emulated double: exact conversions and rounding, shaders that compile in seconds (fork 2.3.4)
+
+Emulated `double` (WebGPU and WebGL, Dekker vec2 and Ozaki vec4) is now exact where it was approximate,
+and a kernel using many emulated-double operations no longer takes minutes to compile. New gates in
+`BackendTestBase.F64EmulationExactness.cs` check every operation, in a kernel body AND in a
+`[NoInlining]` helper, under BOTH emulation modes, against the CPU result.
+
+### Fixed - a large emulated-double kernel hung the GPU and killed every later test (WebGPU, WebGL)
+
+A kernel with 19 double operations inline plus 19 calls to a `[NoInlining]` helper took Chrome's shader
+compiler past the GPU watchdog: the device was lost and every later WebGPU and WebGL test on the page
+failed with it. DXC (Chrome's WebGPU compiler here) took 34 s, FXC (WebGL through ANGLE, and WebGPU
+wherever Dawn cannot use DXC) over 10 minutes. Compile time grows superlinearly with branches, and
+the emulation library was full of early returns inlined into every load, store and operation. Now:
+
+- The emulation library is branch-free (every case computed, the result selected): the IEEE bit
+  conversions, 64-bit shifts, rounding, integer conversions and the non-finite guards on add, mul, div.
+- Dekker stores convert hi + lo to IEEE bits in straight-line code, and Floor / Ceiling / Truncate /
+  Round work in f32 arithmetic instead of through the bit pattern and back.
+- An acyclic `[NoInlining]` helper is emitted as a forward-only state machine - one pass of
+  `if (current_block == k)` blocks - instead of `loop { switch (current_block) }`, which FXC cannot
+  fold at a constant-argument call site (136 s -> 2 s under FXC).
+- Sqrt: Dekker uses Karp's method (no double-float divide; worst error 7.8e-15 vs 1.1e-14 before),
+  Ozaki one Karp step plus one Newton step (correctly rounded, half the code); Ozaki division's
+  correction steps multiply by a single f32 digit (the QD library's `qd_real * double`).
+
+The 19-op Dekker kernel now compiles in about 3 s on WebGPU and WebGL. A kernel with dozens of heavy
+Ozaki (quad-float) operations - sqrt, %, IEEERemainder, division - is still large: the worst such group
+in the new tests takes 18 s to compile on WebGL (ANGLE -> FXC).
+
+### Fixed - exact 64-bit conversions and rounding for emulated double (WebGPU, WebGL)
+
+- double -> bits stores honour a NEGATIVE low word (33554431.0 stored as 33554433.0) and round to
+  nearest-even; Ozaki keeps all 53 significand bits (it dropped 5).
+- long / ulong / int / uint <-> double convert exactly and saturate like .NET 9+ (NaN -> 0); they went
+  through a 32-bit intermediate.
+- Math.Round (to even and AwayFromZero), Floor, Ceiling, Truncate, Abs, Sign, Min/Max, `%` and
+  IEEERemainder on emulated doubles were applied per f32 COMPONENT: 2.5000000001 (2.5 + 1e-10 as hi + lo)
+  rounded to 2.
+
+### Fixed - WebGL: D3D folded or fused the emulation's error terms
+
+ANGLE compiles without IEEE strictness. The Ozaki add computed its component two-sums inline with no
+`u_one` barrier and D3D reduced them to zero error (12345678.75 + 0.25 = 12345678.75); a product feeding
+a two-sum could be fused into a `mad`, so the error term described a sum that was never computed (Ozaki
+sqrt was 1 ULP low). Both now go through the barriered primitives.
+
+### Fixed - Wasm
+
+- `Math.Round` (via `XMath.RoundToEven`) returned 0: ILGPU seals an intrinsic method with a placeholder
+  body that returns a null constant, and the Wasm backend compiled that placeholder as a helper instead
+  of reaching the intrinsic. Intrinsic and external methods are no longer registered as helpers.
+- `MathF.Round` rounded halves up (2.5 -> 3); now `f32.nearest` (to even). Float -> integer conversions use
+  the saturating `trunc_sat` opcodes (the plain ones trapped on out-of-range values); ulong -> float uses
+  the unsigned convert; integer Abs/Min/Max honour 64-bit and unsigned operands.
+
+### Fixed - CUDA / PTX `XMath.RoundToEven` (fork)
+
+The ties-to-even test read the even bit from the MANTISSA field, which for 1 <= |x| < 2 is the implicit
+leading 1 - 1.5 rounded to 1 instead of 2.
+
+### Fixed - WebGPU `Math.Max` was registered to the Clamp generator
+
+### Tests and tooling
+
+- WebGL test lanes now call `EnableAlgorithms()` like the production `AllAcceleratorsAsync` does; they
+  compiled different IR from what users get (`Math.Round(x, AwayFromZero)` failed there alone).
+- `ShaderCompiler` builds its offline context with the same intrinsic remappings as the runtime, and
+  honours the profile's f64 emulation mode for GLSL.
+- `SpawnDev.ILGPU.DemoConsole -- kernel-dump <method>` writes a test kernel's WGSL, GLSL and Wasm offline.
+- PlaywrightMultiTest: `PMT_DAWN_FEATURES=<toggle,...>` enables Dawn toggles for a run.
+
+### Known limitation (unchanged) - WebGL stores must match the thread's positional layout
+
+Transform Feedback places store `j` of thread `i` at `i * storeCount + j`. A kernel that writes a subset
+of a wider per-thread layout (`out[i * 19 + 6]` without slots 0..5) has its values misplaced. See
+`WebGL/CLAUDE.md`, "One-store-per-thread contract".
+
 ## 5.2.14 - Browser backends: [NoInlining] helper functions compile correctly; loop phi copies, switch, 64-bit converts (fork 2.3.3)
 
 Every fix below is a silent wrong result (or a hang) on WebGPU, WebGL and/or Wasm; CUDA, OpenCL and CPU

@@ -4,9 +4,9 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.2.14</Version>
+		<Version>5.2.15</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>v5.2.14 - Browser backends (WebGPU/WebGL/Wasm): [NoInlining] helper functions keep their loops and branches; loops that rotate/swap loop-carried values, switch statements, and uint-to-64-bit widening compile correctly; Wasm helper scratch is initialized and sized from the generated helper; Wasm bool negation fixed. See CHANGELOG.md.</PackageReleaseNotes>
+		<PackageReleaseNotes>v5.2.15 - Emulated double (WebGPU/WebGL, Dekker and Ozaki): exact 64-bit integer conversions, stores and rounding (Round/Floor/Ceiling/Truncate/%/IEEERemainder were per f32 component); large emulated-double kernels compile in seconds instead of hanging the GPU (branch-free emulation library, forward-only helper state machine); WebGL Ozaki error terms no longer folded or fused by D3D; Wasm Math.Round returned 0. Fork 2.3.4: CUDA RoundToEven. See CHANGELOG.md.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -64,8 +64,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.3.3" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.3.3" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.3.4" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.3.4" />
 	</ItemGroup>
 
 	<ItemGroup>
