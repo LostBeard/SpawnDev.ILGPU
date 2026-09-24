@@ -297,6 +297,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// <summary>Number of GPU→CPU readback <c>MapAsync(Read)</c> waits while <see cref="EnableDispatchProfiling"/> is on.</summary>
         public static long ProfileReadbackWaitCount;
 
+        /// <summary>Bytes copied GPU->CPU by those readbacks (the staging copy size, 4-byte padded) while
+        /// <see cref="EnableDispatchProfiling"/> is on. A partial read must cost its range, not the buffer.</summary>
+        public static long ProfileReadbackBytes;
+
         // ── CPU-prologue phase timers (the per-dispatch .NET build/submit work in RunKernel) ──
         // The GPU-wait surfaces above measure where the GPU blocks; these measure where the CPU
         // spends time BUILDING each dispatch. Their sum across a step is the directly-measured CPU
@@ -350,6 +354,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             ProfileSyncWaitCount = 0;
             ProfileReadbackWaitMs = 0;
             ProfileReadbackWaitCount = 0;
+            ProfileReadbackBytes = 0;
             ProfileCpuShaderResolveMs = 0;
             ProfileCpuArgBuildMs = 0;
             ProfileCpuBindGroupMs = 0;

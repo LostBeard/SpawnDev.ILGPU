@@ -231,10 +231,11 @@ namespace SpawnDev.ILGPU.WebGPU
         /// <c>OnSubmittedWorkDone</c> drain — so a profiled step accounts for ALL GPU-wait, not just the sync
         /// drain (a decode whose wait hides here reads ~0 in <see cref="WebGPUBackend.ProfileSyncWaitMs"/>).
         /// </summary>
-        private static async Task ProfiledMapReadAsync(GPUBuffer stagingBuffer)
+        private static async Task ProfiledMapReadAsync(GPUBuffer stagingBuffer, long bytes)
         {
             if (WebGPUBackend.EnableDispatchProfiling)
             {
+                WebGPUBackend.ProfileReadbackBytes += bytes;
                 var profSw = System.Diagnostics.Stopwatch.StartNew();
                 await stagingBuffer.MapAsync(GPUMapMode.Read);
                 WebGPUBackend.ProfileReadbackWaitMs += profSw.Elapsed.TotalMilliseconds;
@@ -320,7 +321,7 @@ namespace SpawnDev.ILGPU.WebGPU
             Accelerator.Queue?.Submit(_submitArray);
 
             // Map, read into caller's destination array, unmap
-            await ProfiledMapReadAsync(_cachedStagingBuffer);
+            await ProfiledMapReadAsync(_cachedStagingBuffer, paddedBytes);
             // The mapped-range ArrayBuffer wrapper holds a JS slot and must be released, or every
             // readback leaks one (the sibling CopyToHostUint8ArrayAsync path already does this).
             using var mappedRange = _cachedStagingBuffer.GetMappedRange();
@@ -388,7 +389,7 @@ namespace SpawnDev.ILGPU.WebGPU
             Accelerator.Queue?.Submit(_submitArray);
 
             // Map, read into caller's destination array, unmap
-            await ProfiledMapReadAsync(_cachedStagingBuffer);
+            await ProfiledMapReadAsync(_cachedStagingBuffer, paddedBytes);
             Uint8Array result = default!;
             try
             {
@@ -470,7 +471,7 @@ namespace SpawnDev.ILGPU.WebGPU
             Accelerator.Queue?.Submit(_submitArray);
 
             // Map, read as TDest into destination array, unmap
-            await ProfiledMapReadAsync(_cachedStagingBuffer);
+            await ProfiledMapReadAsync(_cachedStagingBuffer, paddedBytes);
             var mappedRange = _cachedStagingBuffer.GetMappedRange();
             if (mappedRange != null)
             {

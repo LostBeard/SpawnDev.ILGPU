@@ -209,7 +209,10 @@ namespace SpawnDev.ILGPU
         /// <summary>
         /// Copies a range of data from any ILGPU buffer back to the host.
         /// Works on all backends (WebGPU, WebGL, Wasm, CUDA, OpenCL, CPU).
-        /// For small reads (≤64 elements), the overhead of reading the full buffer is negligible.
+        /// Only the requested range crosses to the host (see <see cref="CopyToHostAsync{T}(ArrayView{T})"/>);
+        /// this used to read the WHOLE buffer and slice it, so a 4-byte count read from a 100 MB buffer
+        /// moved 100 MB. A range whose byte offset is not 4-aligned still takes the whole-buffer path,
+        /// because a WebGPU buffer copy needs a 4-aligned source offset.
         /// </summary>
         /// <typeparam name="T">The element type of the buffer.</typeparam>
         /// <param name="buffer">The MemoryBuffer1D to read from.</param>
@@ -219,6 +222,12 @@ namespace SpawnDev.ILGPU
         public static async Task<T[]> CopyToHostAsync<T>(
             this MemoryBuffer1D<T, Stride1D.Dense> buffer, long offset, long count) where T : unmanaged
         {
+            if (offset < 0 || count < 0 || offset + count > buffer.Length)
+                throw new ArgumentOutOfRangeException(nameof(count),
+                    $"Range [{offset}, {offset + count}) is outside the buffer's {buffer.Length} elements.");
+            if (count == 0) return System.Array.Empty<T>();
+            if (offset * System.Runtime.CompilerServices.Unsafe.SizeOf<T>() % 4 == 0)
+                return await CopyToHostAsync<T>(buffer.View.SubView(offset, count).BaseView);
             var all = await CopyToHostAsync<T>(buffer);
             if (offset == 0 && count == all.Length) return all;
             var result = new T[count];
