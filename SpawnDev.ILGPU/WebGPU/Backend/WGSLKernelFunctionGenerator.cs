@@ -8132,7 +8132,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         // Targeted restore: only un-visit blocks that are shared convergence
                         // targets reachable from the false branch. This handles || patterns
                         // without duplicating code in normal if-else branches.
-                        UnvisitSharedTargets(falseTarget, visitedBeforeTrueBranch, visited);
+                        UnvisitSharedTargets(falseTarget, mergeNode, visitedBeforeTrueBranch, visited);
                         GenerateStructuredCodeRecursive(falseTarget, mergeNode, pd, visited, currentLoop);
                         PopIndent();
                         AppendLine("}");
@@ -8242,23 +8242,30 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
         /// <summary>
-        /// For || short-circuit patterns: un-visit blocks that are shared convergence
-        /// targets between the true and false branches of an if-else. This walks the
-        /// false target's CFG (following unconditional branches and if-branch targets)
-        /// to find blocks that were newly visited by the true branch. Only those blocks
-        /// are removed from the visited set, avoiding duplicate code emission in normal
-        /// if-else branches.
+        /// For || short-circuit patterns: un-visit the blocks the TRUE branch emitted that the FALSE
+        /// branch can also reach before the merge, so the false branch emits them again (with its own
+        /// phi copies) instead of finding them "visited" and emitting nothing.
+        ///
+        /// A block reachable from both arms before their merge is, by definition, a shared convergence
+        /// block; a normal if/else has none (its arms only meet AT the merge), so this duplicates code
+        /// only where the CFG requires it. The walk therefore follows EVERY edge from the false target,
+        /// stopping at the merge and at blocks emitted before this if (loop headers, ancestors).
+        ///
+        /// It used to follow only edges INTO blocks the true branch had visited, which finds a shared
+        /// block one branch down (<c>if (a || b)</c>) but not two: in
+        /// <c>if (r2 &gt; den || (r2 == den &amp;&amp; odd)) q++;</c> the false side reaches the increment
+        /// through two unvisited tests, so that edge emitted an empty block, its phi copy was lost and
+        /// q read its default 0 (WebGPU-only wrong pixels in ILGPU.ML's resample, 2026-09-23). Guarded by
+        /// <c>ShortCircuit_SharedBlockPhi_AllEmitters</c>.
         /// </summary>
-        private void UnvisitSharedTargets(BasicBlock falseTarget, HashSet<BasicBlock> visitedBefore, HashSet<BasicBlock> visited)
+        private void UnvisitSharedTargets(BasicBlock falseTarget, BasicBlock? mergeNode,
+            HashSet<BasicBlock> visitedBefore, HashSet<BasicBlock> visited)
         {
-            // Collect blocks newly visited by the true branch
+            // Blocks newly visited by the true branch
             var newlyVisited = new HashSet<BasicBlock>(visited, new BasicBlock.Comparer());
             newlyVisited.ExceptWith(visitedBefore);
             if (newlyVisited.Count == 0) return;
 
-            // Walk the false path to find reachable blocks that were also visited
-            // by the true path. Only walk a few steps to find immediate convergence
-            // (the || pattern typically converges within 1-2 blocks).
             var toCheck = new Queue<BasicBlock>();
             toCheck.Enqueue(falseTarget);
             var checked_ = new HashSet<BasicBlock>(new BasicBlock.Comparer());
@@ -8267,31 +8274,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 var bb = toCheck.Dequeue();
                 if (!checked_.Add(bb)) continue;
+                if (bb == mergeNode) continue;                 // the arms' meeting point: emitted once, after the if
+                if (visitedBefore.Contains(bb)) continue;      // emitted before this if (loop header, ancestor)
 
-                // If this block was newly visited by the true branch, un-visit it
-                // so the false branch can re-emit it
                 if (newlyVisited.Contains(bb))
                 {
                     visited.Remove(bb);
-                    // Continue checking successors — the shared body might chain
-                    // to more shared blocks via unconditional branches
+                    // Its NewView `let`s were declared inside the TRUE arm's braces; the re-emission in the
+                    // false arm is a sibling scope and must declare them again.
+                    foreach (var value in bb)
+                        if (value.Value is global::ILGPU.IR.Values.NewView nv)
+                            _emittedLetBindings.Remove(Load(nv).Name);
                 }
 
-                // Only follow edges from blocks we haven't un-visited yet or that
-                // are the starting block (to find its successors)
-                var term = bb.Terminator;
-                if (term is global::ILGPU.IR.Values.IfBranch ib)
-                {
-                    if (newlyVisited.Contains(ib.TrueTarget))
-                        toCheck.Enqueue(ib.TrueTarget);
-                    if (newlyVisited.Contains(ib.FalseTarget))
-                        toCheck.Enqueue(ib.FalseTarget);
-                }
-                else if (term is global::ILGPU.IR.Values.UnconditionalBranch ub)
-                {
-                    if (newlyVisited.Contains(ub.Target))
-                        toCheck.Enqueue(ub.Target);
-                }
+                foreach (var succ in bb.Successors)
+                    toCheck.Enqueue(succ);
             }
         }
 

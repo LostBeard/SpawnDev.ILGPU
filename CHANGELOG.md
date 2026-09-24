@@ -1,6 +1,26 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.17 (unreleased; local 5.2.17-local.1) - WebGPU: a short-circuit branch lost its phi value
+
+**WebGPU kernels could silently produce 0 on one arm of a nested short-circuit condition.** For
+`if (r2 > den || (r2 == den && (q & 1) == 1)) q++;` the block doing `q++` is reached from both arms of the
+outer if, the second time two branches down. The loop-aware structured WGSL walker emitted it under the
+first arm, then found it "visited" on the second and emitted an EMPTY block: the phi copy for that edge was
+lost and `q` read its default, 0. Only the tie-with-odd-quotient inputs hit it, so it showed up as sparse,
+deterministic wrong values - found in SpawnDev.ILGPU.ML's DAv3 area resample, where exact .5 ties zeroed one
+channel of a few hundred pixels on WebGPU only (CUDA, OpenCL, CPU, Wasm and WebGL were right).
+
+- `WGSLKernelFunctionGenerator.UnvisitSharedTargets` walked only edges INTO blocks the true arm had visited,
+  so it found a shared block one branch down (`if (a || b)`) but not two. It now follows every edge from the
+  false target up to the merge (stopping at blocks emitted before the if) and re-emits whatever the true arm
+  emitted there, forgetting those blocks' `NewView` `let` names so the sibling scope declares them again.
+  A normal if/else has no block reachable from both arms before the merge, so nothing else is duplicated.
+- The helper inliner and the loop-free walker already restored the whole visited set and were correct.
+- Gate: `ShortCircuit_SharedBlockPhi_AllEmitters` - every branch combination in a kernel with a loop, one
+  without, and a `[NoInlining]` helper, against the host. Red-checked: 8 failures on WebGPU before the fix
+  (exactly the tie+odd cases, each 0); green on all six backends after. Full WebGPU lane 1291/0/15.
+
 ## 5.2.16 - Fork 2.3.5: the RoundToEven fix that 2.3.4 was meant to carry
 
 **SpawnDev.ILGPU.Algorithms.Fork 2.3.4 (paired with SpawnDev.ILGPU 5.2.15) does not contain the CUDA/PTX
