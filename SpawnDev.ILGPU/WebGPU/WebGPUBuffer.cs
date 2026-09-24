@@ -144,6 +144,16 @@ namespace SpawnDev.ILGPU.WebGPU
         #region Methods
 
         /// <summary>
+        /// Submits batched ILGPU dispatches before a host write. <c>queue.writeBuffer</c> executes on the
+        /// queue timeline at the moment it is CALLED, while launched kernels sit in an unsubmitted command
+        /// encoder until the batch flushes - so without this a kernel launched BEFORE the write would read
+        /// the NEW bytes (write-after-read hazard). The ILGPU-layer CopyFromCPU path already flushed; these
+        /// native entry points (CopyFromHost / CopyFromJS) did not, so the same upload was ordered
+        /// differently depending on which API the caller used. Do NOT remove.
+        /// </summary>
+        private void FlushBeforeHostWrite() => Accelerator.FlushPendingCommands?.Invoke();
+
+        /// <summary>
         /// Copies data from a host array to the GPU buffer.
         /// Data crosses the .NET/JS boundary. For browser backends, prefer
         /// <see cref="CopyFromJS(TypedArray, long)"/> when data is already in JS.
@@ -164,6 +174,7 @@ namespace SpawnDev.ILGPU.WebGPU
             var paddedBytes = WebGPUAlignment.AlignTo4(copyBytes);
             using var uint8Array = new Uint8Array((int)paddedBytes);
             uint8Array.Write(sourceArray);
+            FlushBeforeHostWrite();
             queue.WriteBuffer(_buffer, (long)(targetOffset * ElementSize), uint8Array);
             // A host write cannot be replayed from a dispatch plan - see WebGPUDispatchPlan.HostWriteCount.
             WebGPUDispatchPlan.Recording?.NoteHostWrite(paddedBytes);
@@ -186,6 +197,7 @@ namespace SpawnDev.ILGPU.WebGPU
             if (queue == null)
                 throw new InvalidOperationException("GPU queue not available");
 
+            FlushBeforeHostWrite();
             queue.WriteBuffer(_buffer, targetByteOffset, source);
             WebGPUDispatchPlan.Recording?.NoteHostWrite(source.ByteLength);
         }
@@ -207,6 +219,7 @@ namespace SpawnDev.ILGPU.WebGPU
             if (queue == null)
                 throw new InvalidOperationException("GPU queue not available");
 
+            FlushBeforeHostWrite();
             queue.WriteBuffer(_buffer, targetByteOffset, source);
             WebGPUDispatchPlan.Recording?.NoteHostWrite(source.ByteLength);
         }

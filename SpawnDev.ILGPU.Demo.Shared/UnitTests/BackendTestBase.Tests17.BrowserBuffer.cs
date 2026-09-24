@@ -1316,5 +1316,79 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     throw new Exception($"norm[{i}].z expected 1, got {norm[i * 3 + 2]}");
             }
         });
+        // ==================== CopyFromJS write-after-read ordering ====================
+
+        static void CopyFromJSOrderingCopyKernel(Index1D idx, ArrayView<float> src, ArrayView<float> dst)
+        {
+            dst[idx] = src[idx];
+        }
+
+        /// <summary>
+        /// A kernel launched BEFORE a CopyFromJS must read the bytes that were there BEFORE it - the same
+        /// ordering CopyFromCPU gives. On WebGPU a launched kernel sits in an unsubmitted command encoder,
+        /// while queue.writeBuffer lands on the queue timeline the moment it is called, so an unflushed
+        /// CopyFromJS overtook the pending kernel and it copied the NEW data (every element wrong). WebGL
+        /// (upload snapshot at bind) and Wasm (PrepareHostWrite snapshot) order it themselves; this test
+        /// runs on all three browser backends. Frame-sized (2M floats, 8 MB) because MediaInterop uploads
+        /// camera frames through exactly this call. Red-check: remove FlushBeforeHostWrite() in
+        /// WebGPUBuffer and the WebGPU case fails at element 0.
+        /// </summary>
+        [TestMethod]
+        public async Task CopyFromJS_AfterPendingKernel_KernelReadsOldDataTest() => await RunTest(async accelerator =>
+        {
+            if (accelerator.AcceleratorType is not (AcceleratorType.WebGPU or AcceleratorType.WebGL or AcceleratorType.Wasm))
+                throw new UnsupportedTestException("CopyFromJS only available on browser backends");
+
+            const int n = 1 << 21;
+            var oldData = new float[n];
+            var newData = new float[n];
+            for (int i = 0; i < n; i++)
+            {
+                oldData[i] = i;
+                newData[i] = -1f - i;
+            }
+
+            using var src = accelerator.Allocate1D<float>(n);
+            using var dst = accelerator.Allocate1D<float>(n);
+            var browserSrc = src.Buffer as IBrowserMemoryBuffer
+                ?? throw new Exception("Buffer does not implement IBrowserMemoryBuffer");
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>>(CopyFromJSOrderingCopyKernel);
+
+            using var jsOld = new Float32Array(oldData);
+            using var jsNew = new Float32Array(newData);
+            browserSrc.CopyFromJS(jsOld);
+            await accelerator.SynchronizeAsync();
+
+            void Check(float[] got, float[] want, string what)
+            {
+                for (int i = 0; i < n; i++)
+                {
+                    if (got[i] != want[i])
+                        throw new Exception($"{what}: dst[{i}] expected {want[i]}, got {got[i]}");
+                }
+            }
+
+            // TypedArray overload: launch (pending), then overwrite the kernel's INPUT before any sync.
+            kernel((Index1D)n, src.View, dst.View);
+            browserSrc.CopyFromJS(jsNew);
+            await accelerator.SynchronizeAsync();
+            Check(await dst.CopyToHostAsync(), oldData, "CopyFromJS(TypedArray) overtook a pending kernel");
+
+            // The write itself must have landed: the next launch sees it.
+            kernel((Index1D)n, src.View, dst.View);
+            await accelerator.SynchronizeAsync();
+            Check(await dst.CopyToHostAsync(), newData, "CopyFromJS(TypedArray) write did not land");
+
+            // ArrayBuffer overload, same contract (src now holds newData; write oldData back).
+            kernel((Index1D)n, src.View, dst.View);
+            using var jsOldBuffer = jsOld.Buffer;
+            browserSrc.CopyFromJS(jsOldBuffer);
+            await accelerator.SynchronizeAsync();
+            Check(await dst.CopyToHostAsync(), newData, "CopyFromJS(ArrayBuffer) overtook a pending kernel");
+
+            kernel((Index1D)n, src.View, dst.View);
+            await accelerator.SynchronizeAsync();
+            Check(await dst.CopyToHostAsync(), oldData, "CopyFromJS(ArrayBuffer) write did not land");
+        });
     }
 }

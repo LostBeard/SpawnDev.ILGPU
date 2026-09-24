@@ -471,8 +471,9 @@ namespace SpawnDev.ILGPU.WebGPU
 
         /// <summary>
         /// Optional callback to flush pending batched ILGPU kernel dispatches.
-        /// Set by WebGPUAccelerator to allow WebGPUBuffer readback operations
-        /// to auto-flush before copying, ensuring kernel results are available.
+        /// Set by WebGPUAccelerator so WebGPUBuffer auto-flushes before a readback (kernel results
+        /// must be submitted before they are copied out) AND before a host write (a kernel launched
+        /// before the write must be submitted before queue.writeBuffer overwrites its input).
         /// </summary>
         internal Action? FlushPendingCommands { get; set; }
 

@@ -1,7 +1,24 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.2.17 (unreleased; local 5.2.17-local.1) - WebGPU: a short-circuit branch lost its phi value
+## 5.2.17 (unreleased; local 5.2.17-local.2) - WebGPU: a short-circuit branch lost its phi value; CopyFromJS overtook pending kernels
+
+**WebGPU `CopyFromJS` (and native `WebGPUBuffer.CopyFromHost`) could overwrite a buffer BEFORE a kernel launched
+earlier had read it.** Launched kernels sit in an unsubmitted command encoder until the batch flushes, while
+`queue.writeBuffer` lands on the queue timeline the moment it is called - so the write overtook the pending
+dispatch and the kernel read the NEW bytes. `CopyFromCPU` (the ILGPU `CopyFrom` path) already flushed first;
+the native `WebGPUBuffer` entry points did not, because the native layer's flush hook had only been wired for
+readbacks. The same upload was therefore ordered differently depending on which API the caller used. WebGL
+(snapshot upload at bind) and Wasm (`PrepareHostWrite` snapshot) were already correct.
+
+- `WebGPUBuffer.CopyFromHost` and both `CopyFromJS` overloads now submit pending dispatches first
+  (`FlushBeforeHostWrite`). A flush with nothing pending is a no-op, so chunked stream uploads cost nothing.
+- Gate: `CopyFromJS_AfterPendingKernel_KernelReadsOldDataTest` - 2M floats, launch, overwrite the input,
+  sync; the kernel must see the old data and the next launch the new, both overloads, all browser backends.
+  Red-checked: with the flush removed both WebGPU lanes fail at element 0 (`expected 0, got -1`); WebGL and
+  Wasm pass either way.
+
+### WebGPU: a short-circuit branch lost its phi value
 
 **WebGPU kernels could silently produce 0 on one arm of a nested short-circuit condition.** For
 `if (r2 > den || (r2 == den && (q & 1) == 1)) q++;` the block doing `q++` is reached from both arms of the
