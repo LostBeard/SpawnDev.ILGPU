@@ -29,7 +29,7 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<PackageReference Include="SpawnDev.SpawnJS" Version="2.1.17" />
+		<PackageReference Include="SpawnDev.SpawnJS" Version="2.1.19" />
 	</ItemGroup>
 
 	<ItemGroup>
