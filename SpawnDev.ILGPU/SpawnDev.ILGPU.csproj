@@ -4,9 +4,9 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.2.17-local.3</Version>
+		<Version>5.2.17</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>v5.2.16 - Fork 2.3.5: SpawnDev.ILGPU.Algorithms.Fork 2.3.4 shipped WITHOUT the CUDA/PTX XMath.RoundToEven fix (1.5 rounded to 1) - the fix had been made in the T4-generated RoundingModes.cs, and the clean release build regenerated it from the unfixed RoundingModes.tt. Fixed in the template. Everything else as 5.2.15: WebGL loops compile in seconds and no longer stop at 100000 iterations; Autolykos2 dataset generation on WebGL; real C# struct layout on WebGL, WebGPU and Wasm; sub-word SubViews at a non-4-byte offset. See CHANGELOG.md.</PackageReleaseNotes>
+		<PackageReleaseNotes>v5.2.17 - See CHANGELOG.md.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
