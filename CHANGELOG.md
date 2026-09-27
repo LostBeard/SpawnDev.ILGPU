@@ -51,6 +51,9 @@ the alloca array (`&arr[i]` indexing).
   `HelperCodegen_ScalarHelper_EarlyReturnSkipsLoop_ManyCallSites`, `HelperCodegen_ReturnFromNestedLoop_ThenMoreWork`.
   Red-checked: without the fixes the first three fail on WebGPU (shader validation / wrong values / watchdog) and
   WebGL (GLSL compile error / wrong values); green on all six with them.
+- `HelperCodegen_EightPointRansac_SpawnSceneKernel`: SpawnScene's GPU pair-verification kernels copied verbatim
+  (per-thread 8-point solve over LocalMemory with early returns, Sampson scoring, pick-best) on synthetic
+  two-view geometry - recall >= 90% of true matches, chance-match pairs rejected. Green on all six.
 - Desktop WGSL/GLSL inspection without a browser: `dotnet run --project SpawnDev.ILGPU.DemoConsole -c Release --
   addr-helper-wgsl <BackendTestBase kernel method>` (`ShaderCompiler.Generate` over the WebGPU and WebGL profiles).
 ## 5.2.17 (unreleased; local 5.2.17-local.2) - WebGPU: a short-circuit branch lost its phi value; CopyFromJS overtook pending kernels
