@@ -1752,5 +1752,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         /// <summary>Number of u32 slots this scalar occupies (1 for 4-byte, 2 for 8-byte).</summary>
         public int SlotCount => (ByteSize + 3) / 4;
+
+        /// <summary>
+        /// True for the auto-grouped kernel's user dimension (always slot 0): the runtime packs the dispatch's
+        /// logical thread count here and the WGSL range check reads it as <c>_ilgpu_user_dim</c>. It used to be a
+        /// pipeline <c>override</c> constant, which made every distinct dispatch size a NEW compute pipeline (a
+        /// full Tint/DXC compile - MEASURED 2026-09-27 ~400 ms per batch for SpawnScene's GPU RANSAC, whose batch
+        /// sizes all differ).
+        /// </summary>
+        public bool IsUserDim { get; set; }
     }
 }

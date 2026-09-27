@@ -1,6 +1,22 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.18-local.2 (unreleased) - WebGPU: one compute pipeline per kernel, not one per dispatch size
+
+**Every distinct dispatch size of an auto-grouped kernel compiled a NEW compute pipeline.** The range check that
+stops excess threads read `_ilgpu_user_dim`, a pipeline `override` constant, and override values are part of a
+pipeline's identity, so each new size paid a full Tint/DXC compile. MEASURED 2026-09-27 in SpawnScene: its GPU pair
+verification sizes every batch differently and each batch took ~770 ms regardless of size (14K..890K threads),
+~400 ms of it the score kernel's compile - on real WebGPU the same kernel ran in ~4 ms at a repeated size.
+- The user dimension is now a packed scalar: `_scalar_params[0]` for every auto-grouped kernel
+  (`ScalarPackingEntry.IsUserDim`), read at the top of `main`; the other packed slots start at 1 (all three slot
+  counters). The runtime fills it per dispatch like view offsets, so batched dispatches of different sizes in one
+  submission each see their own. The shader-resolve cache no longer keys on it.
+- Gates: `ShaderResolveCache_OneShaderServesEveryDispatchSize` (small then large must HIT one shader and write every
+  element; small + large back to back in one batch each see their own dimension) - red on the old implementation
+  ("misses 1 -> 2"). `ShaderCache_LruCapBoundsGrowth_AndEvictedKernelStillCorrect` now mints distinct shaders with
+  four distinct kernels (distinct sizes no longer do).
+
 ## 5.2.18 (unreleased; local 5.2.18-local.1, forks 2.3.6-local.1) - WebGPU/WebGL: loop exits that skip code, and helpers taking views
 
 Found by SpawnScene's GPU pair verification (a per-thread 8-point RANSAC solve with `LocalMemory` scratch and

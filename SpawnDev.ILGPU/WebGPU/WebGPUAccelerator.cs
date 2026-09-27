@@ -415,7 +415,7 @@ namespace SpawnDev.ILGPU.WebGPU
 
         // Identity of a shader resolution. Captures the compiled kernel (which fixes the WGSL, entry point,
         // dynamic-shared overrides, and IsExplicitlyGrouped) plus the dispatch-config inputs that change the
-        // resolved shader: the auto-grouped _ilgpu_user_dim (= userDim), the explicit GroupDim (drives the
+        // resolved shader: the explicit GroupDim (drives the
         // @workgroup_size patch), and the dynamic-shared-memory element count/size. Equality is reference
         // identity on the kernel (RuntimeHelpers hash) + value equality on the config fields.
         private readonly struct ShaderResolveKey : IEquatable<ShaderResolveKey>
@@ -444,21 +444,15 @@ namespace SpawnDev.ILGPU.WebGPU
         }
 
         // Builds the resolution key from (compiled kernel, dispatch dimension). MUST mirror RunKernel's
-        // resolution inputs EXACTLY: the _ilgpu_user_dim uint product (auto-grouped only), the KernelConfig
+        // resolution inputs EXACTLY: the KernelConfig
         // GroupDim (workgroup patch), and the dynamic-shared element count/size. Keep in lock-step with the
         // "Build override constants" + workgroup-patch blocks in RunKernel.
         private static ShaderResolveKey BuildShaderResolveKey(WebGPUCompiledKernel ck, object dimension)
         {
-            uint userDim = 0;
-            if (!ck.EntryPoint.IsExplicitlyGrouped)
-            {
-                if (dimension is Index1D i1d) userDim = (uint)i1d.X;
-                else if (dimension is Index2D i2d) userDim = (uint)(i2d.X * i2d.Y);
-                else if (dimension is Index3D i3d) userDim = (uint)(i3d.X * i3d.Y * i3d.Z);
-                else if (dimension is LongIndex1D l1d) userDim = (uint)l1d.X;
-                else if (dimension is LongIndex2D l2d) userDim = (uint)(l2d.X * l2d.Y);
-                else if (dimension is LongIndex3D l3d) userDim = (uint)(l3d.X * l3d.Y * l3d.Z);
-            }
+            // The user dimension is NOT a resolution input any more: it is a packed scalar
+            // (ScalarPackingEntry.IsUserDim), not a pipeline override, so one resolved shader serves every
+            // dispatch size. Keying on it would still mint an entry per size.
+            const uint userDim = 0;
             int gx = 0, gy = 0, gz = 0, smNum = 0, smElem = 0;
             if (dimension is KernelConfig kc)
             {
@@ -1088,10 +1082,10 @@ namespace SpawnDev.ILGPU.WebGPU
                 }
             }
 
-            // For auto-grouped (implicitly grouped) kernels, pass the user dimension as an
-            // override constant so the WGSL range check can prevent excess threads from
-            // executing. Without this, WGSL's clamped array indexing causes OOB writes to
-            // overwrite the last valid element.
+            // Auto-grouped kernels: the user dimension for the WGSL range check. Packed into _scalar_params
+            // slot 0 below (ScalarPackingEntry.IsUserDim) - it was an `override` constant, which compiled a new
+            // pipeline per distinct dispatch size.
+            uint dispatchUserDim = 0;
             if (!compiledKernel.EntryPoint.IsExplicitlyGrouped)
             {
                 uint userDim = 0;
@@ -1102,11 +1096,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 else if (dimension is LongIndex2D l2d) userDim = (uint)(l2d.X * l2d.Y);
                 else if (dimension is LongIndex3D l3d) userDim = (uint)(l3d.X * l3d.Y * l3d.Z);
 
-                if (userDim > 0)
-                {
-                    overrideConstants ??= new Dictionary<string, object>();
-                    overrideConstants["_ilgpu_user_dim"] = (double)userDim;
-                }
+                dispatchUserDim = userDim;
             }
 
             // For explicitly grouped kernels (KernelConfig), the dispatch's GroupDim
@@ -1695,7 +1685,7 @@ namespace SpawnDev.ILGPU.WebGPU
                             // C# scalar args. Adding them to packedScalarLookup would cause Phase 2's
                             // scalar fill to try to serialize the underlying ArrayView arg as a struct
                             // (CopyStructToBytes fails: ArrayView has pointer fields).
-                            if (entry.IsViewOffset || entry.IsViewCount || entry.IsCoalesceFieldOffset) continue;
+                            if (entry.IsViewOffset || entry.IsViewCount || entry.IsCoalesceFieldOffset || entry.IsUserDim) continue;
                             // Use argsToEffectiveOffset to map past body-struct expansion. Each body
                             // struct param consumes its IR slot (1 args index) but its FIELDS occupy
                             // multiple expandedArgs slots. So a trailing scalar at args[N] is actually
@@ -2158,6 +2148,13 @@ namespace SpawnDev.ILGPU.WebGPU
                     // its coalesced shared buffer (computed during coalesce-processing pre-pass).
                     foreach (var entry in manifest)
                     {
+                        if (entry.IsUserDim)
+                        {
+                            // 0 (no dimension) = no limit, matching the old override's default.
+                            uint ud = dispatchUserDim > 0 ? dispatchUserDim : uint.MaxValue;
+                            BitConverter.GetBytes(ud).CopyTo(packedData, entry.ByteOffset);
+                            continue;
+                        }
                         if (entry.IsCoalesceFieldOffset)
                         {
                             int byteOffset = entry.ByteOffset;

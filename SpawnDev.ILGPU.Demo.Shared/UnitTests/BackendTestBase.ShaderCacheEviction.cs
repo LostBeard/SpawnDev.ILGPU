@@ -112,18 +112,25 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 using var input = accelerator.Allocate1D(src);
                 using var output = accelerator.Allocate1D<float>(N);
 
-                var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, float, float>(
-                    BindGroupCache_ScaleAddKernel);
+                // Four DISTINCT kernels = four distinct cached shaders, more than the cap allows. (Distinct
+                // dispatch sizes no longer do: the user dimension is a packed scalar, one shader serves every size.)
+                var kernels = new[]
+                {
+                    accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, float, float>(EvictScaleAddA),
+                    accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, float, float>(EvictScaleAddB),
+                    accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, float, float>(EvictScaleAddC),
+                    accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, float, float>(EvictScaleAddD),
+                };
+                var k = kernels[0];
 
                 webgpu.ClearShaderCache();
                 WebGPUBackend.MaxCachedShaders = Cap;
 
-                // Distinct DISPATCH SIZES produce distinct cached shaders (the auto-grouped shader bakes in
-                // _ilgpu_user_dim), so this mints more distinct entries than the cap allows.
                 int[] sizes = { 8, 16, 32, 64 };
-                foreach (var n in sizes)
+                for (int ki = 0; ki < kernels.Length; ki++)
                 {
-                    k((Index1D)n, input.View, output.View, 2f, 3f);
+                    int n = sizes[ki];
+                    kernels[ki]((Index1D)n, input.View, output.View, 2f, 3f);
                     await accelerator.SynchronizeAsync();
                     if (webgpu.CachedShaderCount > Cap)
                         throw new Exception(
@@ -133,15 +140,16 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 
                 // NON-VACUITY: `count > Cap` alone would pass trivially on an EMPTY cache. Assert the cache
                 // actually filled TO the cap - which simultaneously proves (a) entries were really being
-                // added, (b) the four distinct dispatch sizes really did produce four distinct shaders (if
+                // added, (b) the four distinct kernels really did produce four distinct shaders (if
                 // they collapsed to one, count would be 1 here), and therefore (c) eviction genuinely ran.
                 if (webgpu.CachedShaderCount != Cap)
                     throw new Exception(
                         $"Expected the cache to sit exactly AT the cap ({Cap}) after dispatching {sizes.Length} " +
-                        $"distinct sizes, got {webgpu.CachedShaderCount}. If 1, the sizes did not produce distinct " +
+                        $"distinct kernels, got {webgpu.CachedShaderCount}. If 1, the kernels did not produce distinct " +
                         $"shaders and this test never exercised eviction at all; if 0, nothing was cached.");
 
-                // The size-8 shader is the least-recently-used and must have been evicted + disposed by now.
+                // Kernel A's shader (dispatched at size 8) is the least-recently-used and must have been evicted +
+                // disposed by now.
                 // Re-dispatching it has to recompile cleanly and produce correct output - the real proof that
                 // eviction purged every dependent reference rather than leaving a disposed pipeline reachable.
                 k((Index1D)8, input.View, output.View, 2f, 3f);
@@ -164,5 +172,12 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 webgpu.ClearShaderCache();
             }
         });
-    }
+    
+        // Four distinct kernels for the LRU test: DIFFERENT math, so their WGSL (the shader cache key) differs.
+        // Only A's output is checked (after its shader was evicted and recompiled).
+        static void EvictScaleAddA(Index1D i, ArrayView<float> input, ArrayView<float> output, float mul, float add) => output[i] = input[i] * mul + add;
+        static void EvictScaleAddB(Index1D i, ArrayView<float> input, ArrayView<float> output, float mul, float add) => output[i] = input[i] * mul - add;
+        static void EvictScaleAddC(Index1D i, ArrayView<float> input, ArrayView<float> output, float mul, float add) => output[i] = input[i] * add + mul;
+        static void EvictScaleAddD(Index1D i, ArrayView<float> input, ArrayView<float> output, float mul, float add) => output[i] = input[i] + mul * add;
+}
 }

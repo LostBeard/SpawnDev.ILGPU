@@ -834,11 +834,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// GenerateHeader to populate _bodyStructParams. We do the field classification here so
         /// SetupParameterBindings can correctly handle body struct parameters.
         /// </summary>
+        /// <summary>
+        /// Auto-grouped kernels read their user dimension from <c>_scalar_params[0]</c> (see
+        /// <see cref="ScalarPackingEntry.IsUserDim"/>), so every other packed slot starts at 1. All three slot
+        /// counters (this scan, SetupParameterBindings, GenerateHeader) must start at <see cref="FirstScalarSlot"/>.
+        /// </summary>
+        private bool ReservesUserDimSlot => !EntryPoint.IsExplicitlyGrouped && KernelParamOffset > 0;
+        private int FirstScalarSlot => ReservesUserDimSlot ? 1 : 0;
+
         private void ScanBodyStructParams()
         {
             int paramOffset = KernelParamOffset;
             // Track global scalar slot offset across all params (as GenerateHeader does)
-            int globalScalarSlotOffset = 0;
+            int globalScalarSlotOffset = FirstScalarSlot;
 
             foreach (var param in Method.Parameters)
             {
@@ -1947,16 +1955,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 builder.AppendLine();
             }
 
-            // For auto-grouped (implicitly grouped) kernels, emit an override constant for the
-            // user dimension. WebGPU dispatches ceil(userDim/workgroupSize) workgroups, which
-            // often exceeds the actual data size. Without a range check, excess threads execute
-            // and WGSL's clamped array indexing causes OOB writes to overwrite the last valid
-            // element. The override constant is set per-dispatch in WebGPUAccelerator.RunKernel().
-            if (!EntryPoint.IsExplicitlyGrouped && KernelParamOffset > 0)
-            {
-                builder.AppendLine("override _ilgpu_user_dim : u32 = 4294967295u;");
-                builder.AppendLine();
-            }
+            // Auto-grouped kernels: WebGPU dispatches ceil(userDim/workgroupSize) workgroups, which often
+            // exceeds the data size, so a range check stops the excess threads (WGSL's clamped indexing would
+            // otherwise make them overwrite the last valid element). The user dimension is read from
+            // _scalar_params[0] at the top of main (SetupIndexVariables) - NOT a pipeline `override`, which
+            // compiled a new pipeline for every distinct dispatch size (ScalarPackingEntry.IsUserDim).
 
             // Emit struct definitions (may reference emu_i64/emu_f64 from the library above)
             TypeGenerator.GenerateTypeDefinitions(builder);
@@ -1973,7 +1976,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Phase 2: Emit single packed scalar binding (if any).
 
             var scalarManifest = new List<ScalarPackingEntry>();
-            int scalarSlotOffset = 0; // current u32 slot index in packed buffer
+            int scalarSlotOffset = FirstScalarSlot; // current u32 slot index in packed buffer
+            if (ReservesUserDimSlot)
+                scalarManifest.Add(new ScalarPackingEntry
+                {
+                    ParamIndex = -2, ByteOffset = 0, ByteSize = 4, WgslType = "u32", IsUserDim = true,
+                });
             // Track view (buffer) params and their binding indices for view offset entries
             var viewParamBindingIndices = new List<(int paramIndex, int bindingIndex)>();
 
@@ -4397,6 +4405,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Only map if strictly implicit OR if we detected an IndexType
             if (KernelParamOffset == 0) return;
 
+            if (ReservesUserDimSlot)
+            {
+                // The dispatch's user dimension (ScalarPackingEntry.IsUserDim, slot 0): a runtime value, so one
+                // pipeline serves every dispatch size. A load from read-only storage is uniform in WGSL's analysis,
+                // as the override constant was.
+                AppendLine("let _ilgpu_user_dim : u32 = _scalar_params[0];");
+                _bodyReferencesScalarParams = true;
+            }
+
             var indexVar = Allocate(indexParam);
             _hoistedIndexFields.Clear();
 
@@ -4988,7 +5005,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             // First pass: classify all params and compute slot offsets for packed scalars
             var packedScalarSlots = new Dictionary<int, (int slot, int slotCount, string wgslType, bool isEmuF64, bool isEmuI64)>();
-            int scalarSlotOffset = 0;
+            int scalarSlotOffset = FirstScalarSlot;
 
             foreach (var param in Method.Parameters)
             {
