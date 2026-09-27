@@ -1,6 +1,58 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.18 (unreleased; local 5.2.18-local.1, forks 2.3.6-local.1) - WebGPU/WebGL: loop exits that skip code, and helpers taking views
+
+Found by SpawnScene's GPU pair verification (a per-thread 8-point RANSAC solve with `LocalMemory` scratch and
+`return false` inside its elimination loop). CPU, CUDA, OpenCL and Wasm were correct throughout; the ILGPU CPU
+accelerator ran the same kernel correctly, so only the generated WGSL/GLSL shows any of this.
+
+**Silently wrong results: a loop exit whose destination is not the loop's normal exit.** An early `return` (or
+`break` to a label) from inside nested loops that skips later code - `for (...) for (...) if (bad) return false;
+...more loops...; return true;` - was emitted as a plain `break`, which resumes at the loop's NORMAL exit. The
+code the exit should have skipped then ran anyway (the later loop, and `true` overwriting `false`). Both
+structured walkers had it: `WGSLKernelFunctionGenerator` and `GLSLCodeGenerator` (kernels and GLSL helpers).
+- Each emitted loop now records its normal exit; a body break to any other destination sets a per-loop exit
+  flag (`_lxN`) and breaks, and after the loop an if-chain on the flag runs each destination up to their common
+  post-dominator. A destination outside the enclosing loop re-exits that loop the same way (multi-level exits).
+  The flag is declared through a sentinel patched after the body, so loops without such exits emit exactly the
+  same shader text as before.
+- The "current loop's header exit" was a single field that a nested loop overwrote and then cleared, so after an
+  inner loop the outer loop's break-scope code lost track of its exit. It is per loop now.
+- GLSL: the walker that emits the code following a nested loop (inside the outer loop) did not know it was in a
+  loop and emitted an exit path inline; an outside block is now a loop exit there, and an if-merge outside the
+  open loop is not treated as a convergence point.
+- WebGPU: calls the Inliner left behind once its cumulative budget ran out were inlined at EMISSION time by a
+  separate structurizer (`InlineStructuredBlock`) with the same defect (on the red run the shader never
+  finished and the GPU watchdog reset the device). They are now inlined at IR level instead - same code size,
+  since they were being duplicated anyway - so they go through the fixed walker. Exception: helpers that
+  allocate shared memory stay on the emission path, which maps every call site onto ONE workgroup array; IR
+  copies each got their own (first full sweep: radix sort's scan went 16 KB -> 48 KB of workgroup storage, over
+  WebGPU's 32 KB limit, 112 failures). WebGL has no emission inliner - every call left in the IR becomes a GLSL
+  function - so there only address-taking calls are inlined.
+- ⚠ KNOWN, OPEN: a budget-surviving helper that allocates shared memory AND exits early out of nested loops still
+  goes through `InlineStructuredBlock` and is still mis-emitted. No known kernel has that shape (the shared-memory
+  helpers are group scans/reductions). Plan: dedupe same-helper shared allocas across IR-inlined copies (so the
+  exception above can go) and retire `InlineStructuredBlock`.
+
+**Shader rejected: helpers taking views.** A helper with `ArrayView`/pointer parameters that stayed a call
+(over the Inliner budget, or over its 1,024-IL cap) went to the WGSL/GLSL fn-def generator, which cannot
+marshal addresses: every view became `ptr<storage, array<T>>` (a `LocalMemory` view is `ptr<function>`), with
+wrong arguments. New IR pass `InlineAddressParameterCalls` (ILGPU fork) in the WebGPU and WebGL kernel
+transformers always inlines such calls.
+
+**Shader rejected: `LocalMemory` view through an address-space cast.** The WGSL generator declared the cast
+result with the view's element type (`var v : f32`) and assigned the array pointer to it. It is now an alias of
+the alloca array (`&arr[i]` indexing).
+
+- Gates (`BackendTestBase.AddressParameterHelperTests.cs`, `PMT_FILTER=HelperCodegen_`), all six backends:
+  `HelperCodegen_AddressParams_LocalMemoryViews_ManyCallSites` (8 dense 6x6 complete-pivot solves per thread
+  through a LocalMemory helper), `HelperCodegen_EarlyReturnSkipsLaterLoop_CallerBranches`,
+  `HelperCodegen_ScalarHelper_EarlyReturnSkipsLoop_ManyCallSites`, `HelperCodegen_ReturnFromNestedLoop_ThenMoreWork`.
+  Red-checked: without the fixes the first three fail on WebGPU (shader validation / wrong values / watchdog) and
+  WebGL (GLSL compile error / wrong values); green on all six with them.
+- Desktop WGSL/GLSL inspection without a browser: `dotnet run --project SpawnDev.ILGPU.DemoConsole -c Release --
+  addr-helper-wgsl <BackendTestBase kernel method>` (`ShaderCompiler.Generate` over the WebGPU and WebGL profiles).
 ## 5.2.17 (unreleased; local 5.2.17-local.2) - WebGPU: a short-circuit branch lost its phi value; CopyFromJS overtook pending kernels
 
 **WebGPU `CopyFromJS` (and native `WebGPUBuffer.CopyFromHost`) could overwrite a buffer BEFORE a kernel launched

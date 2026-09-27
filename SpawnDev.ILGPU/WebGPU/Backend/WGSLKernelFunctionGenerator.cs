@@ -3164,6 +3164,28 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         private BasicBlock? _currentLoopHeaderExitTarget;
 
+        /// <summary>
+        /// Per emitted loop: its normal exit (the header's exit target, where post-loop code starts) and the
+        /// OTHER exit destinations a body break can take. A structured `break` always resumes at the normal
+        /// exit, so a break whose destination is elsewhere - past later code, or out of an enclosing loop too
+        /// (an early <c>return</c> from nested loops in an inlined helper) - sets <see cref="LoopExitInfo.Flag"/>
+        /// to its 1-based index in <see cref="LoopExitInfo.Divergent"/> and breaks; after the loop an if-chain on
+        /// the flag runs each destination's code (or exits the enclosing loop the same way). Before this, such
+        /// a break ran the normal post-loop code anyway: silently wrong results on WebGPU (CPU/CUDA/OpenCL/Wasm
+        /// correct). Regression tests: <c>HelperCodegen_EarlyReturnSkipsLaterLoop_CallerBranches</c>,
+        /// <c>HelperCodegen_AddressParams_LocalMemoryViews_ManyCallSites</c>.
+        /// </summary>
+        private sealed class LoopExitInfo
+        {
+            public BasicBlock? HeaderExit;
+            public BasicBlock? NormalExit;
+            public string Flag = "";
+            public string SentinelLine = "";
+            public readonly List<BasicBlock> Divergent = new();
+        }
+        private readonly Dictionary<Loops<ReversePostOrder, Forwards>.Node, LoopExitInfo> _loopExitInfo = new();
+        private int _loopExitFlagCounter;
+
         private void InlineStructuredBlock(
             BasicBlock current,
             BasicBlock? stop,
@@ -7319,6 +7341,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     return;
                 }
             }
+            // A VIEW of a function-scope alloca (LocalMemory.Allocate -> NewView, emitted `let v_view = &v_arr;`)
+            // cast to the generic address space: alias the cast to the alloca array itself so element access
+            // emits `&v_arr[i]`. The base path below Declare()s the target with TypeGenerator[ViewType] - the
+            // ELEMENT type - and assigns the pointer to it: `var v_c : f32; v_c = v_view;`, which Tint rejects
+            // ("cannot assign 'ptr<function, array<f32, 42>, read_write>' to 'f32'"). Found by SpawnScene's
+            // GpuEpipolarRansac; regression test HelperCodegen_AddressParams_LocalMemoryViews_ManyCallSites.
+            if (value.Value.Resolve() is global::ILGPU.IR.Values.NewView localView)
+            {
+                var basePtr = Load(localView.Pointer);
+                if (_localAllocaVarNames.Contains(basePtr.Name))
+                {
+                    valueVariables[value] = basePtr;
+                    return;
+                }
+            }
             // Fall through to base for non-alloca / non-ptr cases.
             base.GenerateCode(value);
         }
@@ -7880,6 +7917,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // Entering a loop — emit a WGSL loop {} construct
                     visited.Add(block);
                     var headerExitBlock = GenerateLoopConstruct(block, loopNode, stopBlock, pd, visited);
+                    var loopExitInfo = _loopExitInfo[loopNode];
+                    if (loopExitInfo.Divergent.Count > 0)
+                    {
+                        var normalStart = headerExitBlock ?? (loopNode.Exits.Length > 0 ? loopNode.Exits[0] : null);
+                        block = EmitDivergentLoopExits(loopExitInfo, normalStart, stopBlock, pd, visited, currentLoop);
+                        continue;
+                    }
 
                     // After the loop, continue with the header's exit target.
                     // IMPORTANT: Use the header's exit target (returned by GenerateLoopConstruct),
@@ -7937,6 +7981,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // we shouldn't be here. This shouldn't happen if stopBlock is set correctly.
                 if (currentLoop != null && !currentLoop.Contains(block))
                 {
+                    // Reached a block outside the loop along a path the branch-exit checks did not see
+                    // (e.g. through a conditional): leave the loop for it instead of silently stopping.
+                    EmitExitOfEnclosingLoop(block, currentLoop, visited);
                     break;
                 }
 
@@ -7981,13 +8028,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         {
                             AppendLine($"if ({Load(branch.Condition)}) {{");
                             PushIndent();
-                            EmitIntermediateBlocksToExit(trueTarget, trueExitBlock, block, currentLoop, visited);
-                            // If the exit leads to a return, emit return; not break;
-                            // break only exits the loop; return exits the kernel.
-                            if (IsReturnExit(trueExitBlock ?? trueTarget))
-                                AppendLine("return;");
-                            else
-                                AppendLine("break;");
+                            // return / plain break / flagged break (divergent destination).
+                            EmitBodyBreak(trueTarget, trueExitBlock, block, currentLoop, visited);
                             PopIndent();
                             AppendLine("}");
                             PushPhiValues(falseTarget, block);
@@ -7999,11 +8041,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         {
                             AppendLine($"if (!{Load(branch.Condition)}) {{");
                             PushIndent();
-                            EmitIntermediateBlocksToExit(falseTarget, falseExitBlock, block, currentLoop, visited);
-                            if (IsReturnExit(falseExitBlock ?? falseTarget))
-                                AppendLine("return;");
-                            else
-                                AppendLine("break;");
+                            EmitBodyBreak(falseTarget, falseExitBlock, block, currentLoop, visited);
                             PopIndent();
                             AppendLine("}");
                             PushPhiValues(trueTarget, block);
@@ -8226,8 +8264,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
                 else if (currentLoop != null && ExitsLoopTransitively(target, currentLoop, out var exitBlock))
                 {
-                    EmitIntermediateBlocksToExit(target, exitBlock, block, currentLoop, visited);
-                    AppendLine(IsReturnExit(exitBlock ?? target) ? "return;" : "break;");
+                    EmitBodyBreak(target, exitBlock, block, currentLoop, visited);
                 }
                 else
                 {
@@ -8427,6 +8464,174 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             return false;
         }
 
+        /// <summary>The block post-loop code starts at: the header's exit target, else the first exit.</summary>
+        private BasicBlock? NormalExitOf(Loops<ReversePostOrder, Forwards>.Node loop)
+        {
+            if (_loopExitInfo.TryGetValue(loop, out var info) && info.NormalExit != null)
+                return info.NormalExit;
+            return loop.Exits.Length > 0 ? loop.Exits[0] : null;
+        }
+
+        /// <summary>
+        /// True when leaving <paramref name="loop"/> for <paramref name="exitBlock"/> is a plain `break`: the
+        /// block IS the normal exit, or reaches it through blocks with no code (the break scope runs
+        /// <paramref name="exitBlock"/>'s own code and pushes phis along the chain - see
+        /// <see cref="EmitIntermediateBlocksToExit"/>). Anything else must skip the normal post-loop code.
+        /// </summary>
+        private bool ExitReachesNormal(BasicBlock exitBlock, Loops<ReversePostOrder, Forwards>.Node loop)
+        {
+            var normal = NormalExitOf(loop);
+            if (normal == null) return true;
+            var cur = exitBlock;
+            for (int i = 0; i < 10; i++)
+            {
+                if (cur == normal) return true;
+                if (!(cur.Terminator is global::ILGPU.IR.Values.UnconditionalBranch ub)) return false;
+                var next = ub.Target;
+                if (next == normal) return true;
+                if (HasNonPhiInstructions(next)) return false;
+                foreach (var l in _loops)
+                    if (IsLoopHeader(next, l)) return false;
+                cur = next;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// A body branch leaving <paramref name="loop"/>: <paramref name="start"/> is the branch target,
+        /// <paramref name="exitBlock"/> the first block outside the loop on its unconditional chain.
+        /// </summary>
+        private void EmitBodyBreak(BasicBlock start, BasicBlock? exitBlock, BasicBlock source,
+            Loops<ReversePostOrder, Forwards>.Node loop, HashSet<BasicBlock> visited)
+        {
+            var x = exitBlock ?? start;
+            if (IsReturnExit(x) || ExitReachesNormal(x, loop))
+            {
+                EmitIntermediateBlocksToExit(start, x, source, loop, visited);
+                AppendLine(IsReturnExit(x) ? "return;" : "break;");
+                return;
+            }
+            // Divergent: run the in-loop part of the chain here, hand the destination its phis, and let the
+            // post-loop dispatch run the destination itself.
+            if (!loop.Contains(start))
+            {
+                PushPhiValues(start, source);
+            }
+            else
+            {
+                var current = start;
+                var prev = source;
+                for (int i = 0; i < 10; i++)
+                {
+                    PushPhiValues(current, prev);
+                    visited.Add(current);
+                    GenerateBasicBlockCode(current);
+                    if (!(current.Terminator is global::ILGPU.IR.Values.UnconditionalBranch ub)) break;
+                    if (!loop.Contains(ub.Target))
+                    {
+                        PushPhiValues(ub.Target, current);
+                        break;
+                    }
+                    prev = current;
+                    current = ub.Target;
+                }
+            }
+            EmitFlaggedBreak(loop, x);
+        }
+
+        private void EmitFlaggedBreak(Loops<ReversePostOrder, Forwards>.Node loop, BasicBlock destination)
+        {
+            var info = _loopExitInfo[loop];
+            int idx = info.Divergent.IndexOf(destination);
+            if (idx < 0) { info.Divergent.Add(destination); idx = info.Divergent.Count - 1; }
+            AppendLine($"{info.Flag} = {idx + 1};");
+            AppendLine("break;");
+        }
+
+        /// <summary>
+        /// The walker reached <paramref name="block"/>, outside <paramref name="loop"/> (its phis are already
+        /// pushed): leave the loop for it. It used to stop emitting here, silently continuing the loop body.
+        /// </summary>
+        private void EmitExitOfEnclosingLoop(BasicBlock block, Loops<ReversePostOrder, Forwards>.Node loop,
+            HashSet<BasicBlock> visited)
+        {
+            if (IsReturnExit(block)) { AppendLine("return;"); return; }
+            if (ExitReachesNormal(block, loop))
+            {
+                var normal = NormalExitOf(loop);
+                if (block != normal && HasNonPhiInstructions(block))
+                {
+                    GenerateBasicBlockCode(block);
+                    visited.Add(block);
+                }
+                var chain = block;
+                for (int i = 0; i < 10 && chain != normal; i++)
+                {
+                    if (!(chain.Terminator is global::ILGPU.IR.Values.UnconditionalBranch ub)) break;
+                    PushPhiValues(ub.Target, chain);
+                    chain = ub.Target;
+                }
+                AppendLine("break;");
+                return;
+            }
+            EmitFlaggedBreak(loop, block);
+        }
+
+        /// <summary>
+        /// After a loop with divergent exits: destinations outside the enclosing loop leave it too; the rest
+        /// run as an if-chain on the flag up to their common post-dominator, which is returned (null: this
+        /// walker level is done).
+        /// </summary>
+        private BasicBlock? EmitDivergentLoopExits(LoopExitInfo info, BasicBlock? normalStart, BasicBlock? stopBlock,
+            global::ILGPU.IR.Analyses.Dominators<global::ILGPU.IR.Analyses.ControlFlowDirection.Backwards> pd,
+            HashSet<BasicBlock> visited, Loops<ReversePostOrder, Forwards>.Node? enclosing)
+        {
+            var inner = new List<(BasicBlock Block, int Id)>();
+            for (int j = 0; j < info.Divergent.Count; j++)
+            {
+                var y = info.Divergent[j];
+                if (enclosing != null && !enclosing.Contains(y))
+                {
+                    AppendLine($"if ({info.Flag} == {j + 1}) {{");
+                    PushIndent();
+                    EmitExitOfEnclosingLoop(y, enclosing, visited);
+                    PopIndent();
+                    AppendLine("}");
+                }
+                else inner.Add((y, j + 1));
+            }
+            if (inner.Count == 0) return normalStart;
+
+            var starts = new List<BasicBlock>();
+            if (normalStart != null) starts.Add(normalStart);
+            foreach (var (b, _) in inner) starts.Add(b);
+            BasicBlock? merge = pd.GetImmediateCommonDominator(starts.ToArray());
+            if (enclosing != null && merge != null && !enclosing.Contains(merge)) merge = null;
+            var stopAt = merge ?? stopBlock;
+
+            var baseVisited = new HashSet<BasicBlock>(visited);
+            void Region(BasicBlock? start)
+            {
+                if (start == null || start == stopAt) return;
+                var rv = new HashSet<BasicBlock>(baseVisited);
+                GenerateStructuredCodeRecursive(start, stopAt, pd, rv, enclosing);
+                visited.UnionWith(rv);
+            }
+            AppendLine($"if ({info.Flag} == 0) {{");
+            PushIndent();
+            Region(normalStart);
+            PopIndent();
+            foreach (var (b, id) in inner)
+            {
+                AppendLine($"}} else if ({info.Flag} == {id}) {{");
+                PushIndent();
+                Region(b);
+                PopIndent();
+            }
+            AppendLine("}");
+            return merge;
+        }
+
         /// <summary>
         /// DEBUG IL FIX: Emits intermediate blocks' instructions and PHI values
         /// along the chain from startBlock to exitBlock.
@@ -8457,8 +8662,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // unconditionally after the loop.
                 // If this IS the header's exit target, skip — it's the shared merge
                 // block that should be emitted naturally after the loop.
-                if (_currentLoopHeaderExitTarget != null
-                    && startBlock != _currentLoopHeaderExitTarget
+                var normalExitOfLoop = NormalExitOf(currentLoop);
+                if (normalExitOfLoop != null
+                    && startBlock != normalExitOfLoop
                     && HasNonPhiInstructions(startBlock))
                 {
                     GenerateBasicBlockCode(startBlock);
@@ -8744,6 +8950,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 AppendLine($"// LOOP header=BB_{headerBlock.Id} exits=[{exitIds}]");
                 WebGPUBackend.Log($"[CODEGEN] LOOP header=B{headerBlock.Id} exits=[{exitIds}] outerStop=B{outerStopBlock?.Id}");
             }
+            var exitInfo = new LoopExitInfo { Flag = $"_lx{_loopExitFlagCounter}" };
+            string exitSentinel = $"/*__LXDECL{_loopExitFlagCounter}__*/";
+            _loopExitFlagCounter++;
+            exitInfo.SentinelLine = new string(' ', IndentLevel * 4) + exitSentinel + Environment.NewLine;
+            exitInfo.NormalExit = loopNode.Exits.Length > 0 ? loopNode.Exits[0] : null;
+            _loopExitInfo[loopNode] = exitInfo;
+            AppendLine(exitSentinel);
             AppendLine("loop {");
             PushIndent();
 
@@ -8783,6 +8996,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // continuation (not body-break-specific intermediate blocks).
                 headerExitTarget = trueIsExit ? trueTarget : (falseIsExit ? falseTarget : null);
                 _currentLoopHeaderExitTarget = headerExitTarget;
+                exitInfo.HeaderExit = headerExitTarget;
+                if (headerExitTarget != null) exitInfo.NormalExit = headerExitTarget;
 
                 // ─── Uniform break emission ─────────────────────────────────
                 // If the break condition uses a non-uniform counter, emit a
@@ -8980,6 +9195,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     || _ufBody.Contains("storageBarrier(", StringComparison.Ordinal);
                 Builder.Replace(_ufBreakSentinel, _ufLoopHasBarrier ? _ufUniformBreak : _ufNaturalBreak);
             }
+
+            // Divergent exits: declare the flag in the scope enclosing the loop (the post-loop dispatch reads it);
+            // otherwise drop the sentinel line so loops without them emit exactly as before.
+            Builder.Replace(exitInfo.SentinelLine, exitInfo.Divergent.Count > 0
+                ? new string(' ', exitInfo.SentinelLine.Length - exitSentinel.Length - Environment.NewLine.Length)
+                    + $"var {exitInfo.Flag} : i32 = 0;" + Environment.NewLine
+                : "");
 
             _currentLoopHeaderExitTarget = null;
             return headerExitTarget;

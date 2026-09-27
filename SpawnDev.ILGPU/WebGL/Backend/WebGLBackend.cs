@@ -13,6 +13,7 @@ using global::ILGPU;
 using global::ILGPU.Backends;
 using global::ILGPU.Backends.EntryPoints;
 using global::ILGPU.IR;
+using global::ILGPU.IR.Transformations;
 using global::ILGPU.IR.Analyses;
 using global::ILGPU.IR.Intrinsics;
 using global::ILGPU.IR.Types;
@@ -115,7 +116,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
             InitializeKernelTransformers(builder =>
             {
-                // WebGL-specific transformers (none for now)
+                // A helper taking a pointer/view must never survive as a call: the fn-def generator cannot
+                // marshal addresses (it typed a LocalMemory view ptr<storage> and Tint rejected the shader -
+                // InlineAddressParameterCalls). Inline them past the Inliner's budget, then tidy the CFG.
+                // .Empty: run on every method, not only ones an earlier pass flagged.
+                builder.Add(Transformer.Create(
+                    TransformerConfiguration.Empty,
+                    new InlineAddressParameterCalls(),
+                    new SimplifyControlFlow(),
+                    new DeadCodeElimination()));
             });
 
             // XMath hard reference removed — loaded dynamically via reflection

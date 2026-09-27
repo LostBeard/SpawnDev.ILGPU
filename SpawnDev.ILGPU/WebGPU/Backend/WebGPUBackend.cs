@@ -11,6 +11,7 @@ using global::ILGPU;
 using global::ILGPU.Backends;
 using global::ILGPU.Backends.EntryPoints;
 using global::ILGPU.IR;
+using global::ILGPU.IR.Transformations;
 using global::ILGPU.IR.Analyses;
 using global::ILGPU.IR.Intrinsics;
 using ILGPU.Algorithms;
@@ -594,7 +595,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             InitializeKernelTransformers(builder =>
             {
-                // Add any WebGPU-specific transformers
+                // A helper taking a pointer/view must never survive as a call: the fn-def generator cannot
+                // marshal addresses (it typed a LocalMemory view ptr<storage> and Tint rejected the shader -
+                // InlineAddressParameterCalls). Inline them past the Inliner's budget, then tidy the CFG.
+                // Budget survivors too: this generator would inline them at emission time anyway, through a
+                // structurizer that mis-emits early exits; IR inlining sends them through the kernel walker -
+                // except helpers that allocate shared memory, which the emission inliner maps onto ONE workgroup
+                // array per helper (IR copies each get their own and blew radix sort past 32 KB).
+                // .Empty: run on every method, not only ones an earlier pass flagged.
+                builder.Add(Transformer.Create(
+                    TransformerConfiguration.Empty,
+                    new InlineAddressParameterCalls(inlineBudgetSurvivors: true),
+                    new SimplifyControlFlow(),
+                    new DeadCodeElimination()));
             });
 
             // Hard reference for bundling

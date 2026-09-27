@@ -16,6 +16,8 @@ try
         return await CpuLaunchLatencyProbe.Run(args);
 
     // Offline WGSL dump of QInt4 vs FP4 radix kernels (WebGPU-only QInt4 mis-sort). No browser.
+    if (args.Length > 0 && args[0] == "addr-helper-wgsl")
+        return await AddrHelperWgslProbe.Run(args.Length > 1 ? args[1] : "AddrHelperKernel");
     if (args.Length > 0 && args[0] == "qint4-radix-wgsl")
         return await QInt4RadixWgslDump.Run();
 
