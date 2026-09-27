@@ -561,13 +561,22 @@ namespace SpawnDev.ILGPU.WebGPU
     {
         static readonly object _lock = new();
         static readonly Dictionary<string, long> _live = new(StringComparer.Ordinal);
+        static readonly Dictionary<string, string> _siteOf = new(StringComparer.Ordinal);
         static long _storageBytes, _stagingBytes;
+
+        /// <summary>
+        /// Record WHO allocated each buffer from now on: the first stack frame outside SpawnDev.ILGPU / ILGPU /
+        /// System (see <see cref="TopCreationSites"/>). Costs a stack walk per allocation - diagnostics only.
+        /// </summary>
+        public static bool CaptureCreationSites { get; set; }
 
         internal static void Track(string label, long bytes, bool staging)
         {
+            string? site = CaptureCreationSites ? CreationSite() : null;
             lock (_lock)
             {
                 _live[label] = bytes;
+                if (site != null) _siteOf[label] = site;
                 if (staging) _stagingBytes += bytes; else _storageBytes += bytes;
             }
         }
@@ -578,9 +587,87 @@ namespace SpawnDev.ILGPU.WebGPU
             {
                 if (_live.Remove(label))
                 {
+                    _siteOf.Remove(label);
                     if (staging) _stagingBytes -= bytes; else _storageBytes -= bytes;
                 }
             }
+        }
+
+        /// <summary>
+        /// The first <see cref="CreationSiteDepth"/> caller frames that are not the allocator machinery itself, innermost
+        /// first, joined by " < ". Async state-machine frames are reported by their source method name.
+        /// </summary>
+        static string CreationSite()
+        {
+            var st = new System.Diagnostics.StackTrace(2, false);
+            var sb = new System.Text.StringBuilder();
+            int taken = 0;
+            for (int i = 0; i < st.FrameCount && taken < CreationSiteDepth; i++)
+            {
+                var m = st.GetFrame(i)?.GetMethod();
+                var t = m?.DeclaringType;
+                if (t == null) continue;
+                string ns = t.Namespace ?? "";
+                if (ns.StartsWith("SpawnDev.ILGPU.WebGPU", StringComparison.Ordinal)
+                    || ns.StartsWith("SpawnDev.ILGPU.Runtime", StringComparison.Ordinal)
+                    || ns.StartsWith("ILGPU", StringComparison.Ordinal)
+                    || ns.StartsWith("System", StringComparison.Ordinal))
+                    continue;
+                string typeName = t.FullName ?? t.Name, methodName = m!.Name;
+                // Compiler-generated names: "Owner+<Method>d__12" (async), "Owner+<>c+<<Method>b__3_0>d" (async lambda),
+                // "Owner+<>c__DisplayClass5_0" with method "<Method>b__0" (lambda). Report Owner.Method.
+                int lt = typeName.IndexOf("+<", StringComparison.Ordinal);
+                if (lt > 0)
+                {
+                    string generated = FirstSourceName(typeName.Substring(lt)) ?? FirstSourceName(methodName);
+                    if (generated != null) methodName = generated;
+                    typeName = typeName.Substring(0, lt);
+                }
+                else if (FirstSourceName(methodName) is string lambdaOwner) methodName = lambdaOwner;
+                int dot = typeName.LastIndexOf('.');
+                if (dot >= 0) typeName = typeName.Substring(dot + 1);
+                if (taken > 0) sb.Append(" < ");
+                sb.Append(typeName).Append('.').Append(methodName);
+                taken++;
+            }
+            return taken == 0 ? "(unknown)" : sb.ToString();
+        }
+
+        /// <summary>The first non-empty "&lt;Name&gt;" in a compiler-generated name, or null.</summary>
+        static string? FirstSourceName(string s)
+        {
+            for (int i = 0; i < s.Length; i++)
+            {
+                if (s[i] != '<') continue;
+                int end = i + 1;
+                while (end < s.Length && s[end] != '<' && s[end] != '>') end++;
+                if (end < s.Length && s[end] == '>' && end > i + 1) return s.Substring(i + 1, end - i - 1);
+            }
+            return null;
+        }
+
+        /// <summary>How many caller frames <see cref="CaptureCreationSites"/> records per buffer (default 3).</summary>
+        public static int CreationSiteDepth { get; set; } = 3;
+
+        /// <summary>
+        /// Live buffers grouped by creation site (<see cref="CaptureCreationSites"/> must have been on when they were
+        /// allocated), largest total first: (site, buffer count, bytes). Buffers allocated with capture off are "(not captured)".
+        /// </summary>
+        public static List<(string Site, int Count, long Bytes)> TopCreationSites(int count = 10)
+        {
+            var agg = new Dictionary<string, (int Count, long Bytes)>(StringComparer.Ordinal);
+            lock (_lock)
+                foreach (var kv in _live)
+                {
+                    string site = _siteOf.TryGetValue(kv.Key, out var s2) ? s2 : "(not captured)";
+                    agg.TryGetValue(site, out var cur);
+                    agg[site] = (cur.Count + 1, cur.Bytes + kv.Value);
+                }
+            var all = new List<(string Site, int Count, long Bytes)>();
+            foreach (var kv in agg) all.Add((kv.Key, kv.Value.Count, kv.Value.Bytes));
+            all.Sort((a, b) => b.Bytes != a.Bytes ? b.Bytes.CompareTo(a.Bytes) : b.Count.CompareTo(a.Count));
+            if (all.Count > count) all.RemoveRange(count, all.Count - count);
+            return all;
         }
 
         /// <summary>Bytes held by live, owned WebGPU storage buffers (all accelerators in this process).</summary>

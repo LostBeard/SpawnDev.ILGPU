@@ -1,6 +1,16 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.18-local.4 (unreleased) - WebGPU buffer creation sites
+
+`WebGPUBufferAccounting.CaptureCreationSites`: when on, every newly allocated WebGPU buffer records WHO allocated it
+(the first `CreationSiteDepth` = 3 caller frames outside SpawnDev.ILGPU.WebGPU / .Runtime / ILGPU / System, async and
+lambda frames reported by their source method name), and `TopCreationSites(n)` groups the live buffers by site with
+count and bytes. Diagnostics only (a stack walk per allocation). Added to find the SpawnScene depth-cascade leak:
+~234 buffers / ~18 MB left live per DAv3 chunk (19,938 buffers after TruckFull), and chrome://gpu then reported
+"The GPU process died due to out of memory". Gate: `WebGPU_LiveBufferAccounting_NamesCreationSite` (red with the site
+replaced by a constant on both browser WebGPU lanes).
+
 ## 5.2.18-local.3 (unreleased) - WebGPU live-buffer accounting
 
 `WebGPUBufferAccounting`: process-wide registry of every owned WebGPU storage buffer and every cached readback
