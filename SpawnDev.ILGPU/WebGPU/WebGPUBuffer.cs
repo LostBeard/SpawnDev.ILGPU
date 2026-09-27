@@ -71,6 +71,8 @@ namespace SpawnDev.ILGPU.WebGPU
             };
 
             _buffer = device.CreateBuffer(descriptor);
+            _accountedBytes = gpuSize;
+            TrackLive(_label, gpuSize, staging: false);
         }
 
         /// <summary>
@@ -296,8 +298,7 @@ namespace SpawnDev.ILGPU.WebGPU
             // WebGPU CopyBufferToBuffer requires copy size to be a multiple of 4
             if (_cachedStagingBuffer == null || _cachedStagingSize < paddedBytes)
             {
-                _cachedStagingBuffer?.Destroy();
-                _cachedStagingBuffer?.Dispose();
+                ReleaseStaging();
 
                 var stagingDescriptor = new GPUBufferDescriptor
                 {
@@ -308,6 +309,8 @@ namespace SpawnDev.ILGPU.WebGPU
                 };
                 _cachedStagingBuffer = device.CreateBuffer(stagingDescriptor);
                 _cachedStagingSize = paddedBytes;
+                _stagingLabel = stagingDescriptor.Label;
+                TrackLive(_stagingLabel, _cachedStagingSize, staging: true);
             }
 
             // Flush pending ILGPU kernel dispatches before copying
@@ -364,8 +367,7 @@ namespace SpawnDev.ILGPU.WebGPU
             // Ensure cached staging buffer is large enough (created once, reused)
             if (_cachedStagingBuffer == null || _cachedStagingSize < paddedBytes)
             {
-                _cachedStagingBuffer?.Destroy();
-                _cachedStagingBuffer?.Dispose();
+                ReleaseStaging();
 
                 var stagingDescriptor = new GPUBufferDescriptor
                 {
@@ -376,6 +378,8 @@ namespace SpawnDev.ILGPU.WebGPU
                 };
                 _cachedStagingBuffer = device.CreateBuffer(stagingDescriptor);
                 _cachedStagingSize = paddedBytes;
+                _stagingLabel = stagingDescriptor.Label;
+                TrackLive(_stagingLabel, _cachedStagingSize, staging: true);
             }
 
             // Flush pending ILGPU kernel dispatches before copying
@@ -446,8 +450,7 @@ namespace SpawnDev.ILGPU.WebGPU
             // Ensure cached staging buffer is large enough (created once, reused)
             if (_cachedStagingBuffer == null || _cachedStagingSize < paddedBytes)
             {
-                _cachedStagingBuffer?.Destroy();
-                _cachedStagingBuffer?.Dispose();
+                ReleaseStaging();
 
                 var stagingDescriptor = new GPUBufferDescriptor
                 {
@@ -458,6 +461,8 @@ namespace SpawnDev.ILGPU.WebGPU
                 };
                 _cachedStagingBuffer = device.CreateBuffer(stagingDescriptor);
                 _cachedStagingSize = paddedBytes;
+                _stagingLabel = stagingDescriptor.Label;
+                TrackLive(_stagingLabel, _cachedStagingSize, staging: true);
             }
 
             // Flush pending ILGPU kernel dispatches before copying
@@ -501,9 +506,7 @@ namespace SpawnDev.ILGPU.WebGPU
             if (_disposed) return;
             _disposed = true;
 
-            _cachedStagingBuffer?.Destroy();
-            _cachedStagingBuffer?.Dispose();
-            _cachedStagingBuffer = null;
+            ReleaseStaging();
 
             // Only destroy the underlying GPUBuffer if we own it.
             // Non-owning instances (wrapping external buffers) must not destroy the buffer.
@@ -522,10 +525,83 @@ namespace SpawnDev.ILGPU.WebGPU
                 }
                 _buffer?.Destroy();
                 _buffer?.Dispose();
+                if (_accountedBytes > 0) { UntrackLive(_label, _accountedBytes, staging: false); _accountedBytes = 0; }
             }
             _buffer = null;
         }
 
+        // ---- live-memory accounting (WebGPUBufferAccounting holds the process-wide registry) ----
+        long _accountedBytes;
+        string? _stagingLabel;
+
+        void ReleaseStaging()
+        {
+            if (_cachedStagingBuffer == null) return;
+            _cachedStagingBuffer.Destroy();
+            _cachedStagingBuffer.Dispose();
+            _cachedStagingBuffer = null;
+            if (_stagingLabel != null) { UntrackLive(_stagingLabel, _cachedStagingSize, staging: true); _stagingLabel = null; }
+        }
+
+        static void TrackLive(string label, long bytes, bool staging) => WebGPUBufferAccounting.Track(label, bytes, staging);
+        static void UntrackLive(string label, long bytes, bool staging) => WebGPUBufferAccounting.Untrack(label, bytes, staging);
+
         #endregion
+    }
+
+    /// <summary>
+    /// Process-wide live-memory accounting for WebGPU buffers: every OWNED storage buffer and every cached readback
+    /// staging buffer of every <see cref="WebGPUBuffer{T}"/>, by label, so a caller can ask what is actually resident
+    /// (nvidia-smi only shows the GPU process's pooled high-water mark). Non-generic on purpose: statics on the
+    /// generic buffer class would be one registry per element type.
+    /// Added 2026-09-27: SpawnScene's GPU process held ~4.7 GB above baseline after a depth cascade and training later
+    /// lost the device at an allocation; "whose buffers are those" had no answer.
+    /// </summary>
+    public static class WebGPUBufferAccounting
+    {
+        static readonly object _lock = new();
+        static readonly Dictionary<string, long> _live = new(StringComparer.Ordinal);
+        static long _storageBytes, _stagingBytes;
+
+        internal static void Track(string label, long bytes, bool staging)
+        {
+            lock (_lock)
+            {
+                _live[label] = bytes;
+                if (staging) _stagingBytes += bytes; else _storageBytes += bytes;
+            }
+        }
+
+        internal static void Untrack(string label, long bytes, bool staging)
+        {
+            lock (_lock)
+            {
+                if (_live.Remove(label))
+                {
+                    if (staging) _stagingBytes -= bytes; else _storageBytes -= bytes;
+                }
+            }
+        }
+
+        /// <summary>Bytes held by live, owned WebGPU storage buffers (all accelerators in this process).</summary>
+        public static long LiveStorageBytes { get { lock (_lock) return _storageBytes; } }
+
+        /// <summary>Bytes held by live cached readback staging buffers (one per buffer that was ever read back).</summary>
+        public static long LiveStagingBytes { get { lock (_lock) return _stagingBytes; } }
+
+        /// <summary>Number of live accounted buffers (storage + staging).</summary>
+        public static int LiveBufferCount { get { lock (_lock) return _live.Count; } }
+
+        /// <summary>The <paramref name="count"/> largest live accounted buffers, largest first: (label, bytes).</summary>
+        public static List<(string Label, long Bytes)> LargestLiveBuffers(int count = 10)
+        {
+            // No LINQ: this is a diagnostics path that runs in Blazor WASM (see the ilgpu_transpiler skill).
+            var all = new List<(string Label, long Bytes)>();
+            lock (_lock)
+                foreach (var kv in _live) all.Add((kv.Key, kv.Value));
+            all.Sort((a, b) => b.Bytes.CompareTo(a.Bytes));
+            if (all.Count > count) all.RemoveRange(count, all.Count - count);
+            return all;
+        }
     }
 }

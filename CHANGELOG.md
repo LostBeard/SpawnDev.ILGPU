@@ -1,6 +1,17 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.18-local.3 (unreleased) - WebGPU live-buffer accounting
+
+`WebGPUBufferAccounting`: process-wide registry of every owned WebGPU storage buffer and every cached readback
+staging buffer (`LiveStorageBytes`, `LiveStagingBytes`, `LiveBufferCount`, `LargestLiveBuffers(n)` by label). nvidia-smi
+only shows the GPU process's pooled high-water mark; this is what the library actually holds. Added for SpawnScene,
+whose GPU process sat ~4.7 GB above baseline after a depth cascade before training lost the device at a later
+allocation. Note each buffer that is ever read back keeps a staging buffer of that size for its lifetime - the
+registry makes that visible. Non-generic on purpose (statics on `WebGPUBuffer<T>` would be one registry per element
+type). Gate: `WebGPU_LiveBufferAccounting_TracksAllocateReadbackDispose` (red with the Dispose untrack removed:
+"storage +4194304, count +1 left over"). Full PMT 4417 / 0 / 324.
+
 ## 5.2.18-local.2 (unreleased) - WebGPU: one compute pipeline per kernel, not one per dispatch size
 
 **Every distinct dispatch size of an auto-grouped kernel compiled a NEW compute pipeline.** The range check that
