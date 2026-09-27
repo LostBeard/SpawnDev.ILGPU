@@ -329,9 +329,21 @@ public abstract partial class BackendTestBase
             ArrayView<int>, int, float, ArrayView<int>>(Ransac8ScoreKernel);
         var pick = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<int>, ArrayView<int>,
             ArrayView<int>, ArrayView<int>, int, ArrayView<float>, ArrayView<int>>(Ransac8PickKernel);
-        score((Index1D)(pairCount * hypotheses), dPts.View, dOffsets.View, dCounts.View, dSeeds.View, hypotheses, th2, dScores.View);
-        pick((Index1D)pairCount, dPts.View, dOffsets.View, dCounts.View, dSeeds.View, dScores.View, hypotheses, dF.View, dBest.View);
-        await accelerator.SynchronizeAsync();
+        // Batched exactly as SpawnScene's GpuEpipolarRansac dispatches it: consecutive pairs per batch through
+        // SubViews with NONZERO offsets, a different thread count per batch, one completed submission each.
+        int[] batchSizes = { 5, 11, 3, 17 };
+        int start = 0, bi = 0;
+        while (start < pairCount)
+        {
+            int count = Math.Min(batchSizes[bi++ % batchSizes.Length], pairCount - start);
+            score((Index1D)(count * hypotheses), dPts.View, dOffsets.View.SubView(start, count), dCounts.View.SubView(start, count),
+                dSeeds.View.SubView(start, count), hypotheses, th2, dScores.View);
+            pick((Index1D)count, dPts.View, dOffsets.View.SubView(start, count), dCounts.View.SubView(start, count),
+                dSeeds.View.SubView(start, count), dScores.View, hypotheses, dF.View.SubView(start * 9L, count * 9L),
+                dBest.View.SubView(start, count));
+            await accelerator.SynchronizeAsync();
+            start += count;
+        }
         var best = await dBest.CopyToHostAsync<int>();
         for (int p = 0; p < pairCount; p++)
         {
