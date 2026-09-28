@@ -346,6 +346,102 @@ namespace ILGPU.Runtime.CPU
         /// <param name="task">The task to execute.</param>
         public virtual void ExecuteInline(CPUAcceleratorTask task) { }
 
+        /// <summary>
+        /// Lane contexts reused by <see cref="ExecuteLaneLoop"/>: one per lane of a group, with the lane,
+        /// warp and linear-group indices fixed at construction.
+        /// </summary>
+        private CPURuntimeThreadContext[] laneLoopContexts = Array.Empty<CPURuntimeThreadContext>();
+
+        /// <summary>
+        /// Set while <see cref="ExecuteLaneLoop"/> runs lanes on the calling thread; a barrier reached in
+        /// that state cannot be honored and fails loud (see <see cref="ThrowIfLaneLoopBarrier"/>).
+        /// </summary>
+        private volatile bool laneLoopActive;
+
+        /// <summary>
+        /// Runs grid groups [<paramref name="gridStart"/>, <paramref name="gridEnd"/>) of a LANE-INDEPENDENT
+        /// task on the calling thread: every lane of a group in turn, as a plain loop.
+        /// </summary>
+        /// <remarks>
+        /// For a kernel without barriers, warp shuffles, broadcasts or shared memory
+        /// (<see cref="CPUKernel.LaneIndependent"/>), this is exactly the order the cooperative scheduler
+        /// already produces - the baton moves only at the start and end of each lane - without its cost:
+        /// waking one OS thread per lane per launch, a Monitor handoff per lane, and two cross-thread
+        /// barriers per launch. MEASURED 2026-09-28: a 32-element kernel launch took 0.65 ms on the
+        /// cooperative path (CUDA: 0.006 ms), which put a 10,240-step training loop at ~270 s.
+        /// </remarks>
+        internal void ExecuteLaneLoop(CPUAcceleratorTask task, int gridStart, int gridEnd)
+        {
+            if (gridStart >= gridEnd)
+                return;
+
+            SetupRuntimeClasses(task);
+            int groupSize = task.GroupDim.Size;
+            int linearUserDim = task.TotalUserDim.Size;
+            var launcher = task.KernelExecutionDelegate;
+
+            if (laneLoopContexts.Length < groupSize)
+            {
+                var contexts = new CPURuntimeThreadContext[groupSize];
+                for (int t = 0; t < groupSize; ++t)
+                {
+                    contexts[t] = new CPURuntimeThreadContext(t % WarpSize, t / WarpSize)
+                    {
+                        LinearGroupIndex = t
+                    };
+                }
+                laneLoopContexts = contexts;
+            }
+            for (int t = 0; t < groupSize; ++t)
+            {
+                laneLoopContexts[t].GroupIndex =
+                    Stride3D.DenseXY.ReconstructFromElementIndex(t, task.GroupDim);
+            }
+
+            groupContext.MakeCurrent();
+            laneLoopActive = true;
+            try
+            {
+                for (int i = gridStart; i < gridEnd; ++i)
+                {
+                    var gridIndex = Stride3D.DenseXY.ReconstructFromElementIndex(i, task.GridDim);
+                    int groupBase = i * groupSize;
+                    for (int t = 0; t < groupSize; ++t)
+                    {
+                        int globalIndex = groupBase + t;
+                        if (globalIndex >= linearUserDim)
+                            break;
+                        var lane = laneLoopContexts[t];
+                        lane.GridIndex = gridIndex;
+                        lane.MakeCurrent();
+                        warpContexts[t / WarpSize].MakeCurrent();
+                        launcher(task, globalIndex);
+                    }
+                }
+            }
+            finally
+            {
+                laneLoopActive = false;
+                groupContext.TearDown();
+            }
+        }
+
+        /// <summary>
+        /// Throws if a barrier is reached inside <see cref="ExecuteLaneLoop"/>. Lanes there run one after
+        /// another to completion, so a barrier could never be satisfied; reaching one means the kernel was
+        /// classified lane-independent wrongly, and a loud failure beats a silently wrong result.
+        /// </summary>
+        protected void ThrowIfLaneLoopBarrier()
+        {
+            if (laneLoopActive)
+            {
+                throw new InvalidOperationException(
+                    "A group/warp barrier was reached in a kernel the CPU backend classified as " +
+                    "lane-independent (no barriers, shuffles, broadcasts or shared memory in its IR). " +
+                    "This is an ILGPU bug in ILBackend.UsesLaneCooperation - please report the kernel.");
+            }
+        }
+
         #endregion
 
         #region Internal Execution Methods
@@ -589,6 +685,8 @@ namespace ILGPU.Runtime.CPU
             /// <returns>The number of participating threads.</returns>
             public override int WarpBarrier()
             {
+                ThrowIfLaneLoopBarrier();
+
                 // Get warp thread index
                 var currentContext = CPURuntimeThreadContext.Current;
                 int threadOffset = currentContext.WarpIndex * WarpSize;
@@ -609,6 +707,8 @@ namespace ILGPU.Runtime.CPU
             /// <returns>The number of participating threads.</returns>
             public override int GroupBarrier()
             {
+                ThrowIfLaneLoopBarrier();
+
                 // Get group thread index
                 int threadIndex = CPURuntimeThreadContext.Current.LinearGroupIndex;
 

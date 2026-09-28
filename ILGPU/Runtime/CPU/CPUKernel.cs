@@ -10,6 +10,7 @@
 // ---------------------------------------------------------------------------------------
 
 using ILGPU.Backends;
+using ILGPU.Backends.IL;
 using ILGPU.Util;
 using System;
 using System.Reflection;
@@ -54,7 +55,14 @@ namespace ILGPU.Runtime.CPU
         {
             KernelExecutionDelegate = kernelExecutionDelegate
                 ?? throw new ArgumentNullException(nameof(kernelExecutionDelegate));
+            LaneIndependent = kernel is ILCompiledKernel il && !il.RequiresLaneCooperation;
         }
+
+        /// <summary>
+        /// Launches a task of this kernel (called by the generated launcher method).
+        /// </summary>
+        internal void Launch(CPUAcceleratorTask task) =>
+            CPUAccelerator.Launch(task, LaneIndependent);
 
         #endregion
 
@@ -70,6 +78,13 @@ namespace ILGPU.Runtime.CPU
         /// Returns the associated kernel-execution delegate.
         /// </summary>
         internal CPUKernelExecutionHandler KernelExecutionDelegate { get; }
+
+        /// <summary>
+        /// True if the kernel's lanes never interact (no barriers, warp shuffles, broadcasts or shared
+        /// memory - see <see cref="ILCompiledKernel.RequiresLaneCooperation"/>), so the accelerator may
+        /// run each group's lanes in a plain loop instead of on its cooperative lane threads.
+        /// </summary>
+        public bool LaneIndependent { get; }
 
         #endregion
 

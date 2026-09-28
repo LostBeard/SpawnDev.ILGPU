@@ -1,6 +1,37 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.18-local.6 (unreleased, forks 2.3.6-local.2) - CPU: lane-independent kernels skip the lane threads
+
+**Bug (performance):** the CPU accelerator's cooperative (Auto) mode runs every lane of a group on its own OS thread and
+hands one baton between them, so EVERY launch woke (multiprocessors x group size) threads, passed the baton lane by
+lane, and crossed two cross-thread barriers - even for a kernel whose lanes never interact. MEASURED on a 12-core CPU:
+**0.685 ms to launch a 32-element kernel** (CUDA: 0.006 ms) and **1,392 ms for a 4M-element element-wise kernel**.
+SpawnDev.ILGPU.ML's Snake behavioral-clone test (10,240 train steps x ~35 launches) projected to ~270 s on CPU and
+timed out at 300 s, against 3 s on CUDA.
+
+**Fix:** the IL backend now records whether a kernel needs its lanes to cooperate
+(`ILCompiledKernel.RequiresLaneCooperation`): any `BarrierOperation` (group/warp barriers, predicate barriers),
+`ThreadValue` (Broadcast, WarpShuffle, SubWarpShuffle) or shared-memory allocation in the kernel or any callee. A
+kernel with none of them (`CPUKernel.LaneIndependent`) runs its groups' lanes in a plain loop
+(`CPUMultiprocessor.ExecuteLaneLoop`) - exactly the lane order the cooperative scheduler already produced, since its
+baton only moves at the start and end of each lane - inline for tiny grids (`CPUAccelerator.LaneLoopInlineMaxWorkItems`
+= 256) and split one grid chunk per multiprocessor on the thread pool otherwise. Kernels that cooperate, explicit
+Parallel mode and the browser CPU path are unchanged. A barrier reached on the lane-loop path throws
+(`InvalidOperationException`) instead of mis-executing. `CPUAccelerator.DisableLaneLoop` forces the old path (A/B);
+`LaneLoopLaunchCount` counts lane-loop launches.
+
+**Measured after:** trivial launch 0.685 -> 0.004 ms; 4M elements 1,392 -> 7.2 ms (light) and 1,408 -> 32.7 ms
+(16 sqrt/element); every size exact against a host reference on both paths (`cpu-launch-lat`, `CPU_LANELOOP=0/1`).
+**Gates:** `CpuLaneLoop_LaneIndependentKernels_ExactAndOnTheLaneLoop` (partial last group, 2D, 1M-element parallel
+split, path proven on CPU) and `CpuLaneLoop_BarrierKernel_StaysCooperativeAndCorrect`; red-checked one guard at a time
+(lane loop off -> path assertion fails; past-end lanes allowed -> out-of-range abort; barrier kernel forced onto the
+lane loop -> the fail-loud throw; grid index not set -> `Group2D_IndexDecomposition_Correct` fails). Full CPU lane:
+605 passed / 0 failed / 57 skipped.
+
+Known, unchanged: a kernel WITH barriers still pays the cooperative cost (`cpu-launch-lat` GROUPBAR: ~135 ms for
+256 groups x 64 with a shared-memory tree reduction).
+
 ## 5.2.18-local.5 (unreleased) - creation sites name generic types cleanly
 
 `WebGPUBufferAccounting` creation sites now build type names from the `Name` chain ("Outer+Type.Method") instead of

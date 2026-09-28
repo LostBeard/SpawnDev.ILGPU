@@ -49,9 +49,11 @@ namespace ILGPU.Backends.IL
             ConstructorInfo taskConstructor,
             ImmutableArray<FieldInfo> taskArgumentMapping,
             int numSharedMemoryAllocations,
-            int allocatedSharedMemorySize)
+            int allocatedSharedMemorySize,
+            bool requiresLaneCooperation = true)
             : base(context, entryPoint, null)
         {
+            RequiresLaneCooperation = requiresLaneCooperation;
             KernelMethod = kernelMethod;
             ExecutionHandler = (CPUKernelExecutionHandler)KernelMethod.CreateDelegate(
                 typeof(CPUKernelExecutionHandler));
@@ -100,6 +102,14 @@ namespace ILGPU.Backends.IL
         /// Returns the size of statically allocated shared memory in bytes.
         /// </summary>
         public int AllocatedSharedMemorySize { get; }
+
+        /// <summary>
+        /// True if the lanes of a group interact (barriers, warp shuffles, broadcasts, shared memory),
+        /// so the CPU runtime must run them on its cooperative lane threads. False = lane-independent:
+        /// the CPU accelerator runs each group's lanes in a plain loop. Defaults to true (the safe path)
+        /// for any construction that did not analyze the kernel.
+        /// </summary>
+        public bool RequiresLaneCooperation { get; }
 
         #endregion
     }

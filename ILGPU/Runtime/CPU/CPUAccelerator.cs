@@ -20,6 +20,7 @@ using System.Diagnostics.CodeAnalysis;
 using System.Reflection;
 using System.Reflection.Emit;
 using System.Threading;
+using System.Threading.Tasks;
 
 #pragma warning disable CA1508 // Avoid dead conditional code
 
@@ -386,18 +387,13 @@ namespace ILGPU.Runtime.CPU
                 emitter.Emit(OpCodes.Stfld, kernel.TaskArgumentMapping[i]);
             }
 
-            // Launch task: ((CPUKernel)kernel).CPUAccelerator.Launch(task);
+            // Launch task: ((CPUKernel)kernel).Launch(task) - the kernel knows whether its lanes are
+            // independent (see CPUKernel.LaneIndependent), which selects the accelerator's launch path.
             emitter.Emit(LocalOperation.Load, cpuKernel);
-            emitter.EmitCall(
-                typeof(CPUKernel).GetProperty(
-                    nameof(CPUKernel.CPUAccelerator))
-                .AsNotNull()
-                .GetGetMethod(false)
-                .AsNotNull());
             emitter.Emit(LocalOperation.Load, task);
             emitter.EmitCall(
-                typeof(CPUAccelerator).GetMethod(
-                    nameof(CPUAccelerator.Launch),
+                typeof(CPUKernel).GetMethod(
+                    nameof(CPUKernel.Launch),
                     BindingFlags.NonPublic | BindingFlags.Instance)
                 .AsNotNull());
 
@@ -427,6 +423,77 @@ namespace ILGPU.Runtime.CPU
         internal void FinishTaskProcessing() =>
             // Wait for the result
             finishedEventPerMultiprocessor.SignalAndWait();
+
+        /// <summary>
+        /// Lane-independent launches of at most this many lane invocations (grid groups x group size)
+        /// run inline on the launching thread; larger ones are split across the multiprocessors on the
+        /// thread pool. See <see cref="Launch(CPUAcceleratorTask, bool)"/>.
+        /// </summary>
+        public static int LaneLoopInlineMaxWorkItems { get; set; } = 256;
+
+        /// <summary>
+        /// Forces every launch onto the cooperative lane-thread path (diagnostic / A-B control for the
+        /// lane-loop path). Default false.
+        /// </summary>
+        public static bool DisableLaneLoop { get; set; }
+
+        /// <summary>
+        /// Launches taken through the lane-loop path since process start (diagnostic; lets a test prove
+        /// which path a kernel ran on).
+        /// </summary>
+        public static long LaneLoopLaunchCount => Interlocked.Read(ref laneLoopLaunchCount);
+        private static long laneLoopLaunchCount;
+
+        /// <summary>
+        /// Launches a task, choosing the execution path from the kernel's lane independence.
+        /// </summary>
+        /// <param name="task">The task to launch.</param>
+        /// <param name="laneIndependent">
+        /// True if the kernel's lanes never interact (<see cref="CPUKernel.LaneIndependent"/>).
+        /// </param>
+        /// <remarks>
+        /// A lane-independent kernel under cooperative (sequential-within-group) execution runs its lanes
+        /// in a plain loop (<see cref="CPUMultiprocessor.ExecuteLaneLoop"/>): the same lane order the
+        /// cooperative lane threads produce, without waking them. Small grids run inline on the calling
+        /// thread; larger ones are split into one grid chunk per multiprocessor - the same chunking and
+        /// parallelism as the lane-thread path - and run on the thread pool. Everything else (kernels with
+        /// barriers/shuffles/shared memory, explicit Parallel mode, the browser) takes the original path.
+        /// </remarks>
+        internal void Launch(CPUAcceleratorTask task, bool laneIndependent)
+        {
+            if (!laneIndependent || !UsesSequentialExecution || IsWasm || DisableLaneLoop)
+            {
+                Launch(task);
+                return;
+            }
+
+            taskConcurrencyLimit.Wait();
+            try
+            {
+                Interlocked.Increment(ref laneLoopLaunchCount);
+                int linearGridDim = task.GridDim.Size;
+                long workItems = (long)linearGridDim * task.GroupDim.Size;
+                int numProcessors = multiprocessors.Length;
+                if (numProcessors == 1 || linearGridDim == 1 || workItems <= LaneLoopInlineMaxWorkItems)
+                {
+                    multiprocessors[0].ExecuteLaneLoop(task, 0, linearGridDim);
+                }
+                else
+                {
+                    int chunk = IntrinsicMath.DivRoundUp(linearGridDim, numProcessors);
+                    Parallel.For(0, numProcessors, i =>
+                    {
+                        int start = i * chunk;
+                        multiprocessors[i].ExecuteLaneLoop(
+                            task, start, Math.Min(linearGridDim, start + chunk));
+                    });
+                }
+            }
+            finally
+            {
+                taskConcurrencyLimit.Release();
+            }
+        }
 
         /// <summary>
         /// Launches the given accelerator task on this accelerator.

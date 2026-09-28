@@ -51,7 +51,10 @@ static class CpuLaunchLatencyProbe
         var mode = Enum.TryParse<CPUAcceleratorMode>(modeStr, out var m) ? m : CPUAcceleratorMode.Auto;
         using var context = Context.Create(b => b.CPU());
         using var acc = context.CreateCPUAccelerator(0, mode);
-        Console.WriteLine($"[cpu-launch-lat] CPUAcceleratorMode={mode}");
+        // CPU_LANELOOP=0: force the cooperative lane-thread path (A/B control for the lane-loop path).
+        CPUAccelerator.DisableLaneLoop = Environment.GetEnvironmentVariable("CPU_LANELOOP") == "0";
+        if (int.TryParse(Environment.GetEnvironmentVariable("CPU_LANELOOP_INLINE"), out var inl)) CPUAccelerator.LaneLoopInlineMaxWorkItems = inl;
+        Console.WriteLine($"[cpu-launch-lat] CPUAcceleratorMode={mode} DisableLaneLoop={CPUAccelerator.DisableLaneLoop}");
         Console.WriteLine($"[cpu-launch-lat] CPU NumThreads={acc.NumThreads} NumMultiprocessors={acc.NumMultiprocessors} " +
                           $"MaxThreadsPerGroup={acc.MaxNumThreadsPerGroup} WarpSize={acc.WarpSize} cores={Environment.ProcessorCount}");
         Console.WriteLine($"[cpu-launch-lat] iters={iters} distinctKernels={distinct}");
@@ -89,12 +92,55 @@ static class CpuLaunchLatencyProbe
         Console.WriteLine($"[cpu-launch-lat] SYNC  total={total.Elapsed.TotalSeconds:F2}s mean={sum / iters:F3}ms " +
                           $"p50={Pct(0.50):F3} p90={Pct(0.90):F3} p99={Pct(0.99):F3} max={times[iters - 1]:F2}ms");
         Console.WriteLine($"[cpu-launch-lat] SYNC   launches >1ms={o1}  >10ms={o10}  >100ms={o100}  >1000ms={o1000}");
+        Console.WriteLine($"[cpu-launch-lat] lane-loop launches so far: {CPUAccelerator.LaneLoopLaunchCount}");
 
         // GROUP-BARRIER phase: launch a shared-mem reduction kernel (in-kernel Group.Barrier) many
         // times via explicit KernelConfig(numGroups, GBSize) — the GGUF GEMV/softmax pattern.
         RunGroupBarrierPhase(acc, Math.Min(iters, 40));
 
+        RunSizeSweepPhase(acc);
         return RunAsyncPhase(acc, a, b, loaded, Math.Min(iters, 2000));
+    }
+
+    static void Heavy(Index1D i, ArrayView<float> a, ArrayView<float> b)
+    {
+        float x = b[i];
+        for (int k = 0; k < 16; k++) x = MathF.Sqrt(x * x + 1f) * 0.5f;
+        a[i] = x;
+    }
+
+    // SIZE SWEEP (lane-loop path): per-launch time vs element count for a light (1 op) and a heavier
+    // (16 sqrt) element-wise kernel, checked against a host reference. Run with CPU_LANELOOP=0/1 to
+    // compare against the cooperative path and to pick CPUAccelerator.LaneLoopInlineMaxWorkItems.
+    static void RunSizeSweepPhase(CPUAccelerator acc)
+    {
+        var light = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>>(K1);
+        var heavy = acc.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>>(Heavy);
+        foreach (int n in (Environment.GetEnvironmentVariable("CPU_SIZES") ?? "1024,4096,16384,65536,262144,1048576,4194304").Split(',').Select(int.Parse))
+        {
+            var host = new float[n];
+            for (int i = 0; i < n; i++) host[i] = (i % 97) * 0.25f;
+            using var inp = acc.Allocate1D(host);
+            using var outp = acc.Allocate1D<float>(n);
+            foreach (var (name, k) in new[] { ("light", light), ("heavy", heavy) })
+            {
+                k(n, outp.View, inp.View); acc.Synchronize();
+                var got = outp.GetAsArray1D();
+                int bad = 0;
+                for (int i = 0; i < n; i++)
+                {
+                    float x = host[i], want;
+                    if (name == "light") want = x * 2f - 0.5f;
+                    else { for (int r = 0; r < 16; r++) x = MathF.Sqrt(x * x + 1f) * 0.5f; want = x; }
+                    if (got[i] != want) bad++;
+                }
+                int reps = n <= 65536 ? 200 : n <= (1 << 20) ? 20 : 5;
+                var sw = Stopwatch.StartNew();
+                for (int r = 0; r < reps; r++) { k(n, outp.View, inp.View); acc.Synchronize(); }
+                Console.WriteLine($"[cpu-launch-lat] SIZE {name,-5} n={n,8}: {sw.Elapsed.TotalMilliseconds / reps,9:F3} ms/launch  " +
+                                  $"{(bad == 0 ? "exact" : bad + " WRONG")}");
+            }
+        }
     }
 
     static void RunGroupBarrierPhase(CPUAccelerator acc, int iters)

@@ -201,6 +201,8 @@ namespace ILGPU.Backends.IL
                 kernelMethod = methodEmitter.Finish();
             }
 
+            int numSharedAllocations = backendContext.SharedAllocations.Length +
+                backendContext.DynamicSharedAllocations.Length;
             return new ILCompiledKernel(
                 Context,
                 entryPoint,
@@ -208,9 +210,50 @@ namespace ILGPU.Backends.IL
                 taskType,
                 taskConstructor,
                 taskArgumentMapping,
-                backendContext.SharedAllocations.Length +
-                    backendContext.DynamicSharedAllocations.Length,
-                backendContext.SharedMemorySpecification.StaticSize);
+                numSharedAllocations,
+                backendContext.SharedMemorySpecification.StaticSize,
+                requiresLaneCooperation:
+                    numSharedAllocations > 0 || UsesLaneCooperation(backendContext));
+        }
+
+        /// <summary>
+        /// True if the kernel or any method it calls contains an operation through which the lanes of
+        /// a group or warp interact: a barrier (<see cref="BarrierOperation"/>: group/warp barriers and
+        /// the predicate barriers behind BarrierPopCount/And/Or), or a <see cref="ThreadValue"/>
+        /// (<see cref="Broadcast"/>, <see cref="WarpShuffle"/>, <see cref="SubWarpShuffle"/>).
+        /// </summary>
+        /// <remarks>
+        /// A kernel with none of these (and no shared memory) is lane-independent: running its lanes one
+        /// after another on one thread is exactly what the cooperative CPU scheduler already does for it
+        /// (the baton only moves at the start and end of each lane), minus the per-lane OS-thread
+        /// handoffs. See <see cref="CPUAccelerator"/>'s lane-loop launch path.
+        /// The CPU backend executes the ORIGINAL managed method, not code generated from this IR, so this
+        /// relies on every cooperative CPU-runtime entry point being an intrinsic the frontend turns into
+        /// one of these IR values. The lane-loop path fails loud if a barrier is reached anyway.
+        /// </remarks>
+        private static bool UsesLaneCooperation(in BackendContext backendContext)
+        {
+            if (MethodUsesLaneCooperation(backendContext.KernelMethod))
+                return true;
+            foreach (var (method, _) in backendContext)
+            {
+                if (MethodUsesLaneCooperation(method))
+                    return true;
+            }
+            return false;
+        }
+
+        private static bool MethodUsesLaneCooperation(Method method)
+        {
+            foreach (var block in method.Blocks)
+            {
+                foreach (var valueEntry in block)
+                {
+                    if (valueEntry.Value is BarrierOperation || valueEntry.Value is ThreadValue)
+                        return true;
+                }
+            }
+            return false;
         }
 
         /// <summary>
