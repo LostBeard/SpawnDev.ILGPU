@@ -1,6 +1,43 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.19-local.2 (unreleased, forks 2.3.6) - Wasm: pipelined dispatch
+
+**Pipelined dispatch (`WasmAccelerator.EnablePipelinedDispatch`, default on).** A flat (no barrier) dispatch of
+at most `NonBarrierMinItemsPerWorker` items that is queued behind nothing but other pipelined work is prepared and
+posted at launch time to ONE checked-out pipeline worker, without waiting for the dispatches ahead of it. The
+worker runs its messages strictly in arrival order (a promise chain in the bootstrap) and does the per-dispatch
+memory work itself - zero, copy each buffer range in, struct arguments, kernel, copy out - so results are the
+same as the serialized path. Host writes (`CopyFromCPU` / `CopyFromHost` / `CopyFromJS`) and device copies queued
+while a pipeline runs go on it too, in order (the training-loop upload pattern). Everything else (barrier kernels,
+large grids, a memory grow, an accelerator's first dispatch) takes the serialized path, which first waits for the
+pipeline to drain. A failed dispatch fails every later dispatch of the same pipeline ("skipped"), as the
+serialized await chain does. Answers are cumulative: the worker answers when something waits (a ping from
+`SynchronizeAsync` / a serialized dispatch / an ordered copy), on a failure, or on a 4 ms timer, so a missed ping
+costs milliseconds, never a hang.
+
+**The cost was SpawnJS marshalling, not the worker** (worker: 0.02 ms per dispatch). Posting a DTO cost ~0.29 ms
+because the POCO marshaller sets every property and every array element with its own interop call; reading an
+answer with `GetData<T>` cost as much. Pipelined messages are built by a main-thread JS helper from ONE call (a
+packed `byte[]` header, the arguments as one string, buffers and scripts as ids), and an answer is one call.
+
+**Measured (Chrome, 32-element kernel, `BackendTestBase.LaunchCost`):** 0.72-0.78 ms/launch serialized ->
+0.134-0.148 ms pipelined (5.3x). ML `SystemOne_Snake_BehavioralClone_AgreesWithTeacher` on Wasm: 117 s -> 36.9 s
+with identical results (loss 0.0320, agreement 100%, policy mean 49.1).
+
+**Also:** per-dispatch host overhead cut (view metadata reflection cached per type; the view-layout diagnostic
+string is built only when an error message needs it; struct field lists cached) - prepare 0.07-0.09 -> 0.04 ms.
+`SynchronizeAsync` used to clear `_pendingWork` after awaiting it (dropping launches made during the await), and a
+failure stayed in the list so EVERY later `SynchronizeAsync` rethrew it; it now removes only completed tasks.
+
+**Tests:** `WasmTests.Wasm_Pipeline_DependentChain_MatchesHostReplay` (400 pipelined launches with struct args,
+SubView sources, host writes and device copies mid-queue, a barrier kernel behind the pipeline, host replay),
+`Wasm_Pipeline_FailedDispatch_SkipsLaterAndRecovers`, `Wasm_Pipeline_AnswersWithoutAWaiter`,
+`Wasm_Pipeline_FirstUseCompiles_StayInOrder`; `LaunchCost_TrivialKernel_SyncedAndBatched` prints a pipelined vs
+serialized A/B. Wasm lane 705/0/30. Red-check note: removing the worker's ordering chain did NOT fail any test -
+on V8 a small module's compile resolves before the next queued message runs - so the chain is kept on the
+spec's terms, not a demonstrated failure.
+
 ## 5.2.18 (forks 2.3.6) - release of 5.2.18-local.1 .. local.8
 
 Everything in the `5.2.18-local.*` sections below. Headlines: CPU lane-independent kernels run as a lane loop

@@ -104,12 +104,44 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 profile = " | " + SpawnDev.ILGPU.Wasm.WasmDispatchProfile.Summary();
             }
 
+            // Deep batches: the steady-state cost once a launch no longer waits on the one before.
+            sw.Restart();
+            double launchLoopMs = 0;
+            for (int r = 0; r < 4; r++)
+            {
+                long t0 = Stopwatch.GetTimestamp();
+                for (int j = 0; j < 64; j++) k(n, a.View, b.View);
+                launchLoopMs += Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
+                await accelerator.SynchronizeAsync();
+            }
+            string deep = $", batched x64 {sw.Elapsed.TotalMilliseconds / 256:F3} ms/launch " +
+                          $"(launch calls {launchLoopMs / 256:F3}, drain {(sw.Elapsed.TotalMilliseconds - launchLoopMs) / 256:F3})";
+
+            // Wasm A/B: the same batched loop on the serialized path (no pipelined dispatch).
+            string serialized = "";
+            if (wasm)
+            {
+                bool savedPipe = SpawnDev.ILGPU.Wasm.WasmAccelerator.EnablePipelinedDispatch;
+                SpawnDev.ILGPU.Wasm.WasmAccelerator.EnablePipelinedDispatch = false;
+                try
+                {
+                    sw.Restart();
+                    for (int r = 0; r < batches; r++)
+                    {
+                        for (int j = 0; j < perBatch; j++) k(n, a.View, b.View);
+                        await accelerator.SynchronizeAsync();
+                    }
+                    serialized = $", serialized x{perBatch} {sw.Elapsed.TotalMilliseconds / (batches * perBatch):F3} ms/launch";
+                }
+                finally { SpawnDev.ILGPU.Wasm.WasmAccelerator.EnablePipelinedDispatch = savedPipe; }
+            }
+
             var got = await a.CopyToHostAsync<float>();
             for (int i = 0; i < n; i++)
                 if (got[i] != host[i] * 2f - 0.5f)
                     throw new Exception($"[{i}] = {got[i]}, expected {host[i] * 2f - 0.5f}");
             Console.WriteLine($"[LaunchCost] {accelerator.AcceleratorType}: synced {syncedMs:F3} ms/launch, " +
-                              $"batched x{perBatch} {batchedMs:F3} ms/launch (32-element kernel){profile}");
+                              $"batched x{perBatch} {batchedMs:F3} ms/launch{deep}{serialized} (32-element kernel){profile}");
         });
     }
 }

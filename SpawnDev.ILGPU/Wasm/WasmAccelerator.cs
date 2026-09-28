@@ -28,7 +28,43 @@ namespace SpawnDev.ILGPU.Wasm
     public class WasmAccelerator : KernelAccelerator<WasmCompiledKernel, WasmKernel>
     {
         // OOB diagnostic: last dispatch's view layout (for error messages)
-        private string _lastViewLayoutDiag = "";
+        private ViewLayoutDiag? _lastViewLayoutDiag;
+
+        /// <summary>A dispatch's view layout, formatted on demand for an error message.</summary>
+        private sealed class ViewLayoutDiag
+        {
+            private readonly List<(bool isBuffer, WasmMemoryBuffer? buffer, int length, int stride, int stride2, object? value)> _args;
+            private readonly List<int> _viewBufferIdx, _bufferOffsets, _viewSubOffsets, _viewElemSizes;
+            private readonly List<(int minByte, int maxByte)> _bufferRanges;
+            private readonly int _memorySize;
+
+            public ViewLayoutDiag(
+                List<(bool isBuffer, WasmMemoryBuffer? buffer, int length, int stride, int stride2, object? value)> args,
+                List<int> viewBufferIdx, List<(int minByte, int maxByte)> bufferRanges, List<int> bufferOffsets,
+                List<int> viewSubOffsets, List<int> viewElemSizes, int memorySize)
+            {
+                _args = args; _viewBufferIdx = viewBufferIdx; _bufferRanges = bufferRanges; _bufferOffsets = bufferOffsets;
+                _viewSubOffsets = viewSubOffsets; _viewElemSizes = viewElemSizes; _memorySize = memorySize;
+            }
+
+            public override string ToString()
+            {
+                var diagSb = new System.Text.StringBuilder();
+                int viewCheckIdx = 0;
+                foreach (var (isB, _, lenCheck, _, _, _) in _args)
+                {
+                    if (!isB) continue;
+                    int bIdx = _viewBufferIdx[viewCheckIdx];
+                    var (diagRMin, _) = _bufferRanges[bIdx];
+                    if (diagRMin == int.MaxValue) diagRMin = 0;
+                    int vOff = _bufferOffsets[bIdx] + _viewSubOffsets[viewCheckIdx] - diagRMin;
+                    int dataEnd = vOff + lenCheck * _viewElemSizes[viewCheckIdx];
+                    diagSb.Append($" V{viewCheckIdx}:[{vOff}..{dataEnd})/{_memorySize}");
+                    viewCheckIdx++;
+                }
+                return diagSb.ToString();
+            }
+        }
 
         // Pending async work (kernel dispatches)
         internal readonly List<Task> _pendingWork = new();
@@ -407,12 +443,23 @@ namespace SpawnDev.ILGPU.Wasm
             public int ScratchPerThread;
             public int TotalItems;
             public int WorkerCount;
-            public string ViewLayoutDiag = "";
+            public ViewLayoutDiag? ViewLayoutDiag;
             // Kernel name for error reporting — surfaced 2026-05-04 by Data needing
             // to identify which op trapped at dispatch 176 in StyleMosaic Wasm.
             public string KernelName = "";
             public Action<MessageEvent>? MsgHandler;
             public Action<Event>? ErrHandler;
+            /// <summary>Pipelined dispatches posted to this worker and not yet answered, oldest first. The
+            /// worker runs them in order and answers cumulatively (see CompletePipelined).</summary>
+            public readonly Queue<PipelinedDispatch> Pipeline = new();
+        }
+
+        private sealed class PipelinedDispatch
+        {
+            public TaskCompletionSource Tcs = null!;
+            public long Seq;
+            public int DispNum;
+            public string KernelName = "";
         }
 
         /// <summary>
@@ -487,6 +534,31 @@ namespace SpawnDev.ILGPU.Wasm
 
         // --- Reflection caches for hot-path stride extraction and struct marshaling ---
         private static readonly ConcurrentDictionary<Type, StrideReflectionCache> _strideCache = new();
+
+        /// <summary>Per view type: what RunKernelAsync needs to place a view (see its SubView offset code).</summary>
+        private sealed class ViewTypeInfo
+        {
+            public PropertyInfo? BaseProp;
+            public PropertyInfo? IndexProp;
+            public int ElemSize;
+
+            public static ViewTypeInfo Create(Type viewType)
+            {
+                var info = new ViewTypeInfo { BaseProp = viewType.GetProperty("BaseView") };
+                var viewObjType = info.BaseProp?.PropertyType ?? viewType;
+                if (viewObjType.IsGenericType)
+                    info.ElemSize = global::ILGPU.Interop.SizeOf(viewObjType.GetGenericArguments()[0]);
+                info.IndexProp = viewObjType.GetProperty("Index",
+                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                return info;
+            }
+        }
+        private static readonly ConcurrentDictionary<Type, ViewTypeInfo> s_viewTypeInfo = new();
+
+        /// <summary>Instance fields of a struct kernel argument, per type (the launcher scans them for views).</summary>
+        private static readonly ConcurrentDictionary<Type, FieldInfo[]> s_structFields = new();
+        private static FieldInfo[] GetStructFields(Type t) => s_structFields.GetOrAdd(t,
+            tt => tt.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance));
         private static readonly ConcurrentDictionary<Type, MethodInfo> _unsafeWriteCache = new();
 
         private sealed class StrideReflectionCache
@@ -679,6 +751,7 @@ namespace SpawnDev.ILGPU.Wasm
             // silently hanging on a worker pool that was already torn down.
             if (wasmAccel._disposed)
                 throw new ObjectDisposedException(nameof(WasmAccelerator), "Cannot dispatch kernels on a disposed WasmAccelerator.");
+            long profLaunch = WasmDispatchProfile.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
 
             int dispNum = ++_dispatchCount;
 
@@ -715,8 +788,7 @@ namespace SpawnDev.ILGPU.Wasm
                     // fields and register intent on any IArrayView's underlying buffer.
                     try
                     {
-                        var fields = arg.GetType().GetFields(
-                            BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
+                        var fields = GetStructFields(arg.GetType());
                         foreach (var f in fields)
                         {
                             var fv = f.GetValue(arg);
@@ -733,8 +805,12 @@ namespace SpawnDev.ILGPU.Wasm
             // Increment active dispatch count BEFORE starting the async task,
             // so the count is visible during the task's synchronous execution phase.
             wasmAccel._activeDispatchCount++;
+            if (profLaunch != 0) WasmDispatchProfile.Add(ref WasmDispatchProfile.LaunchTicks, profLaunch);
             var task = wasmAccel.RunKernelAsync(compiledKernel, dimension, args, dispNum, argDispatchIntents);
             wasmAccel._pendingWork.Add(task);
+            // RunKernelAsync posts a pipelined dispatch before its first await, so the flag is already set.
+            if (wasmAccel._lastLaunchPipelined && !task.IsCompleted)
+                wasmAccel._pipelinedTasks.Add(task);
         }
 
         /// <summary>
@@ -763,9 +839,19 @@ namespace SpawnDev.ILGPU.Wasm
             // like RunKernelAsync's serialize-and-clear step. Replacing _pendingWork with [copyTask]
             // bounds the list (a run of pure copies with no intervening dispatch won't accumulate) while
             // preserving order — a later dispatch / SynchronizeAsync awaits copyTask, which awaits prior.
+            if (CanJoinRunningPipeline())
+            {
+                EnsurePipeId(target);
+                EnsurePipeId(source);
+                PostPipelinedOp("(device copy)", (worker, seq) => PipeJs.JSRef!.CallVoid("copy", worker,
+                    _pipelineEpoch, (int)(seq >> 32), (int)(seq & 0xFFFFFFFF), target.PipeId,
+                    (double)targetOffsetInBytes, source.PipeId, (double)sourceOffsetInBytes, (double)lengthInBytes));
+                return;
+            }
             Task[] prior = _pendingWork.Count > 0 ? _pendingWork.ToArray() : System.Array.Empty<Task>();
             var copyTask = OrderedDeviceCopyAsync(
                 prior, target, source, sourceOffsetInBytes, targetOffsetInBytes, lengthInBytes);
+            RequestPipelineAck();
             _pendingWork.Clear();
             _pendingWork.Add(copyTask);
         }
@@ -803,8 +889,24 @@ namespace SpawnDev.ILGPU.Wasm
                 staged.Dispose();
                 throw new ObjectDisposedException(nameof(WasmAccelerator));
             }
+            if (CanJoinRunningPipeline())
+            {
+                // The pipeline worker applies it in its turn; the staged bytes are TRANSFERRED to it.
+                EnsurePipeId(target);
+                try
+                {
+                    PostPipelinedOp("(host write)", (worker, seq) => PipeJs.JSRef!.CallVoid("write", worker,
+                        _pipelineEpoch, (int)(seq >> 32), (int)(seq & 0xFFFFFFFF), target.PipeId,
+                        (double)targetByteOffset, staged));
+                }
+                finally { staged.Dispose(); }
+                // Same as ApplyStagedHostWrite: dispatches queued after this write must see the new bytes.
+                target.NotifyHostWrite();
+                return;
+            }
             Task[] prior = _pendingWork.Count > 0 ? _pendingWork.ToArray() : System.Array.Empty<Task>();
             var writeTask = OrderedHostWriteAsync(prior, target, staged, targetByteOffset);
+            RequestPipelineAck();
             _pendingWork.Clear();
             _pendingWork.Add(writeTask);
         }
@@ -849,12 +951,29 @@ namespace SpawnDev.ILGPU.Wasm
             if (_disposed)
                 throw new ObjectDisposedException(nameof(WasmAccelerator));
 
+            // A small flat dispatch queued behind nothing but other pipelined dispatches may join the
+            // pipeline (see EnablePipelinedDispatch): it is prepared and posted right now, WITHOUT waiting for
+            // the work ahead of it, because the pipeline worker runs everything in order. Whether it really
+            // joins is decided once its memory layout is known (TryJoinPipeline); until then nothing below
+            // touches linear memory or buffer contents, so falling back and waiting for `pipelinePrior` then
+            // is equivalent to waiting here.
+            _lastLaunchPipelined = false;
+            bool pipelineCandidate = IsPipelineCandidate(compiledKernel, dimension);
+            Task[]? pipelinePrior = null;
+            if (pipelineCandidate)
+            {
+                // Keep the in-flight pipelined tasks in _pendingWork (SynchronizeAsync must wait for all of
+                // them); drop the finished ones so a long pipeline does not grow the list.
+                _pendingWork.RemoveAll(t => t.IsCompletedSuccessfully);
+                if (_pendingWork.Count > 0) pipelinePrior = _pendingWork.ToArray();
+            }
             // Serialize kernel execution: wait for all previous dispatches to complete
             // before starting a new one. Prevents data races in multi-kernel algorithms.
-            if (_pendingWork.Count > 0)
+            else if (_pendingWork.Count > 0)
             {
                 var pending = _pendingWork.ToArray();
                 _pendingWork.Clear();
+                RequestPipelineAck();
                 await Task.WhenAll(pending);
             }
 
@@ -1045,27 +1164,19 @@ namespace SpawnDev.ILGPU.Wasm
                             int subViewByteOffset = 0;
                             try
                             {
-                                var viewType = args[i].GetType();
-                                var baseProp = viewType.GetProperty("BaseView");
-                                object viewObj = baseProp != null ? baseProp.GetValue(args[i])! : args[i];
-                                // Get the actual element size from the view type.
-                                var viewGenericType = viewObj.GetType();
-                                if (viewGenericType.IsGenericType)
+                                // Per view TYPE: the BaseView property (strided views), the element size and
+                                // the Index property are looked up once (s_viewTypeInfo); the view's Index is
+                                // read through IContiguousArrayView when the view implements it.
+                                var vinfo = s_viewTypeInfo.GetOrAdd(args[i].GetType(), ViewTypeInfo.Create);
+                                object viewObj = vinfo.BaseProp != null ? vinfo.BaseProp.GetValue(args[i])! : args[i];
+                                if (vinfo.ElemSize > 0)
+                                    viewElemSizeForLength = vinfo.ElemSize;
+                                object? idx = viewObj is IContiguousArrayView contiguous
+                                    ? contiguous.Index
+                                    : vinfo.IndexProp?.GetValue(viewObj);
+                                if (idx is long longIdx)
                                 {
-                                    var elemType = viewGenericType.GetGenericArguments()[0];
-                                    int actualSize = global::ILGPU.Interop.SizeOf(elemType);
-                                    if (actualSize > 0)
-                                        viewElemSizeForLength = actualSize;
-                                }
-                                var indexProp = viewObj.GetType().GetProperty("Index",
-                                    BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                                if (indexProp != null)
-                                {
-                                    var idx = indexProp.GetValue(viewObj);
-                                    if (idx is long longIdx)
-                                    {
-                                        subViewByteOffset = (int)(longIdx * viewElemSizeForLength);
-                                    }
+                                    subViewByteOffset = (int)(longIdx * viewElemSizeForLength);
                                 }
                             }
                             catch (Exception ex)
@@ -1209,6 +1320,7 @@ namespace SpawnDev.ILGPU.Wasm
                     }
                 }
 
+                if (WasmDispatchProfile.Enabled) WasmDispatchProfile.Add(ref WasmDispatchProfile.ArgsTicks, profStart);
                 // Calculate total memory needed for all buffers.
                 // For deduped buffers (SubViews of the same parent), allocate only the
                 // union of SubView ranges — NOT the full parent buffer. This prevents
@@ -1314,10 +1426,21 @@ namespace SpawnDev.ILGPU.Wasm
                 // SharedMemEntry.Gate). Acquired BEFORE any shared-memory read/create/grow and released
                 // in the finally after copy-OUT. Uncontended (zero cost) for a private memory or when
                 // only one accelerator of this max dispatches at a time (the PMT/production case).
-                if (UsesSharedMemory)
+                bool pipelined = pipelineCandidate && TryJoinPipeline(wasmPages, argDispatchIntents);
+                if (!pipelined)
                 {
-                    heldSharedGate = SharedEntry.Gate;
-                    await heldSharedGate.WaitAsync();
+                    if (pipelinePrior != null)
+                    {
+                        RequestPipelineAck();
+                        await Task.WhenAll(pipelinePrior);
+                        if (_disposed)
+                            throw new ObjectDisposedException(nameof(WasmAccelerator));
+                    }
+                    if (UsesSharedMemory)
+                    {
+                        heldSharedGate = SharedEntry.Gate;
+                        await heldSharedGate.WaitAsync();
+                    }
                 }
 
                 // DIAGNOSTIC (Tuvok 2026-05-26): force a real 1-page memory.grow on every
@@ -1347,7 +1470,13 @@ namespace SpawnDev.ILGPU.Wasm
                 SpawnJSObject? disposeWasmMemory = null;   // track per-dispatch memory for cleanup
                 SharedArrayBuffer? disposeBuffer = null;
 
-                if (!hasConcurrentWork && CachedWasmMemory != null && wasmPages <= CachedWasmPages)
+                if (pipelined)
+                {
+                    // TryJoinPipeline checked that the cached memory is large enough: no create, no grow.
+                    wasmMemory = CachedWasmMemory!;
+                    memoryBuffer = CachedMemoryBuffer!;
+                }
+                else if (!hasConcurrentWork && CachedWasmMemory != null && wasmPages <= CachedWasmPages)
                 {
                     // Reuse cached memory — fast path for render loops (same kernel, no overlap)
                     wasmMemory = CachedWasmMemory;
@@ -1440,7 +1569,7 @@ namespace SpawnDev.ILGPU.Wasm
                 // the buffer region [0..scratchBase). If a kernel reads from offsets that
                 // weren't fully overwritten by Copy-In, it gets garbage or OOB.
                 int zeroEnd = totalWithBarriers;
-                if (zeroEnd > 0)
+                if (zeroEnd > 0 && !pipelined) // a pipelined dispatch zeroes in the worker
                 {
                     using var zeroView = new Uint8Array(memoryBuffer, 0, zeroEnd);
                     zeroView.JSRef!.CallVoid("fill", 0);
@@ -1460,7 +1589,26 @@ namespace SpawnDev.ILGPU.Wasm
                 // SharedBuffer has been overwritten by a host write since queue.
                 var bufIndicesReadFromSnapshot = new HashSet<int>();
                 long profCopyIn = WasmDispatchProfile.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
-                for (int i = 0; i < bufferInfos.Count; i++)
+                // A pipelined dispatch copies in (and out) inside the worker, at its turn in the queue:
+                // record each used range instead. The ranges are the same ones the loop below copies.
+                WasmMemoryBuffer[]? pipeBuffers = null;
+                int[]? pipeRanges = null;
+                if (pipelined)
+                {
+                    pipeBuffers = new WasmMemoryBuffer[bufferInfos.Count];
+                    pipeRanges = new int[bufferInfos.Count * 3];
+                    for (int i = 0; i < bufferInfos.Count; i++)
+                    {
+                        var (buf, _) = bufferInfos[i];
+                        var (rangeMin, rangeMax) = bufferRanges[i];
+                        if (rangeMin == int.MaxValue) { rangeMin = 0; rangeMax = (int)buf.LengthInBytes; }
+                        pipeBuffers[i] = buf;
+                        pipeRanges[i * 3] = rangeMin;
+                        pipeRanges[i * 3 + 1] = bufferOffsets[i];
+                        pipeRanges[i * 3 + 2] = rangeMax - rangeMin;
+                    }
+                }
+                for (int i = 0; !pipelined && i < bufferInfos.Count; i++)
                 {
                     var (buf, _) = bufferInfos[i];
                     int offset = bufferOffsets[i];
@@ -1502,6 +1650,7 @@ namespace SpawnDev.ILGPU.Wasm
                 // short = 2 bytes < 4). Surfaced 2026-05-04 by Tests23_MinimalShortIntBodyStruct
                 // on Wasm.
                 if (WasmBackend.VerboseLogging
+                    && !pipelined
                     && dispNum >= 1 && dispNum <= 8
                     && bufferInfos.Count > 0)
                 {
@@ -1543,28 +1692,13 @@ namespace SpawnDev.ILGPU.Wasm
                 var structScratchWrites = new List<(int scratchOffset, byte[] bytes)>();
                 int scratchCursor = 0; // offset within scratch region
 
-                // OOB diagnostic: build view layout summary for error messages
+                // OOB diagnostic: view layout summary for error messages. Built only if an error message
+                // asks for it (ToString) - formatting it on every dispatch was pure overhead.
                 int memorySize = wasmPages * 65536;
-                {
-                    var diagSb = new System.Text.StringBuilder();
-                    int viewCheckIdx = 0;
-                    foreach (var (isB, bufCheck, lenCheck, _, _, _) in wasmArgs)
-                    {
-                        if (isB)
-                        {
-                            int bIdx = viewBufferIdx[viewCheckIdx];
-                            var (diagRMin, _) = bufferRanges[bIdx];
-                            if (diagRMin == int.MaxValue) diagRMin = 0;
-                            int vOff = bufferOffsets[bIdx] + viewSubOffsets[viewCheckIdx] - diagRMin;
-                            int elemSize = viewElemSizes[viewCheckIdx];
-                            int dataEnd = vOff + lenCheck * elemSize;
-                            diagSb.Append($" V{viewCheckIdx}:[{vOff}..{dataEnd})/{memorySize}");
-                            viewCheckIdx++;
-                        }
-                    }
-                    _lastViewLayoutDiag = diagSb.ToString();
-                }
+                _lastViewLayoutDiag = new ViewLayoutDiag(wasmArgs, viewBufferIdx, bufferRanges, bufferOffsets,
+                    viewSubOffsets, viewElemSizes, memorySize);
 
+                long profFlat = WasmDispatchProfile.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                 var flatArgs = new List<string>();
                 int viewIndex = 0; // tracks views for SubView offset lookup
                 int wasmArgIdx = 0; // tracks current wasmArgs index for IR param lookup
@@ -1906,8 +2040,27 @@ namespace SpawnDev.ILGPU.Wasm
                     wasmArgIdx++;
                 }
 
-                // Write struct scalar args into scratch memory region
-                if (structScratchWrites.Count > 0)
+                // Write struct scalar args into scratch memory region (a pipelined dispatch hands them to
+                // the worker, which writes them after its copy-in).
+                byte[]? pipeStructBytes = null;
+                int[]? pipeStructOffsets = null;
+                if (pipelined && structScratchWrites.Count > 0)
+                {
+                    int totalStructWriteBytes = 0;
+                    foreach (var (_, bytes) in structScratchWrites) totalStructWriteBytes += bytes.Length;
+                    pipeStructBytes = new byte[totalStructWriteBytes];
+                    pipeStructOffsets = new int[structScratchWrites.Count * 2];
+                    int cursor = 0;
+                    for (int si = 0; si < structScratchWrites.Count; si++)
+                    {
+                        var (scratchOffset, bytes) = structScratchWrites[si];
+                        System.Buffer.BlockCopy(bytes, 0, pipeStructBytes, cursor, bytes.Length);
+                        pipeStructOffsets[si * 2] = scratchOffset;
+                        pipeStructOffsets[si * 2 + 1] = bytes.Length;
+                        cursor += bytes.Length;
+                    }
+                }
+                else if (structScratchWrites.Count > 0)
                 {
                     foreach (var (scratchOffset, bytes) in structScratchWrites)
                     {
@@ -1916,6 +2069,7 @@ namespace SpawnDev.ILGPU.Wasm
                     }
                 }
 
+                if (profFlat != 0) WasmDispatchProfile.Add(ref WasmDispatchProfile.FlatTicks, profFlat);
                 // Restore NativePtr to 0 (cleanup from the pre-serialization patching)
                 for (int i = 0; i < bufferInfos.Count; i++)
                     bufferInfos[i].buffer.NativePtr = IntPtr.Zero;
@@ -1935,6 +2089,15 @@ namespace SpawnDev.ILGPU.Wasm
                 // will use them once the trace covers every Store-target IR shape.
                 bool traceFoundAnyBufferWrite = writtenBufferIndices.Count > 0;
                 if (WasmDispatchProfile.Enabled) WasmDispatchProfile.Add(ref WasmDispatchProfile.PrepareTicks, profStart);
+                if (pipelined)
+                {
+                    var done = PostPipelined(
+                        compiledKernel, totalItems, gridDimX, gridDimY, scratchBase, groupSize,
+                        realGroupDimX, realGroupDimY, flatArgs, wasmMemory, zeroEnd,
+                        pipeBuffers!, pipeRanges!, pipeStructBytes, pipeStructOffsets, dispNum);
+                    await done;
+                    return;
+                }
                 await DispatchToWorkers(
                     totalItems, gridDimX, gridDimY, scratchBase, scratchPerThread,
                     sharedMemBase, barrierBase, fenceSlot, yieldStateRegionBase, compiledKernel,
@@ -2005,6 +2168,22 @@ namespace SpawnDev.ILGPU.Wasm
                 // on EVERY exit path, including the stray-message early return below. WasmDispatchResponse
                 // is a plain C# DTO (no JSObjects), so it stays valid after msg is disposed.
                 using var _msgScope = msg;
+                if (state.Pipeline.Count > 0)
+                {
+                    long profAnswer = WasmDispatchProfile.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+                    // One interop call: +s = every dispatch up to sequence s is done, -s = dispatch s failed
+                    // (and everything before it is done).
+                    double ack = PipeJs.JSRef!.Call<MessageEvent, double>("ack", msg);
+                    string? error = ack < 0 ? PipeJs.JSRef!.Call<MessageEvent, string>("err", msg) : null;
+                    CompletePipelined(worker, state, (long)Math.Abs(ack), error);
+                    if (profAnswer != 0)
+                    {
+                        WasmDispatchProfile.Add(ref WasmDispatchProfile.ResponseTicks, profAnswer);
+                        WasmDispatchProfile.PipelinedAnswers++;
+                        WasmDispatchProfile.WorkerMs += PipeJs.JSRef!.Call<double>("takeWt");
+                    }
+                    return;
+                }
                 var tcs = state.CurrentTcs;
                 if (tcs == null) return; // No in-flight dispatch; ignore late or stray message.
                 state.CurrentTcs = null;
@@ -2037,6 +2216,11 @@ namespace SpawnDev.ILGPU.Wasm
                 // Same ownership rule as MsgHandler: the Event SpawnJSObject is handler-owned and must be
                 // disposed on every path (rare - only fires on a worker-level error - but still leaks if not).
                 using var _errScope = err;
+                if (state.Pipeline.Count > 0)
+                {
+                    AbortPipeline(new Exception($"[Wasm] Pipeline worker error during kernel execution | kernel={state.Pipeline.Peek().KernelName} disp={state.Pipeline.Peek().DispNum}"));
+                    return;
+                }
                 var tcs = state.CurrentTcs;
                 if (tcs == null) return;
                 state.CurrentTcs = null;
@@ -2048,6 +2232,463 @@ namespace SpawnDev.ILGPU.Wasm
 
             worker.OnMessage += state.MsgHandler;
             worker.OnError += state.ErrHandler;
+        }
+
+        /// <summary>
+        /// Pipelined dispatch (default on). A flat (no barrier) dispatch small enough for one worker
+        /// (at most <see cref="NonBarrierMinItemsPerWorker"/> items) is posted to a single PIPELINE worker
+        /// without waiting for the dispatches queued ahead of it. The worker runs its messages strictly in
+        /// arrival order and does the per-dispatch memory work itself (zero, copy-in, struct arguments,
+        /// kernel, copy-out), so the results are the same as the serialized path, but the host prepares
+        /// dispatch N+1 while the worker runs dispatch N instead of paying a full round trip per launch.
+        /// Everything else (barrier kernels, large grids, a memory grow, an ordered host write or device copy
+        /// in the queue) takes the serialized path, which first waits for the pipeline to drain.
+        /// Set false to force the serialized path (A/B measurement, red-checks).
+        /// </summary>
+        public static bool EnablePipelinedDispatch { get; set; } = true;
+
+        /// <summary>Number of dispatches that took the pipelined path (diagnostic, process-wide).</summary>
+        public static long PipelinedDispatchCount => s_pipelinedDispatchCount;
+
+        /// <summary>Pipelined dispatches this accelerator has posted and not yet had answered (diagnostic).</summary>
+        public int PipelinedInFlight => _pipelineInFlight;
+        private static long s_pipelinedDispatchCount;
+
+        // Pipeline state. One pipeline per accelerator at a time: it starts when a dispatch joins with nothing
+        // in flight and ends when the last in-flight dispatch answers (EndPipeline). While it runs it holds the
+        // pipeline worker (checked out of the pool) and this memory group's shared gate.
+        private Worker? _pipelineWorker;
+        private WorkerPool? _pipelinePool;
+        private SemaphoreSlim? _pipelineGate;
+        private int _pipelineInFlight;
+        private int _pipelineEpoch;
+        // Process-wide, so a worker's sequence numbers only ever grow, whichever accelerator uses it.
+        private static int s_pipelineEpochCounter;
+        private static long s_pipelineSeq;
+        private long _pipelineLastPostedSeq, _pipelinePingedSeq;
+        private long _pipelineLastProgress;
+        private CancellationTokenSource? _pipelineWatchdogCts;
+        // Set by RunKernelAsync when the launch it is running was posted to the pipeline (read by the
+        // launcher right after the call returns, before anything else can run).
+        private bool _lastLaunchPipelined;
+        // The pipelined tasks in _pendingWork, so a later launch can tell "only pipelined work ahead of me".
+        private readonly HashSet<Task> _pipelinedTasks = new();
+
+        /// <summary>
+        /// Cheap launch-time check: can this dispatch possibly join the pipeline? The memory checks come
+        /// later (<see cref="TryJoinPipeline"/>).
+        /// </summary>
+        private bool IsPipelineCandidate(WasmCompiledKernel compiledKernel, object dimension)
+        {
+            if (!EnablePipelinedDispatch || !_useSharedPool || !_firstDispatchDone || compiledKernel.HasBarriers)
+                return false;
+            var (x, y, z) = GetGridDimensions(dimension);
+            long totalItems = (long)x * y * z;
+            if (totalItems <= 0 || totalItems > NonBarrierMinItemsPerWorker)
+                return false;
+            return OnlyPipelinedWorkPending();
+        }
+
+        /// <summary>True when every unfinished task in <see cref="_pendingWork"/> is on the pipeline.</summary>
+        private bool OnlyPipelinedWorkPending()
+        {
+            foreach (var t in _pendingWork)
+            {
+                if (t.IsCompletedSuccessfully) continue;
+                // A failed dispatch or copy: take the serialized path, which awaits it and reports the error.
+                if (t.IsCompleted) return false;
+                // Unfinished non-pipelined work (a serialized copy or host write, a barrier kernel): it runs on
+                // the host or on other workers, so the pipeline worker cannot order itself behind it.
+                if (!_pipelinedTasks.Contains(t)) return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// Can an ordered host write / device copy go on the RUNNING pipeline? Only while one is in flight: with
+        /// nothing queued the caller writes immediately, and with serialized work queued it must wait for that.
+        /// </summary>
+        private bool CanJoinRunningPipeline()
+            => EnablePipelinedDispatch && _pipelineInFlight > 0 && _pipelineWorker != null && OnlyPipelinedWorkPending();
+
+        /// <summary>Queues pipelined work (not a kernel) and returns its task; <paramref name="post"/> sends it.</summary>
+        private Task PostPipelinedOp(string what, Action<Worker, long> post)
+        {
+            var worker = _pipelineWorker!;
+            var state = _workerHandlers[worker];
+            long seq = ++s_pipelineSeq;
+            var tcs = new TaskCompletionSource();
+            RegisterTcs(tcs);
+            try { post(worker, seq); }
+            catch { UnregisterTcs(tcs); throw; }
+            _pipelineLastPostedSeq = seq;
+            state.Pipeline.Enqueue(new PipelinedDispatch { Seq = seq, Tcs = tcs, DispNum = 0, KernelName = what });
+            _pipelineInFlight++;
+            _pendingWork.RemoveAll(t => t.IsCompletedSuccessfully);
+            _pendingWork.Add(tcs.Task);
+            _pipelinedTasks.Add(tcs.Task);
+            return tcs.Task;
+        }
+
+        private static void EnsurePipeId(WasmMemoryBuffer buf)
+        {
+            if (buf.PipeId != 0) return;
+            buf.PipeId = Interlocked.Increment(ref s_nextPipeBufferId);
+            PipeJs.JSRef!.CallVoid("reg", buf.PipeId, buf.SharedBuffer);
+        }
+
+        /// <summary>
+        /// Joins (or starts) the pipeline for a dispatch whose layout needs <paramref name="wasmPages"/>
+        /// pages. False means take the serialized path.
+        /// </summary>
+        private bool TryJoinPipeline(int wasmPages, Dictionary<WasmMemoryBuffer, int>? argDispatchIntents)
+        {
+            if (WasmBackend.ForceGrowEachDispatch)
+                return false;
+            // A buffer that has to be read from a host-write snapshot: the worker only sees SharedBuffer.
+            if (argDispatchIntents != null)
+                foreach (var kv in argDispatchIntents)
+                    if (kv.Key.GetSnapshotForDispatch(kv.Value) != null)
+                        return false;
+            if (_pipelineInFlight > 0)
+                // The pipeline holds the gate, so nobody else can have grown or replaced the memory.
+                return CachedWasmMemory != null && wasmPages <= CachedWasmPages;
+
+            var gate = SharedEntry.Gate;
+            if (!gate.Wait(0))
+                return false;
+            // Memory must already be big enough: a create or grow is host work the queued dispatches would race.
+            if (CachedWasmMemory == null || wasmPages > CachedWasmPages)
+            {
+                gate.Release();
+                return false;
+            }
+            var pool = GetSharedWorkerPool(1);
+            var acquired = pool.Acquire(1);
+            if (acquired.Count == 0)
+            {
+                gate.Release();
+                return false;
+            }
+            var worker = acquired[0];
+            _acquiredWorkers.Add(worker);
+            EnsurePersistentHandlers(worker);
+            _pipelineWorker = worker;
+            _pipelinePool = pool;
+            _activePool = pool;
+            _pipelineGate = gate;
+            _pipelineEpoch = Interlocked.Increment(ref s_pipelineEpochCounter);
+            _pipelineLastProgress = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (WasmDispatchWatchdogSeconds > 0)
+            {
+                _pipelineWatchdogCts = new CancellationTokenSource();
+                _ = PipelineWatchdogAsync(_pipelineEpoch, _pipelineWatchdogCts.Token);
+            }
+            return true;
+        }
+
+        /// <summary>Posts one pipelined dispatch; the task completes when the worker answers it.</summary>
+        /// <remarks>
+        /// One interop call: every number goes in a packed header (byte[] crosses as one heap copy), the kernel
+        /// arguments as one comma-joined string, and buffers and the worker script as ids the main-thread
+        /// helper (<see cref="PipeJs"/>) resolves. Posting a DTO cost ~0.3 ms per dispatch (2026-09-28): the
+        /// SpawnJS POCO marshaller sets each property, and each array ELEMENT, with its own interop call.
+        /// </remarks>
+        private Task PostPipelined(
+            WasmCompiledKernel compiledKernel, int totalItems, int gridDimX, int gridDimY, int scratchBase,
+            int groupSize, int realGroupDimX, int realGroupDimY, List<string> flatArgs, SpawnJSObject wasmMemory,
+            int zeroEnd, WasmMemoryBuffer[] buffers, int[] ranges, byte[]? structBytes, int[]? structOffsets,
+            int dispNum)
+        {
+            var worker = _pipelineWorker!;
+            var state = _workerHandlers[worker];
+            var wasmBytes = compiledKernel.WasmBinary;
+            if (!_initializedWorkersByKernel.TryGetValue(wasmBytes, out var kernelCacheEntry))
+            {
+                // Same monotonic id rule as DispatchToWorkers (never an identity hash).
+                kernelCacheEntry = new KernelCacheEntry { KernelId = Interlocked.Increment(ref _nextKernelId) };
+                _initializedWorkersByKernel[wasmBytes] = kernelCacheEntry;
+            }
+            var pipeJs = PipeJs;
+            int scriptId = GetPipeScriptId(compiledKernel.HasSimdKernel, flatArgs.Count);
+
+            // Header, in int32 words: epoch, sequence (high, low), script id, kernel id, startIdx, endIdx, scratch, zero bytes,
+            // param count + params, buffer count + (id, source offset, memory offset, length) each, struct
+            // count + (memory offset, length) each; then the struct bytes. Order must match PipeJsSource.post.
+            var p = BuildWorkerParams(false, gridDimX, gridDimY, scratchBase, 0, 0, 0, 0, groupSize, 0,
+                realGroupDimX, realGroupDimY, 0, 1, 0, 0);
+            int structCount = structOffsets == null ? 0 : structOffsets.Length / 2;
+            int words = 9 + 1 + p.Length + 1 + buffers.Length * 4 + 1 + structCount * 2;
+            var head = new int[words];
+            int k = 0;
+            long seq = ++s_pipelineSeq;
+            head[k++] = _pipelineEpoch;
+            head[k++] = (int)(seq >> 32);
+            head[k++] = (int)(seq & 0xFFFFFFFF);
+            head[k++] = scriptId;
+            head[k++] = kernelCacheEntry.KernelId;
+            head[k++] = 0;
+            head[k++] = totalItems;
+            head[k++] = scratchBase;
+            head[k++] = zeroEnd;
+            head[k++] = p.Length;
+            foreach (var v in p) head[k++] = v;
+            head[k++] = buffers.Length;
+            for (int i = 0; i < buffers.Length; i++)
+            {
+                var buf = buffers[i];
+                EnsurePipeId(buf);
+                head[k++] = buf.PipeId;
+                head[k++] = ranges[i * 3];
+                head[k++] = ranges[i * 3 + 1];
+                head[k++] = ranges[i * 3 + 2];
+            }
+            head[k++] = structCount;
+            for (int i = 0; i < structCount * 2; i++) head[k++] = structOffsets![i];
+            var headBytes = new byte[words * 4 + (structBytes?.Length ?? 0)];
+            System.Buffer.BlockCopy(head, 0, headBytes, 0, words * 4);
+            if (structBytes != null) System.Buffer.BlockCopy(structBytes, 0, headBytes, words * 4, structBytes.Length);
+
+            bool firstTimeOnWorker = kernelCacheEntry.Workers.Add(worker);
+            var tcs = new TaskCompletionSource();
+            RegisterTcs(tcs);
+            long profPost = WasmDispatchProfile.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+            try
+            {
+                pipeJs.JSRef!.CallVoid("post", worker, wasmMemory, headBytes, string.Join(",", flatArgs),
+                    firstTimeOnWorker ? wasmBytes : null);
+            }
+            catch
+            {
+                UnregisterTcs(tcs);
+                if (firstTimeOnWorker) kernelCacheEntry.Workers.Remove(worker);
+                if (_pipelineInFlight == 0) EndPipeline(returnWorker: true);
+                throw;
+            }
+            _pipelineLastPostedSeq = seq;
+            state.Pipeline.Enqueue(new PipelinedDispatch
+            {
+                Seq = seq,
+                Tcs = tcs,
+                DispNum = dispNum,
+                KernelName = compiledKernel.EntryPoint?.Name ?? "<unknown>",
+            });
+            _pipelineInFlight++;
+            _lastLaunchPipelined = true;
+            s_pipelinedDispatchCount++;
+            if (profPost != 0)
+            {
+                WasmDispatchProfile.Add(ref WasmDispatchProfile.PostTicks, profPost);
+                WasmDispatchProfile.Dispatches++;
+                WasmDispatchProfile.WorkersUsed++;
+            }
+            return tcs.Task;
+        }
+
+        /// <summary>
+        /// Main-thread helper for pipelined dispatch: builds the worker message from the packed header (see
+        /// <see cref="PostPipelined"/>) and reads the worker's answer, so each is ONE interop call. Buffers are
+        /// held as WeakRefs - the helper never keeps a buffer's memory alive; the buffer's own SharedBuffer
+        /// handle does, until it is disposed (which also removes the entry, <see cref="UnregisterPipeBuffer"/>).
+        /// </summary>
+        private const string PipeJsSource = @"(function () {
+  const bufs = new Map();
+  const scripts = [];
+  return {
+    reg: function (id, sab) { bufs.set(id, new WeakRef(sab)); },
+    unreg: function (id) { bufs.delete(id); },
+    script: function (id, text) { scripts[id] = text; },
+    wt: 0,
+    ack: function (e) {
+      const d = e.data;
+      if (!d || !d.s) return 0;
+      if (d.ack) { this.wt += d.wt || 0; return d.s; }
+      return -d.s;
+    },
+    takeWt: function () { const w = this.wt; this.wt = 0; return w; },
+    ping: function (worker) { worker.postMessage({ ping: true }); },
+    sab: function (id) {
+      const ref = bufs.get(id);
+      const sab = ref ? ref.deref() : undefined;
+      if (!sab) throw new Error('pipelined dispatch: buffer ' + id + ' is not registered (disposed?)');
+      return sab;
+    },
+    write: function (worker, pe, hi, lo, dstId, off, staged) {
+      worker.postMessage({ pl: true, pw: true, pe: pe, sq: hi * 4294967296 + (lo >>> 0), dst: this.sab(dstId), off: off, b: staged },
+        [staged.buffer]);
+    },
+    copy: function (worker, pe, hi, lo, dstId, doff, srcId, soff, n) {
+      worker.postMessage({ pl: true, pc: true, pe: pe, sq: hi * 4294967296 + (lo >>> 0), dst: this.sab(dstId), doff: doff,
+        src: this.sab(srcId), soff: soff, n: n });
+    },
+    err: function (e) { const d = e.data; return (d && d.error) ? String(d.error) : 'Unknown worker error'; },
+    post: function (worker, memory, head, args, wasmBytes) {
+      if (head.byteOffset & 3) head = head.slice();
+      const h = new Int32Array(head.buffer, head.byteOffset, head.byteLength >> 2);
+      let k = 0;
+      const pe = h[k++], sq = h[k++] * 4294967296 + (h[k++] >>> 0), sid = h[k++], kid = h[k++], startIdx = h[k++], endIdx = h[k++], myScratch = h[k++], z = h[k++];
+      const np = h[k++];
+      const p = Array.from(h.subarray(k, k + np)); k += np;
+      const nb = h[k++];
+      const pb = new Array(nb), pi = new Int32Array(nb * 3);
+      for (let i = 0; i < nb; i++) {
+        const id = h[k++];
+        const ref = bufs.get(id);
+        const sab = ref ? ref.deref() : undefined;
+        if (!sab) throw new Error('pipelined dispatch: buffer ' + id + ' is not registered (disposed?)');
+        pb[i] = sab; pi[3 * i] = h[k++]; pi[3 * i + 1] = h[k++]; pi[3 * i + 2] = h[k++];
+      }
+      const ns = h[k++];
+      let swo = null, swb = null;
+      if (ns > 0) { swo = new Int32Array(h.subarray(k, k + 2 * ns)); k += 2 * ns; swb = head.slice(k * 4); }
+      worker.postMessage({
+        pl: true, pe: pe, sq: sq, script: scripts[sid], wasmBytes: wasmBytes, kernelId: kid, memory: memory,
+        startIdx: startIdx, endIdx: endIdx, myScratch: myScratch, p: p,
+        a: args.length ? args.split(',') : [], z: z, pb: pb, pi: pi, swb: swb, swo: swo
+      });
+    }
+  };
+})()";
+
+        private static SpawnJSObject? s_pipeJs;
+        private static SpawnJSObject PipeJs => s_pipeJs ??= SpawnJSRuntime.Instance.Call<string, SpawnJSObject>("eval", PipeJsSource);
+        private static int s_nextPipeBufferId;
+        private static int s_nextPipeScriptId;
+        private static readonly Dictionary<(bool, int), int> s_pipeScriptIds = new();
+
+        private static int GetPipeScriptId(bool hasSimd, int argCount)
+        {
+            if (s_pipeScriptIds.TryGetValue((hasSimd, argCount), out int id)) return id;
+            id = ++s_nextPipeScriptId;
+            PipeJs.JSRef!.CallVoid("script", id, GetWorkerScript(false, hasSimd, argCount));
+            s_pipeScriptIds[(hasSimd, argCount)] = id;
+            return id;
+        }
+
+        /// <summary>A buffer used by a pipelined dispatch is being disposed: drop it from the helper.</summary>
+        internal static void UnregisterPipeBuffer(int pipeId)
+        {
+            if (pipeId != 0 && s_pipeJs != null)
+                s_pipeJs.JSRef!.CallVoid("unreg", pipeId);
+        }
+
+        /// <summary>
+        /// The pipeline worker answered: every queued dispatch up to <paramref name="seq"/> is done, except that
+        /// with an <paramref name="error"/> the dispatch <paramref name="seq"/> itself failed.
+        /// </summary>
+        private void CompletePipelined(Worker worker, WorkerDispatchState state, long seq, string? error)
+        {
+            if (seq <= 0) return; // not a pipeline answer
+            var done = new List<PipelinedDispatch>();
+            PipelinedDispatch? failed = null;
+            while (state.Pipeline.Count > 0 && state.Pipeline.Peek().Seq <= seq)
+            {
+                var entry = state.Pipeline.Dequeue();
+                UnregisterTcs(entry.Tcs);
+                if (error != null && entry.Seq == seq) failed = entry;
+                else done.Add(entry);
+            }
+            if (done.Count == 0 && failed == null) return; // an answer this pipeline already had
+            _pipelineInFlight = state.Pipeline.Count;
+            _pipelineLastProgress = System.Diagnostics.Stopwatch.GetTimestamp();
+            // Release the worker and the gate BEFORE completing the tasks: a continuation may be the next
+            // serialized dispatch, which needs both.
+            if (_pipelineInFlight == 0)
+                EndPipeline(returnWorker: true);
+            foreach (var entry in done)
+                entry.Tcs.TrySetResult();
+            failed?.Tcs.TrySetException(new Exception(
+                $"[Wasm] Worker error (pipelined): {error} | kernel={failed.KernelName} disp={failed.DispNum}"));
+        }
+
+        /// <summary>
+        /// Something is about to wait for queued work: ask the pipeline worker to answer as soon as it reaches
+        /// this point (it otherwise batches its answers on a short timer). Cheap no-op when nothing is queued
+        /// or everything posted has already been asked for.
+        /// </summary>
+        private void RequestPipelineAck()
+        {
+            if (_pipelineInFlight == 0 || _pipelineWorker == null || _pipelinePingedSeq == _pipelineLastPostedSeq)
+                return;
+            _pipelinePingedSeq = _pipelineLastPostedSeq;
+            PipeJs.JSRef!.CallVoid("ping", _pipelineWorker);
+        }
+
+        /// <summary>
+        /// Fails every queued pipelined dispatch (worker-level error or watchdog). The worker is NOT returned
+        /// to the pool - it may still be running - it stays checked out and Dispose terminates it, as for a
+        /// serialized dispatch that hangs.
+        /// </summary>
+        private void AbortPipeline(Exception ex)
+        {
+            var worker = _pipelineWorker;
+            var entries = new List<PipelinedDispatch>();
+            if (worker != null && _workerHandlers.TryGetValue(worker, out var state))
+            {
+                while (state.Pipeline.Count > 0) entries.Add(state.Pipeline.Dequeue());
+            }
+            _pipelineInFlight = 0;
+            EndPipeline(returnWorker: false);
+            foreach (var e in entries)
+            {
+                UnregisterTcs(e.Tcs);
+                e.Tcs.TrySetException(ex);
+            }
+        }
+
+        private void EndPipeline(bool returnWorker)
+        {
+            var worker = _pipelineWorker;
+            _pipelineWorker = null;
+            if (worker != null && returnWorker)
+            {
+                _acquiredWorkers.Remove(worker);
+                _pipelinePool?.Return(worker);
+            }
+            _pipelinePool = null;
+            _pipelinedTasks.Clear();
+            if (_pipelineWatchdogCts != null)
+            {
+                _pipelineWatchdogCts.Cancel();
+                _pipelineWatchdogCts.Dispose();
+                _pipelineWatchdogCts = null;
+            }
+            var gate = _pipelineGate;
+            _pipelineGate = null;
+            gate?.Release();
+        }
+
+        /// <summary>
+        /// Fails the pipeline if it makes no progress (no dispatch answered) for
+        /// <see cref="WasmDispatchWatchdogSeconds"/>. One timer per pipeline, cancelled when it drains.
+        /// </summary>
+        private async Task PipelineWatchdogAsync(int epoch, CancellationToken ct)
+        {
+            long limit = (long)WasmDispatchWatchdogSeconds * System.Diagnostics.Stopwatch.Frequency;
+            try
+            {
+                while (true)
+                {
+                    long remaining = _pipelineLastProgress + limit - System.Diagnostics.Stopwatch.GetTimestamp();
+                    if (remaining > 0)
+                        await Task.Delay(TimeSpan.FromSeconds((double)remaining / System.Diagnostics.Stopwatch.Frequency)
+                            + TimeSpan.FromMilliseconds(1), ct);
+                    if (ct.IsCancellationRequested || epoch != _pipelineEpoch || _pipelineInFlight == 0 || _disposed)
+                        return;
+                    if (System.Diagnostics.Stopwatch.GetTimestamp() - _pipelineLastProgress >= limit)
+                    {
+                        var head = _pipelineWorker != null && _workerHandlers.TryGetValue(_pipelineWorker, out var st)
+                            && st.Pipeline.Count > 0 ? st.Pipeline.Peek() : null;
+                        AbortPipeline(new TimeoutException(
+                            $"[Wasm] Dispatcher hang watchdog fired after {WasmDispatchWatchdogSeconds}s with no pipelined dispatch " +
+                            $"completing. kernel={head?.KernelName ?? "<unknown>"} disp={head?.DispNum} queued={_pipelineInFlight}. " +
+                            $"Likely infinite-loop kernel. Set WasmAccelerator.WasmDispatchWatchdogSeconds higher if this is a " +
+                            $"legitimately-slow kernel."));
+                        return;
+                    }
+                }
+            }
+            catch (OperationCanceledException) { }
         }
 
         /// <summary>
@@ -2645,7 +3286,8 @@ namespace SpawnDev.ILGPU.Wasm
             }
 
             sb.AppendLine();
-            sb.AppendLine("    self.postMessage({ done: true });");
+            // A pipelined dispatch (d.deferDone) still has to copy its results out; the bootstrap posts done.
+            sb.AppendLine("    if (!d.deferDone) self.postMessage({ done: true });");
             return sb.ToString();
         }
 
@@ -3196,8 +3838,19 @@ namespace SpawnDev.ILGPU.Wasm
         {
             if (_pendingWork.Count > 0)
             {
-                await Task.WhenAll(_pendingWork);
-                _pendingWork.Clear();
+                try
+                {
+                    RequestPipelineAck();
+                    await Task.WhenAll(_pendingWork.ToArray());
+                }
+                finally
+                {
+                    // Drop what finished, and only that: a launch made while we waited is still pending
+                    // (Clear() used to forget it, so the next SynchronizeAsync returned before it ran). A
+                    // failure is reported by THIS call; it used to stay in the list and fail every later
+                    // SynchronizeAsync too.
+                    _pendingWork.RemoveAll(t => t.IsCompleted);
+                }
             }
         }
 
@@ -3313,6 +3966,11 @@ namespace SpawnDev.ILGPU.Wasm
                 _pendingWork.Clear();
                 _initializedWorkersByKernel.Clear();
                 _activeDispatchCount = 0;
+                // An in-flight pipeline holds this memory group's gate: release it (another accelerator may be
+                // waiting on it). Its worker stays in _acquiredWorkers, so it is terminated below like any
+                // worker disposed mid-dispatch; its queued tasks were faulted with the other stranded TCSs.
+                _pipelineInFlight = 0;
+                EndPipeline(returnWorker: false);
                 // Dispose only this accelerator's PRIVATE memory. A shared-memory accelerator
                 // (UsesSharedMemory) keeps these instance fields null — its memory lives in the
                 // process-static s_sharedWasmMemory, which OUTLIVES the accelerator by design (one
@@ -3336,6 +3994,7 @@ namespace SpawnDev.ILGPU.Wasm
                     var worker = kvp.Key;
                     var st = kvp.Value;
                     st.CurrentTcs = null;
+                    st.Pipeline.Clear();
                     try
                     {
                         if (st.MsgHandler != null) worker.OnMessage -= st.MsgHandler;

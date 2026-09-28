@@ -14,7 +14,7 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
     /// Wasm backend tests. Inherits all shared tests from BackendTestBase.
     /// v4.6.0: Fiber-based phase dispatch. 182 pass / 0 fail.
     /// </summary>
-    public class WasmTests : BackendTestBase
+    public partial class WasmTests : BackendTestBase
     {
         public WasmTests(IPortableCrypto crypto, SpawnDev.WebTorrent.WebTorrentClient webTorrentClient) : base(crypto, webTorrentClient) { }
         protected override string BackendName => "Wasm";

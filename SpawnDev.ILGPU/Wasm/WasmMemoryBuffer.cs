@@ -30,6 +30,10 @@ namespace SpawnDev.ILGPU.Wasm
         /// </summary>
         public SharedArrayBuffer SharedBuffer { get; private set; }
 
+        /// <summary>This buffer's id in the pipelined-dispatch helper (0 = never used by one). See
+        /// WasmAccelerator.PostPipelined.</summary>
+        internal int PipeId;
+
         /// <summary>
         /// The typed array view for this buffer (e.g., Int32Array, Float32Array).
         /// </summary>
@@ -736,6 +740,7 @@ namespace SpawnDev.ILGPU.Wasm
         {
             if (disposing)
             {
+                if (PipeId != 0) { WasmAccelerator.UnregisterPipeBuffer(PipeId); PipeId = 0; }
                 TypedArrayView?.Dispose();
                 SharedBuffer?.Dispose();
                 // Free any snapshot SABs still resident (buffer disposed with pending host-write

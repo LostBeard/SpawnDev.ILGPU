@@ -89,8 +89,63 @@ const _mathImports = {
   pow: Math.pow, atan2: Math.atan2
 };
 
-self.onmessage = async function(e) {
+// Messages run strictly one after another, in arrival order. The handler awaits (module compile,
+// instantiate), so without the chain a second message could start while the first is still waiting -
+// a PIPELINED dispatch (several queued on one worker, see WasmAccelerator) depends on that order.
+var _chain = Promise.resolve();
+// Pipeline epoch that has failed: later dispatches of the same epoch are skipped, not run, because
+// they were queued on top of a result that was never produced (matches the host's await chain).
+var _poisonEpoch = -1;
+// Pipelined answers are CUMULATIVE: {ack, s} means every pipelined dispatch up to sequence s is done. A success
+// is not answered on its own - the host asks with a ping when something waits (SynchronizeAsync, a serialized
+// dispatch), and a short timer answers anyway so progress is visible and a missed ping cannot hang. A failure or
+// a skip is answered at once, and it implicitly answers every earlier dispatch too.
+var _lastDone = 0, _lastAcked = 0, _ackTimer = null, _wtAcc = 0;
+function _flushAck() {
+  if (_ackTimer !== null) { clearTimeout(_ackTimer); _ackTimer = null; }
+  if (_lastDone > _lastAcked) {
+    _lastAcked = _lastDone;
+    var wt = _wtAcc; _wtAcc = 0;
+    self.postMessage({ ack: true, s: _lastDone, wt: wt });
+  }
+}
+function _answerFail(d, msg) {
+  if (_ackTimer !== null) { clearTimeout(_ackTimer); _ackTimer = null; }
+  _lastDone = _lastAcked = d.sq;
+  self.postMessage({ done: false, s: d.sq, error: msg });
+}
+self.onmessage = function(e) {
   var d = e.data;
+  // The catch keeps the chain alive: a rejected link would silently drop every later message.
+  _chain = _chain.then(function() { return _handle(d); }).catch(function(ex) {
+    self.postMessage({ done: false, error: (ex && ex.message) ? ex.message : String(ex) });
+  });
+};
+
+// A pipelined dispatch carries its own memory work so the host never waits between dispatches:
+// zero [0, z), copy each used buffer range IN (pb[i] = the buffer's SharedArrayBuffer, pi = triples
+// of source offset / linear-memory offset / length), write struct arguments (swb bytes, swo pairs of
+// offset / length), run the kernel, then copy every range back OUT.
+async function _handle(d) {
+  var t0 = performance.now();
+  if (d.ping) { _flushAck(); return; }
+  if (d.pl && d.pe === _poisonEpoch) {
+    _answerFail(d, 'skipped: an earlier pipelined dispatch in this batch failed');
+    return;
+  }
+  // Pipelined host write (pw: staged bytes -> buffer) or device copy (pc: buffer -> buffer), in queue order.
+  if (d.pw || d.pc) {
+    try {
+      if (d.pw) new Uint8Array(d.dst).set(d.b, d.off);
+      else new Uint8Array(d.dst, d.doff, d.n).set(new Uint8Array(d.src, d.soff, d.n));
+      _lastDone = d.sq;
+      if (_ackTimer === null) _ackTimer = setTimeout(_flushAck, 4);
+    } catch (ex) {
+      _poisonEpoch = d.pe;
+      _answerFail(d, (ex && ex.message) ? ex.message : String(ex));
+    }
+    return;
+  }
   try {
     // Module-cache flush (bounds the per-worker _modulesById accumulation that drives late-lane
     // memory pressure — Tuvok's trace 2026-06-14: kernels 2->1057 unbounded on the ML Wasm lane,
@@ -162,11 +217,34 @@ self.onmessage = async function(e) {
     d._instance = instance;
     var fn = _fnByScript.get(d.script);
     if (!fn) { fn = new AsyncFunction('d', d.script); _fnByScript.set(d.script, fn); }
+    if (!d.pl) { await fn(d); return; }
+    var m8 = new Uint8Array(d.memory.buffer);
+    if (d.z > 0) m8.fill(0, 0, d.z);
+    var pb = d.pb, pi = d.pi, i, n;
+    for (i = 0; i < pb.length; i++) {
+      n = pi[3 * i + 2];
+      if (n > 0) m8.set(new Uint8Array(pb[i], pi[3 * i], n), pi[3 * i + 1]);
+    }
+    if (d.swb) {
+      var swb = d.swb instanceof Uint8Array ? d.swb : new Uint8Array(d.swb);
+      var swo = d.swo, c = 0;
+      for (i = 0; i < swo.length; i += 2) { m8.set(swb.subarray(c, c + swo[i + 1]), swo[i]); c += swo[i + 1]; }
+    }
+    d.deferDone = true;
     await fn(d);
+    for (i = 0; i < pb.length; i++) {
+      n = pi[3 * i + 2];
+      if (n > 0) new Uint8Array(pb[i], pi[3 * i], n).set(new Uint8Array(d.memory.buffer, pi[3 * i + 1], n));
+    }
+    _lastDone = d.sq;
+    _wtAcc += performance.now() - t0;
+    if (_ackTimer === null) _ackTimer = setTimeout(_flushAck, 4);
   } catch(ex) {
-    self.postMessage({ done: false, error: (ex && ex.message) ? ex.message : String(ex) });
+    var msg = (ex && ex.message) ? ex.message : String(ex);
+    if (d.pl) { _poisonEpoch = d.pe; _answerFail(d, msg); }
+    else self.postMessage({ done: false, error: msg });
   }
-};
+}
 ";
 
         /// <summary>
