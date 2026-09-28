@@ -52,8 +52,14 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             var k1 = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(LaneLoopIndexKernel);
             k1(LaneLoopPartialLen, partial.View);
 
-            // 2) 2D implicit grid with odd extents.
-            using var grid2d = accelerator.Allocate1D<int>(LaneLoopW * LaneLoopH);
+            // 2) 2D implicit grid with odd extents. Padded with sentinels past the grid: a backend that rounds the
+            //    dispatch up (WebGPU: 16x16 workgroups -> 48x32 threads) and lets out-of-range threads run writes
+            //    y*W + x >= W*H for every thread with y >= H - deterministically, where a write racing a valid
+            //    element inside the grid only fails when it lands last (2026-09-28, WebGPU 2D range check).
+            int grid2dAlloc = LaneLoopW * 64 + 64;
+            var grid2dInit = new int[grid2dAlloc];
+            Array.Fill(grid2dInit, LaneLoopSentinel);
+            using var grid2d = accelerator.Allocate1D(grid2dInit);
             var k2 = accelerator.LoadAutoGroupedStreamKernel<Index2D, ArrayView<int>, int>(LaneLoop2DKernel);
             k2(new Index2D(LaneLoopW, LaneLoopH), grid2d.View, LaneLoopW);
 
@@ -75,6 +81,10 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 for (int x = 0; x < LaneLoopW; x++)
                     if (g[y * LaneLoopW + x] != x * 1000 + y)
                         throw new Exception($"2D launch: ({x},{y}) = {g[y * LaneLoopW + x]}, expected {x * 1000 + y}");
+            for (int i = LaneLoopW * LaneLoopH; i < grid2dAlloc; i++)
+                if (g[i] != LaneLoopSentinel)
+                    throw new Exception($"2D launch: element {i} past the {LaneLoopW}x{LaneLoopH} grid was written ({g[i]} = x {g[i] / 1000}, y {g[i] % 1000}) - " +
+                                        "a thread outside the launch extent ran");
             var b = await big.CopyToHostAsync<int>();
             for (int i = 0; i < LaneLoopBigLen; i++)
                 if (b[i] != i * 3 + 1)

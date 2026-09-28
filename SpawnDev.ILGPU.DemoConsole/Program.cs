@@ -24,6 +24,9 @@ try
     if (args.Length > 0 && args[0] == "fp4-helper-wgsl")
         return await Fp4HelperWgslDump.Run();
 
+    // Offline WGSL dump: odd-width auto-grouped Index2D kernel, WebGPU with vs without subgroups. No browser.
+    if (args.Length > 0 && args[0] == "lane2d-wgsl")
+        return await Lane2DWgslDump.Run();
     // Offline GLSL dump: struct-field read vs whole-element copy (WebGL field read returned 0). No browser.
     if (args.Length > 0 && args[0] == "struct-field-glsl")
         return await StructFieldGlslDump.Run();

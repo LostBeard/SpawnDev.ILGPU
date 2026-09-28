@@ -9,6 +9,20 @@ Everything in the `5.2.18-local.*` sections below. Headlines: CPU lane-independe
 writes behind queued dispatches); Wasm small-dispatch cost 2.1-2.3 -> 0.57 ms; WebGPU loop-exit / view-helper
 miscompiles fixed (local.1); one WebGPU pipeline per kernel (local.2); WebGPU buffer accounting (local.3-5).
 
+## 5.2.18 release fix - WebGPU: 2D/3D auto-grouped kernels ran threads outside the launch extent
+
+**Bug (silent wrong result, live in 5.2.17):** an auto-grouped `Index2D` / `Index3D` / `LongIndex2D` / `LongIndex3D`
+kernel on WebGPU had NO range check - only 1D kernels did - and its user dimension was packed as the PRODUCT
+X*Y(*Z). The dispatch rounds each axis up to 16x16 workgroups, so on a 33x17 launch the 48x32 threads included
+(33, 0), which computed `y*33 + x = 33` and overwrote element (0, 1), and every thread with y >= 17 wrote past the
+grid. Whether an in-grid element survived depended on which write landed last. Found by the ILGPU release sweep
+(`CpuLaneLoop_LaneIndependentKernels_ExactAndOnTheLaneLoop`, a 33x17 Index2D launch); WebGL, Wasm and the desktop
+backends were right. **Fix:** one user-dimension slot per axis (`_ilgpu_user_dim`, `_ilgpu_user_dim_y`,
+`_ilgpu_user_dim_z`; `ScalarPackingEntry.UserDimAxis`) and a per-axis early return for 2D/3D kernels (same
+exemptions as 1D: kernels using subgroups, broadcast, barriers or group reduce). The test now pads the 2D output
+with sentinels past the grid, so the failure is deterministic: red-checked against the 5.2.17 WebGPU code on both
+WebGPU variants (`(0,16) = 33015`; `element 561 past the 33x17 grid was written`).
+
 ## 5.2.18-local.8 (unreleased, forks 2.3.6-local.2) - Wasm: host writes ordered behind queued dispatches; shape-only worker scripts
 
 **Bug (silent wrong result, live in 5.2.17):** a host write (`CopyFromCPU` / `CopyFromHost` / `CopyFromJS`) while

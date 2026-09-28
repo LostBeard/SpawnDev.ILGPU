@@ -1085,18 +1085,18 @@ namespace SpawnDev.ILGPU.WebGPU
             // Auto-grouped kernels: the user dimension for the WGSL range check. Packed into _scalar_params
             // slot 0 below (ScalarPackingEntry.IsUserDim) - it was an `override` constant, which compiled a new
             // pipeline per distinct dispatch size.
-            uint dispatchUserDim = 0;
+            // One extent PER AXIS (X, Y, Z): the WGSL range check tests each axis against its own extent. A 2D/3D
+            // launch used to pack only the product X*Y(*Z) and the shader had no check at all, so threads past the
+            // X extent of a rounded-up dispatch wrote into the next row (see WGSLKernelFunctionGenerator.UserDimSlotCount).
+            uint dispatchUserDim = 0, dispatchUserDimY = 0, dispatchUserDimZ = 0;
             if (!compiledKernel.EntryPoint.IsExplicitlyGrouped)
             {
-                uint userDim = 0;
-                if (dimension is Index1D i1d) userDim = (uint)i1d.X;
-                else if (dimension is Index2D i2d) userDim = (uint)(i2d.X * i2d.Y);
-                else if (dimension is Index3D i3d) userDim = (uint)(i3d.X * i3d.Y * i3d.Z);
-                else if (dimension is LongIndex1D l1d) userDim = (uint)l1d.X;
-                else if (dimension is LongIndex2D l2d) userDim = (uint)(l2d.X * l2d.Y);
-                else if (dimension is LongIndex3D l3d) userDim = (uint)(l3d.X * l3d.Y * l3d.Z);
-
-                dispatchUserDim = userDim;
+                if (dimension is Index1D i1d) dispatchUserDim = (uint)i1d.X;
+                else if (dimension is Index2D i2d) { dispatchUserDim = (uint)i2d.X; dispatchUserDimY = (uint)i2d.Y; }
+                else if (dimension is Index3D i3d) { dispatchUserDim = (uint)i3d.X; dispatchUserDimY = (uint)i3d.Y; dispatchUserDimZ = (uint)i3d.Z; }
+                else if (dimension is LongIndex1D l1d) dispatchUserDim = (uint)l1d.X;
+                else if (dimension is LongIndex2D l2d) { dispatchUserDim = (uint)l2d.X; dispatchUserDimY = (uint)l2d.Y; }
+                else if (dimension is LongIndex3D l3d) { dispatchUserDim = (uint)l3d.X; dispatchUserDimY = (uint)l3d.Y; dispatchUserDimZ = (uint)l3d.Z; }
             }
 
             // For explicitly grouped kernels (KernelConfig), the dispatch's GroupDim
@@ -2151,7 +2151,8 @@ namespace SpawnDev.ILGPU.WebGPU
                         if (entry.IsUserDim)
                         {
                             // 0 (no dimension) = no limit, matching the old override's default.
-                            uint ud = dispatchUserDim > 0 ? dispatchUserDim : uint.MaxValue;
+                            uint axisDim = entry.UserDimAxis switch { 1 => dispatchUserDimY, 2 => dispatchUserDimZ, _ => dispatchUserDim };
+                            uint ud = axisDim > 0 ? axisDim : uint.MaxValue;
                             BitConverter.GetBytes(ud).CopyTo(packedData, entry.ByteOffset);
                             continue;
                         }

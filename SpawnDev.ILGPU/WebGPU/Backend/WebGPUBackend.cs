@@ -1761,5 +1761,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// sizes all differ).
         /// </summary>
         public bool IsUserDim { get; set; }
+
+        /// <summary>For IsUserDim entries: which extent this slot holds (0 = X, 1 = Y, 2 = Z).</summary>
+        public int UserDimAxis { get; set; }
     }
 }

@@ -840,7 +840,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// counters (this scan, SetupParameterBindings, GenerateHeader) must start at <see cref="FirstScalarSlot"/>.
         /// </summary>
         private bool ReservesUserDimSlot => !EntryPoint.IsExplicitlyGrouped && KernelParamOffset > 0;
-        private int FirstScalarSlot => ReservesUserDimSlot ? 1 : 0;
+
+        /// <summary>
+        /// One user-dimension slot PER AXIS: slot 0 = X extent, 1 = Y, 2 = Z. A 2D/3D launch used to pack only the
+        /// PRODUCT X*Y(*Z) and emit NO range check at all, so the rounded-up 16x16 dispatch ran threads with
+        /// x >= X: on a 33x17 Index2D launch, thread (33, 0) computed y*33 + x = 33 and overwrote element (0, 1)
+        /// (CpuLaneLoop_LaneIndependentKernels_ExactAndOnTheLaneLoop, 2026-09-28 ILGPU sweep). A per-axis check
+        /// needs every extent.
+        /// </summary>
+        private int UserDimSlotCount => !ReservesUserDimSlot ? 0 : EntryPoint.IndexType switch
+        {
+            IndexType.Index2D or IndexType.LongIndex2D => 2,
+            IndexType.Index3D or IndexType.LongIndex3D => 3,
+            _ => 1,
+        };
+        private int FirstScalarSlot => UserDimSlotCount;
 
         private void ScanBodyStructParams()
         {
@@ -1977,10 +1991,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             var scalarManifest = new List<ScalarPackingEntry>();
             int scalarSlotOffset = FirstScalarSlot; // current u32 slot index in packed buffer
-            if (ReservesUserDimSlot)
+            for (int axis = 0; axis < UserDimSlotCount; axis++)
                 scalarManifest.Add(new ScalarPackingEntry
                 {
-                    ParamIndex = -2, ByteOffset = 0, ByteSize = 4, WgslType = "u32", IsUserDim = true,
+                    ParamIndex = -2, ByteOffset = axis * 4, ByteSize = 4, WgslType = "u32", IsUserDim = true,
+                    UserDimAxis = axis,
                 });
             // Track view (buffer) params and their binding indices for view offset entries
             var viewParamBindingIndices = new List<(int paramIndex, int bindingIndex)>();
@@ -4411,6 +4426,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // pipeline serves every dispatch size. A load from read-only storage is uniform in WGSL's analysis,
                 // as the override constant was.
                 AppendLine("let _ilgpu_user_dim : u32 = _scalar_params[0];");
+                if (UserDimSlotCount >= 2) AppendLine("let _ilgpu_user_dim_y : u32 = _scalar_params[1];");
+                if (UserDimSlotCount >= 3) AppendLine("let _ilgpu_user_dim_z : u32 = _scalar_params[2];");
                 _bodyReferencesScalarParams = true;
             }
 
@@ -4448,6 +4465,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 // Map global_id.xy to vec2<i32>
                 AppendLine($"var {indexVar.Name} : vec2<i32> = vec2<i32>(i32(global_id.x), i32(global_id.y));");
+                if (needsRangeCheck)
+                    AppendLine($"if (u32({indexVar.Name}.x) >= _ilgpu_user_dim || u32({indexVar.Name}.y) >= _ilgpu_user_dim_y) {{ return; }}");
 
                 // Handle struct field access (index.X, index.Y) by pre-calculating them
                 // This prevents "GetField" later from trying to access a struct field on a vec2
@@ -4469,6 +4488,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 // Map global_id.xyz to vec3<i32>
                 AppendLine($"var {indexVar.Name} : vec3<i32> = vec3<i32>(i32(global_id.x), i32(global_id.y), i32(global_id.z));");
+                if (needsRangeCheck)
+                    AppendLine($"if (u32({indexVar.Name}.x) >= _ilgpu_user_dim || u32({indexVar.Name}.y) >= _ilgpu_user_dim_y || u32({indexVar.Name}.z) >= _ilgpu_user_dim_z) {{ return; }}");
 
                 foreach (var use in indexParam.Uses)
                 {
@@ -4500,6 +4521,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // This is rare - map to a struct with two emu_i64 fields for X and Y
                 AppendLine($"var {indexVar.Name}_x : vec2<u32> = vec2<u32>(u32(global_id.x), 0u); // LongIndex2D X");
                 AppendLine($"var {indexVar.Name}_y : vec2<u32> = vec2<u32>(u32(global_id.y), 0u); // LongIndex2D Y");
+                if (needsRangeCheck)
+                    AppendLine($"if (global_id.x >= _ilgpu_user_dim || global_id.y >= _ilgpu_user_dim_y) {{ return; }}");
                 // Note: LongIndex2D field accesses may still need handling in GetField
             }
             // LongIndex3D Kernel
@@ -4508,6 +4531,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 AppendLine($"var {indexVar.Name}_x : vec2<u32> = vec2<u32>(u32(global_id.x), 0u); // LongIndex3D X");
                 AppendLine($"var {indexVar.Name}_y : vec2<u32> = vec2<u32>(u32(global_id.y), 0u); // LongIndex3D Y");
                 AppendLine($"var {indexVar.Name}_z : vec2<u32> = vec2<u32>(u32(global_id.z), 0u); // LongIndex3D Z");
+                if (needsRangeCheck)
+                    AppendLine($"if (global_id.x >= _ilgpu_user_dim || global_id.y >= _ilgpu_user_dim_y || global_id.z >= _ilgpu_user_dim_z) {{ return; }}");
             }
             else
             {
