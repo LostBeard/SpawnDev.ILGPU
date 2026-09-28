@@ -316,8 +316,48 @@ namespace SpawnDev.ILGPU.Wasm
         /// </summary>
         public void CopyFromHost<T>(T[] data) where T : unmanaged
         {
+            if (TryDeferHostWrite(() =>
+                {
+                    var staged = new Uint8Array((long)data.Length * System.Runtime.CompilerServices.Unsafe.SizeOf<T>());
+                    staged.Write(data);
+                    return staged;
+                }, 0))
+                return;
             PrepareHostWrite();
             TypedArrayView.Write(data);
+            NotifyHostWrite();
+        }
+
+        /// <summary>
+        /// While dispatches are queued on the accelerator, a host write must not touch
+        /// <see cref="SharedBuffer"/> yet: it has to land AFTER them (they may still read or write this
+        /// buffer) and BEFORE any dispatch queued later. <paramref name="stage"/> copies the source bytes into
+        /// a private array NOW - the caller may reuse or free its source as soon as this call returns - and
+        /// the write is enqueued via <see cref="WasmAccelerator.EnqueueOrderedHostWrite"/>. Returns false (write
+        /// immediately) when nothing is pending.
+        /// </summary>
+        private bool TryDeferHostWrite(Func<Uint8Array> stage, long targetByteOffset)
+        {
+            if (Accelerator is not WasmAccelerator wasmAccel || !wasmAccel.HasPendingWork)
+                return false;
+            wasmAccel.EnqueueOrderedHostWrite(this, stage(), targetByteOffset);
+            return true;
+        }
+
+        /// <summary>
+        /// Applies a staged host write in its turn in the work stream (see <see cref="TryDeferHostWrite"/>).
+        /// </summary>
+        /// <remarks>
+        /// ⚠️ Deliberately NO <see cref="PrepareHostWrite"/>: every dispatch queued BEFORE this write has
+        /// already completed, and the dispatches still holding intents were queued AFTER it - they must see
+        /// the NEW bytes. A snapshot here would pin the pre-write data for them. The counter bump makes their
+        /// copy-IN find no snapshot tier and read <see cref="SharedBuffer"/> directly.
+        /// </remarks>
+        internal void ApplyStagedHostWrite(Uint8Array staged, long targetByteOffset)
+        {
+            if (TypedArrayView == null)
+                throw new ObjectDisposedException(nameof(WasmMemoryBuffer));
+            TypedArrayView.Set(staged, targetByteOffset);
             NotifyHostWrite();
         }
 
@@ -326,6 +366,14 @@ namespace SpawnDev.ILGPU.Wasm
         {
             if (TypedArrayView == null)
                 throw new ObjectDisposedException(nameof(WasmMemoryBuffer));
+            if (TryDeferHostWrite(() =>
+                {
+                    var staged = new Uint8Array(source.ByteLength);
+                    using var src = new Uint8Array(source.Buffer, (int)source.ByteOffset, (int)source.ByteLength);
+                    staged.Set(src);
+                    return staged;
+                }, targetByteOffset))
+                return;
             PrepareHostWrite();
             // Use the typed Set(TypedArray, long) overload - zero .NET copy, JS-to-JS
             using var srcBytes = new Uint8Array(source.Buffer, (int)source.ByteOffset, (int)source.ByteLength);
@@ -338,6 +386,14 @@ namespace SpawnDev.ILGPU.Wasm
         {
             if (TypedArrayView == null)
                 throw new ObjectDisposedException(nameof(WasmMemoryBuffer));
+            if (TryDeferHostWrite(() =>
+                {
+                    var staged = new Uint8Array(source.ByteLength);
+                    using var src = new Uint8Array(source);
+                    staged.Set(src);
+                    return staged;
+                }, targetByteOffset))
+                return;
             PrepareHostWrite();
             using var srcBytes = new Uint8Array(source);
             TypedArrayView.Set(srcBytes, targetByteOffset);
@@ -531,9 +587,21 @@ namespace SpawnDev.ILGPU.Wasm
             // JS-side, never through the .NET heap. See BrowserBufferPolicy.
             BrowserBufferPolicy.CheckHostCopy(length, "Wasm");
 
+            int dstOffset = (int)targetView.LoadEffectiveAddressAsPtr();
+            var srcPtrForStage = sourceView.LoadEffectiveAddressAsPtr();
+            if (TryDeferHostWrite(() =>
+                {
+                    // Copy the CPU source out of the WASM heap NOW, inside this synchronous call - the
+                    // caller's array may change or be freed once CopyFromCPU returns.
+                    var staged = new Uint8Array(length);
+                    using var heapView = new HeapView<byte, Uint8Array>(srcPtrForStage, length);
+                    staged.Set(heapView.View);
+                    return staged;
+                }, dstOffset))
+                return;
+
             // Write to SharedArrayBuffer
             PrepareHostWrite();
-            int dstOffset = (int)targetView.LoadEffectiveAddressAsPtr();
             using var dstUint8 = new Uint8Array(SharedBuffer, dstOffset, length);
 
             // ZERO-COPY host->device: the CPU source already lives in WASM linear memory (its native

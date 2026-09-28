@@ -770,6 +770,60 @@ namespace SpawnDev.ILGPU.Wasm
             _pendingWork.Add(copyTask);
         }
 
+        /// <summary>True while any queued dispatch / ordered copy / ordered host write has not completed.</summary>
+        internal bool HasPendingWork
+        {
+            get
+            {
+                foreach (var t in _pendingWork)
+                    if (!t.IsCompleted) return true;
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Enqueues a HOST write (bytes already copied into <paramref name="staged"/>) into the serialized work
+        /// stream, exactly like <see cref="EnqueueOrderedDeviceCopy"/>: it applies after every dispatch queued
+        /// before it, and every dispatch queued after it waits for it. Takes ownership of
+        /// <paramref name="staged"/> (disposed once applied).
+        /// </summary>
+        /// <remarks>
+        /// 🔴 Replaces the queue-time SNAPSHOT for this case. A host write while dispatches were queued
+        /// snapshotted the buffer's SharedArrayBuffer at write time - but that memory does not yet hold the
+        /// results of dispatches still queued ahead of the write, so a queued dispatch read data from before
+        /// its predecessors ran. MEASURED 2026-09-28 (QueuedDispatches_DependentChainWithHostWrites_ExactOrder):
+        /// 200 queued in-place increments, a queued copy, then CopyFromCPU - the copy saw 0, not 200.
+        /// Ordering the write gives the WebGPU queue-timeline semantics: earlier launches see the old data
+        /// including each other's results, later launches see the new.
+        /// </remarks>
+        internal void EnqueueOrderedHostWrite(WasmMemoryBuffer target, Uint8Array staged, long targetByteOffset)
+        {
+            if (_disposed)
+            {
+                staged.Dispose();
+                throw new ObjectDisposedException(nameof(WasmAccelerator));
+            }
+            Task[] prior = _pendingWork.Count > 0 ? _pendingWork.ToArray() : System.Array.Empty<Task>();
+            var writeTask = OrderedHostWriteAsync(prior, target, staged, targetByteOffset);
+            _pendingWork.Clear();
+            _pendingWork.Add(writeTask);
+        }
+
+        private static async Task OrderedHostWriteAsync(
+            Task[] prior, WasmMemoryBuffer target, Uint8Array staged, long targetByteOffset)
+        {
+            try
+            {
+                if (prior.Length > 0)
+                    await Task.WhenAll(prior);
+                target.ApplyStagedHostWrite(staged, targetByteOffset);
+            }
+            finally
+            {
+                staged.Dispose();
+            }
+        }
+
         private static async Task OrderedDeviceCopyAsync(
             Task[] prior,
             WasmMemoryBuffer target,
@@ -1405,6 +1459,7 @@ namespace SpawnDev.ILGPU.Wasm
                 // skip writing back stale snapshot data for inputs whose
                 // SharedBuffer has been overwritten by a host write since queue.
                 var bufIndicesReadFromSnapshot = new HashSet<int>();
+                long profCopyIn = WasmDispatchProfile.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
                 for (int i = 0; i < bufferInfos.Count; i++)
                 {
                     var (buf, _) = bufferInfos[i];
@@ -1439,6 +1494,7 @@ namespace SpawnDev.ILGPU.Wasm
                     dstView.JSRef!.CallVoid("set", srcView);
                     hostWriteSnapshot[i] = buf.HostWriteCounter;
                 }
+                if (WasmDispatchProfile.Enabled) WasmDispatchProfile.Add(ref WasmDispatchProfile.CopyInTicks, profCopyIn);
                 // Debug: check buf.SharedBuffer and Wasm memory after copy-in.
                 // Gate the entire block behind VerboseLogging — the JS interop calls allocate
                 // typed array views per dispatch even when the log message is suppressed, and
@@ -1901,6 +1957,7 @@ namespace SpawnDev.ILGPU.Wasm
             }
             finally
             {
+                if (WasmDispatchProfile.Enabled && profStart != 0) WasmDispatchProfile.Add(ref WasmDispatchProfile.TotalTicks, profStart);
                 // Always decrement active dispatch count
                 _activeDispatchCount--;
                 // Release the lazy-snapshot intent for every buffer this dispatch
@@ -2311,8 +2368,13 @@ namespace SpawnDev.ILGPU.Wasm
                     Task done;
                     if (watchdogMs > 0)
                     {
-                        var watchdog = Task.Delay(watchdogMs);
+                        // One no-progress window per wait, CANCELLED as soon as the wait ends. An uncancelled
+                        // Task.Delay stays a live timer for its full duration: a training loop of ~358K launches
+                        // left one 120 s timer per worker completion pending (2026-09-28).
+                        using var watchdogCts = new CancellationTokenSource();
+                        var watchdog = Task.Delay(watchdogMs, watchdogCts.Token);
                         var first = await Task.WhenAny(Task.WhenAny(remaining), watchdog);
+                        if (first != watchdog) watchdogCts.Cancel();
                         if (first == watchdog)
                         {
                             // Hit the watchdog. Surface a diagnostic hang error.
@@ -2339,7 +2401,7 @@ namespace SpawnDev.ILGPU.Wasm
                 }
             }
 
-            if (WasmDispatchProfile.Enabled) WasmDispatchProfile.Add(ref WasmDispatchProfile.WaitTicks, profT);
+            if (WasmDispatchProfile.Enabled) profT = WasmDispatchProfile.Add(ref WasmDispatchProfile.WaitTicks, profT);
             // Debug: dump first 4 bytes of each buffer in Wasm memory after kernel.
             // Gate the JS interop loop behind VerboseLogging too — the per-buffer typed
             // array allocations cost real time even when the log message is suppressed.
@@ -2421,8 +2483,10 @@ namespace SpawnDev.ILGPU.Wasm
                 // unnecessary; copy-OUT writes back identical bytes for
                 // unwritten buffers and a real write for written ones.
                 // (rc.16 RadixSort multi-pass + StyleMosaic perf, 2026-05-05.)
-                // Read first 4 bytes from Wasm memory at this offset for debugging
-                if (rangeSize >= 4)
+                // Read first 4 bytes from Wasm memory at this offset for debugging - a JS typed-array
+                // round trip per written buffer per dispatch, so VerboseLogging only (it ran on every
+                // dispatch until 2026-09-28; its only reader is a failure message in Tests21).
+                if (WasmBackend.VerboseLogging && rangeSize >= 4)
                 {
                     var debugSrc = new Uint8Array(memoryBuffer, offset, 4);
                     var debugBytes = debugSrc.ReadBytes();
@@ -2432,6 +2496,7 @@ namespace SpawnDev.ILGPU.Wasm
                 }
             }
             _lastImplicitIndexDebug += $" | copyOut={copyOutCount}/{bufferInfos.Count} skip={copyOutSkipped} traceBufWrites={traceFoundAnyBufferWrite}";
+            if (WasmDispatchProfile.Enabled) WasmDispatchProfile.Add(ref WasmDispatchProfile.CopyOutTicks, profT);
         }
 
         /// <summary>

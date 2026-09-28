@@ -18,7 +18,7 @@ namespace SpawnDev.ILGPU.Wasm
         public static long WorkersUsed;
         /// <summary>Total characters of worker script built across those dispatches.</summary>
         public static long ScriptChars;
-        internal static long PrepareTicks, ScriptTicks, AcquireTicks, PostTicks, WaitTicks;
+        internal static long PrepareTicks, ScriptTicks, AcquireTicks, PostTicks, WaitTicks, CopyInTicks, CopyOutTicks, TotalTicks;
 
         internal static long Add(ref long bucket, long since)
         {
@@ -31,7 +31,7 @@ namespace SpawnDev.ILGPU.Wasm
         public static void Reset()
         {
             Dispatches = WorkersUsed = ScriptChars = 0;
-            PrepareTicks = ScriptTicks = AcquireTicks = PostTicks = WaitTicks = 0;
+            PrepareTicks = ScriptTicks = AcquireTicks = PostTicks = WaitTicks = CopyInTicks = CopyOutTicks = TotalTicks = 0;
         }
 
         /// <summary>Per-dispatch averages in milliseconds.</summary>
@@ -39,9 +39,9 @@ namespace SpawnDev.ILGPU.Wasm
         {
             if (Dispatches == 0) return "no dispatches";
             double Ms(long t) => t * 1000.0 / Stopwatch.Frequency / Dispatches;
-            return $"{Dispatches} dispatches, per dispatch: prepare {Ms(PrepareTicks):F3} ms, script {Ms(ScriptTicks):F3} ms " +
+            return $"{Dispatches} dispatches, per dispatch: TOTAL {Ms(TotalTicks):F3} ms = prepare {Ms(PrepareTicks):F3} (of which copy-in {Ms(CopyInTicks):F3}), script {Ms(ScriptTicks):F3} ms " +
                    $"({ScriptChars / Dispatches} chars), acquire {Ms(AcquireTicks):F3} ms, post {Ms(PostTicks):F3} ms, " +
-                   $"wait {Ms(WaitTicks):F3} ms, workers {(double)WorkersUsed / Dispatches:F1}";
+                   $"wait {Ms(WaitTicks):F3} ms, copy-out {Ms(CopyOutTicks):F3} ms, workers {(double)WorkersUsed / Dispatches:F1}";
         }
     }
 }
