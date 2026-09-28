@@ -1,7 +1,7 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.2.19-local.2 (unreleased, forks 2.3.6) - Wasm: pipelined dispatch
+## 5.2.19 (forks 2.3.6) - Wasm: pipelined dispatch
 
 **Pipelined dispatch (`WasmAccelerator.EnablePipelinedDispatch`, default on).** A flat (no barrier) dispatch of
 at most `NonBarrierMinItemsPerWorker` items that is queued behind nothing but other pipelined work is prepared and
@@ -34,7 +34,7 @@ failure stayed in the list so EVERY later `SynchronizeAsync` rethrew it; it now 
 SubView sources, host writes and device copies mid-queue, a barrier kernel behind the pipeline, host replay),
 `Wasm_Pipeline_FailedDispatch_SkipsLaterAndRecovers`, `Wasm_Pipeline_AnswersWithoutAWaiter`,
 `Wasm_Pipeline_FirstUseCompiles_StayInOrder`; `LaunchCost_TrivialKernel_SyncedAndBatched` prints a pipelined vs
-serialized A/B. Wasm lane 705/0/30. Red-check note: removing the worker's ordering chain did NOT fail any test -
+serialized A/B. Wasm lane 705/0/30; full ILGPU sweep 4455/0/346. Red-check note: removing the worker's ordering chain did NOT fail any test -
 on V8 a small module's compile resolves before the next queued message runs - so the chain is kept on the
 spec's terms, not a demonstrated failure.
 
