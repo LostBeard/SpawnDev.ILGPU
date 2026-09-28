@@ -48,6 +48,12 @@ namespace SpawnDev.ILGPU.Wasm
         /// it re-dispatches with resumeMode=1 after a microtask boundary.
         /// </summary>
         public int yieldStateAddr { get; init; }
+        /// <summary>Per-dispatch grid/layout numbers the shape-only worker script reads (see
+        /// WasmAccelerator.BuildWorkerParams for the order).</summary>
+        public int[] p { get; init; } = System.Array.Empty<int>();
+        /// <summary>The flat kernel arguments, formatted as the host formats them (integers, G9/G17 floats,
+        /// <c>123n</c> for 64-bit values); the worker script converts each with <c>cv</c>.</summary>
+        public string[] a { get; init; } = System.Array.Empty<string>();
     }
 
     /// <summary>
@@ -74,6 +80,12 @@ namespace SpawnDev.ILGPU.Wasm
         public int endIdx { get; init; }
         /// <summary>Per-worker scratch base address (separate region per worker to prevent races).</summary>
         public int myScratch { get; init; }
+        /// <summary>Per-dispatch grid/layout numbers the shape-only worker script reads (see
+        /// WasmAccelerator.BuildWorkerParams for the order).</summary>
+        public int[] p { get; init; } = System.Array.Empty<int>();
+        /// <summary>The flat kernel arguments, formatted as the host formats them (integers, G9/G17 floats,
+        /// <c>123n</c> for 64-bit values); the worker script converts each with <c>cv</c>.</summary>
+        public string[] a { get; init; } = System.Array.Empty<string>();
     }
 
     /// <summary>

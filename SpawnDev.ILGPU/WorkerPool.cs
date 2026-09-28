@@ -72,8 +72,9 @@ self.onmessage = function(e) {
 var _modulesById = {};
 var _instancesById = {};
 var _lastMemoryBuffer = null;
-var _cachedFn = null;
-var _cachedFnSrc = null;
+// Compiled dispatch functions by script text. The host sends shape-only scripts (no per-dispatch values),
+// so this holds one entry per kernel shape; the old single slot recompiled on every shape switch.
+var _fnByScript = new Map();
 const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
 const _mathImports = {
   sin: Math.sin, cos: Math.cos, tan: Math.tan,
@@ -159,8 +160,9 @@ self.onmessage = async function(e) {
       _instancesById[kid] = instance;
     }
     d._instance = instance;
-    if (_cachedFnSrc !== d.script) { _cachedFn = new AsyncFunction('d', d.script); _cachedFnSrc = d.script; }
-    await _cachedFn(d);
+    var fn = _fnByScript.get(d.script);
+    if (!fn) { fn = new AsyncFunction('d', d.script); _fnByScript.set(d.script, fn); }
+    await fn(d);
   } catch(ex) {
     self.postMessage({ done: false, error: (ex && ex.message) ? ex.message : String(ex) });
   }

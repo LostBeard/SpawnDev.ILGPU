@@ -2059,8 +2059,11 @@ namespace SpawnDev.ILGPU.Wasm
         /// Minimum work items per worker for a kernel without barriers: a dispatch of N items uses
         /// ceil(N / this) workers, capped at the pool size. MEASURED 2026-09-28 (BackendTestBase.LaunchCost):
         /// a 32-element kernel spread over 10 workers spent 0.65 ms posting and 0.92 ms waiting per dispatch.
+        /// Waking an idle worker costs more than splitting saves until the grid is large: 64K light elements
+        /// took 1.0 ms on one worker vs 3.8 ms on four; 256K took 2.4 ms on four vs 4.3 ms on ten
+        /// (LaunchCost_WasmWorkerSizing_Sweep, after the shape-only worker scripts).
         /// </summary>
-        public static int NonBarrierMinItemsPerWorker { get; set; } = 16384;
+        public static int NonBarrierMinItemsPerWorker { get; set; } = 65536;
 
         private async Task DispatchToWorkers(
             int totalItems,
@@ -2127,23 +2130,21 @@ namespace SpawnDev.ILGPU.Wasm
 
             long profT = WasmDispatchProfile.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             if (WasmDispatchProfile.Enabled) { WasmDispatchProfile.Dispatches++; WasmDispatchProfile.WorkersUsed += workerCount; }
-            // Build the worker script
-            string argStr = string.Join(", ", flatArgs);
+            // The worker script depends only on the kernel's SHAPE; the per-dispatch numbers and the kernel
+            // arguments travel in the message (d.p / d.a) - see GetWorkerScript.
             int maxYieldIters = Math.Max(10000, compiledKernel.BarrierCount * Math.Max(phaseCount, 1) * 250);
-            var workerScript = BuildWasmWorkerScript(
-                gridDimX, gridDimY, scratchBase, scratchPerThread,
-                sharedMemBase, barrierBase, fenceSlot,
-                groupSize, numGroups, realGroupDimX, realGroupDimY, hasBarriers, argStr,
-                dynamicSharedElements, workerCount, phaseCount,
-                maxYieldIters,
+            var workerScript = GetWorkerScript(hasBarriers, compiledKernel.HasSimdKernel, flatArgs.Count);
+            var workerArgs = flatArgs.ToArray();
+            var workerParams = BuildWorkerParams(
+                hasBarriers, gridDimX, gridDimY, scratchBase, scratchPerThread,
+                sharedMemBase, barrierBase, fenceSlot, groupSize, numGroups, realGroupDimX, realGroupDimY,
+                dynamicSharedElements, workerCount, maxYieldIters,
                 // Zero region covers shared memory + barrier counters only.
                 // MUST NOT include fence slots — the group barrier uses fenceSlot+16/+20
                 // immediately after the zero loop. If a slow worker zeroes the arrival
                 // counter after a fast worker already incremented it, both deadlock.
                 // Fence slots self-manage via the barrier protocol (last worker resets).
-                fenceSlot - sharedMemBase,
-                // SIMD by-4 + scalar tail when the module exported a v128 kernel_simd.
-                compiledKernel.HasSimdKernel);
+                fenceSlot - sharedMemBase);
 
             // Resolve the pool: the process-shared persistent pool for default-WorkerCount
             // accelerators (created once per tab, reused across every accelerator — no per-test
@@ -2287,6 +2288,8 @@ namespace SpawnDev.ILGPU.Wasm
                         threadStart = threadStart,
                         threadEnd = threadEnd,
                         yieldStateAddr = yieldStateAddr,
+                        p = workerParams,
+                        a = workerArgs,
                     });
 
                     tasks.Add(tcs.Task);
@@ -2335,6 +2338,8 @@ namespace SpawnDev.ILGPU.Wasm
                         startIdx = startIdx,
                         endIdx = endIdx,
                         myScratch = myScratch,
+                        p = workerParams,
+                        a = workerArgs,
                     });
 
                     tasks.Add(tcs.Task);
@@ -2500,28 +2505,49 @@ namespace SpawnDev.ILGPU.Wasm
         }
 
         /// <summary>
-        /// Builds the JS script that runs inside each Wasm worker.
-        /// For barrier kernels: worker receives { wasmBytes, memory, threadId }
-        ///   and iterates over groups, calling kernel(globalIdx, dimX, dimY, scratchBase, groupDimX, threadIdX, sharedMemBase, barrierBase, ...args)
-        /// For non-barrier kernels: worker receives { wasmBytes, memory, startIdx, endIdx }
-        ///   and iterates over its assigned items with the same kernel signature (groupDimX=dimX, threadIdX=globalIdx).
+        /// Worker script text per kernel SHAPE (barrier or flat, SIMD or not, argument count). The text holds
+        /// no per-dispatch value: grid/layout numbers travel in the message as <c>d.p</c> and the kernel
+        /// arguments as <c>d.a</c> (see <see cref="BuildWorkerParams"/>), so a worker compiles each shape once.
         /// </summary>
-        private static string BuildWasmWorkerScript(
-            int gridDimX, int gridDimY, int scratchBase, int scratchPerThread,
-            int sharedMemBase, int barrierBase, int fenceSlot,
-            int groupSize, int numGroups, int realGroupDimX, int realGroupDimY, bool hasBarriers,
-            string argStr,
-            int dynamicSharedLength = 0,
-            int workerCount = 1,
-            int phaseCount = 1,
-            int maxYieldIters = 10000,
-            int zeroRegionSize = 0,
-            bool hasSimd = false)
+        /// <remarks>
+        /// 🔴 The script used to embed every argument value, grid size and memory offset as source text, and
+        /// the worker cached ONE compiled function keyed by that exact text - so any dispatch whose arguments
+        /// or layout differed from the previous one (every step of a training loop that alternates kernels)
+        /// compiled a new AsyncFunction from source inside the worker, on top of rebuilding the string here.
+        /// </remarks>
+        private static string GetWorkerScript(bool hasBarriers, bool hasSimd, int argCount)
+            => s_workerScripts.GetOrAdd((hasBarriers, hasSimd && !hasBarriers, argCount),
+                key => BuildWasmWorkerScript(key.Item1, key.Item2, key.Item3));
+
+        private static readonly ConcurrentDictionary<(bool, bool, int), string> s_workerScripts = new();
+
+        /// <summary>
+        /// The per-dispatch numbers the worker script reads from <c>d.p</c>, in the order
+        /// <see cref="BuildWasmWorkerScript"/> declares them.
+        /// </summary>
+        private static int[] BuildWorkerParams(
+            bool hasBarriers, int gridDimX, int gridDimY, int scratchBase, int scratchPerThread,
+            int sharedMemBase, int barrierBase, int fenceSlot, int groupSize, int numGroups,
+            int realGroupDimX, int realGroupDimY, int dynamicSharedLength, int workerCount,
+            int maxYieldIters, int zeroRegionSize)
+            => hasBarriers
+                ? new[] { numGroups, groupSize, gridDimX, gridDimY, scratchBase, scratchPerThread, sharedMemBase,
+                          barrierBase, dynamicSharedLength, zeroRegionSize, workerCount, fenceSlot,
+                          realGroupDimX, realGroupDimY, maxYieldIters }
+                : new[] { gridDimX, gridDimY, groupSize, realGroupDimX, realGroupDimY };
+
+        /// <summary>
+        /// Builds the JS script that runs inside each Wasm worker, for one kernel SHAPE.
+        /// For barrier kernels: worker receives { wasmBytes, memory, threadStart, threadEnd, yieldStateAddr, p, a }
+        ///   and runs the in-Wasm phase dispatcher over its thread band.
+        /// For non-barrier kernels: worker receives { wasmBytes, memory, startIdx, endIdx, myScratch, p, a }
+        ///   and iterates over its assigned items with the same kernel signature (groupDimX=dimX, threadIdX=globalIdx).
+        /// <c>d.a</c> holds the flat kernel arguments as the strings the host formatted them as (integers,
+        /// G9/G17 floats, NaN/Infinity, and <c>123n</c> for 64-bit values); <c>cv</c> turns each into exactly
+        /// the value the old inline source literal produced.
+        /// </summary>
+        private static string BuildWasmWorkerScript(bool hasBarriers, bool hasSimd, int argCount)
         {
-            // Produces an async function body string that is sent as the 'script' field
-            // in the message to the pool worker's async bootstrap.
-            // The bootstrap caches WebAssembly.compile/instantiate — the script body
-            // just uses the pre-cached instance from d._instance.
             var sb = new System.Text.StringBuilder();
             sb.AppendLine("    const kernel = d._instance.exports.kernel;");
             // Wasm SIMD128 Stage-3a: when the module also exported a v128 `kernel_simd` (4 lanes/call;
@@ -2529,87 +2555,59 @@ namespace SpawnDev.ILGPU.Wasm
             // the flat loop below can run it by-4 with a scalar tail. Never set for barrier kernels.
             if (hasSimd && !hasBarriers)
                 sb.AppendLine("    const kernel_simd = d._instance.exports.kernel_simd;");
+            sb.AppendLine("    const P = d.p;");
+            sb.AppendLine("    const A = d.a;");
+            sb.AppendLine("    const cv = (s) => s.endsWith('n') ? BigInt(s.slice(0, -1)) : Number(s);");
+            var argNames = new System.Text.StringBuilder();
+            for (int k = 0; k < argCount; k++)
+            {
+                sb.AppendLine($"    const a{k} = cv(A[{k}]);");
+                argNames.Append(", a").Append(k);
+            }
+            string argList = argNames.ToString();
             sb.AppendLine();
 
             if (hasBarriers)
             {
                 // Phase dispatcher: runs the thread/phase/group loop entirely in Wasm.
-                // Eliminates ~1M JS-Wasm boundary crossings for large sorts.
-                // The "dispatcher" function is compiled into the Wasm module.
-                //
-                // SPIN-YIELD LOOP (Variant C, Trip 2026-05-27): the dispatcher may return
-                // mid-spin when a phase OR group barrier fails to advance within
-                // YIELD_SPIN_THRESHOLD iterations (~5ms at ~5ns/iter on modern Wasm). When
-                // it does, yieldStateAddr[0] is left as 1 (phase) or 2 (group) and the
-                // dispatcher's spin-loop position is saved to the per-worker yield buffer.
-                // This wrapper re-invokes the dispatcher with resumeMode=1 so it picks up
-                // exactly where it left off.
-                //
-                // JS-side `Atomics.wait(..., Infinity)` parks the worker until the WASM
-                // producer (last-arriving worker) calls `env.notify` after its seqcst
-                // gen-bump store - see WasmBackend.GeneratePhaseDispatcher Step 2 notify
-                // emits. The notify shim is spec-correct per tc39/ecma262 #3800 (syg):
-                // `Atomics.wait` returning "not-equal" does NOT imply visibility of
-                // surrounding stores; the standard pattern is `while (load != target)
-                // wait(...)`, which our dispatcher's spin-on-re-entry provides.
-                //
-                // Why Infinity (no timeout): a timed wait re-polls every Tms even when the
-                // gen never advances mid-window. Under Fallout76-class CPU contention,
-                // hundreds of barrier yields * Tms re-polls = framework-cap timeout.
-                // Infinity wait + producer notify = exactly one park per genuine stall,
-                // exactly one wake per gen-bump. No polling overhead.
+                // SPIN-YIELD LOOP (Variant C, Trip 2026-05-27): the dispatcher may return mid-spin when a phase
+                // OR group barrier fails to advance within YIELD_SPIN_THRESHOLD iterations. yieldStateAddr[0]
+                // is then 1 (phase) or 2 (group) and the spin position is saved to the per-worker yield buffer;
+                // this wrapper re-invokes the dispatcher with resumeMode=1. JS-side `Atomics.wait(..., Infinity)`
+                // parks the worker until the last-arriving worker calls `env.notify` after its gen bump
+                // (tc39/ecma262 #3800: `while (load != target) wait(...)`). See WasmBackend.GeneratePhaseDispatcher.
+                sb.AppendLine("    const numGroups = P[0], groupSize = P[1], gridDimX = P[2], gridDimY = P[3];");
+                sb.AppendLine("    const scratchBase = P[4], scratchPerThread = P[5], sharedMemBase = P[6], barrierBase = P[7];");
+                sb.AppendLine("    const dynamicSharedLength = P[8], zeroRegionSize = P[9], workerCount = P[10], fenceSlot = P[11];");
+                sb.AppendLine("    const realGroupDimX = P[12], realGroupDimY = P[13], MAX_YIELD_ITERS = P[14];");
                 sb.AppendLine("    const dispatcher = d._instance.exports.dispatcher;");
                 sb.AppendLine("    const threadStart = d.threadStart;");
                 sb.AppendLine("    const threadEnd = d.threadEnd;");
                 sb.AppendLine("    const yieldStateAddr = d.yieldStateAddr;");
-                // Verify memory is big enough before dispatching. Account for per-worker
-                // yield region: yieldStateAddr + 16 bytes per worker is the upper bound.
-                sb.AppendLine($"    const memBytes = d.memory.buffer.byteLength;");
-                sb.AppendLine($"    const needed = yieldStateAddr + 16;");
-                sb.AppendLine($"    if (memBytes < needed) {{ self.postMessage({{ done: false, error: 'MEM TOO SMALL: buffer=' + memBytes + ' needed=' + needed + ' fence={fenceSlot} scratch={scratchBase}+{scratchPerThread}*{groupSize} shared={sharedMemBase}' }}); return; }}");
-                // i32 view over the SAB, used for yieldFlag + Atomics.wait on the phase gen.
-                // (The same buffer underlies d.memory; aliasing is intentional.)
+                // Verify memory is big enough before dispatching (yieldStateAddr + 16 is the upper bound).
+                sb.AppendLine("    const memBytes = d.memory.buffer.byteLength;");
+                sb.AppendLine("    const needed = yieldStateAddr + 16;");
+                sb.AppendLine("    if (memBytes < needed) { self.postMessage({ done: false, error: 'MEM TOO SMALL: buffer=' + memBytes + ' needed=' + needed + ' fence=' + fenceSlot + ' scratch=' + scratchBase + '+' + scratchPerThread + '*' + groupSize + ' shared=' + sharedMemBase }); return; }");
+                // i32 view over the SAB, for yieldFlag + Atomics.wait on the gen slots (aliasing intentional).
                 sb.AppendLine("    const yMem32 = new Int32Array(d.memory.buffer);");
-                sb.AppendLine($"    const yieldFlagIdx = yieldStateAddr >>> 2;");
-                // gen index in i32 view: fenceSlot+4 is the phase generation slot, fenceSlot+20
-                // the group generation slot. A spin-yield can happen at EITHER barrier — the park
-                // below must wait on the gen slot matching the barrier we yielded at (yieldFlag).
-                sb.AppendLine($"    const genIdx = {(fenceSlot + 4) >>> 2};");
-                sb.AppendLine($"    const groupGenIdx = {(fenceSlot + 20) >>> 2};");
+                sb.AppendLine("    const yieldFlagIdx = yieldStateAddr >>> 2;");
+                // fenceSlot+4 = phase generation, fenceSlot+20 = group generation. The park below waits on the
+                // slot matching the barrier we yielded at (yieldFlag).
+                sb.AppendLine("    const genIdx = (fenceSlot + 4) >>> 2;");
+                sb.AppendLine("    const groupGenIdx = (fenceSlot + 20) >>> 2;");
                 sb.AppendLine("    let resumeMode = 0;");
                 sb.AppendLine("    let yieldIters = 0;");
-                // Scale with kernel barrier load: under Fallout76-class CPU contention a single
-                // barrier crossing may need many park/wake cycles before all workers advance.
-                // Floor 10K catches missed-notify / livelock quickly on healthy machines.
-                sb.AppendLine($"    const MAX_YIELD_ITERS = {maxYieldIters};");
                 sb.AppendLine("    while (true) {");
                 sb.AppendLine("      try {");
-                sb.Append($"        dispatcher(threadStart, threadEnd, {numGroups}, {groupSize}, {gridDimX}, {gridDimY}, {scratchBase}, {scratchPerThread}, {sharedMemBase}, {barrierBase}, {dynamicSharedLength}, {zeroRegionSize}, {workerCount}, {fenceSlot}, yieldStateAddr, resumeMode, {realGroupDimX}, {realGroupDimY}");
-                if (argStr.Length > 0)
-                {
-                    sb.Append(", ");
-                    sb.Append(argStr);
-                }
-                sb.AppendLine(");");
+                sb.AppendLine("        dispatcher(threadStart, threadEnd, numGroups, groupSize, gridDimX, gridDimY, scratchBase, scratchPerThread, sharedMemBase, barrierBase, dynamicSharedLength, zeroRegionSize, workerCount, fenceSlot, yieldStateAddr, resumeMode, realGroupDimX, realGroupDimY" + argList + ");");
                 sb.AppendLine("      } catch(e) { self.postMessage({ done: false, error: 'Dispatcher trap: ' + e.message + ' memSize=' + d.memory.buffer.byteLength + ' yieldIters=' + yieldIters }); return; }");
                 sb.AppendLine("      const yieldFlag = Atomics.load(yMem32, yieldFlagIdx);");
                 sb.AppendLine("      if (yieldFlag === 0) break;");
                 sb.AppendLine("      yieldIters++;");
                 sb.AppendLine("      if (yieldIters >= MAX_YIELD_ITERS) { self.postMessage({ done: false, error: 'Dispatcher exceeded MAX_YIELD_ITERS=' + MAX_YIELD_ITERS }); return; }");
-                // Variant C Step 3 (Trip 2026-05-27): Atomics.wait WITHOUT timeout (Infinity).
-                // OS-parks the worker thread until the wasm producer's `env.notify` shim is
-                // called by the last-arriving worker (after its seqcst gen-bump). If gen has
-                // already advanced past savedGen by the time we get here, the wait returns
-                // "not-equal" immediately - zero overhead in that case. Otherwise we park
-                // until the notify, no polling. Atomics.wait return value (`ok` / `not-equal`
-                // / `timed-out`) is intentionally discarded: regardless of which fired, we
-                // resume the dispatcher and let its spin-on-re-entry re-check the gen. This
-                // matches the standard condition-variable `while (load != target) wait()`
-                // pattern from tc39/ecma262 #3800 (syg). See NOTES_ecma262_3800_syg.md.
+                // Variant C Step 3: Atomics.wait WITHOUT timeout; the return value is intentionally discarded -
+                // the dispatcher's spin-on-re-entry re-checks the gen either way.
                 sb.AppendLine("      const savedGen = yMem32[yieldFlagIdx + 3];");
-                // yieldFlag 1 = phase-barrier yield (park on phase gen), 2 = group-barrier
-                // yield (park on group gen). Parking on the wrong slot mismatches
-                // immediately and busy-loops instead of parking.
                 sb.AppendLine("      const waitGenIdx = (yieldFlag === 2) ? groupGenIdx : genIdx;");
                 sb.AppendLine("      Atomics.wait(yMem32, waitGenIdx, savedGen);");
                 sb.AppendLine("      resumeMode = 1;");
@@ -2617,27 +2615,19 @@ namespace SpawnDev.ILGPU.Wasm
             }
             else
             {
-                // Non-barrier kernel: flat item dispatch with per-worker scratch
+                // Non-barrier kernel: flat item dispatch with per-worker scratch.
+                sb.AppendLine("    const gridDimX = P[0], gridDimY = P[1], groupSize = P[2], realGroupDimX = P[3], realGroupDimY = P[4];");
                 sb.AppendLine("    const startIdx = d.startIdx;");
                 sb.AppendLine("    const endIdx = d.endIdx;");
                 sb.AppendLine("    const myScratch = d.myScratch;");
                 sb.AppendLine();
-
-                // The kernel's trailing per-lane call args (same for scalar `kernel` and v128 `kernel_simd` —
-                // both share the ABI; kernel_simd just reads/writes 4 consecutive lanes from the base index).
-                // For non-barrier kernels: pass groupSize (groupDimX) + realGroupDimX/Y so Grid.IdxX/Y and
-                // Group.IdxX/Y decompose correctly. Auto-grouped launches are 1D (realGroupDimX == groupSize,
-                // realGroupDimY == 1). Trailing zeros = sharedMemBase, barrierBase, dynamicSharedLen, phase.
-                string callTail = $", {gridDimX}, {gridDimY}, myScratch, {groupSize}, i % {groupSize}, 0, 0, 0, 0, {realGroupDimX}, {realGroupDimY}";
-                if (argStr.Length > 0)
-                    callTail += ", " + argStr;
-
+                // Trailing per-lane call args (same for scalar `kernel` and v128 `kernel_simd`): groupSize
+                // (groupDimX) + realGroupDimX/Y so Grid.Idx and Group.Idx decompose correctly; the zeros are
+                // sharedMemBase, barrierBase, dynamicSharedLen, phase.
+                string callTail = ", gridDimX, gridDimY, myScratch, groupSize, i % groupSize, 0, 0, 0, 0, realGroupDimX, realGroupDimY" + argList;
                 if (hasSimd)
                 {
-                    // SIMD by-4: each worker processes its OWN contiguous [startIdx,endIdx) range — run
-                    // kernel_simd for full groups of 4 (it loads/stores 4 unit-stride lanes from base i),
-                    // then the scalar `kernel` for this worker's own count%4 tail (Stage 3b adds masks to
-                    // drop the tail loop). Per-worker ranges don't overlap, so no lane is skipped/doubled.
+                    // SIMD by-4 over this worker's own contiguous [startIdx,endIdx) range, then the scalar tail.
                     sb.AppendLine("    let i = startIdx;");
                     sb.AppendLine("    for (; i + 4 <= endIdx; i += 4) {");
                     sb.AppendLine($"      kernel_simd(i{callTail});");
