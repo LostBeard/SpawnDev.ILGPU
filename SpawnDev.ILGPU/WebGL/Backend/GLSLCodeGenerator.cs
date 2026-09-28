@@ -1119,11 +1119,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // reaches the header through a UB chain (it's the continuation block).
             if (!mergeInLoop && merge != null)
             {
-                BasicBlock? inLoopMerge = null;
-                if (loop.Contains(trueTarget) && ReachesHeaderThroughUBChain(trueTarget, loop))
-                    inLoopMerge = trueTarget;
-                else if (loop.Contains(falseTarget) && ReachesHeaderThroughUBChain(falseTarget, loop))
-                    inLoopMerge = falseTarget;
+                // The first block BOTH arms reach in the loop (StructuredLoopMerge); see the WGSL generator.
+                BasicBlock? inLoopMerge = SpawnDev.ILGPU.CodeGen.StructuredLoopMerge.FindInLoopMerge(trueTarget, falseTarget, loop);
+                if (inLoopMerge == null)
+                {
+                    if (loop.Contains(trueTarget) && ReachesHeaderThroughUBChain(trueTarget, loop))
+                        inLoopMerge = trueTarget;
+                    else if (loop.Contains(falseTarget) && ReachesHeaderThroughUBChain(falseTarget, loop))
+                        inLoopMerge = falseTarget;
+                }
                 if (inLoopMerge != null)
                 {
                     merge = inLoopMerge;

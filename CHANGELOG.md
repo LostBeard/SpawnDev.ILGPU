@@ -1,6 +1,24 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.20-local.1 (unreleased) - WebGPU + WebGL: infinite loop when an if/else in a loop has a break in one arm
+
+**Bug (GPU hang, live in 5.2.19 and earlier):** in `for (k..) { if (c) { run++; if (run >= 9) break; } else run = 0; }`
+the arm that can break makes the function-wide post-dominator of the `if` lie OUTSIDE the loop, so the structured
+emitters looked for an in-loop merge - and took "a branch target that reaches the header through unconditional
+branches", which was the ELSE arm's own block. The then-arm walked through the loop latch (`k++` and the loop-variable
+copies), the else arm stopped at its own block and never reached it: on the first iteration that took the else arm the
+counter never advanced. On WebGPU that is `DXGI_ERROR_DEVICE_HUNG` (found by SpawnScene's GPU FAST-9 detector on the
+first photo, 2026-09-28); WebGL had the identical heuristic. **Fix:** `CodeGen.StructuredLoopMerge.FindInLoopMerge` -
+the first block BOTH arms reach inside the loop (header and exits excluded), used by the WGSL and GLSL emitters; the
+old guess remains only as the fallback when the arms never meet in the loop.
+
+**Test:** `BackendTestBase.LoopLatch_IfElseWithBreak_BothArmsReachLatch` (the minimal shape, and FAST's shape: a helper
+that `return`s from inside the loop, called twice), CPU oracle, all 7 lanes. Red-checked on the GENERATED WGSL/GLSL
+(`DemoConsole -- addr-helper-wgsl LoopLatchRunKernel`): before, the else arm never reached the counter increment;
+after, the latch follows the if/else on every path. Not red-checked by running the broken shader - it hangs the GPU
+and resets the display driver on the test machine. Full sweep 4462/0/346.
+
 ## 5.2.19 (forks 2.3.6) - Wasm: pipelined dispatch
 
 **Pipelined dispatch (`WasmAccelerator.EnablePipelinedDispatch`, default on).** A flat (no barrier) dispatch of

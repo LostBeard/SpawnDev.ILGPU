@@ -8139,11 +8139,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         // it's the in-loop merge — both branches converge there before back-edging.
                         // Without this, the continuation code (sum += val; i++) gets placed inside
                         // one branch and the other branch's non-exit paths can't reach it.
-                        BasicBlock? inLoopMerge = null;
-                        if (currentLoop.Contains(trueTarget) && ReachesHeaderThroughUBChain(trueTarget, currentLoop))
-                            inLoopMerge = trueTarget;
-                        else if (currentLoop.Contains(falseTarget) && ReachesHeaderThroughUBChain(falseTarget, currentLoop))
-                            inLoopMerge = falseTarget;
+                        // The first block BOTH arms reach in the loop (StructuredLoopMerge). The old guess - a target that
+                        // reaches the header through unconditional branches - can be one arm's own block; the other arm
+                        // then walked through the latch and this arm never reached it (infinite loop, 2026-09-28).
+                        BasicBlock? inLoopMerge = SpawnDev.ILGPU.CodeGen.StructuredLoopMerge.FindInLoopMerge(trueTarget, falseTarget, currentLoop);
+                        if (inLoopMerge == null)
+                        {
+                            if (currentLoop.Contains(trueTarget) && ReachesHeaderThroughUBChain(trueTarget, currentLoop))
+                                inLoopMerge = trueTarget;
+                            else if (currentLoop.Contains(falseTarget) && ReachesHeaderThroughUBChain(falseTarget, currentLoop))
+                                inLoopMerge = falseTarget;
+                        }
 
                         mergeNode = inLoopMerge ?? stopBlock;
                     }
