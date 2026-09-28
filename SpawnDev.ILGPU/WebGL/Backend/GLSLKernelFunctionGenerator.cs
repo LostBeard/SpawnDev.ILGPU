@@ -2564,6 +2564,85 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// <summary>Maps parameter index → GLSL element type ("int", "uint", "float") for buffer params.</summary>
         private readonly Dictionary<int, string> _bufferGlslTypes = new();
 
+        /// <summary>
+        /// GLSL expression reading one leaf field of element <paramref name="elemIdx"/> of a struct buffer
+        /// bound as <paramref name="bn"/>. The texture is the element array's raw bytes, one 32-bit texel per 4
+        /// bytes, so the leaf lives at byte (index + offset) * elementSize + leaf.ByteOffset (ILGPU's real
+        /// layout, padding included); a 64-bit emulated leaf is TWO texels; a byte/short leaf is shifted and
+        /// masked out of its texel, zero-extended. Shared by the whole-element load and the single-field load
+        /// through a <see cref="LoadFieldAddress"/> so the two can never disagree.
+        /// </summary>
+        private static string StructLeafFetchExpr(StructLeaf leaf, string elemIdx, string bn, int elemSize)
+        {
+            string Fetch(string texelIdx) =>
+                $"texelFetch({bn}, ivec2(({texelIdx}) % {bn}_tileW, ({texelIdx}) / {bn}_tileW), 0).r";
+            if (leaf.ByteSize < 4)
+            {
+                // byte / short: shift + mask out of its texel, zero-extended (the backend's sub-word register
+                // convention; a signed use re-extends at its widening convert). A struct of only sub-word fields
+                // can have a size that is not a multiple of 4, so the texel and shift are computed per element.
+                if (leaf.Basic != BasicValueType.Int8 && leaf.Basic != BasicValueType.Int16)
+                    throw new NotSupportedException(
+                        $"WebGL: struct buffer field {leaf.Path} ({leaf.Basic}, {leaf.ByteSize} bytes) cannot be read - " +
+                        "16/8-bit float fields (Half, BFloat16, FP8) inside a struct buffer are not supported. " +
+                        "Widen the field to float.");
+                string texelIdx, shift;
+                if (elemSize % 4 == 0)
+                {
+                    texelIdx = $"(int({elemIdx}) + {bn}_offset) * {elemSize / 4} + {leaf.ByteOffset / 4}";
+                    shift = $"{(leaf.ByteOffset % 4) * 8}u";
+                }
+                else
+                {
+                    string byteAddr = $"((int({elemIdx}) + {bn}_offset) * {elemSize} + {leaf.ByteOffset})";
+                    texelIdx = $"({byteAddr} >> 2)";
+                    shift = $"uint(({byteAddr} & 3) * 8)";
+                }
+                string raw = $"((uint({Fetch(texelIdx)}) >> {shift}) & {(1u << (leaf.ByteSize * 8)) - 1u}u)";
+                return $"int({raw})";
+            }
+            if (elemSize % 4 != 0 || leaf.ByteOffset % 4 != 0 || leaf.ByteSize != 4 && leaf.ByteSize != 8)
+                throw new NotSupportedException(
+                    $"WebGL: reading struct field {leaf.Path} ({leaf.ByteSize} bytes at byte {leaf.ByteOffset} of a " +
+                    $"{elemSize}-byte element) from a buffer is not supported. Use WebGPU/Wasm.");
+            string texel0 = $"(int({elemIdx}) + {bn}_offset) * {elemSize / 4} + {leaf.ByteOffset / 4}";
+            if (leaf.IsEmulated64)
+            {
+                string lo = $"uint({Fetch(texel0)})";
+                string hi = $"uint({Fetch(texel0 + " + 1")})";
+                return leaf.IsF64 ? $"f64_from_ieee754_bits({lo}, {hi})" : $"uvec2({lo}, {hi})";
+            }
+            if (leaf.GlslType == "float") return $"intBitsToFloat({Fetch(texel0)})";
+            if (leaf.GlslType == "uint") return $"uint({Fetch(texel0)})";
+            return Fetch(texel0);
+        }
+
+        /// <summary>
+        /// Field addresses INTO a struct buffer element: LFA target name -> (buffer param index, the element
+        /// LEA's index variable, first flattened leaf, leaf count). A Load through one reads just those
+        /// leaves; see <see cref="GenerateCode(LoadFieldAddress)"/>.
+        /// </summary>
+        private readonly Dictionary<string, (int ParamIdx, string ElemIdx, int FirstLeaf, int LeafCount)> _lfaBufferFields = new();
+
+        /// <summary>
+        /// A field address into a struct-buffer element (<c>pairs[i].Key</c>). The base generator only emitted
+        /// a comment here, and a Load through the result read an UNINITIALIZED local: every
+        /// <c>keys[i] = pairs[i].Key</c> on WebGL produced 0 (4099 of 4099,
+        /// SimdAddressShapes_NonUnitStrideAccesses_Exact, 2026-09-28) while whole-element loads were right.
+        /// Now the address is recorded and the Load fetches exactly the field's texels.
+        /// </summary>
+        public override void GenerateCode(LoadFieldAddress value)
+        {
+            base.GenerateCode(value);
+            var source = Load(value.Source);
+            if (_leaParamMap.TryGetValue(source.ToString(), out var paramIdx)
+                && _structFieldCounts.TryGetValue(paramIdx, out var fieldCount) && fieldCount > 0)
+            {
+                var target = Load(value);
+                _lfaBufferFields[target.ToString()] = (paramIdx, source.ToString(), value.FieldSpan.Index, value.FieldSpan.Span);
+            }
+        }
+
         public override void GenerateCode(global::ILGPU.IR.Values.Load loadVal)
         {
             var target = Load(loadVal);
@@ -2576,6 +2655,28 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     AppendLine($"{target} = {arrayExpr};");
                 else
                     EmitTypedAssignment(target, TypeGenerator[loadVal.Type], arrayExpr);
+                return;
+            }
+
+            // Load of one field (or a nested sub-struct) of a struct-buffer element via its field address.
+            if (_lfaBufferFields.TryGetValue(source.ToString(), out var lfa))
+            {
+                var lfaParam = Method.Parameters.FirstOrDefault(p => p.Index == lfa.ParamIdx)
+                    ?? throw new InvalidOperationException($"WebGL: struct buffer param{lfa.ParamIdx} not found for a field load");
+                var lfaElemType = UnwrapType(lfaParam.ParameterType);
+                var lfaLeaves = GenerateStructFieldPaths(lfaElemType);
+                string lfaBn = GetParamBindingName(lfa.ParamIdx);
+                Declare(target);
+                if (lfa.LeafCount == 1)
+                {
+                    AppendLine($"{target} = {StructLeafFetchExpr(lfaLeaves[lfa.FirstLeaf], lfa.ElemIdx, lfaBn, lfaElemType.Size)};");
+                }
+                else
+                {
+                    // A nested struct field: its own flattened leaves are field_0..field_{n-1}, in order.
+                    for (int k = 0; k < lfa.LeafCount; k++)
+                        AppendLine($"{target}.field_{k} = {StructLeafFetchExpr(lfaLeaves[lfa.FirstLeaf + k], lfa.ElemIdx, lfaBn, lfaElemType.Size)};");
+                }
                 return;
             }
 
@@ -2758,59 +2859,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         var leaves = GenerateStructFieldPaths(elemType);
                         int elemSize = elemType.Size;
                         Declare(target);
-                        for (int fi = 0; fi < leaves.Count; fi++)
-                        {
-                            var leaf = leaves[fi];
-                            string Fetch(string texelIdx) =>
-                                $"texelFetch({leaBn}, ivec2(({texelIdx}) % {leaBn}_tileW, ({texelIdx}) / {leaBn}_tileW), 0).r";
-                            string valExpr;
-                            if (leaf.ByteSize < 4)
-                            {
-                                // byte / short: shift + mask out of its texel, zero-extended (the
-                                // backend's sub-word register convention; a signed use re-extends at its
-                                // widening convert). A struct of only sub-word fields can have a size that
-                                // is not a multiple of 4, so the texel and shift are computed per element.
-                                if (leaf.Basic != BasicValueType.Int8 && leaf.Basic != BasicValueType.Int16)
-                                    throw new NotSupportedException(
-                                        $"WebGL: struct buffer field {leaf.Path} ({leaf.Basic}, {leaf.ByteSize} bytes) cannot be read - " +
-                                        "16/8-bit float fields (Half, BFloat16, FP8) inside a struct buffer are not supported. " +
-                                        "Widen the field to float.");
-                                string texelIdx, shift;
-                                if (elemSize % 4 == 0)
-                                {
-                                    texelIdx = $"(int({source}) + {leaBn}_offset) * {elemSize / 4} + {leaf.ByteOffset / 4}";
-                                    shift = $"{(leaf.ByteOffset % 4) * 8}u";
-                                }
-                                else
-                                {
-                                    string byteAddr = $"((int({source}) + {leaBn}_offset) * {elemSize} + {leaf.ByteOffset})";
-                                    texelIdx = $"({byteAddr} >> 2)";
-                                    shift = $"uint(({byteAddr} & 3) * 8)";
-                                }
-                                string raw = $"((uint({Fetch(texelIdx)}) >> {shift}) & {(1u << (leaf.ByteSize * 8)) - 1u}u)";
-                                valExpr = $"int({raw})";
-                                AppendLine($"{target}{leaf.Path} = {valExpr};");
-                                continue;
-                            }
-                            if (elemSize % 4 != 0 || leaf.ByteOffset % 4 != 0 || leaf.ByteSize != 4 && leaf.ByteSize != 8)
-                                throw new NotSupportedException(
-                                    $"WebGL: reading struct field {leaf.Path} ({leaf.ByteSize} bytes at byte {leaf.ByteOffset} of a " +
-                                    $"{elemSize}-byte element) from a buffer is not supported. Use WebGPU/Wasm.");
-                            string texel0 = $"(int({source}) + {leaBn}_offset) * {elemSize / 4} + {leaf.ByteOffset / 4}";
-                            if (leaf.IsEmulated64)
-                            {
-                                string lo = $"uint({Fetch(texel0)})";
-                                string hi = $"uint({Fetch(texel0 + " + 1")})";
-                                valExpr = leaf.IsF64 ? $"f64_from_ieee754_bits({lo}, {hi})" : $"uvec2({lo}, {hi})";
-                            }
-                            else if (leaf.GlslType == "float")
-                                valExpr = $"intBitsToFloat({Fetch(texel0)})";
-                            else if (leaf.GlslType == "uint")
-                                valExpr = $"uint({Fetch(texel0)})";
-                            else
-                                valExpr = Fetch(texel0);
-                            AppendLine($"{target}{leaf.Path} = {valExpr};");
-                        }
+                        foreach (var leaf in leaves)
+                            AppendLine($"{target}{leaf.Path} = {StructLeafFetchExpr(leaf, source.ToString(), leaBn, elemSize)};");
                         return;
                     }
                 }
@@ -2870,6 +2920,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 AppendLine($"{arrayExpr} = {val};");
                 return;
             }
+
+            // A store to ONE field of a struct-buffer element (dst[i].Key = x). Transform feedback writes whole
+            // elements, so this needs a read-modify-write of the other fields; until that exists, fail loud -
+            // before this check the store fell through to a plain local assignment and was silently lost.
+            if (_lfaBufferFields.TryGetValue(address.ToString(), out var lfaStore))
+                throw new NotSupportedException(
+                    $"WebGL: storing a single field of a struct buffer element (param{lfaStore.ParamIdx}) is not supported - " +
+                    "write the whole element (dst[i] = new T(...)) or use WebGPU/Wasm.");
 
             // Emulated 64-bit buffer store via TF output
             if (_emulatedVarMappings.TryGetValue(address.ToString(), out var emulInfo))

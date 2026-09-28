@@ -804,6 +804,7 @@ namespace SpawnDev.ILGPU.Wasm
                 await Task.WhenAll(pending);
             }
 
+            long profStart = WasmDispatchProfile.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             // A Dispose could have happened while we awaited above. Bail out before
             // re-creating the worker pool below, which would resurrect a disposed accelerator.
             if (_disposed)
@@ -1877,6 +1878,7 @@ namespace SpawnDev.ILGPU.Wasm
                 // for the diagnostic string (not gating copy-OUT) — a future iteration
                 // will use them once the trace covers every Store-target IR shape.
                 bool traceFoundAnyBufferWrite = writtenBufferIndices.Count > 0;
+                if (WasmDispatchProfile.Enabled) WasmDispatchProfile.Add(ref WasmDispatchProfile.PrepareTicks, profStart);
                 await DispatchToWorkers(
                     totalItems, gridDimX, gridDimY, scratchBase, scratchPerThread,
                     sharedMemBase, barrierBase, fenceSlot, yieldStateRegionBase, compiledKernel,
@@ -1996,6 +1998,13 @@ namespace SpawnDev.ILGPU.Wasm
         /// For barrier kernels: distributes groups across workers. Each worker runs all threads within its groups.
         /// For non-barrier kernels: distributes items across workers with flat range dispatch.
         /// </summary>
+        /// <summary>
+        /// Minimum work items per worker for a kernel without barriers: a dispatch of N items uses
+        /// ceil(N / this) workers, capped at the pool size. MEASURED 2026-09-28 (BackendTestBase.LaunchCost):
+        /// a 32-element kernel spread over 10 workers spent 0.65 ms posting and 0.92 ms waiting per dispatch.
+        /// </summary>
+        public static int NonBarrierMinItemsPerWorker { get; set; } = 16384;
+
         private async Task DispatchToWorkers(
             int totalItems,
             int gridDimX,
@@ -2040,9 +2049,11 @@ namespace SpawnDev.ILGPU.Wasm
             }
             else
             {
-                // Non-barrier: full worker count for maximum parallelism
-                workerCount = _workerCount;
-                if (workerCount > totalItems) workerCount = Math.Max(1, totalItems);
+                // Non-barrier: one worker per NonBarrierMinItemsPerWorker items, up to the full pool. Every
+                // worker costs a postMessage plus a completion round trip whether it has 3 items or 3 million,
+                // so spreading a small dispatch over the whole pool is slower than running it on one worker.
+                workerCount = Math.Min(_workerCount,
+                    Math.Max(1, (totalItems + NonBarrierMinItemsPerWorker - 1) / NonBarrierMinItemsPerWorker));
             }
 
             if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] Dispatch: workers={workerCount}, items={totalItems}, barriers={hasBarriers}, gs={groupSize}, ng={numGroups}, phases={phaseCount}");
@@ -2057,6 +2068,8 @@ namespace SpawnDev.ILGPU.Wasm
                 WasmBackend.Log("[Wasm_DUMP_END]");
             }
 
+            long profT = WasmDispatchProfile.Enabled ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+            if (WasmDispatchProfile.Enabled) { WasmDispatchProfile.Dispatches++; WasmDispatchProfile.WorkersUsed += workerCount; }
             // Build the worker script
             string argStr = string.Join(", ", flatArgs);
             int maxYieldIters = Math.Max(10000, compiledKernel.BarrierCount * Math.Max(phaseCount, 1) * 250);
@@ -2079,6 +2092,7 @@ namespace SpawnDev.ILGPU.Wasm
             // accelerators (created once per tab, reused across every accelerator — no per-test
             // create/terminate churn; see s_sharedWorkerPool), or a private pool for explicit-
             // WorkerCount accelerators (so a stress test's large count can't inflate the shared pool).
+            if (WasmDispatchProfile.Enabled) { WasmDispatchProfile.ScriptChars += workerScript.Length; profT = WasmDispatchProfile.Add(ref WasmDispatchProfile.ScriptTicks, profT); }
             WorkerPool pool;
             if (_useSharedPool)
             {
@@ -2161,6 +2175,7 @@ namespace SpawnDev.ILGPU.Wasm
                 }
             }
 
+            if (WasmDispatchProfile.Enabled) profT = WasmDispatchProfile.Add(ref WasmDispatchProfile.AcquireTicks, profT);
             var tasks = new List<Task>();
 
             if (hasBarriers)
@@ -2287,6 +2302,7 @@ namespace SpawnDev.ILGPU.Wasm
             // hitting the outer harness timeout. Default chosen large enough that
             // legitimately-slow kernels (large Conv2D on Wasm) complete in time, but
             // small enough that a hang surfaces in 2 min vs 10+ min.
+            if (WasmDispatchProfile.Enabled) profT = WasmDispatchProfile.Add(ref WasmDispatchProfile.PostTicks, profT);
             {
                 var remaining = new List<Task>(tasks);
                 int watchdogMs = WasmDispatchWatchdogSeconds * 1000;
@@ -2323,6 +2339,7 @@ namespace SpawnDev.ILGPU.Wasm
                 }
             }
 
+            if (WasmDispatchProfile.Enabled) WasmDispatchProfile.Add(ref WasmDispatchProfile.WaitTicks, profT);
             // Debug: dump first 4 bytes of each buffer in Wasm memory after kernel.
             // Gate the JS interop loop behind VerboseLogging too — the per-buffer typed
             // array allocations cost real time even when the log message is suppressed.

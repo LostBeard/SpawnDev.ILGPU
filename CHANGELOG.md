@@ -1,6 +1,45 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.18-local.7 (unreleased, forks 2.3.6-local.2) - Wasm/WebGL silent wrong results fixed; Wasm small-dispatch cost halved
+
+**Wasm SIMD (`kernel_simd`) - two silent wrong-result bugs, live in 5.2.17 for any large enough dispatch:**
+1. The v128 emitter ASSUMED every lane-variant address was unit-stride and never checked it. An f32 field of a
+   struct array (8-byte stride) was loaded as Key0,Value0,Key1,Value1; out-parameter locals and other non-unit
+   addresses wrote the wrong slots. Now a lane-variant load/store is vectorized only through a
+   `LoadElementAddress` with a lane-invariant base, element size == lane width, and an offset that is the 1D thread
+   index +/- lane-invariant terms (or a gather/scatter index, done lane by lane); anything else emits scalar
+   (`IsVectorAccessAddress`). 2D/3D indices are never treated as unit-stride (y*width+x is contiguous only if width is
+   the grid width, which the IR cannot prove).
+2. If-conversion built each phi source's lane mask from the FIRST IfBranch into a block and ignored its other
+   predecessors, so a block reached two ways (`if (a || (b && c)) v++`) lost the second route's lanes. The
+   control-path walk now stops only at a block that post-dominates the entry and bails to scalar on any join off
+   that spine (`TrySingleIncomingEdge`, `PostDominatesEntry`; the first-match `TryControllingBranch` is removed).
+
+The by-4 path only runs when ONE worker gets 4+ consecutive items, so the small WasmStruct*DiagTest /
+ShortCircuit_SharedBlockPhi / NoHelperOutLikeAlloca tests never reached it - until small dispatches moved to one
+worker (below), which exposed 8 failures, all green with `WasmBackend.ForceScalar`. Red-check with the 5.2.17 emitter
+AND 5.2.17 worker sizing at N=4099: struct-field reads 3,060/4,099 wrong, short-circuit join 680/4,099 wrong.
+
+**WebGL - reading one field of a struct-buffer element returned 0:** a Load through a `LoadFieldAddress` into a
+struct buffer (`keys[i] = pairs[i].Key`) emitted only a comment and read an uninitialized local (4,099/4,099 = 0);
+whole-element loads were right. The field load now fetches exactly that field's texel(s) through the same per-leaf
+code as the whole-element load (`StructLeafFetchExpr`); a nested sub-struct field is rebuilt leaf by leaf. A STORE to
+one field of a struct-buffer element used to fall through to a local and be lost; it now throws
+`NotSupportedException` (transform feedback writes whole elements - write `dst[i] = new T(...)`).
+
+**Wasm small-dispatch cost:** a non-barrier dispatch used the whole worker pool (10 workers for a 32-element kernel:
+0.65 ms posting + 0.92 ms waiting). It now uses one worker per `WasmAccelerator.NonBarrierMinItemsPerWorker`
+(= 16384) items, capped at the pool: 32-element launch 2.03-2.32 -> 1.045 ms batched (4.58 -> 1.80 ms synced); large
+dispatches unchanged (1M elements: 6.5-8.6 ms either way). `WasmDispatchProfile` (opt-in) splits a dispatch into
+prepare / script / acquire / post / wait.
+
+**Tests:** `SimdAddressShapes_NonUnitStrideAccesses_Exact` (N=4099: struct field, scatter, stride-2, short-circuit
+join, elementwise control; scatter checked only where `RequiresScatterStores` is satisfied), `LaunchCost_TrivialKernel_
+SyncedAndBatched` (per-backend gauge), `LaunchCost_WasmWorkerSizing_Sweep`. Gates: full Wasm lane 728 run / 0 failed,
+full WebGL lane 545 / 0 failed, shapes test on all 9 backend configurations; offline `wasm-simd-emit-gate` still emits
+`kernel_simd` for every canonical elementwise kernel. New probe: `struct-field-glsl`.
+
 ## 5.2.18-local.6 (unreleased, forks 2.3.6-local.2) - CPU: lane-independent kernels skip the lane threads
 
 **Bug (performance):** the CPU accelerator's cooperative (Auto) mode runs every lane of a group on its own OS thread and

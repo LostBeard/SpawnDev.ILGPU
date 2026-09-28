@@ -1067,33 +1067,88 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 if (Is2Lane(ClassOf(oc.Left.Resolve().Type)) != need2lane) return null;
                 rev.Add((oc, ReferenceEquals(ownIf.TrueTarget, phiBlock)));
             }
+            // Walk up to the always-executed spine. A path is only a correct lane mask if every block on it
+            // has exactly ONE incoming edge: a block reached two ways (X -> T and X -> F -> G -> T in
+            // `if (a || (b && c)) v++`) runs for lanes on EITHER route, which a single (compare, edge) chain
+            // cannot express. 🔴 The old walk took the FIRST IfBranch targeting a block and ignored the rest,
+            // so the second route's lanes were treated as not reaching T (ShortCircuit_SharedBlockPhi on
+            // Wasm: `r2 == den && q odd` lost its increment, 2026-09-28); it also stopped at a block entered
+            // by an unconditional jump as if that block always ran. A join off the spine now bails to scalar.
             var cur = pred; int guard = 0;
-            while (TryControllingBranch(cur, out var ifb, out var ifBlock, out bool edge))
+            while (true)
             {
+                if (++guard > 64) return null; // malformed / cycle guard
+                if (headerStop == null && PostDominatesEntry(cur)) break;   // every lane runs cur: path complete
+                if (!TrySingleIncomingEdge(cur, out var fromBlock, out var ifb, out bool edge)) return null; // a join
+                if (fromBlock == null) break;                               // the entry block
+                if (ifb == null) { cur = fromBlock; continue; }             // unconditional edge: fromBlock's mask
                 // Inside a divergent loop, stop at the header's loop-condition branch: it is UNIFORM (all
                 // active lanes are in the loop), so it must not become a per-lane select mask.
-                if (headerStop != null && ReferenceEquals(ifBlock, headerStop)) break;
+                if (headerStop != null && ReferenceEquals(fromBlock, headerStop)) break;
                 if (ifb.Condition.Resolve() is not CompareValue c || !laneVariant.Contains(c) || MapCompare(c) == 0) return null;
                 if (Is2Lane(ClassOf(c.Left.Resolve().Type)) != need2lane) return null;
                 rev.Add((c, edge));
-                cur = ifBlock;
-                if (++guard > 64) return null; // malformed / cycle guard
+                cur = fromBlock;
             }
             rev.Reverse();
             return rev;
         }
 
-        /// <summary>Finds the IfBranch whose true/false target is <paramref name="target"/>, plus its block.</summary>
-        private bool TryControllingBranch(BasicBlock target, out IfBranch branch, out BasicBlock branchBlock, out bool isTrueEdge)
+        /// <summary>
+        /// The one edge into <paramref name="target"/>: its source block, and the IfBranch (null for an
+        /// unconditional branch) with the edge taken. False if the block has more than one incoming edge or
+        /// is entered by any other terminator kind (e.g. a switch). No incoming edge (the entry block) =
+        /// true with <paramref name="fromBlock"/> null. Read from the terminators, not the cached CFG.
+        /// </summary>
+        private bool TrySingleIncomingEdge(BasicBlock target, out BasicBlock fromBlock, out IfBranch branch, out bool isTrueEdge)
         {
-            branch = null; branchBlock = null; isTrueEdge = false;
+            fromBlock = null; branch = null; isTrueEdge = false;
+            int count = 0;
             foreach (var b in Method.Blocks)
-                if (b.Terminator is IfBranch ib)
+            {
+                var term = b.Terminator;
+                if (term == null) continue;
+                foreach (var t in term.Targets)
                 {
-                    if (ReferenceEquals(ib.TrueTarget, target)) { branch = ib; branchBlock = b; isTrueEdge = true; return true; }
-                    if (ReferenceEquals(ib.FalseTarget, target)) { branch = ib; branchBlock = b; isTrueEdge = false; return true; }
+                    if (!ReferenceEquals(t, target)) continue;
+                    if (++count > 1) return false;
+                    fromBlock = b;
+                    switch (term)
+                    {
+                        case IfBranch ib:
+                            branch = ib;
+                            isTrueEdge = ReferenceEquals(ib.TrueTarget, target);
+                            break;
+                        case UnconditionalBranch:
+                            break;
+                        default:
+                            return false;
+                    }
                 }
-            return false;
+            }
+            return true;
+        }
+
+        /// <summary>
+        /// True if every path from the entry block to the (single) return block passes through
+        /// <paramref name="block"/> - i.e. every lane executes it.
+        /// </summary>
+        private bool PostDominatesEntry(BasicBlock block)
+        {
+            var entry = Method.Blocks.First();
+            if (ReferenceEquals(block, entry)) return true;
+            var seen = new HashSet<BasicBlock> { block };
+            var stack = new Stack<BasicBlock>();
+            stack.Push(entry); seen.Add(entry);
+            while (stack.Count > 0)
+            {
+                var b = stack.Pop();
+                if (b.Terminator is ReturnTerminator) return false;   // reached an exit without passing block
+                if (b.Terminator == null) continue;
+                foreach (var t in b.Terminator.Targets)
+                    if (seen.Add(t)) stack.Push(t);
+            }
+            return true;
         }
 
         /// <summary>Dry-run of the recursive select-tree partition: at each level all items must share the same
@@ -1202,9 +1257,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             switch (v)
             {
                 case Load ld:
-                    return ClassOf(ld.Type) != LaneClass.None && AllUsesVectorizable(ld);
+                    return ClassOf(ld.Type) != LaneClass.None && AllUsesVectorizable(ld)
+                        && IsVectorAccessAddress(ld.Source.Resolve(), ld.Type, laneVariant);
                 case Store st:
-                    return ClassOf(st.Value.Resolve().Type) != LaneClass.None;
+                    return ClassOf(st.Value.Resolve().Type) != LaneClass.None
+                        && IsVectorAccessAddress(st.Target.Resolve(), st.Value.Resolve().Type, laneVariant);
                 case BinaryArithmeticValue ba:
                     return SimdBinaryOk(ba) && AllUsesVectorizable(ba);
                 case UnaryArithmeticValue ua:
@@ -1992,6 +2049,64 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     _ => 0u,
                 };
             return 0u;
+        }
+
+        /// <summary>
+        /// True if a lane-variant load/store through <paramref name="address"/> can be emitted as a vector
+        /// access: the address must be a <see cref="LoadElementAddress"/> with a lane-INVARIANT base whose
+        /// element size equals the lane width of <paramref name="laneType"/>, and whose offset is either the
+        /// 1D thread index plus a lane-invariant term (4 consecutive elements -> one v128 load/store) or a
+        /// loaded index (gather/scatter, done lane by lane).
+        /// </summary>
+        /// <remarks>
+        /// 🔴 The emitter used to ASSUME every lane-variant address was unit-stride ("verified numerically
+        /// by the CPU-oracle gate") and never checked it. Anything else was silently wrong once a worker ran
+        /// 4+ consecutive items: an f32 field of a struct array (8-byte stride) loaded Key0,Value0,Key1,Value1
+        /// as four keys; <c>dest[pos]</c> / out-parameter locals wrote the wrong slots. Surfaced 2026-09-28
+        /// when small dispatches first ran on ONE worker (WasmStruct*DiagTest, ShortCircuit_SharedBlockPhi,
+        /// NoHelperOutLikeAlloca - all green with SIMD forced off); any large dispatch of such a kernel was
+        /// already wrong. A 2D/3D index is never unit: y*width+x is contiguous only if width is the grid
+        /// width, which the IR cannot prove.
+        /// </remarks>
+        private bool IsVectorAccessAddress(Value address, TypeNode laneType, HashSet<Value> laneVariant)
+        {
+            if (address is not LoadElementAddress lea)
+                return false;
+            if (lea.Type is not AddressSpaceType at || at.ElementType.Size != laneType.Size)
+                return false;
+            if (laneVariant.Contains(lea.Source.Resolve()))
+                return false;
+            return IsGatherLEA(lea) || IsUnitIndex(lea.Offset.Resolve(), laneVariant, 0);
+        }
+
+        /// <summary>
+        /// True if <paramref name="v"/> is the 1D thread index plus/minus lane-invariant terms (through
+        /// integer conversions), i.e. consecutive lanes address consecutive elements.
+        /// </summary>
+        private bool IsUnitIndex(Value v, HashSet<Value> laneVariant, int depth)
+        {
+            if (depth > 16 || _indexParam is null || _indexParam.Type is not PrimitiveType)
+                return false;
+            if (ReferenceEquals(v, _indexParam))
+                return true;
+            switch (v)
+            {
+                case ConvertValue cv:
+                    return !global::ILGPU.Util.TypeExtensions.IsFloat(cv.SourceType) && !global::ILGPU.Util.TypeExtensions.IsFloat(cv.TargetType)
+                        && IsUnitIndex(cv.Value.Resolve(), laneVariant, depth + 1);
+                case BinaryArithmeticValue ba when ba.Kind == BinaryArithmeticKind.Add:
+                {
+                    var l = ba.Left.Resolve();
+                    var r = ba.Right.Resolve();
+                    return (IsUnitIndex(l, laneVariant, depth + 1) && !laneVariant.Contains(r))
+                        || (IsUnitIndex(r, laneVariant, depth + 1) && !laneVariant.Contains(l));
+                }
+                case BinaryArithmeticValue ba when ba.Kind == BinaryArithmeticKind.Sub:
+                    return IsUnitIndex(ba.Left.Resolve(), laneVariant, depth + 1)
+                        && !laneVariant.Contains(ba.Right.Resolve());
+                default:
+                    return false;
+            }
         }
 
         /// <summary>True if <paramref name="lea"/> is a GATHER address: its element offset is a loaded

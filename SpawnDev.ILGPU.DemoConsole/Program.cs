@@ -24,6 +24,9 @@ try
     if (args.Length > 0 && args[0] == "fp4-helper-wgsl")
         return await Fp4HelperWgslDump.Run();
 
+    // Offline GLSL dump: struct-field read vs whole-element copy (WebGL field read returned 0). No browser.
+    if (args.Length > 0 && args[0] == "struct-field-glsl")
+        return await StructFieldGlslDump.Run();
     if (args.Length > 0 && args[0] == "fp4-helper-glsl")
         return await Fp4HelperGlslDump.Run();
 
