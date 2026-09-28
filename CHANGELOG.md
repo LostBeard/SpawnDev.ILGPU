@@ -1,7 +1,7 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.2.20-local.1 (unreleased) - WebGPU + WebGL: infinite loop when an if/else in a loop has a break in one arm
+## 5.2.20 (forks 2.3.6) - WebGPU + WebGL: infinite loop when an if/else in a loop has a break in one arm
 
 **Bug (GPU hang, live in 5.2.19 and earlier):** in `for (k..) { if (c) { run++; if (run >= 9) break; } else run = 0; }`
 the arm that can break makes the function-wide post-dominator of the `if` lie OUTSIDE the loop, so the structured

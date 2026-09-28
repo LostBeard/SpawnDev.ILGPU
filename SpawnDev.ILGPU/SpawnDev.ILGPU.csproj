@@ -4,9 +4,9 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.2.19</Version>
+		<Version>5.2.20</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>v5.2.19 - Wasm pipelined dispatch: small launches, host writes and device copies no longer wait on the work ahead of them (5.3x lower per-launch cost, ML training 3.2x faster on Wasm). See CHANGELOG.md.</PackageReleaseNotes>
+		<PackageReleaseNotes>v5.2.20 - WebGPU + WebGL: fixed a GPU hang (infinite loop) when an if/else inside a loop can break out in one arm. See CHANGELOG.md.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
