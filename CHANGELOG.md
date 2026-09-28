@@ -1,6 +1,38 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.18 (forks 2.3.6) - release of 5.2.18-local.1 .. local.8
+
+Everything in the `5.2.18-local.*` sections below. Headlines: CPU lane-independent kernels run as a lane loop
+(0.685 -> 0.004 ms per trivial launch, bit-identical); four silent wrong-result bugs fixed that 5.2.17 shipped
+(Wasm SIMD non-unit-stride addresses, Wasm SIMD if-conversion joins, WebGL struct-buffer field reads, Wasm host
+writes behind queued dispatches); Wasm small-dispatch cost 2.1-2.3 -> 0.57 ms; WebGPU loop-exit / view-helper
+miscompiles fixed (local.1); one WebGPU pipeline per kernel (local.2); WebGPU buffer accounting (local.3-5).
+
+## 5.2.18-local.8 (unreleased, forks 2.3.6-local.2) - Wasm: host writes ordered behind queued dispatches; shape-only worker scripts
+
+**Bug (silent wrong result, live in 5.2.17):** a host write (`CopyFromCPU` / `CopyFromHost` / `CopyFromJS`) while
+dispatches were queued snapshotted the buffer's SharedArrayBuffer AT WRITE TIME for the queued dispatches - but
+that memory did not yet hold the results of dispatches still queued ahead of the write, so a queued dispatch read
+data from before its predecessors ran. `QueuedDispatches_DependentChainWithHostWrites_ExactOrder`: 200 queued
+in-place increments, a queued copy, then `CopyFromCPU` - the copy saw 0, expected 200. **Fix:** the bytes are staged
+into a private array at call time and the write is enqueued in the work stream exactly like
+`EnqueueOrderedDeviceCopy` (after earlier work, before later work - WebGPU's queue-timeline semantics). The apply
+deliberately skips the snapshot so later-queued dispatches read the new bytes.
+
+**Performance:** the worker script embedded every argument, grid size and memory offset as JS source and the worker
+cached ONE compiled function by that exact text, so any change of arguments or kernel recompiled an AsyncFunction.
+Scripts now depend only on the kernel shape (barrier/flat, SIMD, argument count); numbers travel as `d.p`, arguments
+as `d.a` (converted with Number / BigInt exactly like the old literals); the worker keeps a Map of compiled
+functions. The dispatch watchdog's `Task.Delay` is now cancelled when its wait ends (one live 120 s timer per worker
+completion before), and the copy-OUT debug read is VerboseLogging-only. `NonBarrierMinItemsPerWorker` 16384 ->
+65536 (waking idle workers costs more than splitting saves below that).
+
+Wasm 32-element launch: 2.1-2.3 ms (5.2.17) -> **0.572 ms batched / 0.599 ms synced**. SpawnDev.ILGPU.ML's
+`SystemOne_Snake_BehavioralClone_AgreesWithTeacher` (~358K launches) went from a 300 s timeout to **160 s** on the
+Wasm lane. Gates: full Wasm lane 729 run / 0 failed with the final defaults; ordering + SIMD-shape tests on all 9
+backend configurations.
+
 ## 5.2.18-local.7 (unreleased, forks 2.3.6-local.2) - Wasm/WebGL silent wrong results fixed; Wasm small-dispatch cost halved
 
 **Wasm SIMD (`kernel_simd`) - two silent wrong-result bugs, live in 5.2.17 for any large enough dispatch:**
