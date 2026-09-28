@@ -613,7 +613,9 @@ namespace SpawnDev.ILGPU.WebGPU
                     || ns.StartsWith("ILGPU", StringComparison.Ordinal)
                     || ns.StartsWith("System", StringComparison.Ordinal))
                     continue;
-                string typeName = t.FullName ?? t.Name, methodName = m!.Name;
+                // Name chain, not FullName: a generic type's FullName embeds assembly-qualified type arguments
+                // ("ContentParamBuffers`1[[System.Int32, System.Private.CoreLib, ...]]").
+                string typeName = TypeDisplayName(t), methodName = m!.Name;
                 // Compiler-generated names: "Owner+<Method>d__12" (async), "Owner+<>c+<<Method>b__3_0>d" (async lambda),
                 // "Owner+<>c__DisplayClass5_0" with method "<Method>b__0" (lambda). Report Owner.Method.
                 int lt = typeName.IndexOf("+<", StringComparison.Ordinal);
@@ -624,13 +626,20 @@ namespace SpawnDev.ILGPU.WebGPU
                     typeName = typeName.Substring(0, lt);
                 }
                 else if (FirstSourceName(methodName) is string lambdaOwner) methodName = lambdaOwner;
-                int dot = typeName.LastIndexOf('.');
-                if (dot >= 0) typeName = typeName.Substring(dot + 1);
                 if (taken > 0) sb.Append(" < ");
                 sb.Append(typeName).Append('.').Append(methodName);
                 taken++;
             }
             return taken == 0 ? "(unknown)" : sb.ToString();
+        }
+
+        /// <summary>"Outer+Inner" without namespace or generic arity ("ContentParamBuffers", not "...`1[[...]]").</summary>
+        static string TypeDisplayName(Type t)
+        {
+            string name = t.Name;
+            int tick = name.IndexOf('`');
+            if (tick > 0) name = name.Substring(0, tick);
+            return t.DeclaringType != null ? TypeDisplayName(t.DeclaringType) + "+" + name : name;
         }
 
         /// <summary>The first non-empty "&lt;Name&gt;" in a compiler-generated name, or null.</summary>

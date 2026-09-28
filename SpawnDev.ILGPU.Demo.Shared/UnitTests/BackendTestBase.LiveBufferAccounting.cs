@@ -84,4 +84,37 @@ public abstract partial class BackendTestBase
         }
         finally { WebGPUBufferAccounting.CaptureCreationSites = was; }
     });
+
+    /// <summary>Allocates through a GENERIC type, whose FullName embeds assembly-qualified type arguments.</summary>
+    static class CreationSiteGenericProbe<T> where T : unmanaged
+    {
+        public static MemoryBuffer1D<T, Stride1D.Dense> Allocate(Accelerator accelerator, int n) => accelerator.Allocate1D<T>(n);
+    }
+
+    /// <summary>
+    /// A site inside a generic type reads "Outer+Type.Method", not the FullName form with assembly-qualified type
+    /// arguments ("...CreationSiteGenericProbe`1[[System.Int32, System.Private.CoreLib, ...]].Allocate") - which
+    /// is what SpawnScene's first leak report printed for ML's ContentParamBuffers&lt;int&gt;.
+    /// </summary>
+    [TestMethod]
+    public async Task WebGPU_LiveBufferAccounting_NamesGenericCreationSite() => await RunTest(async accelerator =>
+    {
+        if (accelerator is not WebGPUAccelerator)
+            throw new UnsupportedTestException("WebGPU-only accounting.");
+
+        bool was = WebGPUBufferAccounting.CaptureCreationSites;
+        WebGPUBufferAccounting.CaptureCreationSites = true;
+        try
+        {
+            using var buf = CreationSiteGenericProbe<int>.Allocate(accelerator, 4321);
+            await Task.Yield();
+            string? site = null;
+            foreach (var s in WebGPUBufferAccounting.TopCreationSites(64))
+                if (s.Site.Contains(nameof(CreationSiteGenericProbe<int>), StringComparison.Ordinal)) site = s.Site;
+            string expected = "BackendTestBase+" + nameof(CreationSiteGenericProbe<int>) + ".Allocate";
+            if (site == null || !site.StartsWith(expected + " <", StringComparison.Ordinal))
+                throw new Exception($"generic creation site should start '{expected} <', got '{site ?? "(none)"}'");
+        }
+        finally { WebGPUBufferAccounting.CaptureCreationSites = was; }
+    });
 }

@@ -1,6 +1,17 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.18-local.5 (unreleased) - creation sites name generic types cleanly
+
+`WebGPUBufferAccounting` creation sites now build type names from the `Name` chain ("Outer+Type.Method") instead of
+`FullName`, which for a generic type embeds assembly-qualified type arguments - SpawnScene's leak report printed
+ML's `ContentParamBuffers<int>` as "0, Culture=neutral, PublicKeyToken=...]].Get". Gate:
+`WebGPU_LiveBufferAccounting_NamesGenericCreationSite` (red with FullName restored).
+
+The SpawnScene leak these sites found is fixed in SpawnDev.ILGPU.ML 5.2.34-local.1 (content-addressed params
+buffers): TruckFull's depth cascade now ends at 2,394 live buffers instead of 19,938, and the run that lost the GPU
+process to out-of-memory completes.
+
 ## 5.2.18-local.4 (unreleased) - WebGPU buffer creation sites
 
 `WebGPUBufferAccounting.CaptureCreationSites`: when on, every newly allocated WebGPU buffer records WHO allocated it
