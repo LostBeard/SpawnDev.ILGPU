@@ -12,8 +12,9 @@ throws). Only Release IL has this shape - always validate WGSL from a Release bu
 
 **WebGL - f64 constants lost their low half (silent):** a double constant was emitted as a runtime decode of its
 IEEE bits; with constant arguments ANGLE/FXC folded the decode and reassociated its error term to exactly 0, so a
-branch-assigned `1e-14` became `float(1e-14)` and `1.0 / x` returned 100000001754833. Constants are now split into
-the exact double-float pair on the host and emitted as raw f32 bits (also no runtime decode cost).
+branch-assigned `1e-14` became `float(1e-14)` and `1.0 / x` returned 100000001754833. Constants are now decoded on
+the host with the shader's own single-precision steps (Dekker pair, or the renormalised Ozaki vec4) and emitted as raw
+f32 bits - identical to a loaded value, with no runtime decode cost.
 
 **WebGL - a store emitted in two branches was dropped (silent):** multi-slot transform-feedback stores took the next
 sequential slot at each emission, so a store the emitter duplicated (e.g. an early-return block reached from two

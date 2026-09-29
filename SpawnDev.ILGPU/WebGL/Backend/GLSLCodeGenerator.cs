@@ -2561,30 +2561,49 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         }
 
         /// <summary>
-        /// The f32 bit patterns (hi, lo) of the double-float pair for <paramref name="d"/>, matching the runtime
-        /// f64_from_ieee754_bits: hi = d rounded to f32, lo = the rounded residual. Zero, Inf, NaN and magnitudes
-        /// outside f32's exponent range get exactly the runtime decode's single-component result.
+        /// The emulated-f64 components of the constant <paramref name="d"/>, computed on the host EXACTLY as the shader's
+        /// f64_from_ieee754_bits computes them for a loaded value (the same single-precision operations, which C# performs in
+        /// IEEE single like the GPU): the (hi, lo) Dekker pair, or the four renormalised Ozaki components.
         /// </summary>
-        internal static (uint Hi, uint Lo) F64ConstantPairBits(double d)
+        internal static float[] F64ConstantComponents(double d, bool ozaki)
         {
             ulong bits = BitConverter.DoubleToUInt64Bits(d);
             uint lo = (uint)bits, hi = (uint)(bits >> 32);
             uint sign = hi & 0x80000000u;
             uint exponent = (hi >> 20) & 0x7FFu;
             uint mHi20 = hi & 0xFFFFFu;
-            if (exponent == 0x7FFu)
-                return (sign | (((mHi20 | lo) != 0u) ? 0x7FC00000u : 0x7F800000u), 0u);
-            if (exponent == 0u && mHi20 == 0u && lo == 0u)
-                return (sign, 0u);
-            int f32Exp = (int)exponent - 1023 + 127;
-            float h = (float)d;
-            if (f32Exp <= 0 || f32Exp >= 255 || float.IsInfinity(h))
+            int e = (int)exponent - 1023, f32Exp = e + 127;
+            uint fe = (uint)Math.Clamp(f32Exp, 1, 254);
+            float Single(float x) => x;
+            float[] One(uint b) => ozaki ? new[] { BitConverter.UInt32BitsToSingle(b), 0f, 0f, 0f } : new[] { BitConverter.UInt32BitsToSingle(b), 0f };
+            // _f64_bits_to_components' special cases, in its order of precedence.
+            if (exponent == 0u && mHi20 == 0u && lo == 0u) return One(sign);
+            if (exponent == 0x7FFu) return One(sign | (((mHi20 | lo) != 0u) ? 0x7FC00000u : 0x7F800000u));
+            if (f32Exp <= 0 || f32Exp >= 255) return One(sign | (fe << 23) | (mHi20 << 3));
+            uint c0 = 0x800000u | (mHi20 << 3) | (lo >> 29), c1 = (lo >> 5) & 0xFFFFFFu, c2 = lo & 0x1Fu;
+            float sg = sign != 0u ? -1f : 1f;
+            float f0 = BitConverter.UInt32BitsToSingle(sign | (fe << 23) | (c0 & 0x7FFFFFu));
+            float f1 = sg * MathF.ScaleB(c1, e - 47);
+            float f2 = sg * MathF.ScaleB(c2, e - 52);
+            if (f1 == 0f && f2 == 0f) return ozaki ? new[] { f0, 0f, 0f, 0f } : new[] { f0, 0f };
+            if (!ozaki)
             {
-                uint fe = (uint)Math.Clamp(f32Exp, 1, 254);
-                return (sign | (fe << 23) | (mHi20 << 3), 0u);
+                float l = Single(f1 + f2), sum = Single(f0 + l);
+                return new[] { sum, Single(l - Single(sum - f0)) };
             }
-            float l = (float)(d - h);
-            return (BitConverter.SingleToUInt32Bits(h), BitConverter.SingleToUInt32Bits(l));
+            // f32_quick_renorm(vec4(f0, f1, f2, 0), 0)
+            static (float S, float E) Qts(float a, float b) { float s = a + b; return (s, b - (s - a)); }
+            float r0 = f0, r1 = f1, r2 = f2, r3 = 0f, r4 = 0f;
+            var (s1, t3) = Qts(r3, r4);
+            var (s2, t2) = Qts(r2, s1);
+            var (s3, t1) = Qts(r1, s2);
+            var (o0, t0) = Qts(r0, s3);
+            (float s5, t2) = Qts(t2, t3);
+            (float s6, t1) = Qts(t1, s5);
+            (float o1, t0) = Qts(t0, s6);
+            (float s8, t1) = Qts(t1, t2);
+            (float o2, t0) = Qts(t0, s8);
+            return new[] { o0, o1, o2, Single(t0 + t1) };
         }
 
         // Constants
@@ -2599,13 +2618,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
             if (isEmulatedF64)
             {
-                // Split on the HOST into the exact double-float pair and emit raw bits. Do NOT emit
+                // Decode on the HOST (exactly as the shader would) and emit raw bits. Do NOT emit
                 // f64_from_ieee754_bits(<const>u, <const>u): with constant arguments ANGLE/FXC folds the decode and
                 // reassociates its error term `l - (s * u_one - c.x)` into `(l + c.x) - s * u_one`, which rounds the
                 // low half to exactly 0 - a branch-assigned 1e-14 became float(1e-14), so 1.0 / x = 100000001754833
                 // (WebGL only; test BackendTestBase.F64_BranchAssignedConstant_KeepsLowHalf).
-                var (hiBits, loBits) = F64ConstantPairBits(value.Float64Value);
-                AppendLine($"{target} = vec2(uintBitsToFloat({hiBits}u), uintBitsToFloat({loBits}u));");
+                var parts = F64ConstantComponents(value.Float64Value, Backend.UseOzakiF64Emulation);
+                AppendLine($"{target} = vec{parts.Length}({string.Join(", ", parts.Select(f => $"uintBitsToFloat({BitConverter.SingleToUInt32Bits(f)}u)"))});");
                 return;
             }
 
