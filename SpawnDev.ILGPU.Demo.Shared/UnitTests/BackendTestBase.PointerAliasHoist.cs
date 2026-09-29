@@ -20,14 +20,14 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             double x = v[i];
             if (!(x > -1.0 && x < 2.0))
             {
-                flags[0] = 1.0;
+                flags[i * 2] = 1.0;
                 outp[i] = 0.0;
                 return;
             }
             if (!(x > 1e-14))
             {
                 x = 1e-14;
-                flags[1] = 1.0;
+                flags[i * 2 + 1] = 1.0;
             }
             outp[i] = 1.0 / x;
         }
@@ -38,7 +38,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             // Out of range (early return), tiny (clamped), ordinary - all three paths taken.
             var input = new double[] { -3.0, 0.5, 1e-20, 1.25, 5.0, 0.0, 1.9, -0.5 };
             using var v = accelerator.Allocate1D(input);
-            using var flags = accelerator.Allocate1D<double>(2);
+            using var flags = accelerator.Allocate1D<double>(input.Length * 2);
             using var outp = accelerator.Allocate1D<double>(input.Length);
             flags.MemSetToZero();
             accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<double, Stride1D.Dense>, ArrayView1D<double, Stride1D.Dense>,
@@ -55,8 +55,14 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 if (!(Math.Abs(got[i] - expected) <= tol))
                     throw new Exception($"out[{i}] = {got[i]:R}, expected {expected:R} (input {x:R})");
             }
-            if (gotFlags[0] != 1.0 || gotFlags[1] != 1.0)
-                throw new Exception($"flags = [{gotFlags[0]}, {gotFlags[1]}], expected [1, 1]");
+            // Per-thread flag slots (a positional store every backend supports - WebGL has no ScatterStores).
+            for (int i = 0; i < input.Length; i++)
+            {
+                double x = input[i];
+                bool early = !(x > -1.0 && x < 2.0), clamped = !early && !(x > 1e-14);
+                if (gotFlags[i * 2] != (early ? 1.0 : 0.0) || gotFlags[i * 2 + 1] != (clamped ? 1.0 : 0.0))
+                    throw new Exception($"flags[{i}] = [{gotFlags[i * 2]}, {gotFlags[i * 2 + 1]}], expected [{(early ? 1 : 0)}, {(clamped ? 1 : 0)}] (input {x:R})");
+            }
         });
     }
 }

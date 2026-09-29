@@ -1,6 +1,28 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.21 (forks 2.3.6) - WebGPU shader validation fix; two WebGL silent wrong-result fixes
+
+Found porting SpawnScene's bundle adjuster to the GPU (f64 kernels, early returns).
+
+**WebGPU - "redeclaration of 'v_N'" (invalid pipeline):** the structured emitter can emit one IR value's code in two
+branches; the WGSL post-processor lifts each block's pointer alias (`let v_N = &paramX;`) to function scope, so the
+alias was declared twice. Hoisted aliases are now declared once per name (a name bound to two different expressions
+throws). Only Release IL has this shape - always validate WGSL from a Release build.
+
+**WebGL - f64 constants lost their low half (silent):** a double constant was emitted as a runtime decode of its
+IEEE bits; with constant arguments ANGLE/FXC folded the decode and reassociated its error term to exactly 0, so a
+branch-assigned `1e-14` became `float(1e-14)` and `1.0 / x` returned 100000001754833. Constants are now split into
+the exact double-float pair on the host and emitted as raw f32 bits (also no runtime decode cost).
+
+**WebGL - a store emitted in two branches was dropped (silent):** multi-slot transform-feedback stores took the next
+sequential slot at each emission, so a store the emitter duplicated (e.g. an early-return block reached from two
+branches) asked for a slot past the last one and was omitted. Each store address now keeps its slot.
+
+**Tests:** `BackendTestBase.PointerAlias_ViewStoredInTwoBranches_DeclaredOnce` (red: naga "redefinition of v_65"
+without the fix; WebGL red on the dropped store), `F64_NonF32ExactValues_KeepLowHalf`,
+`F64_BranchAssignedConstant_KeepsLowHalf` (WebGL red before the constant fix), all 9 lanes.
+
 ## 5.2.20 (forks 2.3.6) - WebGPU + WebGL: infinite loop when an if/else in a loop has a break in one arm
 
 **Bug (GPU hang, live in 5.2.19 and earlier):** in `for (k..) { if (c) { run++; if (run >= 9) break; } else run = 0; }`

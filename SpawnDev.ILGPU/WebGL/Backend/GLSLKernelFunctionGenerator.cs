@@ -50,6 +50,23 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         private readonly Dictionary<int, int> _outputStoreCount = new();
         // Multi-store TF: runtime counter for assigning store slots during code generation
         private readonly Dictionary<int, int> _currentStoreSlot = new();
+        // Slot already given to a store address (same key as the store-count pre-scan). The structured emitter can emit
+        // one IR store in two branches; the second copy must reuse the first copy's slot. A plain sequential counter gave
+        // it slot N of N, which has no varying, so the store was silently dropped (a view written in an early-return
+        // block emitted twice; test BackendTestBase.PointerAlias_ViewStoredInTwoBranches_DeclaredOnce, 2026-09-29).
+        private readonly Dictionary<(int ParamIndex, string Key), int> _storeSlotByKey = new();
+
+        private int GetStoreSlot(int paramIndex, global::ILGPU.IR.Values.Store storeVal)
+        {
+            var target = storeVal.Target.Resolve();
+            string key = target is LoadElementAddress lea ? $"{lea.Source}[{lea.Offset}]" : target.ToString();
+            if (_storeSlotByKey.TryGetValue((paramIndex, key), out int slot))
+                return slot;
+            slot = _currentStoreSlot.GetValueOrDefault(paramIndex, 0);
+            _currentStoreSlot[paramIndex] = slot + 1;
+            _storeSlotByKey[(paramIndex, key)] = slot;
+            return slot;
+        }
         // Params targeted by GenericAtomic (Atomic.Add etc.) — get atomic vote TF varyings
         private readonly HashSet<int> _atomicParamIndices = new();
 
@@ -2941,10 +2958,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 OutputVaryingInfo? loOutput, hiOutput;
                 if (emuStoreCount > 1)
                 {
-                    int emuSlot = _currentStoreSlot.GetValueOrDefault(emulInfo.ParamIndex, 0);
+                    int emuSlot = GetStoreSlot(emulInfo.ParamIndex, storeVal);
                     _emulatedSlotIndex!.TryGetValue((emulInfo.ParamIndex, emuSlot, "lo"), out loOutput);
                     _emulatedSlotIndex!.TryGetValue((emulInfo.ParamIndex, emuSlot, "hi"), out hiOutput);
-                    _currentStoreSlot[emulInfo.ParamIndex] = emuSlot + 1;
                 }
                 else
                 {
@@ -3034,14 +3050,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 int storeCount = _outputStoreCount.GetValueOrDefault(leaParamIdx, 1);
                 if (storeCount > 1)
                 {
-                    // Multi-store TF: route this store to the next sequential slot
-                    int slot = _currentStoreSlot.GetValueOrDefault(leaParamIdx, 0);
+                    // Multi-store TF: this store address's slot (the next sequential one on first sight)
+                    int slot = GetStoreSlot(leaParamIdx, storeVal);
                     _storeSlotIndex!.TryGetValue((leaParamIdx, slot), out var slotOutput);
                     if (slotOutput != null)
                     {
                         string tfValExpr = CastIfNeeded(val, slotOutput.GlslType ?? "float");
                         AppendLine($"{slotOutput.VaryingName} = {tfValExpr};");
-                        _currentStoreSlot[leaParamIdx] = slot + 1;
                         return;
                     }
                 }

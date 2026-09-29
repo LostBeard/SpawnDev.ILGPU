@@ -2560,6 +2560,33 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"// LAEA: {target} -> {arrayName}[{indexVar}]");
         }
 
+        /// <summary>
+        /// The f32 bit patterns (hi, lo) of the double-float pair for <paramref name="d"/>, matching the runtime
+        /// f64_from_ieee754_bits: hi = d rounded to f32, lo = the rounded residual. Zero, Inf, NaN and magnitudes
+        /// outside f32's exponent range get exactly the runtime decode's single-component result.
+        /// </summary>
+        internal static (uint Hi, uint Lo) F64ConstantPairBits(double d)
+        {
+            ulong bits = BitConverter.DoubleToUInt64Bits(d);
+            uint lo = (uint)bits, hi = (uint)(bits >> 32);
+            uint sign = hi & 0x80000000u;
+            uint exponent = (hi >> 20) & 0x7FFu;
+            uint mHi20 = hi & 0xFFFFFu;
+            if (exponent == 0x7FFu)
+                return (sign | (((mHi20 | lo) != 0u) ? 0x7FC00000u : 0x7F800000u), 0u);
+            if (exponent == 0u && mHi20 == 0u && lo == 0u)
+                return (sign, 0u);
+            int f32Exp = (int)exponent - 1023 + 127;
+            float h = (float)d;
+            if (f32Exp <= 0 || f32Exp >= 255 || float.IsInfinity(h))
+            {
+                uint fe = (uint)Math.Clamp(f32Exp, 1, 254);
+                return (sign | (fe << 23) | (mHi20 << 3), 0u);
+            }
+            float l = (float)(d - h);
+            return (BitConverter.SingleToUInt32Bits(h), BitConverter.SingleToUInt32Bits(l));
+        }
+
         // Constants
         public virtual void GenerateCode(PrimitiveValue value)
         {
@@ -2572,11 +2599,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
             if (isEmulatedF64)
             {
-                double doubleVal = value.Float64Value;
-                ulong bits = BitConverter.DoubleToUInt64Bits(doubleVal);
-                uint lo = (uint)(bits & 0xFFFFFFFF);
-                uint hi = (uint)(bits >> 32);
-                AppendLine($"{target} = f64_from_ieee754_bits({lo}u, {hi}u);");
+                // Split on the HOST into the exact double-float pair and emit raw bits. Do NOT emit
+                // f64_from_ieee754_bits(<const>u, <const>u): with constant arguments ANGLE/FXC folds the decode and
+                // reassociates its error term `l - (s * u_one - c.x)` into `(l + c.x) - s * u_one`, which rounds the
+                // low half to exactly 0 - a branch-assigned 1e-14 became float(1e-14), so 1.0 / x = 100000001754833
+                // (WebGL only; test BackendTestBase.F64_BranchAssignedConstant_KeepsLowHalf).
+                var (hiBits, loBits) = F64ConstantPairBits(value.Float64Value);
+                AppendLine($"{target} = vec2(uintBitsToFloat({hiBits}u), uintBitsToFloat({loBits}u));");
                 return;
             }
 
