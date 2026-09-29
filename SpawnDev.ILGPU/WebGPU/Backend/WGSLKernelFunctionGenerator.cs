@@ -3765,11 +3765,29 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             Builder.AppendLine(decl);
                     }
 
-                    // Insert hoisted pointer-alias let declarations at function scope
+                    // Insert hoisted pointer-alias let declarations at function scope - ONCE per name. The
+                    // structured emitter can emit the same IR value's code in two branches (legal while each copy
+                    // was block-scoped); lifted to function scope, the second copy was a redeclaration:
+                    // "redeclaration of 'v_421'" (SpawnScene GpuBundleAdjuster.PointSolveKernel, 2026-09-28; test
+                    // BackendTestBase.PointerAlias_ViewStoredInTwoBranches_DeclaredOnce). A name bound to two
+                    // DIFFERENT expressions would be a real codegen conflict: fail loud, never emit it.
                     if (hoistedLetDeclarations.Count > 0)
                     {
+                        var hoistedByName = new Dictionary<string, string>(System.StringComparer.Ordinal);
                         foreach (var decl in hoistedLetDeclarations)
+                        {
+                            var m = System.Text.RegularExpressions.Regex.Match(decl, @"^\s*let\s+(\w+)\s*=");
+                            string name = m.Success ? m.Groups[1].Value : decl;
+                            if (hoistedByName.TryGetValue(name, out var previous))
+                            {
+                                if (previous.Trim() != decl.Trim())
+                                    throw new InvalidOperationException(
+                                        $"WGSL codegen: pointer alias '{name}' bound twice with different expressions: '{previous.Trim()}' and '{decl.Trim()}'");
+                                continue;
+                            }
+                            hoistedByName[name] = decl;
                             Builder.AppendLine(decl);
+                        }
                     }
 
                     Builder.Append(processed);
