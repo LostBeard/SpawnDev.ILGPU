@@ -1,6 +1,20 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.24 (forks 2.3.6) - WebGPU GPU hang / WebGL wrong values: an if/else merge inside a loop with a break
+
+Found by SpawnDev.ILGPU.ML's PMT sweep: style-mosaic's first node (Pad, reflect) hung the GPU and took the whole WebGPU
+lane down (every later test failed at requestDevice).
+
+**WebGPU (hang) + WebGL (silent):** for a loop body like `if (s < 0 || s >= n) { if (m == 0) break; ... }`, the
+structured emitters' in-loop merge (`StructuredLoopMerge`, 5.2.18) picked a block reachable from BOTH arms - but the
+in-bounds path bypasses it to the latch. The latch was emitted inside one arm only; the `s < 0` arm never advanced the
+loop (WebGPU: infinite loop, DXGI_ERROR_DEVICE_HUNG; WebGL: 161311 of 161472 values wrong). A merge must now lie on
+every in-loop path from both arms back to the header.
+
+**Tests:** `LoopBreakInElseChain_Pad_AllModes` (ML's PadKernel verbatim, [1,3,224,224] -> [1,3,232,232], reflect /
+edge / constant vs CPU; red: WebGPU hang + WebGL wrong). Full PMT: 4502 passed, 0 failed, 348 skipped.
+
 ## 5.2.23 (forks 2.3.6) - WebGPU: a strided loop after another loop lost its start index (silent wrong results)
 
 Found by the first real WebGPU execution of 5.2.22's own new test (5.2.22 shipped on naga validation only).
