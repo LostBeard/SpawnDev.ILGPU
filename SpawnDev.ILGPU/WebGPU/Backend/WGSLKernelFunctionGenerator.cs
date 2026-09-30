@@ -4008,7 +4008,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 "    // because `bitcast<f32>(const_u32_with_inf_bit_pattern)` is rejected\n" +
                 "    // at shader creation. See WGSLEmulationLibrary.F32SpecialValueFunctions.\n" +
                 "    _ilgpu_runtime_zero = local_id.x ^ local_id.x;\n" +
-                (bodyNeedsSubgroups ? "    let subgroup_id = _ep_local_index / subgroup_size;\n" : "");
+                (bodyNeedsSubgroups ? "    let subgroup_id = _ep_local_index / subgroup_size;\n" : "") +
+                // The uniformity transform's synthetic loop counters, at FUNCTION scope so every loop that assigns one
+                // (in any nested or sibling block) sees the declaration.
+                string.Concat(_declaredSyntheticCounters.OrderBy(n => n, StringComparer.Ordinal).Select(n => $"    var {n} : i32 = 0;\n"));
 
             // Replace the sentinel with the real signature + builtin copies
             string fullOutput = Builder.ToString(signatureInsertPosition, Builder.Length - signatureInsertPosition);
@@ -8967,10 +8970,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                     needsSyntheticGroupCounter = true;
                                     isTileLoopCounter = true;
                                     syntheticGroupCounterVar = "_uf_tile_iter";
-                                    if (_declaredSyntheticCounters.Add(syntheticGroupCounterVar))
-                                        AppendLine($"var {syntheticGroupCounterVar} : i32 = {uniformInit};");
-                                    else
-                                        AppendLine($"{syntheticGroupCounterVar} = {uniformInit};");
+                                    // Declared once at FUNCTION scope (see builtinCopies), assigned here: declaring it at
+                                    // its first use put the `var` inside that loop's enclosing block, and a later tile loop
+                                    // in a sibling scope assigned an undeclared name (SpawnScene CholeskyKernel, 2026-09-29:
+                                    // "no definition in scope for identifier: `_uf_tile_iter`").
+                                    _declaredSyntheticCounters.Add(syntheticGroupCounterVar);
+                                    AppendLine($"{syntheticGroupCounterVar} = {uniformInit};");
                                     usedTileCounter = true;
 
                                     if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
@@ -8987,20 +8992,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 // ── Grid-stride / Unknown / tile fallback: existing behavior ──
                                 needsSyntheticGroupCounter = true;
                                 syntheticGroupCounterVar = "_uf_group_iter";
-                                if (_declaredSyntheticCounters.Add(syntheticGroupCounterVar))
-                                {
-                                    if (ShouldLinearizeGridX())
-                                        AppendLine($"var {syntheticGroupCounterVar} : i32 = i32(group_id.x + group_id.y * num_workgroups.x);");
-                                    else
-                                        AppendLine($"var {syntheticGroupCounterVar} : i32 = i32(group_id.x);");
-                                }
+                                // Declared once at function scope (see builtinCopies and the tile counter above).
+                                _declaredSyntheticCounters.Add(syntheticGroupCounterVar);
+                                if (ShouldLinearizeGridX())
+                                    AppendLine($"{syntheticGroupCounterVar} = i32(group_id.x + group_id.y * num_workgroups.x);");
                                 else
-                                {
-                                    if (ShouldLinearizeGridX())
-                                        AppendLine($"{syntheticGroupCounterVar} = i32(group_id.x + group_id.y * num_workgroups.x);");
-                                    else
-                                        AppendLine($"{syntheticGroupCounterVar} = i32(group_id.x);");
-                                }
+                                    AppendLine($"{syntheticGroupCounterVar} = i32(group_id.x);");
 
                                 if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
                                     WebGPUBackend.Log($"[UniformityDirect] SYNTHETIC counter: var {syntheticGroupCounterVar} (linearized={ShouldLinearizeGridX()})");
