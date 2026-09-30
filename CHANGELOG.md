@@ -1,6 +1,22 @@
-# SpawnDev.ILGPU Changelog
+﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.25 (unreleased; staged as 5.2.25-local.1) - `IExternalImageCopier`: video / image -> GPU buffer, no readback
+
+New `SpawnDev.ILGPU.Rendering.IExternalImageCopier` (`ExternalImageCopier.Create(accelerator)`), the input-side twin of
+`ICanvasRenderer`: copies a `<video>`, `<img>`, canvas, `ImageBitmap`, `VideoFrame` or `ImageData` into an
+`ArrayView1D<int>` as packed RGBA8 (R low byte - the layout `ICanvasRenderer` presents).
+- **WebGPU** (`WebGPUExternalImageCopier`): `queue.copyExternalImageToTexture` -> `copyTextureToBuffer`, entirely on the
+  GPU. When `width*4` is not a multiple of 256 (copyTextureToBuffer's bytesPerRow rule) the rows land in a padded
+  staging buffer and one kernel compacts them. Pending ILGPU dispatches are flushed first (the copy runs on the queue
+  timeline at call time); refuses to run while a dispatch plan is recording (a copy cannot be replayed).
+- **WebGL / Wasm** (`Canvas2DExternalImageCopier`): 2D canvas + `IBrowserMemoryBuffer.CopyFromJS` (pixels stay JS-side).
+- Built for Anaglyphohol's per-frame video ingest (the previous route was a canvas getImageData readback per frame).
+- ⚠️ Requires SpawnDev.SpawnJS 2.1.20 on WebGPU: 2.1.19 sends `colorSpace: null` and every copyExternalImageToTexture throws.
+- Tests: `BackendTestBase.ExternalImageCopy.cs` (aligned 64 px, padded 67 px, reuse across sizes; sub-view with sentinels;
+  exact bytes). WebGPU / WebGPU-no-subgroups / WebGL / Wasm green (14/14). Red-checked: bypassing the compaction fails
+  the padded + resize cases on both WebGPU lanes while the aligned case passes.
+
 ## 5.2.24 (forks 2.3.6) - WebGPU GPU hang / WebGL wrong values: an if/else merge inside a loop with a break
 
 Found by SpawnDev.ILGPU.ML's PMT sweep: style-mosaic's first node (Pad, reflect) hung the GPU and took the whole WebGPU
