@@ -8751,18 +8751,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     if (exitChain.Terminator is global::ILGPU.IR.Values.UnconditionalBranch exitUB)
                     {
-                        // Stop if the next block is a loop header — it belongs to a
-                        // parent loop whose PHIs will be handled by its own code generation.
-                        bool isParentLoopHeader = false;
-                        foreach (var loop in _loops)
+                        // Stop if the next block is the header of THIS loop or an ENCLOSING one - its PHIs
+                        // are handled by that loop's own code generation. Only ancestors: a SIBLING loop
+                        // that follows this one is entered from here, and its entry PHIs (e.g. a strided
+                        // loop's `i = local_id`) must be pushed now - post-loop processing skips a
+                        // pass-through exit block. Stopping at every header dropped that init and every
+                        // thread started the next loop at 0 (Cholesky solve, 2026-09-30).
+                        bool isEnclosingLoopHeader = false;
+                        for (var loop = currentLoop; loop != null && !isEnclosingLoopHeader; loop = loop.Parent)
                         {
                             foreach (var header in loop.Headers)
                             {
-                                if (header == exitUB.Target) { isParentLoopHeader = true; break; }
+                                if (header == exitUB.Target) { isEnclosingLoopHeader = true; break; }
                             }
-                            if (isParentLoopHeader) break;
                         }
-                        if (isParentLoopHeader) break;
+                        if (isEnclosingLoopHeader) break;
 
                         PushPhiValues(exitUB.Target, exitChain);
                         exitChain = exitUB.Target;

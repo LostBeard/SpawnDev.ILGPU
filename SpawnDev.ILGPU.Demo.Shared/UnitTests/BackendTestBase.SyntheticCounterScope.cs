@@ -106,9 +106,63 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             var got = await xBuf.CopyToHostAsync<float>();
             var failed = await failBuf.CopyToHostAsync<int>();
             if (failed[0] != 0) throw new Exception("the factorisation hit a non-positive pivot on an SPD matrix");
+            // Check the factor first, so a failure names the phase: L (lower triangle, in place) vs a double Cholesky.
+            var gotA = await aBuf.CopyToHostAsync<float>();
+            var l = (double[])a.Clone();
+            for (int j = 0; j < n; j++)
+            {
+                l[j * n + j] = Math.Sqrt(l[j * n + j]);
+                for (int i = j + 1; i < n; i++) l[i * n + j] /= l[j * n + j];
+                for (int i = j + 1; i < n; i++)
+                    for (int k = j + 1; k <= i; k++) l[i * n + k] -= l[i * n + j] * l[k * n + j];
+            }
+            int badL = 0; string firstL = null;
             for (int i = 0; i < n; i++)
-                if (!(Math.Abs(got[i] - xTrue[i]) <= 1e-3))
-                    throw new Exception($"x[{i}] = {got[i]:R}, expected {xTrue[i]:R}");
+                for (int j = 0; j <= i; j++)
+                    if (!(Math.Abs(gotA[i * n + j] - l[i * n + j]) <= 1e-4 * Math.Max(1.0, Math.Abs(l[i * n + j]))))
+                    {
+                        if (badL++ == 0) firstL = $"L[{i},{j}] = {gotA[i * n + j]:R}, expected {l[i * n + j]:R}";
+                    }
+            if (badL != 0) throw new Exception($"factor wrong in {badL} of {n * (n + 1) / 2} entries; first {firstL}");
+            var badX = new System.Text.StringBuilder();
+            for (int i = 0; i < n; i++)
+                if (!(Math.Abs(got[i] - xTrue[i]) <= 1e-3)) badX.Append($" {i}:{got[i] - xTrue[i]:G3}");
+            if (badX.Length != 0) throw new Exception($"factor right, solve wrong at (index:error){badX}");
+        });
+
+        // WGSL (2026-09-30): a loop whose exit falls straight into a following thread-strided loop lost that loop's
+        // entry PHI (`i = t`). The break path's exit-chain walk stopped at EVERY loop header, not just enclosing ones,
+        // and post-loop processing skips the pass-through exit block, so nothing assigned `i` and every thread started
+        // at 0 (the Cholesky test above: only x[0] and x[32] were copied from b). No barriers, so every backend runs it.
+        private static void SiblingLoopEntryPhiKernel(ArrayView<float> b, ArrayView<float> x, int n)
+        {
+            int t = Group.IdxX, dim = Group.DimX;
+            float s = 0f;
+            for (int j = 0; j < n; j++) s += b[j];
+            for (int i = t; i < n; i += dim) x[i] = b[i] + s;
+        }
+
+        [TestMethod]
+        public async Task SiblingLoop_StridedLoopAfterLoop_EntryPhi() => await RunTest(async accelerator =>
+        {
+            if (accelerator.AcceleratorType == AcceleratorType.WebGL)
+                throw new UnsupportedTestException("Thread-strided stores (x[t], x[t + dim]) are scatter stores; WebGL Transform Feedback captures one record per thread (RequiresScatterStores).");
+            const int n = SCS_N;
+            var bh = new float[n];
+            for (int i = 0; i < n; i++) bh[i] = i + 1;
+            float s = n * (n + 1) / 2f;
+            using var bBuf = accelerator.Allocate1D(bh);
+            using var xBuf = accelerator.Allocate1D<float>(n);
+            xBuf.MemSetToZero();
+            int group = Math.Min(SCS_GroupSize, accelerator.MaxNumThreadsPerGroup);
+            accelerator.LoadStreamKernel<ArrayView<float>, ArrayView<float>, int>(SiblingLoopEntryPhiKernel)(
+                new KernelConfig(1, group), bBuf.View, xBuf.View, n);
+            await accelerator.SynchronizeAsync();
+            var got = await xBuf.CopyToHostAsync<float>();
+            var bad = new System.Text.StringBuilder();
+            for (int i = 0; i < n; i++)
+                if (got[i] != bh[i] + s) bad.Append($" x[{i}]={got[i]:R}");
+            if (bad.Length != 0) throw new Exception($"expected x[i] = b[i] + {s}; wrong:{bad}");
         });
     }
 }
