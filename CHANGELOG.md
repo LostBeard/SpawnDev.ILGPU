@@ -1,6 +1,21 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.23 (forks 2.3.6) - WebGPU: a strided loop after another loop lost its start index (silent wrong results)
+
+Found by the first real WebGPU execution of 5.2.22's own new test (5.2.22 shipped on naga validation only).
+
+**WebGPU - a loop's entry PHI dropped (silent):** when a loop's exit fell through a pass-through block straight into a
+following loop, that loop's entry values (e.g. a thread-strided `for (i = t; ...)`'s `i = local_id`) were never
+assigned: the break path's exit-chain walk stopped at EVERY loop header, not only enclosing ones, and post-loop
+processing skips pass-through exit blocks. Valid WGSL, wrong values - every thread started that loop at 0. Now the walk
+stops only at the headers of the current loop and its ancestors. SpawnScene's GPU global positioner: 6 of 24 kernels
+changed (only by the added assignments).
+
+**Tests:** `SiblingLoop_StridedLoopAfterLoop_EntryPhi` (new, barrier-free; red: both WebGPU lanes fail with the fix
+reverted) and `SyntheticCounter_SiblingStridedLoops_CholeskySolve` (failed on WebGPU in 5.2.22; now names the failing
+phase). Full PMT: 4495 passed, 0 failed, 348 skipped (5.2.22: 4487 / 2 failed).
+
 ## 5.2.22 (forks 2.3.6) - WebGPU: synthetic loop counter declared out of scope (invalid pipeline)
 
 Found porting SpawnScene's global positioning to the GPU (a dense Cholesky solve in one workgroup).
