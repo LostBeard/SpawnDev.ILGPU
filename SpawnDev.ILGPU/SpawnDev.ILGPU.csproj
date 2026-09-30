@@ -1,12 +1,12 @@
-<Project Sdk="Microsoft.NET.Sdk.Razor">
+﻿<Project Sdk="Microsoft.NET.Sdk.Razor">
 
 	<PropertyGroup>
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.2.24</Version>
+		<Version>5.2.25</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>v5.2.21 - WebGPU: a view stored in two branches no longer fails shader validation. WebGL: f64 constants keep full precision; a store emitted in two branches is no longer dropped. See CHANGELOG.md.</PackageReleaseNotes>
+		<PackageReleaseNotes>v5.2.25 - WebGPU dispatch batching: one JS crossing per submit (host cost per dispatch 433 -> ~40 us), ordered batched uploads, @workgroup_size patch only on a shader-resolve miss. IExternalImageCopier (video/img -> GPU buffer). Fixes: WebGPU coalesce ordering, OpenCL sub-view MemSet, WebGL host writes wiping kernel results, Wasm 2D/3D view extents. Requires SpawnDev.SpawnJS 2.1.20. See CHANGELOG.md.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -29,7 +29,7 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<PackageReference Include="SpawnDev.SpawnJS" Version="2.1.19" />
+		<PackageReference Include="SpawnDev.SpawnJS" Version="2.1.20" />
 	</ItemGroup>
 
 	<ItemGroup>
@@ -64,8 +64,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.3.6" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.3.6" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.3.7" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.3.7" />
 	</ItemGroup>
 
 	<ItemGroup>

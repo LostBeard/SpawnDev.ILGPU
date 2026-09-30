@@ -1,4 +1,4 @@
-// ---------------------------------------------------------------------------------------
+﻿// ---------------------------------------------------------------------------------------
 //                               SpawnDev.ILGPU.Wasm
 //                    WebAssembly Compute Backend for Blazor WebAssembly
 //
@@ -33,13 +33,13 @@ namespace SpawnDev.ILGPU.Wasm
         /// <summary>A dispatch's view layout, formatted on demand for an error message.</summary>
         private sealed class ViewLayoutDiag
         {
-            private readonly List<(bool isBuffer, WasmMemoryBuffer? buffer, int length, int stride, int stride2, object? value)> _args;
+            private readonly List<(bool isBuffer, WasmMemoryBuffer? buffer, int length, int stride, int stride2, object? value, int[]? extents)> _args;
             private readonly List<int> _viewBufferIdx, _bufferOffsets, _viewSubOffsets, _viewElemSizes;
             private readonly List<(int minByte, int maxByte)> _bufferRanges;
             private readonly int _memorySize;
 
             public ViewLayoutDiag(
-                List<(bool isBuffer, WasmMemoryBuffer? buffer, int length, int stride, int stride2, object? value)> args,
+                List<(bool isBuffer, WasmMemoryBuffer? buffer, int length, int stride, int stride2, object? value, int[]? extents)> args,
                 List<int> viewBufferIdx, List<(int minByte, int maxByte)> bufferRanges, List<int> bufferOffsets,
                 List<int> viewSubOffsets, List<int> viewElemSizes, int memorySize)
             {
@@ -51,7 +51,7 @@ namespace SpawnDev.ILGPU.Wasm
             {
                 var diagSb = new System.Text.StringBuilder();
                 int viewCheckIdx = 0;
-                foreach (var (isB, _, lenCheck, _, _, _) in _args)
+                foreach (var (isB, _, lenCheck, _, _, _, _) in _args)
                 {
                     if (!isB) continue;
                     int bIdx = _viewBufferIdx[viewCheckIdx];
@@ -569,6 +569,24 @@ namespace SpawnDev.ILGPU.Wasm
             public PropertyInfo? ZStrideProp;
         }
 
+        /// <summary>Per-axis extents of an ArrayView2D/3D argument (matching the kernel's extra extent params), else null.</summary>
+        private static int[]? ViewExtents(object? arg)
+        {
+            if (arg == null) return null;
+            var t = arg.GetType();
+            if (!t.IsGenericType) return null;
+            var def = t.GetGenericTypeDefinition();
+            int rank = def == typeof(ArrayView2D<,>) ? 2 : def == typeof(ArrayView3D<,>) ? 3 : 0;
+            if (rank == 0) return null;
+            var ext = t.GetProperty("IntExtent")!.GetValue(arg)!;
+            var et = ext.GetType();
+            var r = new int[rank];
+            r[0] = (int)et.GetProperty("X")!.GetValue(ext)!;
+            r[1] = (int)et.GetProperty("Y")!.GetValue(ext)!;
+            if (rank == 3) r[2] = (int)et.GetProperty("Z")!.GetValue(ext)!;
+            return r;
+        }
+
         private static StrideReflectionCache GetOrCreateStrideCache(Type argType, Type strideType)
         {
             // Two-level cache: argType → StrideProp, strideType → YStride/XStride/ZStride
@@ -1044,7 +1062,7 @@ namespace SpawnDev.ILGPU.Wasm
                 var viewBufferIdx = new List<int>();   // per-view: which buffer in bufferInfos
                 var viewSubOffsets = new List<int>();   // per-view: SubView byte offset
                 var viewElemSizes = new List<int>();    // per-view: bytes per element (from view's generic arg)
-                var wasmArgs = new List<(bool isBuffer, WasmMemoryBuffer? buffer, int length, int stride, int stride2, object? value)>();
+                var wasmArgs = new List<(bool isBuffer, WasmMemoryBuffer? buffer, int length, int stride, int stride2, object? value, int[]? extents)>();
                 // IR param index for each struct wasmArg (wasmArgIdx drifts when body-struct views expand).
                 var wasmStructIrParamIndices = new List<int>();
 
@@ -1234,11 +1252,12 @@ namespace SpawnDev.ILGPU.Wasm
                                 }
                             }
                             if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] View arg[{i}]: length={iav.Length}, stride={stride}, stride2={stride2}");
-                            wasmArgs.Add((true, wasmBuf, (int)iav.Length, stride, stride2, null));
+                            // 2D/3D views also carry their per-axis extents (see WasmKernelFunctionGenerator._viewExtentLocals).
+                            wasmArgs.Add((true, wasmBuf, (int)iav.Length, stride, stride2, null, ViewExtents(args[i])));
                         }
                         else
                         {
-                            wasmArgs.Add((false, null, 0, 0, 0, 0));
+                            wasmArgs.Add((false, null, 0, 0, 0, 0, null));
                         }
                     }
                     else
@@ -1309,7 +1328,7 @@ namespace SpawnDev.ILGPU.Wasm
                                 throw new NotSupportedException("LongIndex2D kernel parameters are not yet supported on the Wasm backend. Use LongIndex1D or restructure the kernel.");
                             else if (arg is LongIndex3D)
                                 throw new NotSupportedException("LongIndex3D kernel parameters are not yet supported on the Wasm backend. Use LongIndex1D or restructure the kernel.");
-                            wasmArgs.Add((false, null, 0, 0, 0, arg));
+                            wasmArgs.Add((false, null, 0, 0, 0, arg, null));
                             if (arg != null && (
                                 (arg.GetType().IsValueType && !arg.GetType().IsPrimitive && !arg.GetType().IsEnum)
                                 || arg.GetType().IsDefined(typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute), false)))
@@ -1703,7 +1722,7 @@ namespace SpawnDev.ILGPU.Wasm
                 int viewIndex = 0; // tracks views for SubView offset lookup
                 int wasmArgIdx = 0; // tracks current wasmArgs index for IR param lookup
                 int structSerializeIdx = 0;
-                foreach (var (isBuffer, buffer, length, stride, stride2, value) in wasmArgs)
+                foreach (var (isBuffer, buffer, length, stride, stride2, value, extents) in wasmArgs)
                 {
                     if (isBuffer)
                     {
@@ -1721,6 +1740,8 @@ namespace SpawnDev.ILGPU.Wasm
                             flatArgs.Add(stride.ToString());
                         if (stride2 != -1)
                             flatArgs.Add(stride2.ToString());
+                        if (extents != null)
+                            foreach (var e in extents) flatArgs.Add(e.ToString(System.Globalization.CultureInfo.InvariantCulture));
                         viewIndex++;
                     }
                     else
@@ -3301,7 +3322,7 @@ namespace SpawnDev.ILGPU.Wasm
             int paramIdx,
             List<WasmParamInfo> paramInfos,
             WasmCompiledKernel compiledKernel,
-            List<(bool isBuffer, WasmMemoryBuffer? buffer, int length, int stride, int stride2, object? value)> wasmArgs,
+            List<(bool isBuffer, WasmMemoryBuffer? buffer, int length, int stride, int stride2, object? value, int[]? extents)> wasmArgs,
             Dictionary<WasmMemoryBuffer, int> uniqueBuffers,
             List<(WasmMemoryBuffer buffer, int byteOffset)> bufferInfos,
             List<(int minByte, int maxByte)> bufferRanges,
@@ -3318,7 +3339,7 @@ namespace SpawnDev.ILGPU.Wasm
                 var wasmBuf = iav.Buffer as WasmMemoryBuffer;
                 if (wasmBuf == null)
                 {
-                    wasmArgs.Add((false, null, 0, 0, 0, 0));
+                    wasmArgs.Add((false, null, 0, 0, 0, 0, null));
                     continue;
                 }
 
@@ -3394,7 +3415,7 @@ namespace SpawnDev.ILGPU.Wasm
 
                 if (WasmBackend.VerboseLogging)
                     WasmBackend.Log($"[Wasm] BodyStruct expanded view arg[{argsIndex}]: length={iav.Length}, stride={stride}, stride2={stride2}");
-                wasmArgs.Add((true, wasmBuf, (int)iav.Length, stride, stride2, null));
+                wasmArgs.Add((true, wasmBuf, (int)iav.Length, stride, stride2, null, null));
             }
         }
 

@@ -1,7 +1,7 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.2.25 (unreleased; staged as 5.2.25-local.8) - WebGPU dispatch batching (one JS crossing per submit), `IExternalImageCopier`, memset/copy fixes
+## 5.2.25 (forks 2.3.7) - 2026-09-30 - WebGPU dispatch batching (one JS crossing per submit), `IExternalImageCopier`, memset/copy fixes
 
 ### WebGPU: plain dispatches are batched - one .NET->JS crossing per submit
 `WebGPUBackend.EnableDispatchBatching` (default **on**). A plain (uncaptured) dispatch no longer builds a
@@ -40,14 +40,16 @@ two full `string.Replace` copies on EVERY dispatch, even when the resolve cache 
 - **WebGL: a host write to a buffer already in the GL worker wiped kernel results** - `MemSet`, `CopyFromCPU` and
   `CopyFromJS` marked the WHOLE host mirror for re-upload; the mirror does not have what kernels wrote since. They
   now post only the written range, in order with the dispatches (`glWorker.js` `uploadBuffer` `dstByteOffset`).
-- ⚠️ **OPEN - Wasm: a 2D view's `IntExtent.X`/`.Y` both return the total length** (the launcher passes one length per
-  view; the codegen answers every extent field from it). `View2D_RowLoop_ExtentAndElements` fails on Wasm only.
+- **Wasm: a 2D/3D view's `IntExtent.X`/`.Y`/`.Z` all returned the view's TOTAL length** - the launcher passed one
+  length per view and the codegen answered every extent field from it, so a kernel looping to `m.IntExtent.Y` ran
+  X*Y iterations. A directly-passed 2D/3D view now gets one extra i32 parameter per axis (1D views and body-struct
+  views keep their layout). `View2D_RowLoop_ExtentAndElements`: red on Wasm before, green after.
 
 Tests: `BackendTestBase.DispatchBatching.cs` - `DispatchBatching_HostUploadsBetweenDispatches_AreOrdered` (upload,
 read, upload, read... in one batch; all lanes green), `DispatchBatching_OrderedChain_MatchesReference` (overlapping
 sub-view writes at unaligned offsets, scalars, 2D stride upload, clears mid-chain; batching ON and OFF, exact ints;
 all 9 lane outcomes green), `Coalesce_InputsFromPendingDispatches_ReadFreshData` (all lanes green),
-`View2D_RowLoop_ExtentAndElements` (red on Wasm - the open bug above).
+`View2D_RowLoop_ExtentAndElements` (was red on Wasm; fixed above).
 
 ### `IExternalImageCopier`: video / image -> GPU buffer, no readback
 

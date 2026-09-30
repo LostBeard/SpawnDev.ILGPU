@@ -1,4 +1,4 @@
-// ---------------------------------------------------------------------------------------
+﻿// ---------------------------------------------------------------------------------------
 //                               SpawnDev.ILGPU.Wasm
 //                    WebAssembly Compute Backend for Blazor WebAssembly
 //
@@ -51,6 +51,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// Strides are always the trailing Int32 fields after the pointer + Int64 extent fields.
         /// </summary>
         private readonly Dictionary<int, int> _viewStrideStartField = new();
+        /// <summary>
+        /// Per 2D/3D view PARAMETER: the locals holding its real per-axis extents (extra i32 params after stride2,
+        /// appended by the launcher for ArrayView2D/3D arguments). Without them every extent field of the view struct
+        /// was answered from the view's total length - IntExtent.X and .Y were both X*Y
+        /// (View2D_RowLoop_ExtentAndElements, 2026-09-30).
+        /// </summary>
+        private readonly Dictionary<int, uint[]> _viewExtentLocals = new();
 
         /// <summary>
         /// When single-block helpers are inlined, maps the helper's <see cref="Parameter"/>
@@ -767,6 +774,26 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     }
                     _viewStrideStartField[i] = strideStart;
                     if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Setup]   View strideStartField={strideStart}");
+
+                    // 2D/3D views: one extra i32 param per extent axis (the Int64 extent fields ahead of the strides).
+                    // A 1D view has one extent, which IS the length, and keeps the four-param layout.
+                    if (paramType is StructureType extStruct)
+                    {
+                        int extentFields = 0;
+                        for (int fi = 1; fi < strideStart && fi < extStruct.NumFields; fi++)
+                            if (extStruct.Fields[fi] is PrimitiveType ept && ept.BasicValueType == BasicValueType.Int64) extentFields++;
+                        if (extentFields >= 2)
+                        {
+                            var extLocals = new uint[extentFields];
+                            for (int e = 0; e < extentFields; e++)
+                            {
+                                FuncParamTypes.Add(WasmOpCodes.I32);
+                                extLocals[e] = _nextLocalIndex++;
+                                _paramCount++;
+                            }
+                            _viewExtentLocals[i] = extLocals;
+                        }
+                    }
 
                     var elemType = GetViewElementType(paramType);
                     int elemSize = 4;
@@ -2708,6 +2735,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                                 WasmModuleBuilder.EmitI64Const(Code, 0);
                             else
                                 WasmModuleBuilder.EmitI32Const(Code, 0);
+                        }
+                        else if (isStructView && _viewExtentLocals.TryGetValue(paramIdx, out var extLocals)
+                            && fieldIndex - 1 < extLocals.Length)
+                        {
+                            // A 2D/3D view's extent field: its own axis, passed by the launcher.
+                            WasmModuleBuilder.EmitLocalGet(Code, extLocals[fieldIndex - 1]);
+                            if (targetWasmType == WasmOpCodes.I64)
+                                Code.Add(WasmOpCodes.I64ExtendI32S);
                         }
                         else
                         {
