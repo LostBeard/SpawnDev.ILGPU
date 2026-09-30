@@ -249,7 +249,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // to happen on the spot), so it must stay legal: submit first, then destroy - WebGPU lets a buffer be
             // destroyed once the work using it is submitted. MEASURED 2026-09-30 without this: "upload target ...
             // is not held" in FloatRoundToEven_And_LongMinMax / CopyFromJS_ArrayBuffer_WritesCorrectDataTest.
-            if (Accelerator is WebGPUAccelerator acc && !acc.IsDisposed && acc.HasPendingRecordBatch)
+            // The same holds for the per-dispatch path's open command encoder (capture, bind-group caching): a
+            // MemSetToZero recorded there references this buffer until submit. MEASURED 2026-09-30 (Tuvok, SpawnScene):
+            // allocate, MemSetToZero, Dispose before any flush -> the NEXT unrelated submit failed "used in submit while
+            // destroyed" (Dispose_WithPendingClear_DoesNotBreakNextSubmit). Any pending work is submitted first.
+            if (Accelerator is WebGPUAccelerator acc && !acc.IsDisposed && acc.HasPendingWorkAny)
                 acc.FlushPendingCommands();
             _buffer?.Dispose();
         }

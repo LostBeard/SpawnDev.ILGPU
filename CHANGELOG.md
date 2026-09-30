@@ -1,6 +1,14 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.26 (unreleased) - WebGPU: disposing a buffer with a pending clear broke the next submit
+
+- **WebGPU: `Dispose()` right after `MemSetToZero()` (before any flush) made the NEXT, unrelated submit fail** with
+  "Buffer ... used in submit while destroyed". The clear is recorded and held until submit; 5.2.25 submitted a pending
+  record BATCH before destroying, but not the per-dispatch command encoder (capture, bind-group caching). Dispose now
+  submits any pending work first. Reported by Tuvok from SpawnScene. Test `Dispose_WithPendingClear_DoesNotBreakNextSubmit`
+  (red before, batching on and off); WebGPU lanes 1349/0.
+
 ## 5.2.25 (forks 2.3.7) - 2026-09-30 - WebGPU dispatch batching (one JS crossing per submit), `IExternalImageCopier`, memset/copy fixes
 
 ### WebGPU: plain dispatches are batched - one .NET->JS crossing per submit

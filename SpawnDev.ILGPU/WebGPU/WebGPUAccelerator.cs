@@ -393,6 +393,9 @@ namespace SpawnDev.ILGPU.WebGPU
         /// <summary>True while plain-dispatch records (which name buffers by id) wait for submission.</summary>
         internal bool HasPendingRecordBatch => DefaultStream is WebGPUStream ws && ws.HasBatch;
 
+        /// <summary>True while ANY recorded-but-unsubmitted work exists (record batch or open command encoder).</summary>
+        internal bool HasPendingWorkAny => DefaultStream is WebGPUStream ws && ws.HasPendingWork;
+
         #endregion
 
         #region Shader-Resolution Cache (WebGPUBackend.EnableShaderResolveCache, default ON)

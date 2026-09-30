@@ -145,6 +145,41 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         static void BatchCopyKernel(Index1D i, ArrayView<int> src, ArrayView<int> dst) => dst[i] = src[i];
 
         /// <summary>
+        /// Disposing a buffer whose MemSetToZero is still PENDING (recorded, not yet submitted) must not break the NEXT,
+        /// unrelated submit. Reported by Tuvok 2026-09-30 from SpawnScene: allocate, MemSetToZero, Dispose before any
+        /// flush, then dispatch anything -> "Buffer ... used in submit while destroyed". Both the record batch and the
+        /// per-dispatch encoder hold the clear until submit; Dispose must submit first.
+        /// </summary>
+        [TestMethod]
+        public async Task Dispose_WithPendingClear_DoesNotBreakNextSubmit() => await RunTest(async accelerator =>
+        {
+            bool prev = WebGPUBackend.EnableDispatchBatching;
+            try
+            {
+                foreach (bool batching in new[] { true, false })
+                {
+                    WebGPUBackend.EnableDispatchBatching = batching;
+                    await accelerator.SynchronizeAsync();   // start from nothing pending
+                    var doomed = accelerator.Allocate1D<int>(1);
+                    doomed.MemSetToZero();                  // recorded, not submitted
+                    doomed.Dispose();                       // before any flush
+                    using var src = accelerator.Allocate1D(new[] { 7, 8, 9 });
+                    using var dst = accelerator.Allocate1D<int>(3);
+                    var copy = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(BatchCopyKernel);
+                    copy(3, src.View, dst.View);            // the unrelated dispatch
+                    await accelerator.SynchronizeAsync();
+                    var got = await dst.CopyToHostAsync<int>();
+                    if (got[0] != 7 || got[1] != 8 || got[2] != 9)
+                        throw new Exception($"batching={batching}: unrelated dispatch after the dispose read [{string.Join(",", got)}]");
+                }
+            }
+            finally
+            {
+                WebGPUBackend.EnableDispatchBatching = prev;
+            }
+        });
+
+        /// <summary>
         /// Host uploads between dispatches must land exactly where they are issued: dispatch 1 reads A, a small
         /// CopyFromCPU rewrites A, dispatch 2 reads A - repeated several times with no sync in between, so on WebGPU
         /// the whole sequence (reads, uploads, reads) is one batch and the uploads are ordered records (a staging copy
