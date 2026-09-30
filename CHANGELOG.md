@@ -1,7 +1,52 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.2.25 (unreleased; staged as 5.2.25-local.1) - `IExternalImageCopier`: video / image -> GPU buffer, no readback
+## 5.2.25 (unreleased; staged as 5.2.25-local.7) - WebGPU dispatch batching (one JS crossing per submit), `IExternalImageCopier`, memset/copy fixes
+
+### WebGPU: plain dispatches are batched - one .NET->JS crossing per submit
+`WebGPUBackend.EnableDispatchBatching` (default **on**). A plain (uncaptured) dispatch no longer builds a
+`GPUBindGroupDescriptor` and encodes its pass through interop; it appends numeric records (SpawnJS hold ids for the
+pipeline, layout and buffers, offsets, sizes, workgroup counts) to a pinned `double[]`, and the scalar-param /
+stride / lock uploads go into one byte arena. A flush hands both to `ilgpuWebGPUPlan.submitBatch` as zero-copy typed
+arrays in ONE call, where the bind groups are created and every op encoded. Copies (`CopyFrom` GPU->GPU, the
+coalesce gather) and clears are records in the same batch, so they no longer split it.
+- Why: SpawnJS marshals a nested object one property `Set` per member - a bind-group descriptor was ~40 crossings.
+  MEASURED (ILGPU.ML, DAv2 Small 518, uncaptured WebGPU forward, RTX 4070): 433 -> 41 us host time per dispatch.
+- The per-dispatch path remains for dispatch-plan capture and bind-group caching, and until the helper loads.
+- Small host uploads (`CopyFromCPU` up to 64 KiB) join the batch as ORDERED records: the bytes are copied into the
+  batch arena on the spot, `submitBatch` writes the arena once into a persistent staging buffer and encodes each
+  upload as a `copyBufferToBuffer` exactly where it sits. Same ordering as flush-then-write; MEASURED 212 -> 0
+  upload flushes per DAv3 forward.
+- Disposing a WebGPU buffer while a record batch is pending submits the batch first (an upload used to happen on
+  the spot, so disposing right after one was always legal and stays legal).
+- The helper import URL is versioned by a hash of its content (`?v=`): a fixed URL let a browser keep an old
+  helper from its HTTP cache after an upgrade. `WebGPUDispatchPlan.LoadHelperAsync()` is the one supported loader,
+  and the module never replaces a newer copy of itself: a test that imported the file by its bare URL got an old
+  cached copy that replaced the library's, and every later WebGPU dispatch on the page failed (1,194 in one sweep).
+
+### WebGPU: the `@workgroup_size` patch is built only on a shader-resolve miss
+A `KernelConfig` dispatch whose `GroupDim` differs from the compiled size ran a regex over the whole WGSL and made
+two full `string.Replace` copies on EVERY dispatch, even when the resolve cache then returned the shader. MEASURED:
+49 of the 50 MiB a DAv2 forward allocated in `RunKernel` (~104 KB/dispatch, three gen-2 GCs per forward).
+
+### Fixes
+- **WebGPU coalesced kernels read stale inputs** when an input was produced by a still-pending dispatch: the
+  coalesce gather was submitted on its own encoder, ahead of the stream. It is now ordered on the stream.
+- **OpenCL (fork): a sub-view `MemSet` filled the wrong range** - `CLMemSet` multiplied the raw byte view's index by
+  the buffer's element size (4x too far for an int buffer). (Fork change: needs the fork version bump to ship.)
+- **WebGL: a host write to a buffer already in the GL worker wiped kernel results** - `MemSet`, `CopyFromCPU` and
+  `CopyFromJS` marked the WHOLE host mirror for re-upload; the mirror does not have what kernels wrote since. They
+  now post only the written range, in order with the dispatches (`glWorker.js` `uploadBuffer` `dstByteOffset`).
+- ⚠️ **OPEN - Wasm: a 2D view's `IntExtent.X`/`.Y` both return the total length** (the launcher passes one length per
+  view; the codegen answers every extent field from it). `View2D_RowLoop_ExtentAndElements` fails on Wasm only.
+
+Tests: `BackendTestBase.DispatchBatching.cs` - `DispatchBatching_HostUploadsBetweenDispatches_AreOrdered` (upload,
+read, upload, read... in one batch; all lanes green), `DispatchBatching_OrderedChain_MatchesReference` (overlapping
+sub-view writes at unaligned offsets, scalars, 2D stride upload, clears mid-chain; batching ON and OFF, exact ints;
+all 9 lane outcomes green), `Coalesce_InputsFromPendingDispatches_ReadFreshData` (all lanes green),
+`View2D_RowLoop_ExtentAndElements` (red on Wasm - the open bug above).
+
+### `IExternalImageCopier`: video / image -> GPU buffer, no readback
 
 New `SpawnDev.ILGPU.Rendering.IExternalImageCopier` (`ExternalImageCopier.Create(accelerator)`), the input-side twin of
 `ICanvasRenderer`: copies a `<video>`, `<img>`, canvas, `ImageBitmap`, `VideoFrame` or `ImageData` into an

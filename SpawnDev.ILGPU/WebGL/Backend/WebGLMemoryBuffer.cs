@@ -1,4 +1,4 @@
-using global::ILGPU;
+﻿using global::ILGPU;
 using global::ILGPU.Runtime;
 using SpawnDev.SpawnJS.JSObjects;
 using SpawnDev.SpawnJS.Toolbox;
@@ -82,7 +82,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 throw new ObjectDisposedException(nameof(WebGLMemoryBuffer));
             using var srcBytes = new Uint8Array(source.Buffer, (int)source.ByteOffset, (int)source.ByteLength);
             _backingArray.Set(srcBytes, targetByteOffset);
-            NeedsUpload = true;
+            CommitHostWrite((int)targetByteOffset, (int)source.ByteLength);
         }
 
         /// <inheritdoc/>
@@ -92,7 +92,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 throw new ObjectDisposedException(nameof(WebGLMemoryBuffer));
             using var srcBytes = new Uint8Array(source);
             _backingArray.Set(srcBytes, targetByteOffset);
-            NeedsUpload = true;
+            CommitHostWrite((int)targetByteOffset, (int)srcBytes.Length);
         }
 
         protected override void CopyFrom(
@@ -124,9 +124,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // (the old "external Instance reference no longer exists" class no longer fires).
                 using var heapView = new HeapView<byte, Uint8Array>(srcPtr, length);
                 _backingArray!.Set(heapView.View, (int)destContiguous.Index);
-
-                // Mark CPU-dirty — needs upload to worker before next dispatch
-                NeedsUpload = true;
+                CommitHostWrite((int)destContiguous.Index, length);
             }
             else if (source.GetAcceleratorType() == AcceleratorType.WebGL)
             {
@@ -274,10 +272,29 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var data = new byte[view.Length];
             if (value != 0) global::System.Array.Fill(data, value);
             _backingArray!.Write(data, (int)viewContiguous.Index);
-
-            // Mark CPU-dirty
-            NeedsUpload = true;
+            CommitHostWrite((int)viewContiguous.Index, (int)view.Length);
         }
+
+        /// <summary>
+        /// Commits a host write of [<paramref name="byteOffset"/>, +<paramref name="length"/>) that has just been
+        /// made to the host mirror.
+        /// </summary>
+        /// <remarks>
+        /// 🔴 Never mark a WORKER-RESIDENT buffer <see cref="NeedsUpload"/> for a partial write. That flag uploads the
+        /// WHOLE host mirror before the next dispatch, and the mirror does not have what kernels wrote since (their
+        /// results live in the worker). MEASURED 2026-09-30 (DispatchBatching_OrderedChain_MatchesReference): a
+        /// sub-view MemSetToZero after a chain of dispatches re-uploaded the stale mirror and zeroed every range
+        /// the kernels had written since the last readback. A resident buffer gets exactly the written range,
+        /// posted in order with the dispatches; a buffer not yet in the worker keeps the lazy full upload.
+        /// </remarks>
+        private void CommitHostWrite(int byteOffset, int length)
+        {
+            if (IsAllocatedInWorker)
+                ((WebGLAccelerator)Accelerator).UploadRangeToWorker(this, byteOffset, length);
+            else
+                NeedsUpload = true;
+        }
+
 
         protected override void DisposeAcceleratorObject(bool disposing)
         {

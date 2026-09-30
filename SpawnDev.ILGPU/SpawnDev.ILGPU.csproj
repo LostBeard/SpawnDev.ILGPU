@@ -73,6 +73,8 @@
 		<None Include="..\LICENSE.txt" Pack="true" PackagePath="\" />
 		<None Include="..\README.md" Pack="true" PackagePath="\" />
 		<None Include="wwwroot\icon-128.png" />
+		<!-- The dispatch helper is ALSO embedded so its content hash can version the import URL (WebGPUDispatchPlan.HelperContentVersion). -->
+		<EmbeddedResource Include="wwwroot\webgpuDispatchPlan.js" LogicalName="SpawnDev.ILGPU.webgpuDispatchPlan.js" />
 		<!-- precompiled-shaders Layer 2: the build automation .targets is auto-imported by NuGet
 		     from build/. Gated OFF by default (<SpawnDevPrecompileShaders>), so consumers that do
 		     not opt in are unaffected. -->

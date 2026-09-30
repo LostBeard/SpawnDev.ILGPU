@@ -1,4 +1,4 @@
-using SpawnDev.SpawnJS;
+﻿using SpawnDev.SpawnJS;
 using SpawnDev.SpawnJS.JSObjects;
 
 namespace SpawnDev.ILGPU.WebGPU;
@@ -267,6 +267,64 @@ public sealed class WebGPUDispatchPlan : IDisposable
         buffers.Clear();
     }
 
+    /// <summary>
+    /// Short hash of the helper script's CONTENT (the same file, embedded), used as the import URL's <c>?v=</c>.
+    /// </summary>
+    /// <remarks>
+    /// 🔴 A fixed URL let a browser keep running an OLD helper after the library changed: an ES module import is
+    /// served from the HTTP cache like any other file. MEASURED 2026-09-30 in PMT's persistent Chromium profile -
+    /// the page had <c>ilgpuWebGPUPlan</c> without the newly added <c>submitBatch</c>, and every WebGPU dispatch
+    /// failed with "Cannot read properties of undefined (reading 'apply')". A real user's browser does the same
+    /// after an upgrade. The assembly version cannot key it (local builds reuse one version, and a JS-only edit
+    /// does not change the DLL's MVID); the content itself can.
+    /// </remarks>
+    internal static string HelperContentVersion => _helperContentVersion ??= ComputeHelperContentVersion();
+    private static string? _helperContentVersion;
+    private static string ComputeHelperContentVersion()
+    {
+        using var s = typeof(WebGPUDispatchPlan).Assembly.GetManifestResourceStream("SpawnDev.ILGPU.webgpuDispatchPlan.js");
+        if (s == null) return "0";
+        var hash = System.Security.Cryptography.SHA256.HashData(s);
+        return Convert.ToHexString(hash, 0, 6).ToLowerInvariant();
+    }
+
+    /// <summary>True once wwwroot/webgpuDispatchPlan.js is loaded (it defines <c>globalThis.ilgpuWebGPUPlan</c>).</summary>
+    internal static bool HelperLoaded { get; private set; }
+
+    /// <summary>
+    /// Loads the helper script if it can be. Called at accelerator creation so the plain-dispatch record batch
+    /// (<see cref="Backend.WebGPUBackend.EnableDispatchBatching"/>) is available from the first dispatch; a host
+    /// that cannot serve <c>_content/SpawnDev.ILGPU/</c> keeps the per-dispatch path instead of failing.
+    /// </summary>
+    internal static async Task TryLoadHelperAsync()
+    {
+        if (HelperLoaded) return;
+        try
+        {
+            await EnsureHelperLoadedAsync();
+            // Check the FUNCTION, not just the namespace object: an older helper defines ilgpuWebGPUPlan too.
+            using var plan = SpawnJSRuntime.Instance.GlobalThis?.JSRef?.Get<SpawnJSObjectReference?>("ilgpuWebGPUPlan");
+            HelperLoaded = plan?.Has("submitBatch") == true;
+        }
+        catch (Exception ex)
+        {
+            _helperLoad = null;
+            if (Backend.WebGPUBackend.VerboseLogging)
+                Backend.WebGPUBackend.Log($"[WebGPU] dispatch helper not loaded - per-dispatch path: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Loads the dispatch helper script (<c>globalThis.ilgpuWebGPUPlan</c>) - the ONE supported way to get it.
+    /// </summary>
+    /// <remarks>
+    /// ⚠️ Never <c>import()</c> <c>_content/SpawnDev.ILGPU/webgpuDispatchPlan.js</c> yourself. A different URL is a
+    /// different module instance, and it re-registers the global: MEASURED 2026-09-30, a test that imported the
+    /// file by its bare URL got an OLD copy from the HTTP cache, which replaced the library's copy and made every
+    /// later WebGPU dispatch on the page fail ("Cannot read properties of undefined (reading 'apply')").
+    /// </remarks>
+    public static Task LoadHelperAsync() => EnsureHelperLoadedAsync();
+
     private static Task EnsureHelperLoadedAsync()
     {
         return _helperLoad ??= LoadAsync();
@@ -274,7 +332,7 @@ public sealed class WebGPUDispatchPlan : IDisposable
         {
             // Resolve against the app base so the import works regardless of the calling module's URL.
             var baseUri = SpawnJSRuntime.Instance.AppBaseUri;
-            var url = new Uri(new Uri(baseUri), "_content/SpawnDev.ILGPU/webgpuDispatchPlan.js").ToString();
+            var url = new Uri(new Uri(baseUri), "_content/SpawnDev.ILGPU/webgpuDispatchPlan.js?v=" + HelperContentVersion).ToString();
             // JS.Import() routes through SpawnJSInterop.import (dynamic import()); the runtime's CallAsync
             // would look up globalThis.import, which does not exist - import() is syntax, not a callable.
             using var module = await SpawnJSRuntime.Instance.Import(url);

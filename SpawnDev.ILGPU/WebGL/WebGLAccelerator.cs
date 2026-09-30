@@ -1,4 +1,4 @@
-// ---------------------------------------------------------------------------------------
+﻿// ---------------------------------------------------------------------------------------
 //                               SpawnDev.ILGPU.WebGL
 //                 WebGL2 Compute Library for Blazor WebAssembly
 //
@@ -411,6 +411,31 @@ namespace SpawnDev.ILGPU.WebGL
             }, new object[] { copyBuffer });
 
             memBuffer.NeedsUpload = false;
+        }
+
+        /// <summary>
+        /// Writes <paramref name="length"/> bytes of the buffer's host mirror, starting at
+        /// <paramref name="byteOffset"/>, into the worker's copy at the same offset - IN ORDER with the dispatches
+        /// already posted. For a host write to a buffer that already lives in the worker.
+        /// </summary>
+        internal void UploadRangeToWorker(WebGLMemoryBuffer memBuffer, int byteOffset, int length)
+        {
+            if (length <= 0 || memBuffer.BackingArray == null) return;
+            if (_glWorker == null)
+                throw new InvalidOperationException(
+                    $"GL worker not initialized (or already disposed) while uploading {length} bytes of buffer {memBuffer.WorkerBufferId}.");
+            using var range = memBuffer.BackingArray.Slice(byteOffset, byteOffset + length);
+            var rangeBuffer = range.Buffer
+                ?? throw new InvalidOperationException($"backing array range of buffer {memBuffer.WorkerBufferId} has no ArrayBuffer (detached?)");
+            _glWorker.PostMessage(new
+            {
+                type = "uploadBuffer",
+                bufferId = memBuffer.WorkerBufferId,
+                buffer = rangeBuffer,
+                byteOffset = 0,
+                byteLength = length,
+                dstByteOffset = byteOffset
+            }, new object[] { rangeBuffer });
         }
 
         /// <summary>

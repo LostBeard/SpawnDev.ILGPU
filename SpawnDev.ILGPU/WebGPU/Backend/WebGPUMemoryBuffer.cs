@@ -1,4 +1,4 @@
-using global::ILGPU;
+﻿using global::ILGPU;
 using global::ILGPU.Runtime;
 using SpawnDev.SpawnJS.JSObjects;
 using SpawnDev.SpawnJS.Toolbox;
@@ -8,7 +8,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 {
     public class WebGPUMemoryBuffer : MemoryBuffer, IBrowserMemoryBuffer
     {
-        private static readonly GPUCommandBuffer[] _submitArray = new GPUCommandBuffer[1];
         private readonly WebGPUBuffer<byte>? _buffer;
 
         public WebGPUMemoryBuffer(WebGPUAccelerator accelerator, long length, int elementSize, int bitsPerElement = 0)
@@ -57,12 +56,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 var sourceBuffer = sourceContiguous.Buffer;
                 var srcPtr = sourceBuffer.NativePtr + (int)sourceContiguous.Index;
 
+                var accelerator = (WebGPUAccelerator)Accelerator;
+                var destContiguous = (IContiguousArrayView)destination;
+
+                // A small upload joins the dispatch batch as an ORDERED record (see WebGPUStream.BatchUpload):
+                // same ordering as flush-then-write, without splitting the batch or crossing to JS here.
+                if (accelerator.TryBatchUpload(stream, _buffer!.NativeBuffer!, destContiguous.Index, srcPtr, length))
+                    return;
+
                 // Flush pending dispatches before writing (queue-timeline ordering: a pending dispatch
                 // that reads this buffer must be submitted BEFORE the writeBuffer overwrites it).
-                var accelerator = (WebGPUAccelerator)Accelerator;
                 accelerator.FlushPendingCommands();
 
-                var destContiguous = (IContiguousArrayView)destination;
 
                 // ZERO-COPY host->GPU upload. In Blazor WASM the CPU source already lives in WASM linear
                 // memory, so `srcPtr` is a byte offset into the JS heap ArrayBuffer (Module.HEAPU8.buffer) -
@@ -95,9 +100,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
             else
             {
-                // GPU-to-GPU copy using CopyBufferToBuffer
+                // GPU-to-GPU copy using CopyBufferToBuffer, recorded on the stream (see RecordCopyBuffer)
                 var accelerator = (WebGPUAccelerator)Accelerator;
-                accelerator.FlushPendingCommands();
 
                 var srcContiguous = (IContiguousArrayView)source;
                 var srcMemBuffer = srcContiguous.Buffer as WebGPUMemoryBuffer
@@ -107,22 +111,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                 var destContiguous = (IContiguousArrayView)destination;
 
-                var device = accelerator.NativeAccelerator.NativeDevice
-                    ?? throw new InvalidOperationException("GPU device not initialized");
-
                 var copyBytes = source.Length;
                 var paddedBytes = WebGPUAlignment.AlignTo4(copyBytes);
-                using var encoder = device.CreateCommandEncoder();
-                encoder.CopyBufferToBuffer(
-                    srcGpuBuffer, (ulong)srcContiguous.Index,
-                    _buffer!.NativeBuffer!, (ulong)destContiguous.Index,
-                    (ulong)paddedBytes);
-                using var commandBuffer = encoder.Finish();
-                _submitArray[0] = commandBuffer;
-                accelerator.NativeAccelerator.Queue?.Submit(_submitArray);
-                // Dispatch-plan capture: device copies during a forward (Concat assembly, cache writes)
-                // move data recomputed by earlier replayed dispatches - a replay must re-run them.
-                accelerator.ActiveDispatchPlan?.RecordCopy(
+                accelerator.RecordCopyBuffer(stream,
                     srcGpuBuffer, (ulong)srcContiguous.Index,
                     _buffer!.NativeBuffer!, (ulong)destContiguous.Index,
                     (ulong)paddedBytes);
@@ -252,7 +243,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         // DisposeAcceleratorObject is protected (not protected internal) in base AcceleratorObject
         protected override void DisposeAcceleratorObject(bool disposing)
         {
-            if (disposing) _buffer?.Dispose();
+            if (!disposing) return;
+            // A plain-dispatch record batch names buffers by id and resolves them only at submit, and a small
+            // CopyFromCPU is now a record in it. Disposing right after an upload was always legal (the upload used
+            // to happen on the spot), so it must stay legal: submit first, then destroy - WebGPU lets a buffer be
+            // destroyed once the work using it is submitted. MEASURED 2026-09-30 without this: "upload target ...
+            // is not held" in FloatRoundToEven_And_LongMinMax / CopyFromJS_ArrayBuffer_WritesCorrectDataTest.
+            if (Accelerator is WebGPUAccelerator acc && !acc.IsDisposed && acc.HasPendingRecordBatch)
+                acc.FlushPendingCommands();
+            _buffer?.Dispose();
         }
 
 

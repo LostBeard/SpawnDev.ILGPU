@@ -1,4 +1,4 @@
-// ---------------------------------------------------------------------------------------
+﻿// ---------------------------------------------------------------------------------------
 //                                 SpawnDev.ILGPU.WebGPU
 //                        Copyright (c) 2024 SpawnDev Project
 //
@@ -251,6 +251,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public static bool EnableBindGroupCaching { get; set; } = false;
 
         /// <summary>
+        /// Plain (uncaptured) dispatches are recorded as numeric records and submitted in ONE .NET-&gt;JS crossing
+        /// per flush, where the bind groups are created and every pass is encoded (wwwroot/webgpuDispatchPlan.js
+        /// <c>submitBatch</c>). True by default; the per-dispatch path is still used under dispatch-plan capture
+        /// and bind-group caching, and until the helper script has loaded.
+        /// </summary>
+        /// <remarks>
+        /// The per-dispatch path paid ~360 us of host time per kernel (MEASURED 2026-09-30, DAv3 Small 518 on an
+        /// RTX 4070: 1,722 dispatches, ~620 ms of a warm uncaptured forward whose whole budget in Transformers.js
+        /// is 61 ms). Most of it was <c>createBindGroup</c>, and the cost there is not Dawn: SpawnJS builds a
+        /// nested .NET object in JS one property <c>Set</c> per member, so a bind-group descriptor (layout, an
+        /// entries array, a resource object per entry) is ~40 crossings. Here every GPU object is named by its
+        /// SpawnJS hold id, the records live in a pinned <c>double[]</c> passed as a zero-copy Float64Array, and
+        /// the scalar-param uploads ride along in one byte arena - so the host does one crossing per flush.
+        /// </remarks>
+        public static bool EnableDispatchBatching { get; set; } = true;
+
+        /// <summary>
         /// When true (DEFAULT), the WebGPU dispatch path caches the resolved compute shader per
         /// (compiled-kernel identity + dispatch-config signature), so a re-dispatch of the same kernel
         /// at the same config skips <c>GetOrCreateComputeShader</c> — and therefore its O(WGSL-length)
@@ -341,6 +358,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// While <see cref="EnableDispatchProfiling"/> is on.</summary>
         public static double ProfileCpuEncodeMs;
 
+        /// <summary>Profiling (gated by <see cref="EnableDispatchProfiling"/>): host ms inside the record batch's single
+        /// submit crossing (JS bind-group creation + encoding + queue.submit), and how many batches were submitted.</summary>
+        public static double ProfileBatchSubmitMs;
+        /// <summary>See <see cref="ProfileBatchSubmitMs"/>.</summary>
+        public static long ProfileBatchSubmitCount;
+        /// <summary>Profiling: managed bytes allocated inside RunKernel (entry to end of encode) - GC pressure per dispatch.</summary>
+        public static long ProfileCpuAllocBytes;
+        /// <summary>Profiling: <see cref="ProfileCpuAllocBytes"/> split by phase [shader, args, bindGroup, encode].</summary>
+        public static readonly long[] ProfileCpuAllocByPhase = new long[4];
+        /// <summary>Profiling: WHO submitted each record batch (a short caller chain), counted - small batches mean
+        /// something is flushing the stream between dispatches.</summary>
+        public static readonly Dictionary<string, int> ProfileBatchSubmitCallers = new();
+
         /// <summary>Number of dispatches that recorded CPU-prologue phase timings while <see cref="EnableDispatchProfiling"/> is on.</summary>
         public static long ProfileCpuDispatchCount;
 
@@ -361,6 +391,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             ProfileCpuBindGroupMs = 0;
             ProfileCpuEncodeMs = 0;
             ProfileCpuDispatchCount = 0;
+            ProfileBatchSubmitMs = 0;
+            ProfileBatchSubmitCount = 0;
+            ProfileCpuAllocBytes = 0;
+            System.Array.Clear(ProfileCpuAllocByPhase);
+            ProfileBatchSubmitCallers.Clear();
         }
 
         /// <summary>

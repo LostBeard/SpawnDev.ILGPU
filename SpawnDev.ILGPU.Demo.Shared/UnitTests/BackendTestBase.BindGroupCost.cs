@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using ILGPU;
 using ILGPU.Runtime;
@@ -56,10 +56,10 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             var device = webgpu.NativeAccelerator.NativeDevice
                 ?? throw new Exception("WebGPU device unavailable");
 
-            // The helper module carrying the two no-ops (same one the plan replay imports).
-            var baseUri = SpawnJSRuntime.Instance.AppBaseUri;
-            var helperUrl = new Uri(new Uri(baseUri), "_content/SpawnDev.ILGPU/webgpuDispatchPlan.js").ToString();
-            using (var _ = await SpawnJSRuntime.Instance.Import(helperUrl)) { }
+            // The helper module carrying the two no-ops. Loaded through the LIBRARY, never imported here: a second
+            // import by a different URL is a second module instance, and it replaced the library's own copy for the
+            // rest of the page - every later WebGPU dispatch failed (2026-09-30, full sweep: 1,194 failures).
+            await SpawnDev.ILGPU.WebGPU.WebGPUDispatchPlan.LoadHelperAsync();
 
             // ── A real layout and real buffers: three storage bindings, production's shape ───────
             using var layout = device.CreateBindGroupLayout(new GPUBindGroupLayoutDescriptor

@@ -1,4 +1,4 @@
-using global::ILGPU;
+﻿using global::ILGPU;
 using global::ILGPU.Backends;
 using global::ILGPU.Runtime;
 using SpawnDev.SpawnJS.JSObjects;
@@ -388,7 +388,10 @@ namespace SpawnDev.ILGPU.WebGPU
 
         /// <summary>True when the default stream holds a command encoder with recorded work that has not
         /// been submitted yet - i.e. destroying a GPU resource it references would be a use-after-free.</summary>
-        private bool HasPendingBatch => ((WebGPUStream)DefaultStream).HasOpenEncoder;
+        private bool HasPendingBatch => ((WebGPUStream)DefaultStream).HasPendingWork;
+
+        /// <summary>True while plain-dispatch records (which name buffers by id) wait for submission.</summary>
+        internal bool HasPendingRecordBatch => DefaultStream is WebGPUStream ws && ws.HasBatch;
 
         #endregion
 
@@ -493,6 +496,10 @@ namespace SpawnDev.ILGPU.WebGPU
         /// </summary>
         private void OnShaderEvicting(WebGPUComputeShader shader)
         {
+            // A record batch names this shader's pipeline and layout by SpawnJS id and only resolves them at
+            // submit; the legacy encoder captured the JS objects when the pass was encoded. Submit first, so the
+            // Dispose that follows this callback cannot release a pipeline a recorded dispatch still needs.
+            if (DefaultStream is WebGPUStream evictStream && evictStream.HasBatch) evictStream.FlushPending();
             List<ShaderResolveKey>? stale = null;
             foreach (var kv in _shaderResolveCache)
             {
@@ -802,6 +809,8 @@ namespace SpawnDev.ILGPU.WebGPU
             accelerator.DefaultStream = accelerator.CreateStreamInternal();
             // Wire flush callback so WebGPUBuffer readback operations auto-flush pending dispatches
             accelerator.NativeAccelerator.FlushPendingCommands = () => accelerator.FlushPendingCommands();
+            // The plain-dispatch batch submits through the helper script; without it dispatches stay per-dispatch.
+            await WebGPUDispatchPlan.TryLoadHelperAsync();
 
             // Update device capabilities from actual enabled features (Float16, Float64, Int64)
             if (device.Capabilities is WebGPUCapabilityContext webCaps)
@@ -1049,6 +1058,8 @@ namespace SpawnDev.ILGPU.WebGPU
             // shader-resolve / arg-build / encode phases — see WebGPUBackend.ProfileCpu*Ms. ts0 = entry.
             bool _prof = WebGPUBackend.EnableDispatchProfiling;
             long _profTs0 = _prof ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+            long _profAlloc0 = _prof ? GC.GetAllocatedBytesForCurrentThread() : 0L;
+            long _profA1 = 0L, _profA2 = 0L, _profA3 = 0L;
             long _profTsShader = 0L, _profTsBind = 0L, _profTsArgs = 0L;
 
             if ((WebGPUBackend.DiagnosticFlags & WGSLDiagnostics.Dispatch) != 0)
@@ -1106,58 +1117,54 @@ namespace SpawnDev.ILGPU.WebGPU
             // If the compiled @workgroup_size doesn't match the dispatch's GroupDim, patch
             // the WGSL source so @workgroup_size and the const workgroup_size variable agree
             // with the actual dispatch dimensions. The shader cache handles deduplication.
-            string wgslSource = compiledKernel.WGSLSource;
+            // ⚠️ The PATCHED SOURCE is built only when a shader has to be resolved (resolve-cache miss, or the
+            // cache disabled). It used to be built on EVERY dispatch - a regex over the whole WGSL plus two full
+            // string.Replace copies - even though the patched shader was then found in the resolve cache, whose
+            // key already carries GroupDim. MEASURED 2026-09-30 on DAv2 Small 518: 49 of the 50 MiB a warm
+            // forward allocated in RunKernel came from here (~104 KB per dispatch, three gen-2 GCs per forward),
+            // and it was the whole "shader" phase of the dispatch profile. `wasPatched` needs no regex: the
+            // memoized compiled size is parsed from the same attribute the patch rewrites.
             bool wasPatched = false;
+            int reqX = 0, reqY = 0, reqZ = 0;
             if (dimension is KernelConfig kcWg)
             {
-                int reqX = kcWg.GroupDim.X;
-                int reqY = kcWg.GroupDim.Y;
-                int reqZ = kcWg.GroupDim.Z;
-
-                // Use the memoized compiled @workgroup_size (parsed once) instead of a per-dispatch
-                // full-WGSL regex. Only when it differs from the dispatch's GroupDim — i.e. the kernel
-                // was loaded without a matching KernelSpecialization (rare) — fall back to the regex to
-                // get the exact matched text needed for the source patch.
+                reqX = kcWg.GroupDim.X;
+                reqY = kcWg.GroupDim.Y;
+                reqZ = kcWg.GroupDim.Z;
                 var (compiledX, compiledY, compiledZ) = compiledKernel.CompiledWorkgroupSize;
-                if (compiledX > 0 && (compiledX != reqX || compiledY != reqY || compiledZ != reqZ))
+                wasPatched = compiledX > 0 && (compiledX != reqX || compiledY != reqY || compiledZ != reqZ);
+            }
+            string ResolveSource()
+            {
+                string wgslSource = compiledKernel.WGSLSource;
+                if (!wasPatched) return wgslSource;
+                var wgMatch = s_workgroupSizePattern.Match(wgslSource);
+                if (!wgMatch.Success) return wgslSource;
+                // This indicates the kernel was loaded without KernelSpecialization matching the dispatch's
+                // GroupDim; adding one to the LoadKernel call removes the need for the patch.
+                if (WebGPUBackend.VerboseLogging)
                 {
-                    var wgMatch = s_workgroupSizePattern.Match(wgslSource);
-                    if (wgMatch.Success)
-                    {
-                        wasPatched = true;
-                        // Always log workgroup_size patching as a warning — this indicates
-                        // the kernel was loaded without KernelSpecialization matching the
-                        // dispatch's GroupDim. Adding KernelSpecialization to the LoadKernel
-                        // call eliminates the need for runtime WGSL patching.
-                        if (WebGPUBackend.VerboseLogging)
-                            WebGPUBackend.Log(
-                                $"[WebGPU] WARNING: Runtime @workgroup_size patching: " +
-                                $"compiled=({compiledX},{compiledY},{compiledZ}), " +
-                                $"dispatch=({reqX},{reqY},{reqZ}). " +
-                                $"Kernel: {compiledKernel.EntryPoint?.Name ?? "unknown"}. " +
-                                $"Consider adding KernelSpecialization to LoadKernel.");
-
-                        wgslSource = wgslSource.Replace(
-                            wgMatch.Value,
-                            $"@workgroup_size({reqX}, {reqY}, {reqZ})");
-
-                        var constMatch = s_constWorkgroupSizePattern.Match(wgslSource);
-                        if (constMatch.Success)
-                        {
-                            wgslSource = wgslSource.Replace(
-                                constMatch.Value,
-                                $"const workgroup_size : vec3<u32> = vec3<u32>({reqX}u, {reqY}u, {reqZ}u);");
-                        }
-                    }
+                    var (cx, cy, cz) = compiledKernel.CompiledWorkgroupSize;
+                    WebGPUBackend.Log(
+                        $"[WebGPU] WARNING: Runtime @workgroup_size patching: " +
+                        $"compiled=({cx},{cy},{cz}), dispatch=({reqX},{reqY},{reqZ}). " +
+                        $"Kernel: {compiledKernel.EntryPoint?.Name ?? "unknown"}. " +
+                        $"Consider adding KernelSpecialization to LoadKernel.");
                 }
+                wgslSource = wgslSource.Replace(wgMatch.Value, $"@workgroup_size({reqX}, {reqY}, {reqZ})");
+                var constMatch = s_constWorkgroupSizePattern.Match(wgslSource);
+                if (constMatch.Success)
+                    wgslSource = wgslSource.Replace(
+                        constMatch.Value,
+                        $"const workgroup_size : vec3<u32> = vec3<u32>({reqX}u, {reqY}u, {reqZ}u);");
+                return wgslSource;
             }
 
             // Resolve the compute shader. The result is a pure function of (compiled kernel, dispatch
             // config), so cache it per (kernel identity + config signature) and skip GetOrCreateComputeShader
             // — and its O(WGSL-length) content-hash lookup — on re-dispatch (every high-dispatch workload).
-            // The override-build + workgroup-patch above are now O(1)/memoized, so they're left to run; the
-            // cached shader equals what GetOrCreateComputeShader(wgslSource, overrideConstants) would return
-            // for this config (the key captures every resolution input — complete by construction).
+            // The cached shader equals what GetOrCreateComputeShader(ResolveSource(), overrideConstants) would
+            // return for this config (the key captures every resolution input — complete by construction).
             WebGPUComputeShader shader;
             if (WebGPUBackend.EnableShaderResolveCache)
             {
@@ -1169,7 +1176,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 }
                 else
                 {
-                    shader = nativeAccel.GetOrCreateComputeShader(wgslSource, "main", overrideConstants,
+                    shader = nativeAccel.GetOrCreateComputeShader(ResolveSource(), "main", overrideConstants,
                         compiledKernel.EntryPoint?.Name);
                     webGpuAccel._shaderResolveCache[resolveKey] = shader;
                     webGpuAccel._shaderResolveCacheMisses++;
@@ -1177,11 +1184,11 @@ namespace SpawnDev.ILGPU.WebGPU
             }
             else
             {
-                shader = nativeAccel.GetOrCreateComputeShader(wgslSource, "main", overrideConstants,
+                shader = nativeAccel.GetOrCreateComputeShader(ResolveSource(), "main", overrideConstants,
                     compiledKernel.EntryPoint?.Name);
             }
             var device = nativeAccel.NativeDevice!;
-            if (_prof) _profTsShader = System.Diagnostics.Stopwatch.GetTimestamp(); // end shader-resolve phase
+            if (_prof) { _profTsShader = System.Diagnostics.Stopwatch.GetTimestamp(); _profA1 = GC.GetAllocatedBytesForCurrentThread(); } // end shader-resolve phase
 
             // Track scalar buffers for pool return (reuse list to avoid per-frame allocation)
             _reusableScalarReturnList ??= new List<GPUBuffer>();
@@ -1289,6 +1296,15 @@ namespace SpawnDev.ILGPU.WebGPU
                 bool bgWillCache = bgUseCache;
                 BindGroupCacheEntry? bgCachedEntry = null;
                 GPUBuffer? bgOwnedScalarBuffer = null;
+                // Record-batch mode (WebGPUBackend.EnableDispatchBatching): everything this dispatch sends to the
+                // queue - scalar uploads, coalesce copies, the pass - becomes a record, submitted in one crossing.
+                // Not under capture (the plan records real bind groups) or bind-group caching (the cache owns them).
+                var batchStream = stream as WebGPUStream ?? (WebGPUStream)webGpuAccel.DefaultStream;
+                bool batchMode = !bgUseCache && webGpuAccel._activeDispatchPlan == null && batchStream.BatchingAvailable;
+                // The stream holds either a record batch or a legacy encoder, never both: switching submits the
+                // open one, so submission order stays dispatch order.
+                if (batchMode) batchStream.EnsureNoOpenEncoder();
+                else batchStream.EnsureNoBatch();
                 // The scalar bytes written into bgOwnedScalarBuffer, carried out of the packing block so the
                 // cache store below can record them on the entry (see BindGroupCacheEntry.ScalarBytes).
                 byte[]? packedDataForCache = null;
@@ -1498,7 +1514,11 @@ namespace SpawnDev.ILGPU.WebGPU
                         // GPU→GPU copy each member's data into the coalesced buffer at running offset.
                         // Run on a dedicated command encoder + immediate submit so the data is in
                         // place before the compute pass that follows on the main encoder.
-                        var copyEnc = device.CreateCommandEncoder(new GPUCommandEncoderDescriptor { Label = $"CoalesceCopy-{group.BindingName}" });
+                        // 🔴 The gather goes on THIS stream, ahead of the pass that reads it: a record in batch mode,
+                        // the stream's own encoder otherwise. It used to be a separate encoder submitted on the
+                        // spot, which executes BEFORE every dispatch still pending in the stream's encoder - so a
+                        // member produced by one of those read its previous contents.
+                        var copyEnc = batchMode ? null : batchStream.GetOrCreateEncoder();
                         ulong runningByteOffset = 0;
                         // Element offset is per-u32-slot for the WGSL access expression
                         //   coalesced_binding[scalar_params[ViewOffsetSlot] + idx * stride]
@@ -1522,7 +1542,8 @@ namespace SpawnDev.ILGPU.WebGPU
 
                             if (copySize > 0)
                             {
-                                copyEnc.CopyBufferToBuffer(srcBuffer, srcByteOffset, coalescedBuffer, runningByteOffset, copySize);
+                                if (copyEnc != null) copyEnc.CopyBufferToBuffer(srcBuffer, srcByteOffset, coalescedBuffer, runningByteOffset, copySize);
+                                else batchStream.BatchCopy(srcBuffer, srcByteOffset, coalescedBuffer, runningByteOffset, copySize);
                                 // Dispatch-plan capture: the coalesce gather reads tensor data that is
                                 // recomputed on every replay - the copy must re-run in captured order.
                                 webGpuAccel._activeDispatchPlan?.RecordCopy(srcBuffer, srcByteOffset, coalescedBuffer, runningByteOffset, copySize);
@@ -1574,10 +1595,6 @@ namespace SpawnDev.ILGPU.WebGPU
                             runningByteOffset += copySize;
                             runningElementCount += m.elementCount;
                         }
-                        var copyCmd = copyEnc.Finish(new GPUCommandBufferDescriptor());
-                        device.Queue.Submit(new[] { copyCmd });
-                        copyCmd.Dispose();
-                        copyEnc.Dispose();
 
                         // Mark members for Phase 1 routing: leader emits the coalesced binding;
                         // non-leaders are skipped entirely.
@@ -1912,7 +1929,8 @@ namespace SpawnDev.ILGPU.WebGPU
                             // which uses MemoryMarshal.AsBytes — no GC pinning required.
                             GetCopyStructMethod(argType).Invoke(null, new object[] { arg, bytes });
 
-                            device.Queue.WriteBuffer(uBuffer, 0, bytes);
+                            if (batchMode) batchStream.BatchWrite(uBuffer, bytes);
+                            else device.Queue.WriteBuffer(uBuffer, 0, bytes);
                             if (WebGPUBackend.VerboseLogging)
                                 WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Struct scalar {argType.Name}, Size={structSize} bytes");
                         }
@@ -1941,7 +1959,8 @@ namespace SpawnDev.ILGPU.WebGPU
                                 Array.Copy(fieldBytes, 0, bytes, offset, fieldSize);
                                 offset += fieldSize;
                             }
-                            device.Queue.WriteBuffer(uBuffer, 0, bytes);
+                            if (batchMode) batchStream.BatchWrite(uBuffer, bytes);
+                            else device.Queue.WriteBuffer(uBuffer, 0, bytes);
                             if (WebGPUBackend.VerboseLogging)
                                 WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Display class captures, Size={totalSize} bytes");
                         }
@@ -1967,7 +1986,8 @@ namespace SpawnDev.ILGPU.WebGPU
                         var byteData = new byte[dims.Length * 4];
                         Buffer.BlockCopy(strideData, 0, byteData, 0, byteData.Length);
 
-                        device.Queue.WriteBuffer(strideBuffer, 0, byteData);
+                        if (batchMode) batchStream.BatchWrite(strideBuffer, byteData);
+                        else device.Queue.WriteBuffer(strideBuffer, 0, byteData);
 
                         entries.Add(new GPUBindGroupEntry { Binding = (uint)currentBindingIndex, Resource = new GPUBufferBinding { Buffer = strideBuffer, Offset = 0, Size = (ulong)strideSize } });
                         currentBindingIndex++;
@@ -2252,7 +2272,10 @@ namespace SpawnDev.ILGPU.WebGPU
                         scalarBuffersToReturn.Add(packedBuffer);
                     }
                     if (!skipScalarWrite)
-                        device.Queue.WriteBuffer(packedBuffer, 0, packedData);
+                    {
+                        if (batchMode) batchStream.BatchWrite(packedBuffer, packedData);
+                        else device.Queue.WriteBuffer(packedBuffer, 0, packedData);
+                    }
                     packedDataForCache = packedData;
                     // Snapshot the scalar upload for the dispatch plan's patch surface (attached to
                     // the Record() below; no-op unless the plan opted into snapshots).
@@ -2280,7 +2303,8 @@ namespace SpawnDev.ILGPU.WebGPU
                         // Use a fixed size that covers any reasonable buffer
                         var lockBuffer = GetPooledScalarBuffer(device);
                         // Zero the lock buffer before dispatch (all locks start unlocked)
-                        device.Queue.WriteBuffer(lockBuffer, 0, new byte[256]);
+                        if (batchMode) batchStream.BatchWrite(lockBuffer, new byte[256]);
+                        else device.Queue.WriteBuffer(lockBuffer, 0, new byte[256]);
                         scalarBuffersToReturn.Add(lockBuffer);
                         entries.Add(new GPUBindGroupEntry
                         {
@@ -2418,9 +2442,13 @@ namespace SpawnDev.ILGPU.WebGPU
                     }
                 }
 
-                if (_prof) _profTsBind = System.Diagnostics.Stopwatch.GetTimestamp(); // end arg-prep phase, begin bind-group resolve
-                GPUBindGroup bindGroup;
-                if (bgCacheHit)
+                if (_prof) { _profTsBind = System.Diagnostics.Stopwatch.GetTimestamp(); _profA2 = GC.GetAllocatedBytesForCurrentThread(); } // end arg-prep phase, begin bind-group resolve
+                GPUBindGroup? bindGroup = null;
+                if (batchMode)
+                {
+                    // The bind group is created JS-side at submit, from the records below.
+                }
+                else if (bgCacheHit)
                 {
                     // Reuse the cached bind group; its owned scalar buffer was either left alone (identical
                     // scalars) or rewritten above only because nothing pending referenced it.
@@ -2534,16 +2562,23 @@ namespace SpawnDev.ILGPU.WebGPU
 
                 if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU] Dispatching: ({workX}, {workY}, {workZ})");
 
-                if (_prof) _profTsArgs = System.Diagnostics.Stopwatch.GetTimestamp(); // end arg-build phase, begin encode
+                if (_prof) { _profTsArgs = System.Diagnostics.Stopwatch.GetTimestamp(); _profA3 = GC.GetAllocatedBytesForCurrentThread(); } // end arg-build phase, begin encode
 
                 // Use the stream's shared encoder for batched submission
-                var webGpuStream = stream as WebGPUStream ?? (WebGPUStream)webGpuAccel.DefaultStream;
-                var encoder = webGpuStream.GetOrCreateEncoder();
-                using var pass = encoder.BeginComputePass();
-                pass.SetPipeline(shader.Pipeline);
-                pass.SetBindGroup(0, bindGroup);
-                pass.DispatchWorkgroups(workX, workY, workZ);
-                pass.End();
+                var webGpuStream = batchStream;
+                if (batchMode)
+                {
+                    webGpuStream.BatchDispatch(shader.Pipeline!, shader.BindGroupLayout!, entries, workX, workY, workZ);
+                }
+                else
+                {
+                    var encoder = webGpuStream.GetOrCreateEncoder();
+                    using var pass = encoder.BeginComputePass();
+                    pass.SetPipeline(shader.Pipeline);
+                    pass.SetBindGroup(0, bindGroup!);
+                    pass.DispatchWorkgroups(workX, workY, workZ);
+                    pass.End();
+                }
                 webGpuStream.IncrementPassCount();
 
                 // Log dispatch for post-mortem debugging. Use the memoized compiled @workgroup_size
@@ -2567,7 +2602,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 var capturePlan = webGpuAccel._activeDispatchPlan;
                 if (capturePlan != null)
                 {
-                    capturePlan.Record(shader.Pipeline!, bindGroup, workX, workY, workZ);
+                    capturePlan.Record(shader.Pipeline!, bindGroup!, workX, workY, workZ);
                     capturePlan.RetainScalarBuffers(scalarBuffersToReturn);
                     if (coalescedBuffersToDestroyAfterDispatch != null)
                         capturePlan.RetainCoalesceBuffers(coalescedBuffersToDestroyAfterDispatch);
@@ -2579,7 +2614,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 // owned scalar buffer stays out of scalarBuffersToReturn. A first-sight miss under
                 // recur-only caching was NOT stored, so it's a throwaway and must be deferred like
                 // the uncached path.
-                if (!bgWillCache)
+                if (!bgWillCache && bindGroup != null)
                     webGpuStream.DeferBindGroupDisposal(bindGroup);
                 foreach (var buffer in scalarBuffersToReturn)
                     webGpuStream.DeferScalarReturn(buffer);
@@ -2605,6 +2640,12 @@ namespace SpawnDev.ILGPU.WebGPU
                     WebGPUBackend.ProfileCpuBindGroupMs += (_profTsArgs - _profTsBind) * _profF;
                     WebGPUBackend.ProfileCpuEncodeMs += (_profTsEnd - _profTsArgs) * _profF;
                     WebGPUBackend.ProfileCpuDispatchCount++;
+                    long _profA4 = GC.GetAllocatedBytesForCurrentThread();
+                    WebGPUBackend.ProfileCpuAllocBytes += _profA4 - _profAlloc0;
+                    WebGPUBackend.ProfileCpuAllocByPhase[0] += _profA1 - _profAlloc0;
+                    WebGPUBackend.ProfileCpuAllocByPhase[1] += _profA2 - _profA1;
+                    WebGPUBackend.ProfileCpuAllocByPhase[2] += _profA3 - _profA2;
+                    WebGPUBackend.ProfileCpuAllocByPhase[3] += _profA4 - _profA3;
                 }
             }
             catch (Exception ex)
@@ -2748,9 +2789,46 @@ namespace SpawnDev.ILGPU.WebGPU
         /// this goes through the command encoder pipeline and gets proper
         /// implicit barriers with adjacent compute passes.
         /// </summary>
+        /// <summary>
+        /// Records a GPU-&gt;GPU <c>copyBufferToBuffer</c> on the given stream, ordered with the dispatches around
+        /// it: a record in the plain-dispatch batch, or the stream's own encoder otherwise.
+        /// </summary>
+        /// <remarks>
+        /// A device copy used to flush the stream and submit its OWN one-copy command buffer. Correct, but every
+        /// copy cut the batch in two: MEASURED 2026-09-30, 55 of the 133 submits of a DAv2 Small 518 forward.
+        /// </remarks>
+        /// <summary>
+        /// Records a small host upload into the plain-dispatch batch, in order (see WebGPUStream.BatchUpload).
+        /// False when batching is not the open form of pending work, a plan is recording (an upload cannot be
+        /// replayed and must stay visible to the plan's host-write census), or the upload is too large/unaligned.
+        /// </summary>
+        internal bool TryBatchUpload(AcceleratorStream stream, GPUBuffer buffer, long byteOffset, IntPtr src, int length)
+        {
+            var webGpuStream = stream as WebGPUStream ?? (WebGPUStream)DefaultStream;
+            return _activeDispatchPlan == null && webGpuStream.BatchingActive
+                && webGpuStream.BatchUpload(buffer, byteOffset, src, length);
+        }
+
+        internal void RecordCopyBuffer(AcceleratorStream stream, GPUBuffer src, ulong srcOffset, GPUBuffer dst, ulong dstOffset, ulong size)
+        {
+            var webGpuStream = stream as WebGPUStream ?? (WebGPUStream)DefaultStream;
+            if (webGpuStream.BatchingActive)
+                webGpuStream.BatchCopy(src, srcOffset, dst, dstOffset, size);
+            else
+                webGpuStream.GetOrCreateEncoder().CopyBufferToBuffer(src, srcOffset, dst, dstOffset, size);
+            // Dispatch-plan capture: device copies during a forward (Concat assembly, cache writes) move data
+            // recomputed by earlier replayed dispatches - a replay must re-run them.
+            _activeDispatchPlan?.RecordCopy(src, srcOffset, dst, dstOffset, size);
+        }
+
         internal void RecordClearBuffer(AcceleratorStream stream, GPUBuffer buffer, ulong offset, ulong size)
         {
             var webGpuStream = stream as WebGPUStream ?? (WebGPUStream)DefaultStream;
+            if (webGpuStream.BatchingActive)
+            {
+                webGpuStream.BatchClear(buffer, offset, size);
+                return;
+            }
             var encoder = webGpuStream.GetOrCreateEncoder();
             encoder.ClearBuffer(buffer, offset, size);
             // Dispatch-plan capture: a replay must re-zero this region or kernels read stale data.
@@ -2799,6 +2877,150 @@ namespace SpawnDev.ILGPU.WebGPU
             /// NEXT Submit, blaming the buffer rather than whatever freed it. See
             /// WebGPUAccelerator.ClearBindGroupCache.</summary>
             internal bool HasOpenEncoder => _encoder != null;
+
+            /// <summary>True while recorded-but-unsubmitted work exists in either form (encoder or record batch).</summary>
+            internal bool HasPendingWork => _encoder != null || _batchLen > 0;
+
+            // ── Record batch (WebGPUBackend.EnableDispatchBatching; format in wwwroot/webgpuDispatchPlan.js) ──
+            private double[] _batchRec = new double[4096];
+            private int _batchLen;
+            private byte[] _batchData = new byte[16384];
+            private int _batchDataLen;
+            private bool _batchHasUploads;   // any tag-4 upload: submitBatch stages the data arena first
+
+            /// <summary>True while records are waiting for <see cref="FlushPending"/>.</summary>
+            internal bool HasBatch => _batchLen > 0;
+
+            /// <summary>Record batching is enabled and its helper script is loaded.</summary>
+            internal bool BatchingAvailable => WebGPUBackend.EnableDispatchBatching && WebGPUDispatchPlan.HelperLoaded;
+
+            /// <summary>A record batch is the open form of pending work (or nothing is open and batching is available).</summary>
+            internal bool BatchingActive => _batchLen > 0 || (_encoder == null && BatchingAvailable && _webGpuAccelerator.ActiveDispatchPlan == null);
+
+            internal void EnsureNoOpenEncoder() { if (_encoder != null) FlushPending(); }
+            internal void EnsureNoBatch() { if (_batchLen > 0) FlushPending(); }
+
+            private void EnsureRecords(int count)
+            {
+                if (_batchLen + count <= _batchRec.Length) return;
+                System.Array.Resize(ref _batchRec, Math.Max(_batchRec.Length * 2, _batchLen + count));
+            }
+
+            private static double IdOf(SpawnDev.SpawnJS.SpawnJSObject obj, string what)
+                => obj.JSRef?.Id ?? throw new InvalidOperationException($"[WebGPU] {what} has no JS reference (disposed?)");
+
+            internal void BatchDispatch(GPUComputePipeline pipeline, GPUBindGroupLayout layout, List<GPUBindGroupEntry> entries, uint x, uint y, uint z)
+            {
+                EnsureRecords(7 + 4 * entries.Count);
+                var r = _batchRec;
+                int i = _batchLen;
+                r[i] = 0; r[i + 1] = IdOf(pipeline, "pipeline"); r[i + 2] = IdOf(layout, "bind group layout");
+                r[i + 3] = entries.Count; r[i + 4] = x; r[i + 5] = y; r[i + 6] = z;
+                i += 7;
+                foreach (var e in entries)
+                {
+                    var binding = e.Resource?.Value as GPUBufferBinding
+                        ?? throw new NotSupportedException($"[WebGPU] batched dispatch: binding {e.Binding} is not a buffer binding");
+                    r[i] = e.Binding;
+                    r[i + 1] = IdOf(binding.Buffer ?? throw new InvalidOperationException($"[WebGPU] binding {e.Binding} has no buffer"), "buffer");
+                    r[i + 2] = binding.Offset ?? 0;
+                    r[i + 3] = binding.Size.HasValue ? binding.Size.Value : -1;
+                    i += 4;
+                }
+                _batchLen = i;
+            }
+
+            internal void BatchCopy(GPUBuffer src, ulong srcOffset, GPUBuffer dst, ulong dstOffset, ulong size)
+            {
+                EnsureRecords(6);
+                var r = _batchRec; int i = _batchLen;
+                r[i] = 1; r[i + 1] = IdOf(src, "copy source"); r[i + 2] = srcOffset; r[i + 3] = IdOf(dst, "copy destination"); r[i + 4] = dstOffset; r[i + 5] = size;
+                _batchLen = i + 6;
+            }
+
+            internal void BatchClear(GPUBuffer buffer, ulong offset, ulong size)
+            {
+                EnsureRecords(4);
+                var r = _batchRec; int i = _batchLen;
+                r[i] = 2; r[i + 1] = IdOf(buffer, "clear target"); r[i + 2] = offset; r[i + 3] = size;
+                _batchLen = i + 4;
+            }
+
+            /// <summary>Queues <c>queue.writeBuffer(buffer, 0, bytes)</c> for the submit, from the batch's byte arena.
+            /// Only for buffers this batch alone uses (the per-dispatch scalar / stride / lock buffers).</summary>
+            internal void BatchWrite(GPUBuffer buffer, byte[] bytes)
+            {
+                int len = bytes.Length;
+                if ((len & 3) != 0) throw new InvalidOperationException($"[WebGPU] batched writeBuffer of {len} bytes: must be a multiple of 4");
+                if (_batchDataLen + len > _batchData.Length)
+                    System.Array.Resize(ref _batchData, Math.Max(_batchData.Length * 2, _batchDataLen + len));
+                System.Buffer.BlockCopy(bytes, 0, _batchData, _batchDataLen, len);
+                EnsureRecords(5);
+                var r = _batchRec; int i = _batchLen;
+                r[i] = 3; r[i + 1] = IdOf(buffer, "write target"); r[i + 2] = 0; r[i + 3] = _batchDataLen; r[i + 4] = len;
+                _batchLen = i + 5;
+                _batchDataLen += len;
+            }
+
+            /// <summary>
+            /// Largest host upload recorded into the batch instead of flushing (<see cref="BatchUpload"/>). Bigger
+            /// uploads (weights, images) keep the flush + direct writeBuffer path.
+            /// </summary>
+            internal const int MaxBatchedUploadBytes = 64 * 1024;
+
+            /// <summary>
+            /// Records an ORDERED host upload of <paramref name="length"/> bytes at <paramref name="src"/> into
+            /// <paramref name="buffer"/> at <paramref name="byteOffset"/>: the bytes are copied into the batch arena
+            /// now (the caller may reuse its source), and submitBatch encodes a staging-&gt;target copy exactly where
+            /// this record sits. Returns false (caller flushes + writes directly) when it cannot be recorded.
+            /// </summary>
+            /// <remarks>
+            /// A small <c>CopyFromCPU</c> used to FLUSH the batch and then cross to JS for its own writeBuffer -
+            /// flush-then-write is what orders it after the dispatches that may still read the buffer. MEASURED
+            /// 2026-09-30: 212 such flushes in one DAv3 Small 518 forward (shape values the executor materializes as
+            /// tensors), each a submit crossing plus a write crossing. Recorded, it is one copy command in order.
+            /// </remarks>
+            internal unsafe bool BatchUpload(GPUBuffer buffer, long byteOffset, IntPtr src, int length)
+            {
+                if (length <= 0 || length > MaxBatchedUploadBytes || (length & 3) != 0 || (byteOffset & 3) != 0) return false;
+                if (_batchDataLen + length > _batchData.Length)
+                    System.Array.Resize(ref _batchData, Math.Max(_batchData.Length * 2, _batchDataLen + length));
+                new ReadOnlySpan<byte>((void*)src, length).CopyTo(_batchData.AsSpan(_batchDataLen));
+                EnsureRecords(5);
+                var r = _batchRec; int i = _batchLen;
+                r[i] = 4; r[i + 1] = IdOf(buffer, "upload target"); r[i + 2] = byteOffset; r[i + 3] = _batchDataLen; r[i + 4] = length;
+                _batchLen = i + 5;
+                _batchDataLen += length;
+                _batchHasUploads = true;
+                return true;
+            }
+
+            private void SubmitBatch()
+            {
+                var device = _webGpuAccelerator.NativeAccelerator.NativeDevice!;
+                try
+                {
+                    using var rec = HeapView.Create(new ReadOnlyMemory<double>(_batchRec, 0, _batchLen));
+                    using var data = HeapView.Create(new ReadOnlyMemory<byte>(_batchData, 0, Math.Max(4, _batchDataLen)));
+                    long t0 = WebGPUBackend.EnableDispatchProfiling ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+                    SpawnDev.SpawnJS.SpawnJSRuntime.Instance.Call<GPUDevice, HeapView<double, Float64Array>, int, HeapView<byte, Uint8Array>, int, int, int>(
+                        "ilgpuWebGPUPlan.submitBatch", device, rec, _batchLen, data, WebGPUBackend.MaxReplayPassesPerSubmit,
+                        _batchHasUploads ? _batchDataLen : 0);
+                    if (t0 != 0)
+                    {
+                        WebGPUBackend.ProfileBatchSubmitMs += (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                        WebGPUBackend.ProfileBatchSubmitCount++;
+                    }
+                }
+                finally
+                {
+                    // Never resubmit a batch, even one that threw part-way: its records name resources that the
+                    // cleanup below is about to release.
+                    _batchLen = 0;
+                    _batchDataLen = 0;
+                    _batchHasUploads = false;
+                }
+            }
             private readonly List<GPUBindGroup> _pendingBindGroups = new();
             private readonly List<GPUBuffer> _pendingScalarBuffers = new();
             private readonly List<GPUBuffer> _pendingCoalesceBuffers = new();
@@ -2849,14 +3071,34 @@ namespace SpawnDev.ILGPU.WebGPU
             /// </summary>
             public void FlushPending()
             {
-                if (_encoder == null) return;
+                if (_encoder == null && _batchLen == 0) return;
 
                 if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU] Flushing batch: {_pendingPassCount} compute passes");
 
-                using var cmd = _encoder.Finish();
-                _webGpuAccelerator.NativeAccelerator.Queue!.Submit(new[] { cmd });
-                _encoder.Dispose();
-                _encoder = null;
+                if (_batchLen > 0)
+                {
+                    if (WebGPUBackend.EnableDispatchProfiling)
+                    {
+                        var st = new System.Diagnostics.StackTrace(1, false);
+                        var parts = new List<string>();
+                        for (int f = 0; f < st.FrameCount && parts.Count < 7; f++)
+                        {
+                            var m = st.GetFrame(f)?.GetMethod();
+                            if (m == null) continue;
+                            parts.Add($"{m.DeclaringType?.Name}.{m.Name}");
+                        }
+                        var key = string.Join(" < ", parts);
+                        WebGPUBackend.ProfileBatchSubmitCallers[key] = WebGPUBackend.ProfileBatchSubmitCallers.GetValueOrDefault(key) + 1;
+                    }
+                    SubmitBatch();
+                }
+                else
+                {
+                    using var cmd = _encoder!.Finish();
+                    _webGpuAccelerator.NativeAccelerator.Queue!.Submit(new[] { cmd });
+                    _encoder.Dispose();
+                    _encoder = null;
+                }
 
                 // 🔴 THE SUBMIT IS WHAT MAKES A CACHED SCALAR BUFFER REWRITABLE AGAIN. Everything recorded
                 // has now been handed to the queue, so no unexecuted dispatch can still be holding one.

@@ -53,7 +53,11 @@ namespace ILGPU.Runtime.OpenCL
                     stream,
                     target.NativePtr,
                     value,
-                    new IntPtr(targetView.Index * target.ElementSize),
+                    // The VIEW's own byte offset. targetView is typically the raw ArrayView<byte> built by
+                    // MemoryBuffer.MemSet, whose Index is already in bytes; multiplying by the BUFFER's element
+                    // size (4 for an int buffer) filled 4x too far in - a sub-view MemSetToZero cleared the
+                    // wrong range and left its own untouched (DispatchBatching_OrderedChain_MatchesReference).
+                    new IntPtr(targetView.GetIndexInBytes()),
                     new IntPtr(targetView.LengthInBytes)));
 
             binding.Recover();
