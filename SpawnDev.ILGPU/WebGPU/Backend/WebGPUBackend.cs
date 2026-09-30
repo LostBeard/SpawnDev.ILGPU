@@ -367,6 +367,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public static long ProfileCpuAllocBytes;
         /// <summary>Profiling: <see cref="ProfileCpuAllocBytes"/> split by phase [shader, args, bindGroup, encode].</summary>
         public static readonly long[] ProfileCpuAllocByPhase = new long[4];
+        /// <summary>Profiling: the "args" phase split [expand + scalar-manifest lookup, view bindings, scalar pack + upload + checks].</summary>
+        public static readonly double[] ProfileCpuArgsSplitMs = new double[3];
         /// <summary>Profiling: WHO submitted each record batch (a short caller chain), counted - small batches mean
         /// something is flushing the stream between dispatches.</summary>
         public static readonly Dictionary<string, int> ProfileBatchSubmitCallers = new();
@@ -395,6 +397,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             ProfileBatchSubmitCount = 0;
             ProfileCpuAllocBytes = 0;
             System.Array.Clear(ProfileCpuAllocByPhase);
+            System.Array.Clear(ProfileCpuArgsSplitMs);
             ProfileBatchSubmitCallers.Clear();
         }
 

@@ -1,7 +1,7 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.2.25 (unreleased; staged as 5.2.25-local.7) - WebGPU dispatch batching (one JS crossing per submit), `IExternalImageCopier`, memset/copy fixes
+## 5.2.25 (unreleased; staged as 5.2.25-local.8) - WebGPU dispatch batching (one JS crossing per submit), `IExternalImageCopier`, memset/copy fixes
 
 ### WebGPU: plain dispatches are batched - one .NET->JS crossing per submit
 `WebGPUBackend.EnableDispatchBatching` (default **on**). A plain (uncaptured) dispatch no longer builds a
@@ -17,6 +17,9 @@ coalesce gather) and clears are records in the same batch, so they no longer spl
   batch arena on the spot, `submitBatch` writes the arena once into a persistent staging buffer and encodes each
   upload as a `copyBufferToBuffer` exactly where it sits. Same ordering as flush-then-write; MEASURED 212 -> 0
   upload flushes per DAv3 forward.
+- 1D view arguments resolve their base view through a cached per-type delegate (no `PropertyInfo.GetValue`, no
+  reflective dimension extraction for a view that can never need a stride buffer): RunKernel's argument phase
+  36 -> 24 ms per DAv3 forward.
 - Disposing a WebGPU buffer while a record batch is pending submits the batch first (an upload used to happen on
   the spot, so disposing right after one was always legal and stays legal).
 - The helper import URL is versioned by a hash of its content (`?v=`): a fixed URL let a browser keep an old

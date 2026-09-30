@@ -923,6 +923,35 @@ namespace SpawnDev.ILGPU.WebGPU
         private static readonly ConcurrentDictionary<Type, Func<object, int[]>> _dimensionExtractorCache = new();
 
         // Helper to robustly extract dimensions (X, Y, Z) using Duck Typing, with caching
+        /// <summary>
+        /// Per argument type: a delegate returning the contiguous base view of a 1D view argument (<c>ArrayView&lt;T&gt;</c>
+        /// or <c>ArrayView1D&lt;T, TStride&gt;</c>), or null for anything else (2D/3D views, structs, scalars), which take the
+        /// general path.
+        /// </summary>
+        /// <remarks>
+        /// The general path read the base view with <c>PropertyInfo.GetValue</c> and extracted the view's dimensions by
+        /// reflection for EVERY view argument of every dispatch - only to discard them, since a 1D view never needs the
+        /// stride buffer they feed. In the browser that is interpreted reflection, several microseconds a call.
+        /// </remarks>
+        private static Func<object, IContiguousArrayView>? GetOneDViewAccessor(Type t)
+            => _oneDViewAccessors.GetOrAdd(t, static tt => BuildOneDViewAccessor(tt));
+        private static readonly ConcurrentDictionary<Type, Func<object, IContiguousArrayView>?> _oneDViewAccessors = new();
+        private static Func<object, IContiguousArrayView>? BuildOneDViewAccessor(Type t)
+        {
+            if (!t.IsValueType) return null;
+            if (typeof(IContiguousArrayView).IsAssignableFrom(t)) return static o => (IContiguousArrayView)o;
+            if (t.IsGenericType && t.GetGenericTypeDefinition() == typeof(ArrayView1D<,>))
+            {
+                var m = typeof(WebGPUAccelerator).GetMethod(nameof(OneDBaseView), BindingFlags.NonPublic | BindingFlags.Static)!
+                    .MakeGenericMethod(t.GetGenericArguments());
+                return (Func<object, IContiguousArrayView>)m.CreateDelegate(typeof(Func<object, IContiguousArrayView>));
+            }
+            return null;
+        }
+        private static IContiguousArrayView OneDBaseView<T, TStride>(object o)
+            where T : unmanaged where TStride : struct, IStride1D
+            => ((ArrayView1D<T, TStride>)o).BaseView;
+
         private static int[] ExtractDimensionsFromView(object view, Type viewType)
         {
             var extractor = _dimensionExtractorCache.GetOrAdd(viewType, BuildDimensionExtractor);
@@ -1719,6 +1748,7 @@ namespace SpawnDev.ILGPU.WebGPU
                     }
                 }
 
+                long _profTsP1 = _prof ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
                 // --- Phase 1: Emit bindings for non-packed params (views, structs, atomics) ---
                 // effectiveArgs[] has body structs pre-expanded into their constituent fields.
                 // Skip the index param (effectiveArgs[0..runtimeIndexSkip-1]) and packed scalars.
@@ -1769,8 +1799,15 @@ namespace SpawnDev.ILGPU.WebGPU
 
                     IArrayView? arrayView = arg as IArrayView;
                     int[] dims = Array.Empty<int>();
-
-                    if (arg != null)
+                    // Fast path for the 1D views that are nearly every argument: resolve the contiguous base view
+                    // through a cached per-type delegate - no PropertyInfo.GetValue, no dimension extraction (a 1D
+                    // view never has a stride buffer). See OneDViewAccessor.
+                    Func<object, IContiguousArrayView>? oneD = arg != null ? GetOneDViewAccessor(arg.GetType()) : null;
+                    if (oneD != null)
+                    {
+                        arrayView = oneD(arg!);
+                    }
+                    else if (arg != null)
                     {
                         var argType = arg.GetType();
                         var argCache = GetOrCreateReflectionCache(argType);
@@ -1994,6 +2031,7 @@ namespace SpawnDev.ILGPU.WebGPU
                     }
                 }
 
+                long _profTsP2 = _prof ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
                 // --- Phase 2: Pack all scalar args into single buffer ---
                 if (compiledKernel.HasScalarPacking)
                 {
@@ -2442,7 +2480,14 @@ namespace SpawnDev.ILGPU.WebGPU
                     }
                 }
 
-                if (_prof) { _profTsBind = System.Diagnostics.Stopwatch.GetTimestamp(); _profA2 = GC.GetAllocatedBytesForCurrentThread(); } // end arg-prep phase, begin bind-group resolve
+                if (_prof)
+                {
+                    _profTsBind = System.Diagnostics.Stopwatch.GetTimestamp(); _profA2 = GC.GetAllocatedBytesForCurrentThread();
+                    double f = 1000.0 / System.Diagnostics.Stopwatch.Frequency;
+                    WebGPUBackend.ProfileCpuArgsSplitMs[0] += (_profTsP1 - _profTsShader) * f;   // expand + manifest lookup
+                    WebGPUBackend.ProfileCpuArgsSplitMs[1] += (_profTsP2 - _profTsP1) * f;       // view bindings
+                    WebGPUBackend.ProfileCpuArgsSplitMs[2] += (_profTsBind - _profTsP2) * f;     // scalar pack + upload + checks
+                } // end arg-prep phase, begin bind-group resolve
                 GPUBindGroup? bindGroup = null;
                 if (batchMode)
                 {
