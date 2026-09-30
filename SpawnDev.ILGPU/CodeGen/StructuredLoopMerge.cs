@@ -28,24 +28,42 @@ public static class StructuredLoopMerge
     /// </summary>
     public static BasicBlock? FindInLoopMerge(BasicBlock a, BasicBlock b, Loops<ReversePostOrder, Forwards>.Node loop)
     {
-        var common = InLoopReachable(a, loop);
-        common.IntersectWith(InLoopReachable(b, loop));
+        var common = InLoopReachable(a, loop, null);
+        common.IntersectWith(InLoopReachable(b, loop, null));
+        // A merge must be on EVERY in-loop path from both arms back to the header (paths that leave the loop are
+        // exits and do not count). Being merely reachable from both is not enough: for
+        // `if (s < 0 || s >= n) { if (m == 0) break; ... }` the out-of-bounds block is reachable from both arms of
+        // `s < 0`, but the in-bounds path bypasses it to the latch. Picking it emitted the latch inside one arm only;
+        // the `s < 0` path never advanced the loop - ML PadKernel reflect pad, DXGI_ERROR_DEVICE_HUNG (2026-09-30).
+        common.RemoveWhere(m => ReachesBackEdgeAvoiding(a, m, loop) || ReachesBackEdgeAvoiding(b, m, loop));
         if (common.Count == 0) return null;
-        // The earliest convergence point reaches every other common block (it is on every in-loop path to them).
+        // The earliest convergence point reaches every other one (it is on every in-loop path to them).
         foreach (var candidate in common)
         {
-            var reach = InLoopReachable(candidate, loop);
+            var reach = InLoopReachable(candidate, loop, null);
             if (reach.IsSupersetOf(common)) return candidate;
         }
         return null;
     }
 
+    /// <summary>True when some path from <paramref name="start"/> gets back to a header of <paramref name="loop"/>
+    /// (a back edge) without passing through <paramref name="avoid"/> or leaving the loop.</summary>
+    private static bool ReachesBackEdgeAvoiding(BasicBlock start, BasicBlock avoid, Loops<ReversePostOrder, Forwards>.Node loop)
+    {
+        if (start == avoid) return false;
+        foreach (var block in InLoopReachable(start, loop, avoid))
+            foreach (var succ in block.Successors)
+                if (IsHeader(succ, loop)) return true;
+        return false;
+    }
+
     /// <summary>Blocks reachable from <paramref name="start"/> (inclusive) without entering a header of
-    /// <paramref name="loop"/> or leaving it.</summary>
-    private static HashSet<BasicBlock> InLoopReachable(BasicBlock start, Loops<ReversePostOrder, Forwards>.Node loop)
+    /// <paramref name="loop"/>, leaving it, or entering <paramref name="avoid"/>.</summary>
+    private static HashSet<BasicBlock> InLoopReachable(BasicBlock start, Loops<ReversePostOrder, Forwards>.Node loop,
+        BasicBlock? avoid)
     {
         var seen = new HashSet<BasicBlock>();
-        if (!loop.Contains(start) || IsHeader(start, loop)) return seen;
+        if (!loop.Contains(start) || IsHeader(start, loop) || start == avoid) return seen;
         var work = new Stack<BasicBlock>();
         seen.Add(start);
         work.Push(start);
@@ -53,7 +71,7 @@ public static class StructuredLoopMerge
         {
             foreach (var succ in work.Pop().Successors)
             {
-                if (!loop.Contains(succ) || IsHeader(succ, loop) || !seen.Add(succ)) continue;
+                if (!loop.Contains(succ) || IsHeader(succ, loop) || succ == avoid || !seen.Add(succ)) continue;
                 work.Push(succ);
             }
         }
