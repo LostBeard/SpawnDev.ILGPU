@@ -1,6 +1,19 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.2.22 (forks 2.3.6) - WebGPU: synthetic loop counter declared out of scope (invalid pipeline)
+
+Found porting SpawnScene's global positioning to the GPU (a dense Cholesky solve in one workgroup).
+
+**WebGPU - "no definition in scope for identifier: `_uf_tile_iter`" (invalid pipeline):** the uniformity transform's
+synthetic loop counters (`_uf_tile_iter`, `_uf_group_iter`) were declared at their FIRST use, inside the block of the
+first thread-strided loop they rewrote; a later strided loop in a sibling scope only assigned the name. Every counter
+is now declared once at function scope and each loop assigns it.
+
+**Tests:** `BackendTestBase.SyntheticCounter_SiblingStridedLoops_CholeskySolve` (red: naga "no definition in scope for
+identifier `_uf_tile_iter`" without the fix). Released on TJ's go WITHOUT a PMT sweep on this commit; desktop naga
+validation of the repro kernel and of SpawnScene's 41 GPU-solver kernels (Release IL) only.
+
 ## 5.2.21 (forks 2.3.6) - WebGPU shader validation fix; two WebGL silent wrong-result fixes
 
 Found porting SpawnScene's bundle adjuster to the GPU (f64 kernels, early returns).
