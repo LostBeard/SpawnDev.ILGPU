@@ -157,7 +157,7 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
             }
             else
             {
-                var preferred = _ilgpuContext.GetPreferredDevice(preferCPU: false);
+                var preferred = _ilgpuContext.GetBestDevice();
                 if (preferred is CPUDevice)
                 {
                     var htDev = new CPUDevice(2, 2, Environment.ProcessorCount);
