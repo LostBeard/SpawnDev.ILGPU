@@ -35,8 +35,9 @@
         noop(x) { return x | 0; },
         // WebGPUBackend.BatchSinglePass -> submitBatch (see there). Set from C# when the switch changes.
         setSinglePass(v) { api.singlePass = !!v; return 0; },
-        // DIAGNOSTIC ABLATION (WebGPUBackend.DiagSubmitAblation; results are garbage while set): 1 = skip the tag-3
-        // queue.writeBuffer records, 2 = skip createBindGroup + the dispatch encode, 3 = return without doing anything.
+        // DIAGNOSTIC ABLATION (WebGPUBackend.DiagSubmitAblation; results are garbage while set): 2 = skip createBindGroup
+        // + the dispatch encode, 3 = return without doing anything. (A "skip only the scalar writes" mode ran every
+        // kernel on stale loop bounds and HUNG the GPU - DXGI_ERROR_DEVICE_HUNG; 2 vs 3 measures the writes safely.)
         setAblation(v) { api.ablation = v | 0; return 0; },
         noopDescriptor(desc) { return desc && desc.entries ? desc.entries.length : 0; },
 
@@ -144,8 +145,6 @@
                     if (enc === null) enc = device.createCommandEncoder();
                     enc.clearBuffer(obj(rec[i + 1], 'clear target', i), rec[i + 2], rec[i + 3]);
                     i += 4;
-                } else if (tag === 3 && ablation === 1) {
-                    i += 5;
                 } else if (tag === 3) {
                     queue.writeBuffer(obj(rec[i + 1], 'write target', i), rec[i + 2], data, rec[i + 3], rec[i + 4]);
                     i += 5;

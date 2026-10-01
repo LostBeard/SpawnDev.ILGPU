@@ -285,8 +285,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// <summary>
         /// DIAGNOSTIC ABLATION - RESULTS ARE GARBAGE WHILE NON-ZERO. Makes the JS batch submit skip part of its work so a
         /// workload timed with it isolates that part's cost (JS timers are too coarse to time ~800 small calls one by
-        /// one): 1 = skip the per-dispatch scalar <c>queue.writeBuffer</c> records, 2 = skip <c>createBindGroup</c> + the
-        /// dispatch encode, 3 = skip the whole submit. 0 = off (default); never set it outside a measurement.
+        /// one): 2 = skip <c>createBindGroup</c> + the dispatch encode (the scalar writes still run), 3 = skip the whole
+        /// submit; 2 minus 3 is the writes' cost. There is deliberately no "skip only the writes" mode: it ran every kernel
+        /// on stale loop bounds and HUNG the GPU (DXGI_ERROR_DEVICE_HUNG, 2026-10-01). 0 = off (default); never set it
+        /// outside a measurement.
         /// </summary>
         public static int DiagSubmitAblation { get; set; }
 

@@ -17,15 +17,18 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   - The batch submit encodes a run of consecutive dispatches into ONE compute pass (was a pass per dispatch), ends it
     before copies / clears / uploads and at every submit, and skips a repeated `setPipeline`. Ordering is the spec's:
     each dispatch in a compute pass is its own usage scope. onnxruntime-web does the same (16 dispatches per pass).
-    `WebGPUBackend.BatchSinglePass` (default on) is the A/B switch; webgpuDispatchPlan.js helper v3. Gain: NOT YET
-    MEASURED (pending an A/B timing window).
+    `WebGPUBackend.BatchSinglePass` (default on) is the A/B switch; webgpuDispatchPlan.js helper v3. MEASURED (same build,
+    switch flipped, DAv3 168x98 video frame): ~1 ms of ~44 ms with the .NET interpreter, ~0 under AOT - small; kept
+    because it matches the spec and ORT and costs nothing.
   - Scalar packing writes in place (`PackScalarsInto`, BinaryPrimitives into a reused arena array) instead of a
     `byte[]` per value + a type-name string test per scalar - MEASURED ~1 ms of a ~45 ms frame (the packing writes
     were a small part of their stage). The old packer is kept verbatim as `PackScalarsLegacy`;
     `WebGPUBackend.VerifyScalarPacking` packs every dispatch both ways and throws on a byte difference (the WebGPU lane
     ran 683/0 with it on; test `ScalarPacking_AllKinds_VerifiedAgainstLegacy` keeps it in the suite).
   - Diagnostic ablation switches (default off, garbage results while set): `WebGPUAccelerator.DiagSkipRunKernel`,
-    `DiagRunKernelStopAfter` (stage exits through RunKernel) and `WebGPUBackend.DiagSubmitAblation` (JS submit parts).
+    `DiagRunKernelStopAfter` (stage exits through RunKernel) and `WebGPUBackend.DiagSubmitAblation` (JS submit parts:
+    2 = no bind group / encode, 3 = no submit; a "skip only the scalar writes" mode ran kernels on stale loop bounds and
+    HUNG the GPU, so it does not exist).
 
 - **`float` / `double` `%` was inexact or wrong on 5 of 7 backends.** C# defines `x % y` as the exact truncated
   remainder (IEEE fmod: no rounding, the true remainder is always representable). WebGPU, WebGL and Wasm lowered it to
