@@ -1,6 +1,28 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## Unreleased - float `%` is exact on every backend
+
+- **`float` / `double` `%` was inexact or wrong on 5 of 7 backends.** C# defines `x % y` as the exact truncated
+  remainder (IEEE fmod: no rounding, the true remainder is always representable). WebGPU, WebGL and Wasm lowered it to
+  `x - y * trunc(x / y)`, and CUDA without libdevice used `frac(|x * rcp(y)|) * |y|`: `-7f % 3f` = -1.0000005 (CUDA),
+  `0.3f % 0.1f` = 0 and `1e30f % 3.3f` = 0 (WebGPU/Wasm), `1e30f % 3.3f` = 8.8e21 (WebGL), `-6f % 3f` lost its
+  signed zero everywhere. New `ILGPU.FloatRemainder.Rem` (float + double) is the shift-subtract long division of the
+  significands, integer operations only, bit-exact against .NET on 20M random float and 5M random double pairs. WebGPU,
+  WebGL and Wasm route `Rem` on Float32 (Wasm: Float64 too) to it through a binary-arithmetic intrinsic redirect;
+  `PTXMath.Rem` calls it. OpenCL (native `fmod`) and CPU were already exact. Emulated f64 on WebGPU/WebGL keeps its
+  own `f64_rem` (double-float format, float exponent range) - not covered by this change.
+  Test `Remainder_IsExact_FloatAndDouble_KernelAndNoInliningHelper` (kernel and `[NoInlining]` helper, bitwise; red
+  on WebGPU, WebGPU no-subgroups, Wasm, WebGL and CUDA before). The old `FloatRemainder_Truncates...` test used
+  divisors with exact reciprocals (2, 1.5), which hid it. Found through SpawnDev.ILGPU.ML's ONNX `Mod`.
+- **PTX: a bitcast (`Interop.FloatAsInt` / `IntAsFloat`) of a CONSTANT crashed codegen** with a
+  NullReferenceException (`LoadHardware` cast a `ConstantRegister` to `HardwareRegister`). Reached once the exact
+  remainder was inlined into `PTXMath.Pow`'s `|x| % 2`; latent before. The operand is now moved into a register
+  first. `AdvancedMathTest`, `MathIntrinsicsExtendedTest`, `Tests23_PowNegativeBase_IntExp2_NoNaN` (CUDA).
+- Note for backend authors: an intrinsic must be registered BEFORE `InitIntrinsicProvider()` - the provider snapshots
+  the registrations. The browser backends' `RegisterMathIntrinsics()` runs after it, so those redirects only reach a
+  second backend created on the same `Context` (unchanged here; tracked).
+
 ## 5.3.0 (forks 2.3.7) - 2026-09-30 - SpawnDev.SpawnJS 3.0.0; WebGPU: disposing a buffer with a pending clear broke the next submit
 
 - **Built on SpawnDev.SpawnJS 3.0.0**, which makes every .NET -> JS call one boundary crossing (arguments, descriptors,

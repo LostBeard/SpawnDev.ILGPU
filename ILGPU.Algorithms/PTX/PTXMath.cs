@@ -91,39 +91,15 @@ namespace ILGPU.Algorithms.PTX
 
         /// <summary cref="XMath.Rem(double, double)"/>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static double Rem(double x, double y)
-        {
-            if (y == 0.0 ||
-                XMath.IsInfinity(x) ||
-                XMath.IsNaN(x) ||
-                XMath.IsNaN(y))
-                return double.NaN;
-
-            if (XMath.IsInfinity(y))
-                return x;
-
-            var xDivY = XMath.Abs(x * XMath.Rcp(y));
-            var result = (xDivY - Floor(xDivY)) * XMath.Abs(y);
-            return Utilities.Select(x < 0.0, -result, result);
-        }
+        public static double Rem(double x, double y) =>
+            // Exact (frac(|x * rcp(y)|) * |y| was not: 7 % 3 = 0.9999999999999991). See FloatRemainder.
+            FloatRemainder.Rem(x, y);
 
         /// <summary cref="XMath.Rem(float, float)"/>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static float Rem(float x, float y)
-        {
-            if (y == 0.0f ||
-                XMath.IsInfinity(x) ||
-                XMath.IsNaN(x) ||
-                XMath.IsNaN(y))
-                return float.NaN;
-
-            if (XMath.IsInfinity(y))
-                return x;
-
-            var xDivY = XMath.Abs(x * XMath.Rcp(y));
-            var result = (xDivY - Floor(xDivY)) * XMath.Abs(y);
-            return Utilities.Select(x < 0.0f, -result, result);
-        }
+        public static float Rem(float x, float y) =>
+            // Exact (frac(|x * rcp(y)|) * |y| was not: -7f % 3f = -1.0000005). See FloatRemainder.
+            FloatRemainder.Rem(x, y);
 
         /// <summary cref="XMath.IEEERemainder(double, double)"/>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

@@ -542,6 +542,111 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
         });
 
+        // float/double % must be EXACT (IEEE fmod is): the divisors above (2, 1.5) hide an approximate
+        // implementation because their reciprocals are exact. PTX without libdevice computed
+        // frac(|x * rcp(y)|) * |y|, so -7f % 3f came out -1.0000005 (SpawnDev.ILGPU.ML's ONNX Mod, 2026-10-01).
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static float F64X_FloatRemExactHelper(float x, float y) => x % y;
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static double F64X_DoubleRemExactHelper(double x, double y) => x % y;
+
+        static void F64X_RemExact(Index1D i, ArrayView<float> xs, ArrayView<float> ys, ArrayView<float> fk, ArrayView<float> fh,
+            ArrayView<double> dxs, ArrayView<double> dys, ArrayView<double> dk, ArrayView<double> dh)
+        {
+            fk[i] = xs[i] % ys[i];
+            fh[i] = F64X_FloatRemExactHelper(xs[i], ys[i]);
+            dk[i] = dxs[i] % dys[i];
+            dh[i] = F64X_DoubleRemExactHelper(dxs[i], dys[i]);
+        }
+
+        // A CONSTANT divisor: the exact remainder is inlined and constant-folded around it (PTXMath.Pow's
+        // IsOddInteger does |x| % 2 - the codegen crashed there with a NullReferenceException).
+        static void F64X_RemConstDivisor(Index1D i, ArrayView<float> xs, ArrayView<float> o2, ArrayView<float> o3, ArrayView<double> dxs, ArrayView<double> d2)
+        {
+            o2[i] = MathF.Abs(xs[i]) % 2f;
+            o3[i] = xs[i] % 3f;
+            d2[i] = Math.Abs(dxs[i]) % 2.0;
+        }
+
+        [TestMethod]
+        public async Task Remainder_IsExact_ConstantDivisor() => await RunTest(async accelerator =>
+        {
+            // No subnormal here: Abs() of one is flushed to zero by WGSL/GLSL hardware before % runs (FTZ is allowed
+            // there). Subnormal OPERANDS of % are covered by the test below, where nothing touches them first.
+            var xs = new float[] { -7f, 7.5f, 1e30f, 0.3f, -6f, 3f, 16777215f, 1e-30f };
+            var dxs = new double[] { -7, 7.5, 1e30, 0.3, -6, 3, 9007199254740991, 1e-300 };
+            int n = xs.Length;
+            bool nativeF64 = accelerator.AcceleratorType is not (AcceleratorType.WebGPU or AcceleratorType.WebGL);
+            using var bx = accelerator.Allocate1D(xs);
+            using var o2 = accelerator.Allocate1D<float>(n);
+            using var o3 = accelerator.Allocate1D<float>(n);
+            using var bdx = accelerator.Allocate1D(dxs);
+            using var d2 = accelerator.Allocate1D<double>(n);
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<double>, ArrayView<double>>(F64X_RemConstDivisor);
+            k(n, bx.View, o2.View, o3.View, bdx.View, d2.View);
+            await accelerator.SynchronizeAsync();
+            var g2 = await o2.CopyToHostAsync<float>();
+            var g3 = await o3.CopyToHostAsync<float>();
+            var gd = await d2.CopyToHostAsync<double>();
+            var errors = new List<string>();
+            for (int i = 0; i < n; i++)
+            {
+                float e2 = MathF.Abs(xs[i]) % 2f, e3 = xs[i] % 3f;
+                if (BitConverter.SingleToInt32Bits(g2[i]) != BitConverter.SingleToInt32Bits(e2)) errors.Add($"|{xs[i]:R}| % 2 = {g2[i]:R}, expected {e2:R}");
+                if (BitConverter.SingleToInt32Bits(g3[i]) != BitConverter.SingleToInt32Bits(e3)) errors.Add($"{xs[i]:R} % 3 = {g3[i]:R}, expected {e3:R}");
+                if (nativeF64)
+                {
+                    double ed = Math.Abs(dxs[i]) % 2.0;
+                    if (BitConverter.DoubleToInt64Bits(gd[i]) != BitConverter.DoubleToInt64Bits(ed)) errors.Add($"|{dxs[i]:R}| % 2.0 = {gd[i]:R}, expected {ed:R}");
+                }
+            }
+            if (errors.Count > 0) throw new Exception($"{errors.Count} wrong: " + string.Join(" | ", errors.Take(8)));
+        });
+
+        [TestMethod]
+        public async Task Remainder_IsExact_FloatAndDouble_KernelAndNoInliningHelper() => await RunTest(async accelerator =>
+        {
+            // Non-power-of-two divisors, both signs, exact zeros, |x| < |y|, huge quotients, subnormal-scale operands.
+            var xs = new float[] { -7f, 7f, -7f, 7f, -66560f, 6f, -6f, 1f, 16777215f, 1e30f, -1e30f, 0.3f, 1e-38f, 5.5f, 123456.789f, -0.1f };
+            var ys = new float[] { 3f, -3f, -3f, 3f, 65536f, 3f, 3f, 3f, 7f, 3.3f, 7.7f, 0.1f, 3e-39f, -0.7f, 0.013f, 0.03f };
+            int n = xs.Length;
+            var dxs = new double[] { -7, 7, -7, 7, -66560, 6, -6, 1, 9007199254740991, 1e300, -1e300, 0.3, 1e-308, 5.5, 123456.789, -0.1 };
+            var dys = new double[] { 3, -3, -3, 3, 65536, 3, 3, 3, 7, 3.3, 7.7, 0.1, 3e-309, -0.7, 0.013, 0.03 };
+            using var bx = accelerator.Allocate1D(xs);
+            using var by = accelerator.Allocate1D(ys);
+            using var fk = accelerator.Allocate1D<float>(n);
+            using var fh = accelerator.Allocate1D<float>(n);
+            using var bdx = accelerator.Allocate1D(dxs);
+            using var bdy = accelerator.Allocate1D(dys);
+            using var dk = accelerator.Allocate1D<double>(n);
+            using var dh = accelerator.Allocate1D<double>(n);
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>, ArrayView<float>,
+                ArrayView<double>, ArrayView<double>, ArrayView<double>, ArrayView<double>>(F64X_RemExact);
+            k(n, bx.View, by.View, fk.View, fh.View, bdx.View, bdy.View, dk.View, dh.View);
+            await accelerator.SynchronizeAsync();
+            var gfk = await fk.CopyToHostAsync<float>();
+            var gfh = await fh.CopyToHostAsync<float>();
+            var gdk = await dk.CopyToHostAsync<double>();
+            var gdh = await dh.CopyToHostAsync<double>();
+            bool nativeF64 = accelerator.AcceleratorType is not (AcceleratorType.WebGPU or AcceleratorType.WebGL);
+            var errors = new List<string>();
+            for (int i = 0; i < n; i++)
+            {
+                float e = xs[i] % ys[i];
+                if (BitConverter.SingleToInt32Bits(gfk[i]) != BitConverter.SingleToInt32Bits(e) || BitConverter.SingleToInt32Bits(gfh[i]) != BitConverter.SingleToInt32Bits(e))
+                    errors.Add($"float {xs[i]:R} % {ys[i]:R}: kernel={gfk[i]:R} helper={gfh[i]:R} expected={e:R}");
+                // WebGPU/WebGL f64 is EMULATED double-float (float's exponent range, ~48-bit significand): 1e300 or
+                // 2^53-1 are not representable there, so the IEEE-double expectations apply to native-f64 backends.
+                if (nativeF64)
+                {
+                    double de = dxs[i] % dys[i];
+                    if (BitConverter.DoubleToInt64Bits(gdk[i]) != BitConverter.DoubleToInt64Bits(de) || BitConverter.DoubleToInt64Bits(gdh[i]) != BitConverter.DoubleToInt64Bits(de))
+                        errors.Add($"double {dxs[i]:R} % {dys[i]:R}: kernel={gdk[i]:R} helper={gdh[i]:R} expected={de:R}");
+                }
+            }
+            if (errors.Count > 0) throw new Exception($"{errors.Count} wrong: " + string.Join(" | ", errors.Take(8)));
+        });
+
         // float Round (to EVEN - GLSL round() leaves .5 to the implementation) and long Min/Max
         // (GLSL min/max on the uvec2 words compare each word on its own).
         [MethodImpl(MethodImplOptions.NoInlining)]

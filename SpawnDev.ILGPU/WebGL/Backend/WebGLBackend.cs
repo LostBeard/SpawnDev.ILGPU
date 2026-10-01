@@ -111,6 +111,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             Options = options ?? WebGLBackendOptions.Default;
             F64Mode = Options.F64Emulation;
 
+            // BEFORE InitIntrinsicProvider: the provider SNAPSHOTS the registered implementations, so anything
+            // registered after it never reaches this backend's IR passes (RegisterMathIntrinsics' redirects only
+            // take effect for a SECOND backend on the same Context - a known inconsistency, left as is here).
+            RegisterExactRemainder();
             InitIntrinsicProvider();
             RegisterMathIntrinsics();
 
@@ -242,6 +246,18 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 new WebGLIntrinsic(
                     target,
                     IntrinsicImplementationMode.Redirect));
+        }
+
+        /// <summary>
+        /// Float <c>%</c> through <see cref="global::ILGPU.FloatRemainder"/>: the exact truncated remainder C#
+        /// defines. The native lowering was <c>x - y * trunc(x / y)</c>, which is not exact - 0.3f % 0.1f gave 0 and
+        /// 1e30f % 3.3f gave 0 (2026-10-01). Float64 is the emulated double-float type here and keeps its own f64_rem.
+        /// </summary>
+        private void RegisterExactRemainder()
+        {
+            var manager = GetIntrinsicManager(Context);
+            manager.RegisterBinaryArithmetic(global::ILGPU.IR.Values.BinaryArithmeticKind.Rem, BasicValueType.Float32,
+                new WebGLIntrinsic(((System.Func<float, float, float>)global::ILGPU.FloatRemainder.Rem).Method, IntrinsicImplementationMode.Redirect));
         }
 
         private void RegisterMathIntrinsics()

@@ -267,6 +267,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         {
             Options = options ?? new WasmBackendOptions();
 
+            // BEFORE InitIntrinsicProvider: the provider SNAPSHOTS the registered implementations, so anything
+            // registered after it never reaches this backend's IR passes (RegisterMathIntrinsics' redirects only
+            // take effect for a SECOND backend on the same Context - a known inconsistency, left as is here).
+            RegisterExactRemainder();
             InitIntrinsicProvider();
             RegisterMathIntrinsics();
             RegisterScanIntrinsics();
@@ -421,6 +425,20 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             RegScan("InclusiveScanWithBoundaries");
             RegScan("ExclusiveScanNextIteration");
             RegScan("InclusiveScanNextIteration");
+        }
+
+        /// <summary>
+        /// Float <c>%</c> through <see cref="global::ILGPU.FloatRemainder"/>: the exact truncated remainder C#
+        /// defines. The native lowering was <c>x - y * trunc(x / y)</c>, which is not exact - 0.3f % 0.1f gave 0 and
+        /// 1e30f % 3.3f gave 0 (2026-10-01). Float64 too: native f64 here, same algorithm.
+        /// </summary>
+        private void RegisterExactRemainder()
+        {
+            var manager = GetIntrinsicManager(Context);
+            manager.RegisterBinaryArithmetic(BinaryArithmeticKind.Rem, BasicValueType.Float32,
+                new global::ILGPU.Backends.Wasm.WasmIntrinsic(((System.Func<float, float, float>)global::ILGPU.FloatRemainder.Rem).Method, IntrinsicImplementationMode.Redirect));
+            manager.RegisterBinaryArithmetic(BinaryArithmeticKind.Rem, BasicValueType.Float64,
+                new global::ILGPU.Backends.Wasm.WasmIntrinsic(((System.Func<double, double, double>)global::ILGPU.FloatRemainder.Rem).Method, IntrinsicImplementationMode.Redirect));
         }
 
         private void RegisterMathIntrinsics()

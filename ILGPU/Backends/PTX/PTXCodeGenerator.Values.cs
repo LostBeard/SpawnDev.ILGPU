@@ -326,6 +326,10 @@ namespace ILGPU.Backends.PTX
         public void GenerateCode(PointerCast cast) => Alias(cast, cast.Value);
 
         /// <summary cref="IBackendCodeGenerator.GenerateCode(FloatAsIntCast)"/>
+        // ⚠️ The operand can be a CONSTANT (a ConstantRegister, not a HardwareRegister): once the exact float
+        // remainder (ILGPU.FloatRemainder) was inlined into PTXMath.Pow's |x| % 2 the optimizer left an
+        // IntAsFloat of the NaN bit pattern, and LoadHardware's cast returned null - NullReferenceException in
+        // codegen (2026-10-01). EnsureHardwareRegister moves a constant into a register first, as the FP16 path does.
         public void GenerateCode(FloatAsIntCast value)
         {
             if (value.Value.BasicValueType == BasicValueType.BFloat16)
@@ -334,7 +338,7 @@ namespace ILGPU.Backends.PTX
                 // Round it to its 16-bit bf16 pattern via portable bit-manip (EmitF32ToBF16Bits -
                 // every CUDA arch) into the Int16 target register (= the raw bf16 bits, exactly
                 // the store-side conversion).
-                var bf16Source = LoadHardware(value.Value);
+                var bf16Source = EnsureHardwareRegister(LoadPrimitive(value.Value));
                 var bf16Target = AllocateHardware(value);
                 EmitF32ToBF16Bits(bf16Source, bf16Target);
                 return;
@@ -348,7 +352,7 @@ namespace ILGPU.Backends.PTX
                 // raw FP8 byte, exactly the store-side conversion). Drives the
                 // AscendingFloat8E4M3/E5M2 radix sort (NumBits=8).
                 bool isE4M3 = value.Value.BasicValueType == BasicValueType.Float8E4M3;
-                var fp8Source = LoadHardware(value.Value);
+                var fp8Source = EnsureHardwareRegister(LoadPrimitive(value.Value));
                 var fp8Target = AllocateHardware(value);
                 EmitF32ToFP8Bits(fp8Source, fp8Target, isE4M3);
                 return;
@@ -359,13 +363,13 @@ namespace ILGPU.Backends.PTX
                 // to its 4-bit E2M1 pattern (low nibble) via portable bit-manip (EmitF32ToFP4Bits -
                 // every CUDA arch) into the Int8 target register (held as .b16, low 4 bits = the raw
                 // FP4 nibble). Drives the AscendingFloat4E2M1 radix sort (NumBits=4).
-                var fp4Source = LoadHardware(value.Value);
+                var fp4Source = EnsureHardwareRegister(LoadPrimitive(value.Value));
                 var fp4Target = AllocateHardware(value);
                 EmitF32ToFP4Bits(fp4Source, fp4Target);
                 return;
             }
 
-            var source = LoadHardware(value.Value);
+            var source = EnsureHardwareRegister(LoadPrimitive(value.Value));
             if (source.Kind == PTXRegisterKind.Int16)
             {
                 // Reuse the register, since int16 and fp16 registers are the same
@@ -394,7 +398,7 @@ namespace ILGPU.Backends.PTX
                 // IntAsFloat(bf16 bits): widen the 16-bit pattern (Int16 reg) to the f32 value
                 // register via portable bit-manip (EmitBF16BitsToF32 - every CUDA arch). Defensive
                 // symmetry - the frontend has no IntAsFloat->BFloat16 overload today.
-                var src = LoadHardware(value.Value);
+                var src = EnsureHardwareRegister(LoadPrimitive(value.Value));
                 var tgt = AllocateHardware(value);
                 EmitBF16BitsToF32(src, tgt);
                 return;
@@ -406,7 +410,7 @@ namespace ILGPU.Backends.PTX
                 // register via portable bit-manip (EmitFP8BitsToF32 - every CUDA arch). Defensive
                 // symmetry - the frontend has no IntAsFloat->Float8 overload today.
                 bool isE4M3 = value.BasicValueType == BasicValueType.Float8E4M3;
-                var src = LoadHardware(value.Value);
+                var src = EnsureHardwareRegister(LoadPrimitive(value.Value));
                 var tgt = AllocateHardware(value);
                 EmitFP8BitsToF32(src, tgt, isE4M3);
                 return;
@@ -416,13 +420,13 @@ namespace ILGPU.Backends.PTX
                 // IntAsFloat(fp4 bits): widen the 4-bit nibble (Int8 reg) to the f32 value register
                 // via portable bit-manip (EmitFP4BitsToF32 - every CUDA arch). Defensive symmetry -
                 // the frontend has no IntAsFloat->Float4E2M1 overload today.
-                var src = LoadHardware(value.Value);
+                var src = EnsureHardwareRegister(LoadPrimitive(value.Value));
                 var tgt = AllocateHardware(value);
                 EmitFP4BitsToF32(src, tgt);
                 return;
             }
 
-            var source = LoadHardware(value.Value);
+            var source = EnsureHardwareRegister(LoadPrimitive(value.Value));
             if (source.Kind == PTXRegisterKind.Int16)
             {
                 // Reuse the register, since int16 and fp16 registers are the same
