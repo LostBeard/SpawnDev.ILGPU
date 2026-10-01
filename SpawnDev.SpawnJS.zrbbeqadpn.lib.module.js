@@ -11,8 +11,11 @@
 // Negative ids are reserved sentinels resolved without a table lookup:
 //   -1 globalThis, -2 undefined, -3 null, -4 the spawnJSObjects table, SpawnJSInterop.
 //
-// Calls flow through _spawnJSInteropCall (sync) / _spawnJSInteropCallAsync (async): .Net names a static
-// method here plus a returnType code (see ReturnType.cs), and _serializeToNet shapes the result to match.
+// Calls flow through _spawnJSInteropCall (sync) / _spawnJSInteropCallAsync (async). The whole call - which static
+// method here, the returnType code (see ReturnType.cs), every argument - is written by .Net onto its call tape
+// (JSTape.cs) in .Net memory and crosses ONCE: the call reads it straight off the WASM heap and writes the result
+// back over the same frame. Each call carries its dotnetId and frame address, so nothing here is shared between
+// .Net instances beyond this class.
 (function () {
     if (globalThis.SpawnJSInterop) return;
     class SpawnJSInterop {
@@ -82,7 +85,8 @@
         //   [JSMarshalAs<JSType.Function<JSType.Number, JSType.Number, JSType.String>>] Action<double, int, string> onAsyncResolvedInt32,
         //   [JSMarshalAs<JSType.Function<JSType.Number, JSType.Any, JSType.String>>] Action<double, object, string> onAsyncResolvedInt32Nullable,
         //   [JSMarshalAs<JSType.Function<JSType.Number, JSType.Number>>] Action<long, long> onDetachedHeap,
-        //   [JSMarshalAs<JSType.Function<JSType.Number, JSType.Number, JSType.Number>>] Action<double, double, double> onCallback)
+        //   [JSMarshalAs<JSType.Function<JSType.Number, JSType.Number, JSType.Number>>] Action<double, double, double> onCallback,
+        //   [JSMarshalAs<JSType.Function<JSType.Number, JSType.Number, JSType.String>>] Action<double, int, string> onAsyncResolvedTape)
         static _registerInstance(
             dotnet,
             onMethodAdded,
@@ -95,7 +99,8 @@
             resolveInt32,
             resolveInt32Nullable,
             onDetachedHeap,
-            handleCallback
+            handleCallback,
+            resolveTape
             ) {
             if (!dotnet) throw new Error('dotnet not set');
             var instanceInfo = SpawnJSInterop._getInstaceFromDotNet(dotnet);
@@ -106,7 +111,7 @@
             // attach the heap buffer to instanceInfo so it can be monitored for detach events
             var heapBuffer = SpawnJSInterop.wasmMemoryBuffer(dotnet);
 
-            var instanceInfo = { heapBuffer, dotnet, dotnetId, onMethodAdded, resolveVoid, resolveDouble, resolveBoolean, resolveString, resolveDoubleNullable, resolveBooleanNullable, resolveInt32, resolveInt32Nullable, handleCallback, onDetachedHeap };
+            var instanceInfo = { heapBuffer, dotnet, dotnetId, onMethodAdded, resolveVoid, resolveDouble, resolveBoolean, resolveString, resolveDoubleNullable, resolveBooleanNullable, resolveInt32, resolveInt32Nullable, handleCallback, onDetachedHeap, resolveTape };
             SpawnJSInterop._instances[dotnetId] = instanceInfo;
 
             instanceInfo.heapBufferSize = heapBuffer.byteLength;
@@ -126,66 +131,87 @@
             if (SpawnJSInterop.verbose) console.log('[SpawnJSInterop] Instance registered', instanceInfo);
             return dotnetId;
         }
+        // Call tape value tags - JSTape.Tag* in JSTape.cs must match
+        static TapeTag = { Undefined: 0, Null: 1, Number: 2, Boolean: 3, String: 4, Ref: 5, Callback: 6, Absent: 8, Object: 9, Shape: 10, Array: 11, Numbers: 12, HeapView: 13, Record: 14, Revive: 15 };
+        // TagNumbers kinds - JSTape.NumberKind must match
+        static TapeNumberCtors = [Int8Array, Uint8Array, Int16Array, Uint16Array, Int32Array, Uint32Array, Float32Array, Float64Array];
+        // what a member written as TagAbsent reads as: the property is not assigned
+        static _tapeAbsent = Object.freeze({});
+
         // Main .Net to JS entrypoint (synchronous)
-        // The args array is fetched AND replaced with a fresh empty [] in the same slot, so the .Net side's
-        // pooled argument-array reference (same id) comes back emptied and ready to reuse on the next call.
+        // The frame at address holds the whole call (see JSTape.cs). The result is written back over the frame and
+        // the return value is its byte length - or minus the bytes it needs when it does not fit in capacity, in
+        // which case it is kept on the instance for _spawnJSInteropCallResult.
         // JSImport
-        // bool? _spawnJSInteropCallBooleanNullable(int returnType, int methodIndex, double argsId);
-        // double? _spawnJSInteropCallDoubleNullable(int returnType, int methodIndex, double argsId);
-        // bool _spawnJSInteropCallBoolean(int returnType, int methodIndex, double argsId);
-        // int _spawnJSInteropCallInt32(int returnType, int methodIndex, double argsId);
-        // int? _spawnJSInteropCallInt32Nullable(int returnType, int methodIndex, double argsId);
-        // double _spawnJSInteropCallDouble(int returnType, int methodIndex, double argsId);
-        // string _spawnJSInteropCallString(int returnType, int methodIndex, double argsId);
-        // void _spawnJSInteropCallVoid(int returnType, int methodIndex, double argsId);
-        static _spawnJSInteropCall(returnType, methodName, argsId, replacerId, replacerConfig) {
-            SpawnJSInterop.detachedEventCheck();
-            var target = typeof methodName === 'string' ? SpawnJSInterop[methodName] : SpawnJSInterop._methodMap[methodName];
-            var args = argsId === null || argsId === undefined ? null : SpawnJSInterop.spawnJSObjectGetAndReplace(argsId, []);
-            // iterate _revivers to process args if needed
-            if (args) {
-                for (let i = 0; i < args.length; i++) {
-                    args[i] = SpawnJSInterop.reviveValue(i, args[i], false);
-                }
-            }
-            var ret = !args ? target() : target(...args);
-            // run replacers
-            var replacer = !replacerId ? null : typeof replacerId === 'string' ? SpawnJSInterop[replacerId] : SpawnJSInterop._methodMap[replacerId];
-            if (replacer) ret = replacer(null, ret, true, replacerConfig);
-            else ret = SpawnJSInterop.replaceValue(null, ret, false);
-            // shape the result to match the .Net side's expected returnType
-            ret = SpawnJSInterop._serializeToNet(returnType, ret);
-            return ret;
+        // int _spawnJSInteropCall(double dotnetId, double address, int length, int capacity);
+        static _spawnJSInteropCall(dotnetId, address, length, capacity) {
+            // no detachedEventCheck(): _tapeViews checks this instance's heap, and walking every OTHER instance on
+            // every call was redundant - each is checked on its own calls and by the 500 ms timer
+            var instance = SpawnJSInterop.getInstace(dotnetId);
+            var call = SpawnJSInterop._tapeReadCall(instance, address, length, dotnetId);
+            var ret = call.target(...call.args);
+            ret = SpawnJSInterop.replaceValue(null, ret, false);
+            return SpawnJSInterop._tapeWriteResult(instance, call.returnType, ret, address, capacity);
+        }
+        // The result that did not fit behind its frame
+        // JSImport
+        // int _spawnJSInteropCallResult(double dotnetId, double address, int capacity);
+        static _spawnJSInteropCallResult(dotnetId, address, capacity) {
+            var instance = SpawnJSInterop.getInstace(dotnetId);
+            var bytes = instance.tapePendingResult;
+            instance.tapePendingResult = undefined;
+            if (!bytes) throw new Error('SpawnJSInterop: no tape result is being held');
+            if (bytes.byteLength > capacity) throw new Error(`SpawnJSInterop: a held tape result of ${bytes.byteLength} bytes does not fit in ${capacity}`);
+            var views = SpawnJSInterop._tapeViews(instance, address + bytes.byteLength);
+            new Uint8Array(views.buffer, address, bytes.byteLength).set(bytes);
+            return bytes.byteLength;
         }
         // Main .Net to JS entrypoint (asynchronous)
+        // Reads the frame and starts the call before returning, because .Net releases the frame as soon as this returns.
+        // Returns 1 when the frame was read and the call started, 0 when it could not be read - that failure has already
+        // gone to the resolver, so the awaiting Task fails rather than hanging.
         // JSImport
-        // void _spawnJSInteropCallAsync(int returnType, double dotnetId, double asyncCallId, double methodIndex, double argsId);
-        static async _spawnJSInteropCallAsync(returnType, dotnetId, asyncCallId, methodName, argsId, replacerId, replacerConfig) {
-            SpawnJSInterop.detachedEventCheck();
-            var target = typeof methodName === 'string' ? SpawnJSInterop[methodName] : SpawnJSInterop._methodMap[methodName];
+        // int _spawnJSInteropCallAsync(double dotnetId, double asyncCallId, double address, int length);
+        static _spawnJSInteropCallAsync(dotnetId, asyncCallId, address, length) {
             var instance = SpawnJSInterop.getInstace(dotnetId);
-            var dotnet = SpawnJSInterop.spawnJSObjectGet(dotnetId);
-            var args = argsId === null || argsId === undefined ? null : SpawnJSInterop.spawnJSObjectGetAndReplace(argsId, []);
-            if (args) {
-                for (let i = 0; i < args.length; i++) {
-                    args[i] = SpawnJSInterop.reviveValue(i, args[i], false);
-                }
+            var returnType = SpawnJSInterop._tapeViews(instance, address + length).f64[(address >>> 3) + 1];
+            var call;
+            try {
+                call = SpawnJSInterop._tapeReadCall(instance, address, length, dotnetId);
+            } catch (ex) {
+                SpawnJSInterop._resolveAsync(instance, returnType, asyncCallId, null, SpawnJSInterop.errorToString(ex));
+                return 0;
             }
+            SpawnJSInterop._runAsync(instance, returnType, asyncCallId, call);
+            return 1;
+        }
+        static async _runAsync(instance, returnType, asyncCallId, call) {
             var error = null;
             var ret = null;
+            var heldBytes = -1;
             try {
-                ret = !args ? target() : target(...args);
+                ret = call.target(...call.args);
                 ret = await ret;
-                // run replacers
-                var replacer = !replacerId ? null : typeof replacerId === 'string' ? SpawnJSInterop[replacerId] : SpawnJSInterop._methodMap[replacerId];
-                if (replacer) ret = replacer(null, ret, true, replacerConfig);
-                else ret = SpawnJSInterop.replaceValue(null, ret, false);
-                // prepare using returnType
-                ret = SpawnJSInterop._serializeToNet(returnType, ret);
+                ret = SpawnJSInterop.replaceValue(null, ret, false);
+                if (returnType > 10) {
+                    // a composite schema: encoded here and held; .Net fetches it with _spawnJSInteropCallResult
+                    heldBytes = SpawnJSInterop._tapeHoldResult(instance, SpawnJSInterop._tapeSchema(instance, returnType), ret);
+                } else {
+                    // prepare using returnType
+                    ret = SpawnJSInterop._serializeToNet(returnType, ret);
+                }
             } catch (ex) {
-                // call the exceptionCallbackId
                 error = SpawnJSInterop.errorToString(ex);
                 ret = null;
+            }
+            if (heldBytes >= 0) instance.resolveTape(asyncCallId, heldBytes, null);
+            else SpawnJSInterop._resolveAsync(instance, returnType, asyncCallId, ret, error);
+        }
+        static _resolveAsync(instance, returnType, asyncCallId, ret, error) {
+            if (returnType > 10) {
+                // a composite schema that failed: nothing is held
+                instance.resolveTape(asyncCallId, 0, error ?? 'SpawnJSInterop: the call produced no result');
+                return;
             }
             switch (returnType) {
                 case 0: // void
@@ -226,13 +252,406 @@
                     break;
             }
         }
-        // creates a new Array, adds it to the hold and returns it
-        // JSImport 
-        // double _spawnJSObjectNewArray();
-        static spawnJSObjectNewArray() {
-            var sjsId = SpawnJSInterop.spawnJSObjectHold([]);
-            if (SpawnJSInterop.verbose) console.log('spawnJSObjectNewArray', sjsId);
-            return sjsId;
+        // The heap views a tape is read through. Kept on the instance - never a page global - and rebuilt when the
+        // heap buffer changes: growth detaches it, and a shared (threaded) heap's buffer does not detach but can be
+        // shorter than the memory, so end is checked too.
+        static _tapeViews(instance, end) {
+            var buffer = instance.getHeap();
+            if (buffer.byteLength < end) {
+                buffer = instance.heapBuffer = SpawnJSInterop.wasmMemoryBuffer(instance.dotnet);
+                instance.heapBufferSize = buffer.byteLength;
+            }
+            var views = instance.tapeViews;
+            if (!views || views.buffer !== buffer) {
+                views = instance.tapeViews = { buffer, f64: new Float64Array(buffer), i32: new Int32Array(buffer), u16: new Uint16Array(buffer) };
+            }
+            return views;
+        }
+        // Reads a call frame: header, then one tagged value per argument, each passed through the revivers as the
+        // v2 argument array was.
+        static _tapeReadCall(instance, address, length, dotnetId) {
+            var views = SpawnJSInterop._tapeViews(instance, address + length);
+            var f64 = views.f64;
+            var p = address >>> 3;
+            var methodIndex = f64[p];
+            var returnType = f64[p + 1];
+            var argCount = f64[p + 2];
+            // one reader per call: a nested call (a reviver can run .Net) gets its own
+            var reader = { instance, dotnetId, address, length, views, p: p + 3 };
+            var args = new Array(argCount);
+            for (var i = 0; i < argCount; i++) {
+                var value = SpawnJSInterop._tapeRead(reader);
+                args[i] = SpawnJSInterop.reviveValue(i, value === SpawnJSInterop._tapeAbsent ? undefined : value, false);
+            }
+            // then the definitions of any schema the result is written by (JSTape.WriteSchemaDefinitions)
+            var end = (address + length) >>> 3;
+            while (reader.p < end) SpawnJSInterop._tapeReadSchemaDefinition(reader);
+            var target = SpawnJSInterop._methodMap[methodIndex];
+            if (!target) throw new Error(`SpawnJSInterop: no method at index ${methodIndex}`);
+            return { target, returnType, args };
+        }
+        // Reads one tagged value at reader.p and advances it. Object members and array elements go through the
+        // revivers with their key, as v2's per-property set did.
+        static _tapeRead(reader) {
+            // a reviver can run .Net (a heap view refresh reports the detach), which can grow the heap
+            if (reader.views.buffer.detached) reader.views = SpawnJSInterop._tapeViews(reader.instance, reader.address + reader.length);
+            var f64 = reader.views.f64;
+            var tag = f64[reader.p++];
+            switch (tag) {
+                case 0: return undefined;
+                case 1: return null;
+                case 2: return f64[reader.p++];
+                case 3: return f64[reader.p++] !== 0;
+                case 4: return SpawnJSInterop._tapeReadChars(reader);
+                case 5: return SpawnJSInterop.spawnJSObjectGet(f64[reader.p++]);
+                case 6: {
+                    var callbackId = f64[reader.p++];
+                    var once = f64[reader.p++] !== 0;
+                    // the schemas its arguments are written by (defined after this frame's arguments when new)
+                    var argumentCount = f64[reader.p++];
+                    var argumentSchemas = new Array(argumentCount);
+                    for (var i = 0; i < argumentCount; i++) argumentSchemas[i] = f64[reader.p++];
+                    return SpawnJSInterop._callbackFunction(reader.dotnetId, callbackId, once, argumentSchemas);
+                }
+                case 8: return SpawnJSInterop._tapeAbsent;
+                case 9: {
+                    var names = reader.instance.tapeShapes?.[f64[reader.p]];
+                    if (!names) throw new Error(`SpawnJSInterop: unknown tape shape ${f64[reader.p]}`);
+                    reader.p++;
+                    var obj = {};
+                    for (var i = 0; i < names.length; i++) {
+                        var value = SpawnJSInterop._tapeRead(reader);
+                        if (value !== SpawnJSInterop._tapeAbsent) obj[names[i]] = SpawnJSInterop.reviveValue(names[i], value, false);
+                    }
+                    return obj;
+                }
+                case 10: {
+                    // a shape definition - kept per instance, since each runtime numbers its own - then the value it
+                    // precedes. The same definition can arrive again until .Net knows a call carrying it completed.
+                    var shapeId = f64[reader.p++];
+                    var count = f64[reader.p++];
+                    var names = new Array(count);
+                    for (var i = 0; i < count; i++) names[i] = SpawnJSInterop._tapeReadChars(reader);
+                    (reader.instance.tapeShapes ??= [])[shapeId] = names;
+                    return SpawnJSInterop._tapeRead(reader);
+                }
+                case 11: {
+                    var count = f64[reader.p++];
+                    var array = new Array(count);
+                    for (var i = 0; i < count; i++) {
+                        var value = SpawnJSInterop._tapeRead(reader);
+                        array[i] = SpawnJSInterop.reviveValue(i, value === SpawnJSInterop._tapeAbsent ? undefined : value, false);
+                    }
+                    return array;
+                }
+                case 12: {
+                    var ctor = SpawnJSInterop.TapeNumberCtors[f64[reader.p++]];
+                    var count = f64[reader.p++];
+                    var view = new ctor(reader.views.buffer, reader.p * 8, count);
+                    reader.p += (count * ctor.BYTES_PER_ELEMENT + 7) >>> 3;
+                    // a plain Array, as element-by-element writing produced; a TypedArray stays opt in
+                    return Array.from(view);
+                }
+                case 14: {
+                    var count = reader.views.f64[reader.p++];
+                    var record = {};
+                    for (var i = 0; i < count; i++) {
+                        var key = SpawnJSInterop._tapeReadChars(reader);
+                        var value = SpawnJSInterop._tapeRead(reader);
+                        record[key] = SpawnJSInterop.reviveValue(key, value === SpawnJSInterop._tapeAbsent ? undefined : value, false);
+                    }
+                    return record;
+                }
+                case 15: {
+                    var reviver = SpawnJSInterop._methodMap[reader.views.f64[reader.p++]];
+                    if (!reviver) throw new Error('SpawnJSInterop: tape reviver not found');
+                    // (key, value, directCall) - the v2 property reviver convention; there is no property key here
+                    return reviver(null, SpawnJSInterop._tapeRead(reader), true);
+                }
+                case 13: {
+                    var f = reader.views.f64;
+                    var viewType = f[reader.p], offset = f[reader.p + 1], count = f[reader.p + 2], copy = f[reader.p + 3] !== 0;
+                    reader.p += 4;
+                    return SpawnJSInterop._heapView(reader.dotnetId, viewType, offset, count, copy);
+                }
+                default: throw new Error(`SpawnJSInterop: unknown tape tag ${tag} at cell ${reader.p - 1}`);
+            }
+        }
+        // length, then UTF-16 code units padded to a cell
+        static _tapeReadChars(reader) {
+            var length = reader.views.f64[reader.p++];
+            var value = SpawnJSInterop._tapeString(reader.views.u16, reader.p * 4, length);
+            reader.p += (length + 3) >>> 2;
+            return value;
+        }
+        // String.fromCharCode keeps every UTF-16 code unit exactly - a lone surrogate included, which a TextDecoder
+        // would replace. Chunked, because apply() has an argument count limit.
+        static _tapeString(u16, index, length) {
+            if (length <= 1024) return String.fromCharCode.apply(null, u16.subarray(index, index + length));
+            var parts = [];
+            for (var i = 0; i < length; i += 1024) {
+                parts.push(String.fromCharCode.apply(null, u16.subarray(index + i, index + Math.min(i + 1024, length))));
+            }
+            return parts.join('');
+        }
+        // ---- results: written back by the schema .Net reads them with (JSSchema.cs, JSTapeReader.cs) ----
+        // Ids 0-10 are the built-in ReturnType kinds; composite schemas are defined per instance, after a call's arguments.
+        static _builtinSchemas = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map(kind => Object.freeze({ kind }));
+        // thrown by a writer over .Net memory that is out of room (only a string can be; it is written again)
+        static _tapeOverflow = Object.freeze({ tapeOverflow: true });
+        static _tapeSchema(instance, id) {
+            if (id <= 10) return SpawnJSInterop._builtinSchemas[id];
+            var schema = instance.tapeSchemas?.[id];
+            if (!schema) throw new Error(`SpawnJSInterop: unknown tape schema ${id}`);
+            return schema;
+        }
+        // TagSchema, id, kind, then per kind - member / element schemas are ids, resolved when a value is written, so a
+        // schema can refer to one defined after it, or to itself
+        static _tapeReadSchemaDefinition(reader) {
+            if (reader.views.buffer.detached) reader.views = SpawnJSInterop._tapeViews(reader.instance, reader.address + reader.length);
+            var f64 = reader.views.f64;
+            var tag = f64[reader.p++];
+            if (tag !== 16) throw new Error(`SpawnJSInterop: expected a tape schema definition, found tag ${tag}`);
+            var id = f64[reader.p++];
+            var schema = { kind: f64[reader.p++] };
+            switch (schema.kind) {
+                case 16: {
+                    var count = f64[reader.p++];
+                    schema.names = new Array(count);
+                    for (var i = 0; i < count; i++) schema.names[i] = SpawnJSInterop._tapeReadChars(reader);
+                    schema.members = new Array(count);
+                    for (var i = 0; i < count; i++) schema.members[i] = reader.views.f64[reader.p++];
+                    break;
+                }
+                case 20: {
+                    var count = f64[reader.p++];
+                    schema.members = new Array(count);
+                    for (var i = 0; i < count; i++) schema.members[i] = f64[reader.p++];
+                    break;
+                }
+                case 17: case 19: schema.element = f64[reader.p++]; break;
+                case 18: schema.numberKind = f64[reader.p++]; break;
+            }
+            (reader.instance.tapeSchemas ??= [])[id] = schema;
+        }
+        // Writes a call's result back over its own frame. A built-in kind goes straight into .Net memory (only a string
+        // can outgrow the frame's segment); a composite is written into Javascript memory first, then copied - it can
+        // hold references and run getters, so it is written exactly once. A result that does not fit is held for
+        // _spawnJSInteropCallResult, and the return value is minus its size.
+        static _tapeWriteResult(instance, schemaId, ret, address, capacity) {
+            var schema = SpawnJSInterop._tapeSchema(instance, schemaId);
+            if (schema.kind === 0) return 0;
+            if (schemaId <= 10) {
+                var views = SpawnJSInterop._tapeViews(instance, address + capacity);
+                var w = { buffer: views.buffer, f64: views.f64, i32: views.i32, u16: views.u16, p: address >>> 3, end: (address + capacity) >>> 3, scratch: false };
+                try {
+                    SpawnJSInterop._tapeEncode(instance, w, schema, ret);
+                    return (w.p - (address >>> 3)) * 8;
+                } catch (ex) {
+                    if (ex !== SpawnJSInterop._tapeOverflow) throw ex;
+                }
+            }
+            var s = SpawnJSInterop._tapeScratchWriter(instance);
+            try {
+                SpawnJSInterop._tapeEncode(instance, s, schema, ret);
+                var bytes = s.p * 8;
+                if (bytes <= capacity) {
+                    var heap = SpawnJSInterop._tapeViews(instance, address + bytes);
+                    new Uint8Array(heap.buffer, address, bytes).set(new Uint8Array(s.buffer, 0, bytes));
+                    return bytes;
+                }
+                instance.tapePendingResult = new Uint8Array(s.buffer.slice(0, bytes));
+                return -bytes;
+            } finally {
+                SpawnJSInterop._tapeScratchRelease(instance, s);
+            }
+        }
+        // encodes a result and holds it for _spawnJSInteropCallResult; returns its size
+        static _tapeHoldResult(instance, schema, value) {
+            var s = SpawnJSInterop._tapeScratchWriter(instance);
+            try {
+                SpawnJSInterop._tapeEncode(instance, s, schema, value);
+                instance.tapePendingResult = new Uint8Array(s.buffer.slice(0, s.p * 8));
+                return s.p * 8;
+            } finally {
+                SpawnJSInterop._tapeScratchRelease(instance, s);
+            }
+        }
+        // Javascript-side result buffers, pooled per instance (a nested call's result uses its own)
+        static _tapeScratchWriter(instance) {
+            var w = instance.tapeScratch?.pop();
+            if (!w) {
+                w = { scratch: true, p: 0 };
+                SpawnJSInterop._tapeScratchResize(w, 512);
+            }
+            w.p = 0;
+            return w;
+        }
+        static _tapeScratchRelease(instance, w) {
+            // a very large one is dropped rather than kept for the life of the page
+            if (w.end <= 1 << 20) (instance.tapeScratch ??= []).push(w);
+        }
+        static _tapeScratchResize(w, cells) {
+            var buffer = new ArrayBuffer(cells * 8);
+            if (w.buffer) new Uint8Array(buffer).set(new Uint8Array(w.buffer, 0, w.p * 8));
+            w.buffer = buffer;
+            w.f64 = new Float64Array(buffer);
+            w.i32 = new Int32Array(buffer);
+            w.u16 = new Uint16Array(buffer);
+            w.end = cells;
+        }
+        static _tapeNeed(w, cells) {
+            if (w.p + cells <= w.end) return;
+            if (!w.scratch) throw SpawnJSInterop._tapeOverflow;
+            SpawnJSInterop._tapeScratchResize(w, Math.max(w.end * 2, w.p + cells));
+        }
+        // One value by its schema. The built-in kinds convert exactly as v2's typed returns did: null/undefined read
+        // as 0 / false, a number is stored through a Float64Array (ToNumber) and an int through an Int32Array (ToInt32).
+        // A composite reads each member / element with that member's schema - what v2's per-property Get<T> read.
+        static _tapeEncode(instance, w, schema, v) {
+            var isNull = v === null || v === undefined;
+            switch (schema.kind) {
+                case 0: return;
+                case 1:
+                    SpawnJSInterop._tapeNeed(w, 1);
+                    w.f64[w.p++] = isNull ? 0 : v;
+                    return;
+                case 2:
+                    SpawnJSInterop._tapeNeed(w, 1);
+                    w.f64[w.p++] = v ? 1 : 0;
+                    return;
+                case 3:
+                    if (isNull) { SpawnJSInterop._tapeNeed(w, 1); w.f64[w.p++] = 1; return; }
+                    SpawnJSInterop._tapeNeed(w, 2);
+                    w.f64[w.p++] = 2;
+                    w.f64[w.p++] = v;
+                    return;
+                case 4:
+                    if (isNull) { SpawnJSInterop._tapeNeed(w, 1); w.f64[w.p++] = 1; return; }
+                    SpawnJSInterop._tapeNeed(w, 2);
+                    w.f64[w.p++] = 3;
+                    w.f64[w.p++] = v ? 1 : 0;
+                    return;
+                case 5:
+                    if (!isNull && typeof v !== 'string') v = Object(v).toString();
+                    SpawnJSInterop._tapeEncodeString(w, isNull ? null : v);
+                    return;
+                case 6: case 7:
+                    SpawnJSInterop._tapeNeed(w, 1);
+                    w.f64[w.p++] = SpawnJSInterop.spawnJSObjectHold(v);
+                    return;
+                case 8:
+                    SpawnJSInterop._tapeEncodeString(w, JSON.stringify(v));
+                    return;
+                case 9:
+                    SpawnJSInterop._tapeNeed(w, 1);
+                    w.i32[w.p * 2] = isNull ? 0 : v;
+                    w.p++;
+                    return;
+                case 10:
+                    if (isNull) { SpawnJSInterop._tapeNeed(w, 1); w.f64[w.p++] = 1; return; }
+                    SpawnJSInterop._tapeNeed(w, 2);
+                    w.f64[w.p] = 2;
+                    w.i32[(w.p + 1) * 2] = v;
+                    w.p += 2;
+                    return;
+                case 16: {
+                    if (isNull) { SpawnJSInterop._tapeNeed(w, 1); w.f64[w.p++] = 1; return; }
+                    SpawnJSInterop._tapeNeed(w, 1);
+                    w.f64[w.p++] = 9;
+                    var names = schema.names, members = schema.members;
+                    for (var i = 0; i < names.length; i++) SpawnJSInterop._tapeEncode(instance, w, SpawnJSInterop._tapeSchema(instance, members[i]), v[names[i]]);
+                    return;
+                }
+                case 17: {
+                    if (isNull) { SpawnJSInterop._tapeNeed(w, 1); w.f64[w.p++] = 1; return; }
+                    var count = Number(v.length) || 0;
+                    SpawnJSInterop._tapeNeed(w, 2);
+                    w.f64[w.p++] = 11;
+                    w.f64[w.p++] = count;
+                    var element = SpawnJSInterop._tapeSchema(instance, schema.element);
+                    for (var i = 0; i < count; i++) SpawnJSInterop._tapeEncode(instance, w, element, v[i]);
+                    return;
+                }
+                case 18: {
+                    if (isNull) { SpawnJSInterop._tapeNeed(w, 1); w.f64[w.p++] = 1; return; }
+                    var count = Number(v.length) || 0;
+                    var int32 = schema.numberKind === 9;
+                    var cells = int32 ? (count + 1) >>> 1 : count;
+                    SpawnJSInterop._tapeNeed(w, 2 + cells);
+                    w.f64[w.p++] = 12;
+                    w.f64[w.p++] = count;
+                    // element by element, not typedArray.set(): an undefined element must read as 0, as Get<T> read it
+                    if (int32) {
+                        var view = new Int32Array(w.buffer, w.p * 8, count);
+                        for (var i = 0; i < count; i++) { var e = v[i]; view[i] = e === null || e === undefined ? 0 : e; }
+                    } else {
+                        var view = new Float64Array(w.buffer, w.p * 8, count);
+                        for (var i = 0; i < count; i++) { var e = v[i]; view[i] = e === null || e === undefined ? 0 : e; }
+                    }
+                    w.p += cells;
+                    return;
+                }
+                case 19: {
+                    if (isNull) { SpawnJSInterop._tapeNeed(w, 1); w.f64[w.p++] = 1; return; }
+                    // own enumerable keys - inherited ones belong to the prototype chain, not the record
+                    var keys = Object.keys(v);
+                    SpawnJSInterop._tapeNeed(w, 2);
+                    w.f64[w.p++] = 14;
+                    w.f64[w.p++] = keys.length;
+                    var element = SpawnJSInterop._tapeSchema(instance, schema.element);
+                    for (var i = 0; i < keys.length; i++) {
+                        SpawnJSInterop._tapeEncodeChars(w, keys[i]);
+                        SpawnJSInterop._tapeEncode(instance, w, element, v[keys[i]]);
+                    }
+                    return;
+                }
+                case 20: {
+                    if (isNull) { SpawnJSInterop._tapeNeed(w, 1); w.f64[w.p++] = 1; return; }
+                    var members = schema.members;
+                    SpawnJSInterop._tapeNeed(w, 2);
+                    w.f64[w.p++] = 11;
+                    w.f64[w.p++] = members.length;
+                    for (var i = 0; i < members.length; i++) SpawnJSInterop._tapeEncode(instance, w, SpawnJSInterop._tapeSchema(instance, members[i]), v[i]);
+                    return;
+                }
+                case 21: {
+                    if (isNull) { SpawnJSInterop._tapeNeed(w, 1); w.f64[w.p++] = 1; return; }
+                    var bytes = v instanceof ArrayBuffer ? new Uint8Array(v)
+                        : ArrayBuffer.isView(v) ? new Uint8Array(v.buffer, v.byteOffset, v.byteLength)
+                        : null;
+                    if (!bytes) throw new TypeError('SpawnJSInterop: expected an ArrayBuffer or ArrayBufferView');
+                    var cells = (bytes.length + 7) >>> 3;
+                    SpawnJSInterop._tapeNeed(w, 2 + cells);
+                    w.f64[w.p++] = 12;
+                    w.f64[w.p++] = bytes.length;
+                    new Uint8Array(w.buffer, w.p * 8, bytes.length).set(bytes);
+                    w.p += cells;
+                    return;
+                }
+            }
+            throw new Error(`SpawnJSInterop: unsupported tape schema kind ${schema.kind}`);
+        }
+        // null, or tag, length, UTF-16 code units
+        static _tapeEncodeString(w, value) {
+            if (value === null || value === undefined) {
+                SpawnJSInterop._tapeNeed(w, 1);
+                w.f64[w.p++] = 1;
+                return;
+            }
+            SpawnJSInterop._tapeNeed(w, 1);
+            w.f64[w.p++] = 4;
+            SpawnJSInterop._tapeEncodeChars(w, value);
+        }
+        // length, UTF-16 code units padded to a cell
+        static _tapeEncodeChars(w, value) {
+            var length = value.length;
+            SpawnJSInterop._tapeNeed(w, 1 + ((length + 3) >>> 2));
+            w.f64[w.p++] = length;
+            var u16 = w.u16;
+            var index = w.p * 4;
+            for (var i = 0; i < length; i++) u16[index + i] = value.charCodeAt(i);
+            w.p += (length + 3) >>> 2;
         }
         // refreshes the method map by looking for any new methods and adds them
         // JSImport
@@ -360,14 +779,7 @@
             return SpawnJSInterop._in(propertyName, parent);
         }
         // get a property
-        // JSImport
-        // string _propertyGetString(double sjsId, string key);
-        // double _propertyGetDouble(double sjsId, string key);
-        // double? _propertyGetDoubleNullable(double sjsId, string key);
-        // bool _propertyGetBoolean(double sjsId, string key);
-        // bool? _propertyGetBooleanNullable(double sjsId, string key);
-        // int _propertyGetInt32(double sjsId, string key);
-        // int? _propertyGetInt32(double sjsId, string key);
+        // InteropCall (dispatched through the call tape)
         static propertyGet(sjsId, key) {
             var ret = undefined;
             var obj = SpawnJSInterop.spawnJSObjectGet(sjsId);
@@ -380,66 +792,8 @@
             }
             return ret;
         }
-        // get a property as a SpawnJSObjectReference
-        // JSImport
-        // double _propertyGetSpawnJSObjectReference(double sjsId, string key, bool force);
-        static propertyGetSpawnJSObjectReference(sjsId, key, force) {
-            var ret = SpawnJSInterop.propertyGet(sjsId, key);
-            if (force) {
-                ret = SpawnJSInterop.spawnJSObjectHold(ret);
-            } else {
-                ret = ret === null || ret === undefined ? null : SpawnJSInterop.spawnJSObjectHold(ret);
-            }
-            return ret;
-        }
-        // get a property as json
-        // JSImport
-        // string? _propertyGetJson(double sjsId, string key);
-        static propertyGetJson(sjsId, key) {
-            var ret = SpawnJSInterop.propertyGet(sjsId, key);
-            ret = JSON.stringify(ret);
-            return ret;
-        }
-        // get a property
-        // JSImport
-        // string _propertyGetWithReplacerString(double sjsId, string key, double methodIndex);
-        // double _propertyGetWithReplacerDouble(double sjsId, string key, double methodIndex);
-        // double? _propertyGetWithReplacerDoubleNullable(double sjsId, string key, double methodIndex);
-        // bool _propertyGetWithReplacerBoolean(double sjsId, string key, double methodIndex);
-        // bool? _propertyGetWithReplacerBooleanNullable(double sjsId, string key, double methodIndex);
-        // string _propertyGetWithReplacerString(double sjsId, string key, double methodIndex, double replacerConfig);
-        // double _propertyGetWithReplacerDouble(double sjsId, string key, double methodIndex, double replacerConfig);
-        // double? _propertyGetWithReplacerDoubleNullable(double sjsId, string key, double methodIndex, double replacerConfig);
-        // bool _propertyGetWithReplacerBoolean(double sjsId, string key, double methodIndex, double replacerConfig);
-        // bool? _propertyGetWithReplacerBooleanNullable(double sjsId, string key, double methodIndex, double replacerConfig);
-        // string _propertyGetWithReplacerString(double sjsId, string key, double methodIndex, string replacerConfig);
-        // double _propertyGetWithReplacerDouble(double sjsId, string key, double methodIndex, string replacerConfig);
-        // double? _propertyGetWithReplacerDoubleNullable(double sjsId, string key, double methodIndex, string replacerConfig);
-        // bool _propertyGetWithReplacerBoolean(double sjsId, string key, double methodIndex, string replacerConfig);
-        // bool? _propertyGetWithReplacerBooleanNullable(double sjsId, string key, double methodIndex, string replacerConfig);
-        static propertyGetWithReplacer(sjsId, key, methodIndex, replacerConfig) {
-            var ret = undefined;
-            var obj = SpawnJSInterop.spawnJSObjectGet(sjsId);
-            var pathInfo = SpawnJSInterop.pathObjectInfo(obj, key);
-            if (pathInfo.shortCircuit) return ret;
-            if (typeof pathInfo.target === 'function') {
-                ret = pathInfo.target.bind(pathInfo.parent);
-            } else {
-                ret = pathInfo.target;
-            }
-            var replacer = typeof methodIndex === 'string' ? SpawnJSInterop[methodIndex] : SpawnJSInterop._methodMap[methodIndex];
-            if (!replacer) throw new Error(`Reviver not found: ${methodName}`);
-            ret = !replacer ? ret : replacer(pathInfo.propertyName, ret, true, replacerConfig);
-            return ret;
-        }
         // set property
-        // JSImport
-        // void _propertySet(double sjsId, string key, string value);
-        // void _propertySet(double sjsId, string key, bool value);
-        // void _propertySet(double sjsId, string key, double value);
-        // void _propertySet(double sjsId, string key, int value);
-        // void _propertySet(double sjsId, string key, bool? value);
-        // void _propertySet(double sjsId, string key, double? value);
+        // InteropCall (dispatched through the call tape)
         static propertySet(sjsId, key, value) {
             var obj = SpawnJSInterop.spawnJSObjectGet(sjsId);
             if (obj === void 0 || obj === null) throw new Error('obj null or undefined');
@@ -449,37 +803,9 @@
             value = SpawnJSInterop.reviveValue(propertyName, value, false);
             parent[propertyName] = value;
         }
-        // This is where SpawnJSObjectReference revives itself into JS via its sjsId
-        // set property to a SpawnJSObjectReference
-        // JSImport
-        // void _propertySetSpawnJSObject(double sjsId, string key, double value);
-        static propertySetSpawnJSObject(sjsId, key, valueId) {
-            var value = SpawnJSInterop.spawnJSObjectGet(valueId);
-            var obj = SpawnJSInterop.spawnJSObjectGet(sjsId);
-            if (obj === void 0 || obj === null) throw new Error('obj null or undefined');
-            var { parent, propertyName, shortCircuit } = SpawnJSInterop.pathObjectInfo(obj, key);
-            if (shortCircuit) return;
-            parent[propertyName] = value;
-        }
-        // set property to a Json
-        // JSImport
-        // void _propertySetJson(double sjsId, string key, string value);
-        static propertySetJson(sjsId, key, json) {
-            var obj = SpawnJSInterop.spawnJSObjectGet(sjsId);
-            if (obj === void 0 || obj === null) throw new Error('obj null or undefined');
-            var { parent, propertyName, shortCircuit } = SpawnJSInterop.pathObjectInfo(obj, key);
-            if (shortCircuit) return;
-            var value = JSON.parse(json);
-            parent[propertyName] = value;
-        }
-        // set property to a HeapView
-        // JSImport
-        // void _propertySetHeapView(double sjsId, string key, double dotnetId, double viewType, double offset, double length, bool copy);
-        static propertySetHeapView(sjsId, key, dotnetId, viewType, offset, length, copy) {
-            var obj = SpawnJSInterop.spawnJSObjectGet(sjsId);
-            if (obj === void 0 || obj === null) throw new Error('obj null or undefined');
-            var { parent, propertyName, shortCircuit } = SpawnJSInterop.pathObjectInfo(obj, key);
-            if (shortCircuit) return;
+        // A view of - or with copy, a copy of - .Net memory. A live view carries its _heapViewInfo so the heap view
+        // reviver can rebuild it after the heap grows. Built when the tape reads a TagHeapView.
+        static _heapView(dotnetId, viewType, offset, length, copy) {
             // create the heapView meta data
             var heapViewInfo = { dotnetId, viewType, offset, length, copy };
             // viewType is an INDEX into HeapViewCtors, and index 0 (BigInt64Array) is a real value - a
@@ -491,37 +817,44 @@
             heapViewInfo.sizeHistory = [];
             heapViewInfo.ctor = SpawnJSInterop.getArrayBufferViewConstructor(heapViewInfo.viewType);
             // refresh the heapView
-            var value = SpawnJSInterop.heapViewRefresh(heapViewInfo);
-            // set to the proeprty
-            parent[propertyName] = value;
+            return SpawnJSInterop.heapViewRefresh(heapViewInfo);
         }
-        // set property null
+        // The Javascript function that invokes a .Net Callback, created once per callback and reused
+        // .Net gives each instance a pinned buffer that a callback's arguments are written into before it calls .Net
         // JSImport
-        // void _propertySetNull(double sjsId, string key);
-        static propertySetNull(sjsId, key) {
-            var obj = SpawnJSInterop.spawnJSObjectGet(sjsId);
-            if (obj === void 0 || obj === null) throw new Error('obj null or undefined');
-            var { parent, propertyName, shortCircuit } = SpawnJSInterop.pathObjectInfo(obj, key);
-            if (shortCircuit) return;
-            parent[propertyName] = null;
+        // void _registerInbound(double dotnetId, double address, int cells);
+        static _registerInbound(dotnetId, address, cells) {
+            // cell 0 carries the offset of the arguments of the callback being called
+            SpawnJSInterop.getInstace(dotnetId).inbound = { address, cells, top: 1 };
         }
-        // set property undefined
-        // JSImport
-        // void _propertySetUndefined(double sjsId, string key);
-        static propertySetUndefined(sjsId, key) {
-            var obj = SpawnJSInterop.spawnJSObjectGet(sjsId);
-            if (obj === void 0 || obj === null) throw new Error('obj null or undefined');
-            var { parent, propertyName, shortCircuit } = SpawnJSInterop.pathObjectInfo(obj, key);
-            if (shortCircuit) return;
-            parent[propertyName] = undefined;
+        // Writes a callback's arguments by their schemas into the instance's inbound buffer, as a stack (a callback can
+        // run inside another), and puts their offset in cell 0. Arguments too large for the space left are held for
+        // _spawnJSInteropCallResult instead, and cell 0 is minus their size. Returns the top to restore afterwards.
+        static _tapeWriteInbound(instance, argumentSchemas, args) {
+            var inbound = instance.inbound;
+            var top = inbound.top;
+            var s = SpawnJSInterop._tapeScratchWriter(instance);
+            try {
+                for (var i = 0; i < argumentSchemas.length; i++) {
+                    SpawnJSInterop._tapeEncode(instance, s, SpawnJSInterop._tapeSchema(instance, argumentSchemas[i]), args[i]);
+                }
+                var views = SpawnJSInterop._tapeViews(instance, inbound.address + inbound.cells * 8);
+                var offset;
+                if (top + s.p <= inbound.cells) {
+                    new Uint8Array(views.buffer, inbound.address + top * 8, s.p * 8).set(new Uint8Array(s.buffer, 0, s.p * 8));
+                    offset = top;
+                    inbound.top = top + s.p;
+                } else {
+                    instance.tapePendingResult = new Uint8Array(s.buffer.slice(0, s.p * 8));
+                    offset = -(s.p * 8);
+                }
+                views.f64[inbound.address >>> 3] = offset;
+            } finally {
+                SpawnJSInterop._tapeScratchRelease(instance, s);
+            }
+            return top;
         }
-        // JSImport
-        // void _propertySetCallback(double sjsId, string key, double dotnetId, double callbackId, bool once);
-        static propertySetCallback(sjsId, key, dotnetId, callbackId, once) {
-            var obj = SpawnJSInterop.spawnJSObjectGet(sjsId);
-            if (obj === void 0 || obj === null) throw new Error('obj null or undefined');
-            var { parent, propertyName, shortCircuit } = SpawnJSInterop.pathObjectInfo(obj, key);
-            if (shortCircuit) return;
+        static _callbackFunction(dotnetId, callbackId, once, argumentSchemas) {
             if (!callbackId || !dotnetId) {
                 return null;
             }
@@ -536,7 +869,8 @@
                         return;
                     }
                     // get the SpawnJSRuntime instance's method that is used to report the callback 
-                    var { handleCallback } = SpawnJSInterop.getInstace(dotnetId);
+                    var instance = SpawnJSInterop.getInstace(dotnetId);
+                    var { handleCallback } = instance;
                     // get argsCnt because after when we call handleCallback .Net will write
                     // the return value to at the end of the array after the last argument (index argsCnt)
                     // unless the return value should be undefined
@@ -551,10 +885,13 @@
                     // a one-shot callback that threw would never be removed and would keep firing.
                     // MEASURED 2026-09-02: dumping the table mid-run in the ML demo showed ~30 stranded
                     // empty arrays alongside the retained adapters.
+                    // the arguments go to .Net memory now, so the call below is the only crossing they need
+                    var inboundTop = SpawnJSInterop._tapeWriteInbound(instance, argumentSchemas ?? [], args);
                     try {
                         // notify SpawnJSRuntime with the argsId and the cnt
                         handleCallback(callbackId, argsId, argsCnt);
                     } finally {
+                        instance.inbound.top = inboundTop;
                         // release the args
                         SpawnJSInterop.spawnJSObjectRelease(argsId);
                         // if it was a 1 time use callback, release it
@@ -565,31 +902,7 @@
                 };
                 SpawnJSInterop._callbacks[callbackIdPair] = value;
             }
-            parent[propertyName] = value;
-        }
-        // set property to using a SpawnJSInterop[methodName](value) call
-        // methodName can be a SpawnJSInterop methodName or a methodIndex
-        // revivers are Javascript methods
-        // JSImport
-        // void _propertySetWithReviver(double sjsId, string key, string value, double reviverIndex);
-        // void _propertySetWithReviver(double sjsId, string key, double value, double reviverIndex);
-        // void _propertySetWithReviver(double sjsId, string key, string value, double reviverIndex, string reviverConfig);
-        // void _propertySetWithReviver(double sjsId, string key, double value, double reviverIndex, string reviverConfig);
-        // void _propertySetWithReviver(double sjsId, string key, string value, double reviverIndex, double reviverConfig);
-        // void _propertySetWithReviver(double sjsId, string key, double value, double reviverIndex, double reviverConfig);
-        // void _propertySetWithReviver(double sjsId, string key, string value, double reviverIndex, bool reviverConfig);
-        // void _propertySetWithReviver(double sjsId, string key, double value, double reviverIndex, bool reviverConfig);
-        static propertySetWithReviver(sjsId, key, value, methodName, reviverConfig) {
-            var obj = SpawnJSInterop.spawnJSObjectGet(sjsId);
-            if (obj === void 0 || obj === null) throw new Error('obj null or undefined');
-            var { parent, propertyName, shortCircuit } = SpawnJSInterop.pathObjectInfo(obj, key);
-            if (shortCircuit) return;
-            var reviver = typeof methodName === 'string' ? SpawnJSInterop[methodName] : SpawnJSInterop._methodMap[methodName];
-            // if SpawnJSInterop does not have the reviver, try the glboalThis. This allows global types to be used
-            if (!reviver) reviver = globalThis[methodName];
-            if (!reviver) throw new Error(`Reviver not found: ${methodName}`);
-            value = reviver(propertyName, value, true, reviverConfig);
-            parent[propertyName] = value;
+            return value;
         }
 
         // Interop Calls
@@ -920,6 +1233,9 @@
             }
             return value;
         }
+        // tape revivers (JSTape.WriteRevived) for a Task that completed before it was written
+        static promiseResolved(key, value) { return Promise.resolve(value); }
+        static promiseRejected(key, value) { return Promise.reject(value); }
         // create a new Promsie with the resolve and reject methods attached to the promise for easy calling from .Net
         static newEasyPromise() {
             var _resolve = null;
@@ -934,7 +1250,7 @@
         }
         // Reviver used by BigIntegerMarshaller: a BigInteger crosses as its decimal string, because a JS
         // number cannot hold one exactly, and is revived into a real BigInt here.
-        // Revivers are called as (key, value, directCall, config) by propertySetWithReviver - a plain
+        // Revivers are called as (key, value, directCall) by the tape (TagRevive, JSTape.WriteRevived) - a plain
         // (value) signature would silently revive the PROPERTY NAME instead of the value.
         static stringToBigInt(key, value) {
             if (!globalThis.BigInt) throw new Error('BigInt not supported on this platform');
@@ -969,21 +1285,21 @@
             }
             return keys;
         }
-        static reviveValue(key, initialValue, directCall) {
-            // Pipe the value through each reviver sequentially
-            return SpawnJSInterop._revivers.reduce((currentValue, currentReviver) => {
-                // Short-circuit: if a previous reviver dropped the value, skip the rest
-                if (currentValue === undefined) return undefined;
-                return currentReviver(key, currentValue, directCall); // the true tells the reviver this is a call revive as opposed to a propertySet revive
-            }, initialValue);
+        // Pipe the value through each reviver sequentially; a reviver that drops the value (undefined) skips the rest.
+        // A plain loop: this runs for every argument of every call, and reduce() allocated a closure each time.
+        static reviveValue(key, value, directCall) {
+            var revivers = SpawnJSInterop._revivers;
+            for (var i = 0; i < revivers.length && value !== undefined; i++) {
+                value = revivers[i](key, value, directCall); // directCall tells the reviver this is a call revive as opposed to a propertySet revive
+            }
+            return value;
         }
-        static replaceValue(key, initialValue, directCall) {
-            // Pipe the value through each reviver sequentially
-            return SpawnJSInterop._replacers.reduce((currentValue, currentReplacer) => {
-                // Short-circuit: if a previous reviver dropped the value, skip the rest
-                if (currentValue === undefined) return undefined;
-                return currentReplacer(key, currentValue, directCall); // the true tells the reviver this is a call revive as opposed to a propertySet revive
-            }, initialValue);
+        static replaceValue(key, value, directCall) {
+            var replacers = SpawnJSInterop._replacers;
+            for (var i = 0; i < replacers.length && value !== undefined; i++) {
+                value = replacers[i](key, value, directCall);
+            }
+            return value;
         }
         // returns the types the object inherits from
         // returns string[]

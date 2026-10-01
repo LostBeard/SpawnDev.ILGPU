@@ -271,13 +271,23 @@ function handleAllocBuffer(msg) {
 }
 
 function handleUploadBuffer(msg) {
-    const { bufferId, buffer, byteOffset, byteLength } = msg;
+    const { bufferId, buffer, byteOffset, byteLength, dstByteOffset } = msg;
     const entry = bufferRegistry[bufferId];
     if (!entry) {
         console.error('[GLWorker] uploadBuffer: unknown bufferId', bufferId);
         return;
     }
     const srcData = new Uint8Array(buffer, byteOffset || 0, byteLength || buffer.byteLength);
+    if (dstByteOffset !== undefined && dstByteOffset !== null) {
+        // PARTIAL host write (MemSet / CopyFromCPU / CopyFromJS on a range) into a buffer that already lives
+        // here. Only that range changes: the rest of entry.data is the post-kernel state, which the host's
+        // own mirror does not have. A whole-buffer upload of the host mirror is what used to wipe it.
+        ensureCpuFresh(entry);
+        entry.data.set(srcData, dstByteOffset);
+        uploadTextureData(entry.texture, entry);
+        entry.dataStale = false;
+        return;
+    }
     entry.data.set(srcData);
     // Zero-fill padding
     if (srcData.length < entry.data.length) {

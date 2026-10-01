@@ -21,6 +21,8 @@
         // onSubmittedWorkDone / SynchronizeAsync for that). Reading performance.now() is ~free,
         // so this records unconditionally; .NET fetches it on demand only.
         last: { ops: 0, encodeMs: 0, submitMs: 0 },
+        // Per-device staging buffer for submitBatch's ordered host uploads (tag 4). Grows, never shrinks.
+        _staging: new WeakMap(),
         // ── Interop cost probes ─────────────────────────────────────────────────────────────────
         // These do NOTHING on purpose. device.createBindGroup measured 1.14 ms per call in a Kokoro
         // pass (2,117 ms of 2,128 ms of the whole bind-group phase), and "1.14 ms" has three possible
@@ -44,6 +46,91 @@
                 plan[i + 4] = newDstOffsets[k];
             }
         },
+        // Submits the accelerator's PLAIN (uncaptured) dispatch batch: WebGPUStream appends numeric
+        // records while kernels are dispatched and hands the whole batch over in ONE crossing here, where
+        // the bind groups are created and every op is encoded. Every GPU object is named by its SpawnJS
+        // hold id and resolved from SpawnJSInterop.spawnJSObjects, so no descriptor is ever marshalled -
+        // SpawnJS builds a nested .NET object one property Set per member, ~40 crossings for a bind-group
+        // descriptor, which is what made createBindGroup the largest host cost of a graph forward.
+        // Records (Float64Array `rec`, first `n` values):
+        //   [0, pipelineId, layoutId, nEntries, x, y, z, (binding, bufferId, offset, size) * nEntries]
+        //   [1, srcId, srcOffset, dstId, dstOffset, size]     copyBufferToBuffer
+        //   [2, bufferId, offset, size]                       clearBuffer
+        //   [3, bufferId, bufferOffset, dataOffset, size]     queue.writeBuffer from `data` (Uint8Array)
+        //   [4, bufferId, bufferOffset, dataOffset, size]     ORDERED host upload: copyBufferToBuffer from the
+        //                                                     staging copy of `data`, encoded in record order
+        // A tag-3 write is issued when it is reached, so it precedes the submit of the command buffer holding
+        // the dispatch that reads it - the same order as the per-dispatch path (write now, submit later). It
+        // is only for buffers the batch alone uses (per-dispatch scalar/stride/lock buffers).
+        // A tag-4 upload targets an ordinary buffer that earlier records in the batch may still read, so it
+        // must land exactly where it sits in the batch: `data` is written ONCE into a persistent staging
+        // buffer and each upload is a copyBufferToBuffer in record order. Reusing the staging buffer across
+        // batches is safe because queue.writeBuffer executes after all previously submitted work.
+        // Command buffers are split every maxPassesPerSubmit passes (see replay() for why).
+        // Returns the number of records processed.
+        submitBatch(device, rec, n, data, maxPassesPerSubmit, uploadBytes) {
+            const objs = globalThis.SpawnJSInterop.spawnJSObjects;
+            const obj = (id, what, at) => {
+                const o = objs[id];
+                if (o === undefined || o === null)
+                    throw new Error(`ilgpuWebGPUPlan.submitBatch: ${what} (SpawnJS id ${id}) at record ${at} is not held - it was disposed while a dispatch still referenced it`);
+                return o;
+            };
+            const cap = (maxPassesPerSubmit > 0) ? (maxPassesPerSubmit | 0) : 0x7fffffff;
+            const queue = device.queue;
+            let staging = null;
+            if (uploadBytes > 0) {
+                staging = api._staging.get(device);
+                if (!staging || staging.size < uploadBytes) {
+                    if (staging) staging.destroy();   // its last readers were submitted; destroy waits for them
+                    let size = 65536;
+                    while (size < uploadBytes) size *= 2;
+                    staging = device.createBuffer({ label: 'ilgpu-batch-upload-staging', size, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+                    api._staging.set(device, staging);
+                }
+                queue.writeBuffer(staging, 0, data, 0, uploadBytes);
+            }
+            let enc = null, passes = 0, ops = 0;
+            for (let i = 0; i < n; ops++) {
+                const tag = rec[i];
+                if (tag === 0) {
+                    const ne = rec[i + 3];
+                    const entries = new Array(ne);
+                    let j = i + 7;
+                    for (let e = 0; e < ne; e++, j += 4)
+                        entries[e] = { binding: rec[j], resource: { buffer: obj(rec[j + 1], 'buffer', i), offset: rec[j + 2], size: rec[j + 3] } };
+                    const bindGroup = device.createBindGroup({ layout: obj(rec[i + 2], 'bind group layout', i), entries });
+                    if (enc === null) enc = device.createCommandEncoder();
+                    const pass = enc.beginComputePass();
+                    pass.setPipeline(obj(rec[i + 1], 'pipeline', i));
+                    pass.setBindGroup(0, bindGroup);
+                    pass.dispatchWorkgroups(rec[i + 4], rec[i + 5], rec[i + 6]);
+                    pass.end();
+                    i = j;
+                    if (++passes >= cap) { queue.submit([enc.finish()]); enc = null; passes = 0; }
+                } else if (tag === 1) {
+                    if (enc === null) enc = device.createCommandEncoder();
+                    enc.copyBufferToBuffer(obj(rec[i + 1], 'copy source', i), rec[i + 2], obj(rec[i + 3], 'copy destination', i), rec[i + 4], rec[i + 5]);
+                    i += 6;
+                } else if (tag === 2) {
+                    if (enc === null) enc = device.createCommandEncoder();
+                    enc.clearBuffer(obj(rec[i + 1], 'clear target', i), rec[i + 2], rec[i + 3]);
+                    i += 4;
+                } else if (tag === 3) {
+                    queue.writeBuffer(obj(rec[i + 1], 'write target', i), rec[i + 2], data, rec[i + 3], rec[i + 4]);
+                    i += 5;
+                } else if (tag === 4) {
+                    if (enc === null) enc = device.createCommandEncoder();
+                    enc.copyBufferToBuffer(staging, rec[i + 3], obj(rec[i + 1], 'upload target', i), rec[i + 2], rec[i + 4]);
+                    i += 5;
+                } else {
+                    throw new Error(`ilgpuWebGPUPlan.submitBatch: bad record tag ${tag} at ${i}`);
+                }
+            }
+            if (enc !== null) queue.submit([enc.finish()]);
+            return ops;
+        },
+
         // Replays a recorded plan on the given device: one pass per dispatch (pass-per-dispatch keeps
         // storage-buffer write->read ordering guarantees airtight), copies/clears encoded inline in
         // captured order, submitted in BATCHES of maxPassesPerSubmit compute passes.
@@ -192,5 +279,11 @@
             });
         }
     };
-    globalThis.ilgpuWebGPUPlan = api;
+    // Register - but never downgrade. A second copy of this module (another URL, an old cached file) must not
+    // replace a newer one already in use: the library looks up ilgpuWebGPUPlan.submitBatch on every flush.
+    // Bump HELPER_VERSION whenever the api's surface changes.
+    const HELPER_VERSION = 2;   // 2: submitBatch (plain-dispatch record batches, ordered uploads)
+    api.version = HELPER_VERSION;
+    const existing = globalThis.ilgpuWebGPUPlan;
+    if (!existing || !(existing.version >= HELPER_VERSION)) globalThis.ilgpuWebGPUPlan = api;
 })();
