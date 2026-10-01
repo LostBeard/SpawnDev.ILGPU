@@ -199,7 +199,7 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
             }
             else
             {
-                var preferred = _ilgpuContext.GetPreferredDevice(preferCPU: false);
+                var preferred = _ilgpuContext.GetBestDevice();
                 if (preferred is CPUDevice)
                 {
                     int cores = Environment.ProcessorCount;
