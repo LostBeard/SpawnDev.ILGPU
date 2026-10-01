@@ -1,7 +1,16 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.2.26 (unreleased) - WebGPU: disposing a buffer with a pending clear broke the next submit
+## 5.3.0 (forks 2.3.7) - 2026-09-30 - SpawnDev.SpawnJS 3.0.0; WebGPU: disposing a buffer with a pending clear broke the next submit
+
+- **Built on SpawnDev.SpawnJS 3.0.0**, which makes every .NET -> JS call one boundary crossing (arguments, descriptors,
+  arrays and the result in one call tape). No ILGPU source change was needed. Measured on WebGPU, same ILGPU code on
+  SpawnJS 2.1.20 vs 3.0.0: `createBindGroup` for a 3-entry descriptor 202 -> 38 us (144 -> 21 us without subgroups);
+  host time per UNBATCHED dispatch 251 -> 80 us; the default record batch is unchanged (~34 us, already one crossing),
+  so dispatch batching stays on. Browser lanes (WebGPU, WebGPU no-subgroups, WebGL, Wasm) on SpawnJS 3.0.0: 2616
+  passed / 0 failed / 201 skipped. Minor version bump because the dependency is a new major: an app that pins
+  SpawnDev.SpawnJS 2.x directly must move to 3.0.0 (NU1605 otherwise). After upgrading, build clean (see the SpawnJS
+  3.0.0 notes).
 
 - **WebGPU: `Dispose()` right after `MemSetToZero()` (before any flush) made the NEXT, unrelated submit fail** with
   "Buffer ... used in submit while destroyed". The clear is recorded and held until submit; 5.2.25 submitted a pending
