@@ -835,8 +835,12 @@ namespace ILGPU.Backends.EntryPoints
                 var paramType = parameters.ParameterTypes[i];
                 try
                 {
-                    // Ensure kernel parameters are blittable.
-                    if (!TypeContext.GetTypeInfo(paramType).IsValidKernelParameter)
+                    // Ensure kernel parameters are blittable. A top-level bool is the exception: it is passed as
+                    // ONE byte (the CLR's in-memory bool) and every backend declares a 1-byte parameter for it and
+                    // tests it against 0 (SpawnDev, 2026-10-01 - BoolScalarParam_TrueAndFalse_Arrive). A bool
+                    // inside a struct stays rejected (the struct's device layout is not 1-byte-bool everywhere).
+                    if (paramType != typeof(bool)
+                        && !TypeContext.GetTypeInfo(paramType).IsValidKernelParameter)
                     {
                         throw new NotSupportedException(
                             string.Format(
@@ -958,8 +962,12 @@ namespace ILGPU.Backends.EntryPoints
                 var paramType = parameters.ParameterTypes[i];
                 try
                 {
-                    // Ensure kernel parameters are blittable.
-                    if (!TypeContext.GetTypeInfo(paramType).IsValidKernelParameter)
+                    // Ensure kernel parameters are blittable. A top-level bool is the exception: it is passed as
+                    // ONE byte (the CLR's in-memory bool) and every backend declares a 1-byte parameter for it and
+                    // tests it against 0 (SpawnDev, 2026-10-01 - BoolScalarParam_TrueAndFalse_Arrive). A bool
+                    // inside a struct stays rejected (the struct's device layout is not 1-byte-bool everywhere).
+                    if (paramType != typeof(bool)
+                        && !TypeContext.GetTypeInfo(paramType).IsValidKernelParameter)
                     {
                         throw new NotSupportedException(
                             string.Format(

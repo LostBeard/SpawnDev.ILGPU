@@ -1,10 +1,10 @@
-﻿<Project Sdk="Microsoft.NET.Sdk.Razor">
+<Project Sdk="Microsoft.NET.Sdk.Razor">
 
 	<PropertyGroup>
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.3.1-local.1</Version>
+		<Version>5.3.1-local.9</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
 		<PackageReleaseNotes>v5.3.0 - Built on SpawnDev.SpawnJS 3.0.0 (one .NET/JS crossing per call: createBindGroup 202 -> 38 us, an unbatched WebGPU dispatch 251 -> 80 us host time). WebGPU: Dispose submits pending work first (a pending MemSetToZero broke the next submit). No ILGPU API change; forks stay 2.3.7. Requires SpawnDev.SpawnJS 3.0.0. See CHANGELOG.md.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>

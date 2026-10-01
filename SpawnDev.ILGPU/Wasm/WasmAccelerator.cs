@@ -1817,7 +1817,7 @@ namespace SpawnDev.ILGPU.Wasm
                                     else if (innerVal is double dvi) flatArgs.Add(dvi.ToString("G17", System.Globalization.CultureInfo.InvariantCulture));
                                     else if (innerVal is long lvi) flatArgs.Add($"{lvi}n");
                                     else if (innerVal is ulong ulvi) flatArgs.Add($"{ulvi}n");
-                                    else flatArgs.Add(innerVal.ToString() ?? "0");
+                                    else flatArgs.Add(WasmScalarToken(innerVal));
                                     wasmArgIdx++;
                                     continue;
                                 }
@@ -2056,7 +2056,7 @@ namespace SpawnDev.ILGPU.Wasm
                             scratchCursor += structSize;
                             if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm] Struct scalar arg: type={value.GetType().Name}, size={structSize}, scratchOffset={absoluteOffset}, structRegionBase={structRegionBase}");
                         }
-                        else flatArgs.Add(value?.ToString() ?? "0");
+                        else flatArgs.Add(WasmScalarToken(value));
                     }
                     wasmArgIdx++;
                 }
@@ -3763,6 +3763,21 @@ namespace SpawnDev.ILGPU.Wasm
                 }
             }
         }
+
+        /// <summary>
+        /// The JS token for an integer-like scalar spliced into the worker's kernel call. <c>object.ToString()</c> was used
+        /// for every remaining primitive, which is wrong for two of them: a <c>bool</c> became <c>True</c>/<c>False</c> (not a
+        /// JS number - the kernel read false for true, found 2026-10-01 by BoolScalarParam_TrueAndFalse_Arrive) and a
+        /// <c>char</c> became the character itself. Both are integers to the kernel (Int1 / Int16 -> i32).
+        /// </summary>
+        private static string WasmScalarToken(object? value) => value switch
+        {
+            null => "0",
+            bool b => b ? "1" : "0",
+            char c => ((int)c).ToString(System.Globalization.CultureInfo.InvariantCulture),
+            IFormattable f => f.ToString(null, System.Globalization.CultureInfo.InvariantCulture),
+            _ => value.ToString() ?? "0",
+        };
 
         /// <summary>
         /// Writes a primitive value to a byte array at the specified offset.

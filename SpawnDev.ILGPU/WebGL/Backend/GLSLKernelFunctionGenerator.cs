@@ -29,6 +29,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
     /// </summary>
     internal sealed class GLSLKernelFunctionGenerator : GLSLCodeGenerator
     {
+        /// <summary>
+        /// The precision qualifier for a scalar uniform of <paramref name="glslType"/>, with its trailing space - none for
+        /// <c>bool</c>: GLSL ES 3.00 allows precision only on float/int/sampler types, and "uniform highp bool" fails to compile
+        /// ("'bool' : illegal type for precision qualifier"), so every kernel with a bool scalar parameter failed on WebGL
+        /// (found 2026-10-01 by BoolScalarParam_TrueAndFalse_Arrive).
+        /// </summary>
+        private static string GlslUniformPrecision(string glslType) => glslType.StartsWith("bool") || glslType.StartsWith("bvec") ? "" : "highp ";
+
         #region Fields
 
         private readonly EntryPoint EntryPoint;
@@ -1409,7 +1417,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     }
                     else
                     {
-                        Builder.AppendLine($"uniform highp {glslType} u_param{param.Index}; // scalar param[{param.Index}]");
+                        Builder.AppendLine($"uniform {GlslUniformPrecision(glslType)}{glslType} u_param{param.Index}; // scalar param[{param.Index}]");
                         _parameterBindings.Add(new KernelParameterBinding(param.Index, bindingIndex++, KernelParamKind.Scalar, glslType));
                         _generatorArgs.ParameterBindings.Add(_parameterBindings[^1]);
                     }
@@ -1518,7 +1526,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 {
                     // Body-struct primitive scalar field: standard uniform.
                     string scalarGlsl = TypeGenerator[f.FieldType];
-                    Builder.AppendLine($"uniform highp {scalarGlsl} {f.BindingName}; // body-struct scalar {paramIndex}.{f.ClrFieldName}");
+                    Builder.AppendLine($"uniform {GlslUniformPrecision(scalarGlsl)}{scalarGlsl} {f.BindingName}; // body-struct scalar {paramIndex}.{f.ClrFieldName}");
                     var binding = new KernelParameterBinding(
                         paramIndex: synth,
                         bindingIndex: bindingIndex++,

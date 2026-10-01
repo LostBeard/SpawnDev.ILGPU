@@ -33,6 +33,11 @@
         // descriptor brackets the first two; whatever the real call costs beyond that is Dawn's.
         // noopDescriptor touches .entries.length so the marshalled object cannot be optimised away.
         noop(x) { return x | 0; },
+        // WebGPUBackend.BatchSinglePass -> submitBatch (see there). Set from C# when the switch changes.
+        setSinglePass(v) { api.singlePass = !!v; return 0; },
+        // DIAGNOSTIC ABLATION (WebGPUBackend.DiagSubmitAblation; results are garbage while set): 1 = skip the tag-3
+        // queue.writeBuffer records, 2 = skip createBindGroup + the dispatch encode, 3 = return without doing anything.
+        setAblation(v) { api.ablation = v | 0; return 0; },
         noopDescriptor(desc) { return desc && desc.entries ? desc.entries.length : 0; },
 
         // Rewrite the dstOffset (slot [i*7+4]) of copy entries in place - the patch surface for
@@ -66,9 +71,17 @@
         // must land exactly where it sits in the batch: `data` is written ONCE into a persistent staging
         // buffer and each upload is a copyBufferToBuffer in record order. Reusing the staging buffer across
         // batches is safe because queue.writeBuffer executes after all previously submitted work.
-        // Command buffers are split every maxPassesPerSubmit passes (see replay() for why).
+        // Command buffers are split every maxPassesPerSubmit dispatches (see replay() for why).
+        // ONE COMPUTE PASS FOR A RUN OF DISPATCHES (api.singlePass, set from WebGPUBackend.BatchSinglePass - default
+        // true): consecutive dispatch records share an open pass; it is ended before an encoder-level command (copy,
+        // clear, upload) and at every submit, and setPipeline is skipped when the pipeline repeats. Ordering is the
+        // spec's, not ours: every dispatch in a compute pass is its OWN usage scope, so a storage write by one dispatch
+        // is visible to the next exactly as across passes - the implementation inserts the barrier. What a pass per
+        // dispatch added was a beginComputePass/end pair (and a fresh pass state) for each of ~800 dispatches a frame.
         // Returns the number of records processed.
         submitBatch(device, rec, n, data, maxPassesPerSubmit, uploadBytes) {
+            const ablation = api.ablation | 0;
+            if (ablation === 3) return 0;
             const objs = globalThis.SpawnJSInterop.spawnJSObjects;
             const obj = (id, what, at) => {
                 const o = objs[id];
@@ -90,10 +103,15 @@
                 }
                 queue.writeBuffer(staging, 0, data, 0, uploadBytes);
             }
+            const single = api.singlePass !== false;
             let enc = null, passes = 0, ops = 0;
+            let pass = null, passPipeline = null;
+            const endPass = () => { if (pass !== null) { pass.end(); pass = null; passPipeline = null; } };
             for (let i = 0; i < n; ops++) {
                 const tag = rec[i];
-                if (tag === 0) {
+                if (tag === 0 && ablation === 2) {
+                    i += 7 + 4 * rec[i + 3];
+                } else if (tag === 0) {
                     const ne = rec[i + 3];
                     const entries = new Array(ne);
                     let j = i + 7;
@@ -101,25 +119,38 @@
                         entries[e] = { binding: rec[j], resource: { buffer: obj(rec[j + 1], 'buffer', i), offset: rec[j + 2], size: rec[j + 3] } };
                     const bindGroup = device.createBindGroup({ layout: obj(rec[i + 2], 'bind group layout', i), entries });
                     if (enc === null) enc = device.createCommandEncoder();
-                    const pass = enc.beginComputePass();
-                    pass.setPipeline(obj(rec[i + 1], 'pipeline', i));
-                    pass.setBindGroup(0, bindGroup);
-                    pass.dispatchWorkgroups(rec[i + 4], rec[i + 5], rec[i + 6]);
-                    pass.end();
+                    const pipeline = obj(rec[i + 1], 'pipeline', i);
+                    if (single) {
+                        if (pass === null) pass = enc.beginComputePass();
+                        if (pipeline !== passPipeline) { pass.setPipeline(pipeline); passPipeline = pipeline; }
+                        pass.setBindGroup(0, bindGroup);
+                        pass.dispatchWorkgroups(rec[i + 4], rec[i + 5], rec[i + 6]);
+                    } else {
+                        const p1 = enc.beginComputePass();
+                        p1.setPipeline(pipeline);
+                        p1.setBindGroup(0, bindGroup);
+                        p1.dispatchWorkgroups(rec[i + 4], rec[i + 5], rec[i + 6]);
+                        p1.end();
+                    }
                     i = j;
-                    if (++passes >= cap) { queue.submit([enc.finish()]); enc = null; passes = 0; }
+                    if (++passes >= cap) { endPass(); queue.submit([enc.finish()]); enc = null; passes = 0; }
                 } else if (tag === 1) {
+                    endPass();
                     if (enc === null) enc = device.createCommandEncoder();
                     enc.copyBufferToBuffer(obj(rec[i + 1], 'copy source', i), rec[i + 2], obj(rec[i + 3], 'copy destination', i), rec[i + 4], rec[i + 5]);
                     i += 6;
                 } else if (tag === 2) {
+                    endPass();
                     if (enc === null) enc = device.createCommandEncoder();
                     enc.clearBuffer(obj(rec[i + 1], 'clear target', i), rec[i + 2], rec[i + 3]);
                     i += 4;
+                } else if (tag === 3 && ablation === 1) {
+                    i += 5;
                 } else if (tag === 3) {
                     queue.writeBuffer(obj(rec[i + 1], 'write target', i), rec[i + 2], data, rec[i + 3], rec[i + 4]);
                     i += 5;
                 } else if (tag === 4) {
+                    endPass();
                     if (enc === null) enc = device.createCommandEncoder();
                     enc.copyBufferToBuffer(staging, rec[i + 3], obj(rec[i + 1], 'upload target', i), rec[i + 2], rec[i + 4]);
                     i += 5;
@@ -127,6 +158,7 @@
                     throw new Error(`ilgpuWebGPUPlan.submitBatch: bad record tag ${tag} at ${i}`);
                 }
             }
+            endPass();
             if (enc !== null) queue.submit([enc.finish()]);
             return ops;
         },
@@ -282,7 +314,7 @@
     // Register - but never downgrade. A second copy of this module (another URL, an old cached file) must not
     // replace a newer one already in use: the library looks up ilgpuWebGPUPlan.submitBatch on every flush.
     // Bump HELPER_VERSION whenever the api's surface changes.
-    const HELPER_VERSION = 2;   // 2: submitBatch (plain-dispatch record batches, ordered uploads)
+    const HELPER_VERSION = 3;   // 2: submitBatch (plain-dispatch record batches, ordered uploads); 3: single-pass runs, setSinglePass
     api.version = HELPER_VERSION;
     const existing = globalThis.ilgpuWebGPUPlan;
     if (!existing || !(existing.version >= HELPER_VERSION)) globalThis.ilgpuWebGPUPlan = api;

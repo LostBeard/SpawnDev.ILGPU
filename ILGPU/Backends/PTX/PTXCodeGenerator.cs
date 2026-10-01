@@ -1167,6 +1167,14 @@ namespace ILGPU.Backends.PTX
                     targetBuilder.Append("b8 ");
                     targetBuilder.Append(paramName);
                     break;
+                case PrimitiveType primBool
+                    when primBool.BasicValueType == BasicValueType.Int1:
+                    // bool: the host passes the CLR's 1-byte bool. Declare 1-byte .b8 storage (a .pred
+                    // parameter is not valid PTX); the Int1 load path loads it through a 32-bit register
+                    // and converts to a predicate (non-zero = true).
+                    targetBuilder.Append("b8 ");
+                    targetBuilder.Append(paramName);
+                    break;
                 case PrimitiveType primFp4
                     when primFp4.BasicValueType == BasicValueType.Float4E2M1:
                     // FP4 (E2M1) - same f32-register model as FP8; 1-byte storage (value in the low

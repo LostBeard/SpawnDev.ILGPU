@@ -315,7 +315,9 @@ namespace ILGPU.Backends.OpenCL
         /// </summary>
         /// <param name="type">The type.</param>
         /// <returns>The interop size in bytes.</returns>
-        private int GetSizeOf(Type type) => TypeContext.CreateType(type).Size;
+        // bool: the pinned local is the CLR's 1-byte bool and the kernel declares it as uchar (OpenCL C has no
+        // bool kernel argument) - the IR size of Int1 is not 1, which made clSetKernelArg fail CL_INVALID_ARG_SIZE.
+        private int GetSizeOf(Type type) => type == typeof(bool) ? 1 : TypeContext.CreateType(type).Size;
 
         /// <summary>
         /// Emits code that sets an OpenCL kernel argument.

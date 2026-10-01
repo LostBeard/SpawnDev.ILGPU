@@ -1019,9 +1019,12 @@ namespace SpawnDev.ILGPU.WebGL
                             hi = (uint)(bits >> 32)
                         });
                     }
-                    else if (arg is long lVal && webGlAccel.Backend.EnableI64Emulation)
+                    else if ((arg is long || arg is ulong) && webGlAccel.Backend.EnableI64Emulation)
                     {
-                        var bits = (ulong)lVal;
+                        // ulong too: the kernel declares an unsigned 64-bit scalar as the same emulated pair. It fell
+                        // to the 32-bit uniform path below and arrived with its low word 0 (found 2026-10-01 by
+                        // ScalarPacking_AllKinds_VerifiedAgainstLegacy).
+                        var bits = arg is long lVal ? (ulong)lVal : (ulong)arg;
                         jsParams.Add(new
                         {
                             kind = "scalar_emu64",

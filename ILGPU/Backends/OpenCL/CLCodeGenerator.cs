@@ -359,6 +359,10 @@ namespace ILGPU.Backends.OpenCL
         /// </summary>
         private readonly List<(string Name, BasicValueType Type)> _subWordScalarParams = new();
 
+        /// <summary>bool kernel params collected during <see cref="SetupParameters"/>: declared as uchar storage
+        /// (OpenCL C has no bool kernel argument), converted to bool at the top of the body.</summary>
+        private readonly List<string> _boolScalarParams = new();
+
         /// <summary>True if <paramref name="param"/> is a by-value scalar of an EMULATED sub-word type
         /// (bf16 + FP8 always; Half when cl_khr_fp16 is absent) - the case whose storage (1-2 bytes)
         /// differs from its OpenCL compute type (`float`, 4 bytes). Native-half scalars and full-width
@@ -401,7 +405,21 @@ namespace ILGPU.Backends.OpenCL
                     targetBuilder.AppendLine(",");
 
                 targetBuilder.Append('\t');
-                if (IsEmulatedSubWordScalarParam(param))
+                if (this is CLKernelFunctionGenerator
+                    && param.ParameterType is ILGPU.IR.Types.PrimitiveType boolPrim
+                    && boolPrim.BasicValueType == BasicValueType.Int1)
+                {
+                    // OpenCL C forbids bool KERNEL arguments (CL_BUILD_PROGRAM_FAILURE). The host passes the
+                    // CLR's 1-byte bool: declare uchar storage under a raw name and convert at the top of the
+                    // body (EmitSubWordScalarParamConversions). KERNEL ENTRY ONLY: a [NoInlining] helper may take
+                    // a bool, and only the kernel body emits the conversion - applying this to helpers left their
+                    // bool undeclared (Blake2b.Compress's isLastBlock, NoInliningHelper_NegatedBoolParameter).
+                    targetBuilder.Append("uchar ");
+                    targetBuilder.Append(variable.VariableName);
+                    targetBuilder.Append(SubWordScalarRawSuffix);
+                    _boolScalarParams.Add(variable.VariableName);
+                }
+                else if (IsEmulatedSubWordScalarParam(param))
                 {
                     // Declare at 2-byte STORAGE (ushort for bf16, half for emulated Half) under a raw
                     // name; the body converts it to the float value variable (EmitSubWordScalarParam-
@@ -442,6 +460,15 @@ namespace ILGPU.Backends.OpenCL
         /// </summary>
         protected void EmitSubWordScalarParamConversions()
         {
+            foreach (var name in _boolScalarParams)
+            {
+                Builder.Append("\tbool ");
+                Builder.Append(name);
+                Builder.Append(" = ");
+                Builder.Append(name);
+                Builder.Append(SubWordScalarRawSuffix);
+                Builder.AppendLine(" != 0;");
+            }
             foreach (var (name, type) in _subWordScalarParams)
             {
                 Builder.Append("\tfloat ");

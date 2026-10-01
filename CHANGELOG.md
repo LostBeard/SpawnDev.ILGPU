@@ -3,6 +3,30 @@
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 ## Unreleased - float `%` is exact on every backend
 
+- **`bool` kernel SCALAR parameters work on all 6 backends** (2026-10-01, new test `BoolScalarParam_TrueAndFalse_Arrive`;
+  each backend red before its fix). WebGPU emitted `bitcast<bool>(u32)` (invalid WGSL: `BitcastFromU32`/`BitcastToU32`
+  now use `!= 0u` / `select(0u, 1u, ..)`); **Wasm received false for true** (scalars are spliced into the worker call as
+  text and `true.ToString()` is `True`, not a JS number - `WasmScalarToken`; `char` was likewise its character); WebGL
+  put `highp` on a `bool` uniform (illegal in GLSL ES); OpenCL C has no `bool` kernel argument (now `uchar` storage +
+  `!= 0`, and `clSetKernelArg` gets 1 byte, not the Int1 IR size); CPU and CUDA rejected `bool` as "not blittable"
+  (`ArgumentMapper` now accepts a TOP-LEVEL bool - a struct with a bool field stays rejected - and PTX declares it
+  `.param .b8`; the Int1 load already converts to a predicate).
+- **WebGL: a `ulong` scalar parameter arrived with its low word 0** - only `long` took the emulated 64-bit uniform pair.
+- **WebGPU dispatch host cost** (measured in a browser on Anaglyphohol's DAv3 video frame, 789 dispatches, by
+  unprofiled ABLATION - per-dispatch stopwatches cost more than what they time in the interpreter):
+  - The batch submit encodes a run of consecutive dispatches into ONE compute pass (was a pass per dispatch), ends it
+    before copies / clears / uploads and at every submit, and skips a repeated `setPipeline`. Ordering is the spec's:
+    each dispatch in a compute pass is its own usage scope. onnxruntime-web does the same (16 dispatches per pass).
+    `WebGPUBackend.BatchSinglePass` (default on) is the A/B switch; webgpuDispatchPlan.js helper v3. Gain: NOT YET
+    MEASURED (pending an A/B timing window).
+  - Scalar packing writes in place (`PackScalarsInto`, BinaryPrimitives into a reused arena array) instead of a
+    `byte[]` per value + a type-name string test per scalar - MEASURED ~1 ms of a ~45 ms frame (the packing writes
+    were a small part of their stage). The old packer is kept verbatim as `PackScalarsLegacy`;
+    `WebGPUBackend.VerifyScalarPacking` packs every dispatch both ways and throws on a byte difference (the WebGPU lane
+    ran 683/0 with it on; test `ScalarPacking_AllKinds_VerifiedAgainstLegacy` keeps it in the suite).
+  - Diagnostic ablation switches (default off, garbage results while set): `WebGPUAccelerator.DiagSkipRunKernel`,
+    `DiagRunKernelStopAfter` (stage exits through RunKernel) and `WebGPUBackend.DiagSubmitAblation` (JS submit parts).
+
 - **`float` / `double` `%` was inexact or wrong on 5 of 7 backends.** C# defines `x % y` as the exact truncated
   remainder (IEEE fmod: no rounding, the true remainder is always representable). WebGPU, WebGL and Wasm lowered it to
   `x - y * trunc(x / y)`, and CUDA without libdevice used `frac(|x * rcp(y)|) * |y|`: `-7f % 3f` = -1.0000005 (CUDA),

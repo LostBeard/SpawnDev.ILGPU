@@ -1069,6 +1069,424 @@ namespace SpawnDev.ILGPU.WebGPU
         }
 
         /// <summary>
+        /// DIAGNOSTIC ABLATION - NOTHING IS DISPATCHED WHILE SET (results are garbage). <see cref="RunKernel"/> returns at
+        /// entry, so a workload timed with this set costs everything EXCEPT the per-dispatch WebGPU work (shader resolve,
+        /// argument build, bind group, encode). The difference to a normal run is that work, measured without the
+        /// per-dispatch stopwatches of <see cref="Backend.WebGPUBackend.EnableDispatchProfiling"/>, which in a browser's
+        /// interpreter cost a large share of what they time. Off by default; never set it outside a measurement.
+        /// </summary>
+        public static bool DiagSkipRunKernel;
+
+        /// <summary>
+        /// DIAGNOSTIC ABLATION - NOTHING IS DISPATCHED WHILE SET (results are garbage). Ends <see cref="RunKernel"/> early
+        /// at a stage boundary, so a timed workload pays only the stages before it, in pipeline order: 1 = after shader
+        /// resolve, 4 = after the argument expansion + scalar-manifest lookup, 5 = after the view bindings, 6 = after the
+        /// scalar VALUES are packed, 7 = after the scalar buffer is rented, written and bound, 8 = after the spinlock /
+        /// binding-count validation, 2 = after the aliasing check (the whole argument build), 3 = after the bind group
+        /// and workgroup counts (just before the encode), 9 = after the dispatch is recorded (no dispatch log /
+        /// deferral bookkeeping). A normal run adds those and the batch submit. Differences between levels (and <see cref="DiagSkipRunKernel"/> /
+        /// a normal run) are each stage's cost with no per-dispatch stopwatch in the way. Each exit cleans up like the
+        /// error path. 0 = off (default); never set it outside a measurement.
+        /// </summary>
+        public static int DiagRunKernelStopAfter;
+
+        /// <summary>
+        /// THE REFERENCE scalar packer - the pre-2026-10-01 per-dispatch code, kept verbatim as the oracle for
+        /// <see cref="PackScalarsInto"/> (<see cref="Backend.WebGPUBackend.VerifyScalarPacking"/> runs both on every
+        /// dispatch and throws on any byte difference). Do not "optimize" it: its value is that it is the old code.
+        /// </summary>
+        private static byte[] PackScalarsLegacy(int totalBytes, Dictionary<int, ScalarPackingEntry> packedScalarLookup,
+            List<object?> expandedArgs, IReadOnlyList<ScalarPackingEntry> manifest, WebGPUAccelerator webGpuAccel,
+            Dictionary<int, int> viewElementOffsets, Dictionary<int, int> viewElementCounts,
+            Dictionary<(int paramIdx, int fieldIdx), int>? coalesceFieldElementOffsets,
+            uint dispatchUserDim, uint dispatchUserDimY, uint dispatchUserDimZ)
+        {
+            var packedData = new byte[totalBytes];
+
+            // Use packedScalarLookup (effectiveArgsIdx → entry) which correctly handles
+            // both regular params and body struct scalar fields (synthetic param indices).
+            foreach (var kvp in packedScalarLookup)
+            {
+                int effectiveArgsIdx = kvp.Key;
+                var entry = kvp.Value;
+                var arg = expandedArgs[effectiveArgsIdx];
+                int byteOffset = entry.ByteOffset;
+
+                if (WebGPUBackend.VerboseLogging)
+                    WebGPUBackend.Log($"[WebGPU-Debug] Packing scalar param {entry.ParamIndex} (effectiveArgs[{effectiveArgsIdx}]) at byte offset {byteOffset}: {arg}");
+
+                // Unwrap SpecializedValue<T> to extract the inner T value
+                if (arg != null && arg.GetType().IsGenericType && 
+                    arg.GetType().Name.StartsWith("SpecializedValue"))
+                {
+                    arg = arg.GetType().GetProperty("Value")!.GetValue(arg);
+                }
+
+                if (arg is int iVal)
+                    BitConverter.GetBytes(iVal).CopyTo(packedData, byteOffset);
+                else if (arg is float fVal)
+                    BitConverter.GetBytes(fVal).CopyTo(packedData, byteOffset);
+                else if (arg is uint uiVal)
+                    BitConverter.GetBytes(uiVal).CopyTo(packedData, byteOffset);
+                else if (arg is long lVal)
+                {
+                    // emu_i64: pack as two u32 values (low word, high word)
+                    BitConverter.GetBytes((uint)(lVal & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset);
+                    if (byteOffset + 4 < packedData.Length)
+                BitConverter.GetBytes((uint)((lVal >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 4);
+                }
+                else if (arg is ulong ulVal)
+                {
+                    // emu_u64: pack as two u32 values (low word, high word)
+                    BitConverter.GetBytes((uint)(ulVal & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset);
+                    if (byteOffset + 4 < packedData.Length)
+                BitConverter.GetBytes((uint)((ulVal >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 4);
+                }
+                else if (arg is LongIndex1D li1)
+                {
+                    // LongIndex1D wraps a long — pack as emu_i64 (two u32 values)
+                    long rawVal = li1.X;
+                    BitConverter.GetBytes((uint)(rawVal & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset);
+                    if (byteOffset + 4 < packedData.Length)
+                BitConverter.GetBytes((uint)((rawVal >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 4);
+                }
+                else if (arg is LongIndex2D li2)
+                {
+                    // LongIndex2D: pack X then Y as two emu_i64 pairs
+                    BitConverter.GetBytes((uint)(li2.X & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset);
+                    if (byteOffset + 4 < packedData.Length)
+                BitConverter.GetBytes((uint)((li2.X >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 4);
+                    if (byteOffset + 8 < packedData.Length)
+                BitConverter.GetBytes((uint)(li2.Y & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 8);
+                    if (byteOffset + 12 < packedData.Length)
+                BitConverter.GetBytes((uint)((li2.Y >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 12);
+                }
+                else if (arg is LongIndex3D li3)
+                {
+                    // LongIndex3D: pack X, Y, Z as three emu_i64 pairs
+                    BitConverter.GetBytes((uint)(li3.X & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset);
+                    if (byteOffset + 4 < packedData.Length)
+                BitConverter.GetBytes((uint)((li3.X >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 4);
+                    if (byteOffset + 8 < packedData.Length)
+                BitConverter.GetBytes((uint)(li3.Y & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 8);
+                    if (byteOffset + 12 < packedData.Length)
+                BitConverter.GetBytes((uint)((li3.Y >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 12);
+                    if (byteOffset + 16 < packedData.Length)
+                BitConverter.GetBytes((uint)(li3.Z & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 16);
+                    if (byteOffset + 20 < packedData.Length)
+                BitConverter.GetBytes((uint)((li3.Z >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 20);
+                }
+                else if (arg is double dVal)
+                {
+                    if (webGpuAccel.Backend.EnableF64Emulation)
+                    {
+                // Write full 64-bit IEEE-754 as 2 u32 values
+                BitConverter.GetBytes(dVal).CopyTo(packedData, byteOffset);
+                    }
+                    else
+                    {
+                BitConverter.GetBytes((float)dVal).CopyTo(packedData, byteOffset);
+                    }
+                }
+                else if (arg is global::ILGPU.Half hVal)
+                {
+                    // Half occupies 2 bytes but is packed into a u32 slot.
+                    // Place the raw f16 bits in the low 16 bits so the WGSL
+                    // bitcast<vec2<f16>>(u32).x pattern extracts the correct value.
+                    ushort rawBits = global::ILGPU.Interop.FloatAsInt(hVal);
+                    BitConverter.GetBytes(rawBits).CopyTo(packedData, byteOffset);
+                }
+                else if (arg is byte bVal)
+                    BitConverter.GetBytes((uint)bVal).CopyTo(packedData, byteOffset);
+                else if (arg is bool blVal)
+                    BitConverter.GetBytes(blVal ? 1u : 0u).CopyTo(packedData, byteOffset);
+                else if (arg is Index1D idx1)
+                    BitConverter.GetBytes(idx1.X).CopyTo(packedData, byteOffset);
+                else if (arg is Index2D idx2)
+                {
+                    BitConverter.GetBytes(idx2.X).CopyTo(packedData, byteOffset);
+                    if (byteOffset + 4 < packedData.Length)
+                BitConverter.GetBytes(idx2.Y).CopyTo(packedData, byteOffset + 4);
+                }
+                else if (arg is Index3D idx3)
+                {
+                    BitConverter.GetBytes(idx3.X).CopyTo(packedData, byteOffset);
+                    if (byteOffset + 4 < packedData.Length)
+                BitConverter.GetBytes(idx3.Y).CopyTo(packedData, byteOffset + 4);
+                    if (byteOffset + 8 < packedData.Length)
+                BitConverter.GetBytes(idx3.Z).CopyTo(packedData, byteOffset + 8);
+                }
+                else if (arg != null && (arg.GetType().IsValueType
+                    || arg.GetType().IsDefined(typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute), false)))
+                {
+                    // Fallback for value types and capturing lambda display classes:
+                    // serialize field bytes directly
+                    if (arg.GetType().IsValueType)
+                    {
+                int structSize = global::ILGPU.Interop.SizeOf(arg.GetType());
+                byte[] bytes = new byte[structSize];
+                GetCopyStructMethod(arg.GetType()).Invoke(null, new object[] { arg, bytes });
+                int copyLen = Math.Min(structSize, packedData.Length - byteOffset);
+                Array.Copy(bytes, 0, packedData, byteOffset, copyLen);
+                    }
+                    else
+                    {
+                // Display class: flatten instance fields
+                var fields = arg.GetType().GetFields(
+                    System.Reflection.BindingFlags.Instance |
+                    System.Reflection.BindingFlags.Public |
+                    System.Reflection.BindingFlags.NonPublic);
+                int localOffset = byteOffset;
+                foreach (var f in fields)
+                {
+                    var val = f.GetValue(arg)!;
+                    int fieldSize = global::ILGPU.Interop.SizeOf(f.FieldType);
+                    var fieldBytes = new byte[fieldSize];
+                    GetCopyStructMethod(f.FieldType).Invoke(
+                        null, new object[] { val, fieldBytes });
+                    int copyLen = Math.Min(fieldSize,
+                        packedData.Length - localOffset);
+                    Array.Copy(fieldBytes, 0, packedData,
+                        localOffset, copyLen);
+                    localOffset += fieldSize;
+                }
+                    }
+                }
+                else if (arg != null)
+                    throw new NotSupportedException($"Unsupported packed scalar type: {arg.GetType()}");
+
+            }
+
+            // --- Pack view element offsets and counts ---
+            // For each IsViewOffset entry in the manifest, pack the element offset.
+            // For each IsViewCount entry, pack the true element count for packed-struct views.
+            // For each IsCoalesceFieldOffset entry, pack the field's u32-slot offset within
+            // its coalesced shared buffer (computed during coalesce-processing pre-pass).
+            foreach (var entry in manifest)
+            {
+                if (entry.IsUserDim)
+                {
+                    // 0 (no dimension) = no limit, matching the old override's default.
+                    uint axisDim = entry.UserDimAxis switch { 1 => dispatchUserDimY, 2 => dispatchUserDimZ, _ => dispatchUserDim };
+                    uint ud = axisDim > 0 ? axisDim : uint.MaxValue;
+                    BitConverter.GetBytes(ud).CopyTo(packedData, entry.ByteOffset);
+                    continue;
+                }
+                if (entry.IsCoalesceFieldOffset)
+                {
+                    int byteOffset = entry.ByteOffset;
+                    if (byteOffset + 4 > packedData.Length)
+                    {
+                var newData = new byte[byteOffset + 4];
+                Array.Copy(packedData, newData, packedData.Length);
+                packedData = newData;
+                    }
+                    int slotOffset = 0;
+                    if (coalesceFieldElementOffsets != null
+                && coalesceFieldElementOffsets.TryGetValue((entry.CoalesceBodyStructParamIndex, entry.CoalesceFieldIndex), out int co))
+                slotOffset = co;
+                    BitConverter.GetBytes(slotOffset).CopyTo(packedData, byteOffset);
+                    if (WebGPUBackend.VerboseLogging)
+                WebGPUBackend.Log($"[WebGPU-Coalesce] Packed coalesce field offset: param={entry.CoalesceBodyStructParamIndex}, field={entry.CoalesceFieldIndex}, slotOffset={slotOffset}, byteOffset={byteOffset}");
+                    continue;
+                }
+                if (entry.IsViewOffset)
+                {
+                    int byteOffset = entry.ByteOffset;
+                    if (byteOffset + 4 > packedData.Length)
+                    {
+                // Extend packedData if needed (view offsets may extend beyond user scalars)
+                var newData = new byte[byteOffset + 4];
+                Array.Copy(packedData, newData, packedData.Length);
+                packedData = newData;
+                    }
+                    int elemOffset = viewElementOffsets.TryGetValue(entry.ViewBindingIndex, out int eo) ? eo : 0;
+                    BitConverter.GetBytes(elemOffset).CopyTo(packedData, byteOffset);
+                    if (WebGPUBackend.VerboseLogging)
+                WebGPUBackend.Log($"[WebGPU-Debug] Packed view offset: binding={entry.ViewBindingIndex}, elemOffset={elemOffset}, byteOffset={byteOffset}");
+                }
+                else if (entry.IsViewCount)
+                {
+                    int byteOffset = entry.ByteOffset;
+                    if (byteOffset + 4 > packedData.Length)
+                    {
+                var newData = new byte[byteOffset + 4];
+                Array.Copy(packedData, newData, packedData.Length);
+                packedData = newData;
+                    }
+                    int elemCount = viewElementCounts.TryGetValue(entry.ViewCountBindingIndex, out int ec) ? ec : 0;
+                    BitConverter.GetBytes(elemCount).CopyTo(packedData, byteOffset);
+                    if (WebGPUBackend.VerboseLogging)
+                WebGPUBackend.Log($"[WebGPU-Debug] Packed view count: binding={entry.ViewCountBindingIndex}, elemCount={elemCount}, byteOffset={byteOffset}");
+                }
+            }
+            return packedData;
+        }
+
+        private static byte[]? _packedScratch;
+        /// <summary>A cleared scratch array of at least <paramref name="length"/> bytes for a batch-mode scalar pack
+        /// (BatchWrite copies it out at once, so one array serves every dispatch).</summary>
+        private static byte[] RentPackedScratch(int length)
+        {
+            if (_packedScratch == null || _packedScratch.Length < length)
+                _packedScratch = new byte[Math.Max(length, 256)];
+            else
+                Array.Clear(_packedScratch, 0, length);
+            return _packedScratch;
+        }
+
+        private static readonly ConcurrentDictionary<Type, PropertyInfo?> _specializedValueProperty = new();
+        /// <summary>The <c>Value</c> property of a <c>SpecializedValue&lt;T&gt;</c> type, else null (cached per type - the
+        /// check used to be a GetType().Name.StartsWith on every packed scalar of every dispatch).</summary>
+        private static PropertyInfo? SpecializedValueProperty(Type t) => _specializedValueProperty.GetOrAdd(t, static tt =>
+            tt.IsGenericType && tt.Name.StartsWith("SpecializedValue") ? tt.GetProperty("Value") : null);
+
+        /// <summary>
+        /// Packs a dispatch's scalar arguments, view element offsets / counts, coalesce field offsets and user
+        /// dimensions into <paramref name="data"/> (already zeroed, exactly <see cref="WebGPUCompiledKernel.PackedScalarByteLength"/>
+        /// long). Same bytes as <see cref="PackScalarsLegacy"/>, written in place with <see cref="System.Buffers.Binary.BinaryPrimitives"/>:
+        /// the legacy code allocated a byte[] per value (BitConverter.GetBytes) and type-tested every scalar's name.
+        /// MEASURED 2026-10-01 (Anaglyphohol DAv3 video frame, WebGPU, browser, unprofiled ablation): the packing
+        /// step was ~6.3 ms of a ~46 ms frame across 789 dispatches.
+        /// </summary>
+        /// <param name="scalarBytes">The scalar-slot length the legacy packer wrote the scalars into BEFORE growing its
+        /// array for view offsets - its "next word only if inside the array" bounds are against this, not the final length.</param>
+        private static void PackScalarsInto(Span<byte> data, int scalarBytes, Dictionary<int, ScalarPackingEntry> packedScalarLookup,
+            List<object?> expandedArgs, IReadOnlyList<ScalarPackingEntry> manifest, bool f64Emulation,
+            Dictionary<int, int> viewElementOffsets, Dictionary<int, int> viewElementCounts,
+            Dictionary<(int paramIdx, int fieldIdx), int>? coalesceFieldElementOffsets,
+            uint dispatchUserDim, uint dispatchUserDimY, uint dispatchUserDimZ)
+        {
+            var all = data;
+            data = all.Slice(0, Math.Min(scalarBytes, all.Length));   // the scalar loop sees the legacy pre-growth array
+            foreach (var kvp in packedScalarLookup)
+            {
+                var entry = kvp.Value;
+                var arg = expandedArgs[kvp.Key];
+                int o = entry.ByteOffset;
+                if (WebGPUBackend.VerboseLogging)
+                    WebGPUBackend.Log($"[WebGPU-Debug] Packing scalar param {entry.ParamIndex} (effectiveArgs[{kvp.Key}]) at byte offset {o}: {arg}");
+                if (arg != null && SpecializedValueProperty(arg.GetType()) is { } svp) arg = svp.GetValue(arg);
+                switch (arg)
+                {
+                    case int v: WriteI32(data, o, v); break;
+                    case float v: WriteF32(data, o, v); break;
+                    case uint v: WriteU32(data, o, v); break;
+                    // emu_i64 / emu_u64 / LongIndex: two u32 words (low, high) per component; each later word only
+                    // if it lies inside the array (the legacy bound - kept, it decides how a short slot truncates).
+                    case long v: WriteU64Words(data, o, (ulong)v); break;
+                    case ulong v: WriteU64Words(data, o, v); break;
+                    case LongIndex1D v: WriteU64Words(data, o, (ulong)v.X); break;
+                    case LongIndex2D v:
+                        WriteU64Words(data, o, (ulong)v.X);
+                        if (o + 8 < data.Length) WriteU64Words(data, o + 8, (ulong)v.Y);
+                        break;
+                    case LongIndex3D v:
+                        WriteU64Words(data, o, (ulong)v.X);
+                        if (o + 8 < data.Length) WriteU64Words(data, o + 8, (ulong)v.Y);
+                        if (o + 16 < data.Length) WriteU64Words(data, o + 16, (ulong)v.Z);
+                        break;
+                    case double v:
+                        if (f64Emulation) System.Buffers.Binary.BinaryPrimitives.WriteDoubleLittleEndian(data.Slice(o, 8), v);
+                        else WriteF32(data, o, (float)v);
+                        break;
+                    case global::ILGPU.Half v:
+                        // raw f16 bits in the low 16 bits of the u32 slot (WGSL bitcast<vec2<f16>>(u32).x)
+                        System.Buffers.Binary.BinaryPrimitives.WriteUInt16LittleEndian(data.Slice(o, 2), global::ILGPU.Interop.FloatAsInt(v));
+                        break;
+                    case byte v: WriteU32(data, o, v); break;
+                    case bool v: WriteU32(data, o, v ? 1u : 0u); break;
+                    case Index1D v: WriteI32(data, o, v.X); break;
+                    case Index2D v:
+                        WriteI32(data, o, v.X);
+                        if (o + 4 < data.Length) WriteI32(data, o + 4, v.Y);
+                        break;
+                    case Index3D v:
+                        WriteI32(data, o, v.X);
+                        if (o + 4 < data.Length) WriteI32(data, o + 4, v.Y);
+                        if (o + 8 < data.Length) WriteI32(data, o + 8, v.Z);
+                        break;
+                    default:
+                        PackStructScalar(data, o, arg);
+                        break;
+                }
+            }
+
+            // View element offsets / counts, coalesce field offsets, user dimensions (see PackScalarsLegacy).
+            data = all;
+            foreach (var entry in manifest)
+            {
+                if (entry.IsUserDim)
+                {
+                    uint axisDim = entry.UserDimAxis switch { 1 => dispatchUserDimY, 2 => dispatchUserDimZ, _ => dispatchUserDim };
+                    WriteU32(data, entry.ByteOffset, axisDim > 0 ? axisDim : uint.MaxValue);
+                }
+                else if (entry.IsCoalesceFieldOffset)
+                {
+                    int slotOffset = 0;
+                    if (coalesceFieldElementOffsets != null
+                        && coalesceFieldElementOffsets.TryGetValue((entry.CoalesceBodyStructParamIndex, entry.CoalesceFieldIndex), out int co))
+                        slotOffset = co;
+                    WriteI32(data, entry.ByteOffset, slotOffset);
+                }
+                else if (entry.IsViewOffset)
+                    WriteI32(data, entry.ByteOffset, viewElementOffsets.TryGetValue(entry.ViewBindingIndex, out int eo) ? eo : 0);
+                else if (entry.IsViewCount)
+                    WriteI32(data, entry.ByteOffset, viewElementCounts.TryGetValue(entry.ViewCountBindingIndex, out int ec) ? ec : 0);
+            }
+        }
+
+        private static void WriteI32(Span<byte> d, int o, int v) => System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(d.Slice(o, 4), v);
+        private static void WriteU32(Span<byte> d, int o, uint v) => System.Buffers.Binary.BinaryPrimitives.WriteUInt32LittleEndian(d.Slice(o, 4), v);
+        private static void WriteF32(Span<byte> d, int o, float v) => System.Buffers.Binary.BinaryPrimitives.WriteSingleLittleEndian(d.Slice(o, 4), v);
+        /// <summary>Low word at <paramref name="o"/>, high word at o + 4 only if o + 4 is inside the array (the legacy rule).</summary>
+        private static void WriteU64Words(Span<byte> d, int o, ulong v)
+        {
+            WriteU32(d, o, (uint)(v & 0xFFFFFFFFUL));
+            if (o + 4 < d.Length) WriteU32(d, o + 4, (uint)(v >> 32));
+        }
+
+        /// <summary>The rare packed scalar that is a user struct or a capturing lambda's display class: field bytes, as
+        /// the legacy packer serialized them (reflection - not on the hot path of any shipped kernel).</summary>
+        private static void PackStructScalar(Span<byte> data, int byteOffset, object? arg)
+        {
+            if (arg == null) return;
+            var t = arg.GetType();
+            if (t.IsValueType)
+            {
+                int structSize = global::ILGPU.Interop.SizeOf(t);
+                byte[] bytes = new byte[structSize];
+                GetCopyStructMethod(t).Invoke(null, new object[] { arg, bytes });
+                int copyLen = Math.Min(structSize, data.Length - byteOffset);
+                bytes.AsSpan(0, copyLen).CopyTo(data.Slice(byteOffset));
+            }
+            else if (t.IsDefined(typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute), false))
+            {
+                var fields = t.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+                int localOffset = byteOffset;
+                foreach (var f in fields)
+                {
+                    var val = f.GetValue(arg)!;
+                    int fieldSize = global::ILGPU.Interop.SizeOf(f.FieldType);
+                    var fieldBytes = new byte[fieldSize];
+                    GetCopyStructMethod(f.FieldType).Invoke(null, new object[] { val, fieldBytes });
+                    int copyLen = Math.Min(fieldSize, data.Length - localOffset);
+                    fieldBytes.AsSpan(0, copyLen).CopyTo(data.Slice(localOffset));
+                    localOffset += fieldSize;
+                }
+            }
+            else throw new NotSupportedException($"Unsupported packed scalar type: {t}");
+        }
+
+        /// <summary>An ablation exit's cleanup: nothing was encoded, so the per-dispatch coalesce buffers die now.</summary>
+        private static void DiagDestroyCoalesced(List<GPUBuffer>? buffers)
+        {
+            if (buffers == null) return;
+            foreach (var b in buffers) { try { b.Destroy(); b.Dispose(); } catch { } }
+            buffers.Clear();
+        }
+
+        /// <summary>
         /// Executes a WebGPU kernel with the specified parameters.
         /// </summary>
         /// <param name="kernel">The kernel to execute.</param>
@@ -1077,6 +1495,7 @@ namespace SpawnDev.ILGPU.WebGPU
         /// <param name="args">The kernel arguments.</param>
         public static void RunKernel(Kernel kernel, AcceleratorStream stream, object dimension, object[] args)
         {
+            if (DiagSkipRunKernel) return;   // DIAGNOSTIC ABLATION - see DiagSkipRunKernel
             var webGpuAccel = (WebGPUAccelerator)kernel.Accelerator;
             var nativeAccel = webGpuAccel.NativeAccelerator;
 
@@ -1221,6 +1640,7 @@ namespace SpawnDev.ILGPU.WebGPU
             }
             var device = nativeAccel.NativeDevice!;
             if (_prof) { _profTsShader = System.Diagnostics.Stopwatch.GetTimestamp(); _profA1 = GC.GetAllocatedBytesForCurrentThread(); } // end shader-resolve phase
+            if (DiagRunKernelStopAfter == 1) return;   // DIAGNOSTIC ABLATION - see DiagRunKernelStopAfter
 
             // Track scalar buffers for pool return (reuse list to avoid per-frame allocation)
             _reusableScalarReturnList ??= new List<GPUBuffer>();
@@ -1752,6 +2172,11 @@ namespace SpawnDev.ILGPU.WebGPU
                 }
 
                 long _profTsP1 = _prof ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+                if (DiagRunKernelStopAfter == 4)   // DIAGNOSTIC ABLATION - see DiagRunKernelStopAfter
+                {
+                    DiagDestroyCoalesced(coalescedBuffersToDestroyAfterDispatch);
+                    return;
+                }
                 // --- Phase 1: Emit bindings for non-packed params (views, structs, atomics) ---
                 // effectiveArgs[] has body structs pre-expanded into their constituent fields.
                 // Skip the index param (effectiveArgs[0..runtimeIndexSkip-1]) and packed scalars.
@@ -2035,6 +2460,11 @@ namespace SpawnDev.ILGPU.WebGPU
                 }
 
                 long _profTsP2 = _prof ? System.Diagnostics.Stopwatch.GetTimestamp() : 0L;
+                if (DiagRunKernelStopAfter == 5)   // DIAGNOSTIC ABLATION - see DiagRunKernelStopAfter
+                {
+                    DiagDestroyCoalesced(coalescedBuffersToDestroyAfterDispatch);
+                    return;   // the finally returns the scalar buffers
+                }
                 // --- Phase 2: Pack all scalar args into single buffer ---
                 if (compiledKernel.HasScalarPacking)
                 {
@@ -2046,226 +2476,32 @@ namespace SpawnDev.ILGPU.WebGPU
                         totalSlots = Math.Max(totalSlots, entry.ByteOffset / 4 + entry.SlotCount);
                     int totalBytes = Math.Max(totalSlots * 4, 4);
 
-                    var packedData = new byte[totalBytes];
-
-                    // Use packedScalarLookup (effectiveArgsIdx → entry) which correctly handles
-                    // both regular params and body struct scalar fields (synthetic param indices).
-                    foreach (var kvp in packedScalarLookup)
+                    // Final packed length (WebGPUCompiledKernel.PackedScalarByteLength): the scalar slots, grown to cover
+                    // every view-offset / view-count / coalesce-offset word exactly as the per-entry growth here used to.
+                    int packedLength = compiledKernel.PackedScalarByteLength;
+                    // Batch mode copies the bytes into its arena at BatchWrite, so the array can be reused. The bind-group
+                    // cache and dispatch-plan capture KEEP it (packedDataForCache / NoteScalarUpload): they get their own.
+                    bool reusePacked = batchMode;
+                    byte[] packedData = reusePacked ? RentPackedScratch(packedLength) : new byte[packedLength];
+                    PackScalarsInto(packedData.AsSpan(0, packedLength), totalBytes, packedScalarLookup, expandedArgs, manifest,
+                        webGpuAccel.Backend.EnableF64Emulation, viewElementOffsets, viewElementCounts,
+                        coalesceFieldElementOffsets, dispatchUserDim, dispatchUserDimY, dispatchUserDimZ);
+                    if (WebGPUBackend.VerifyScalarPacking)
                     {
-                        int effectiveArgsIdx = kvp.Key;
-                        var entry = kvp.Value;
-                        var arg = expandedArgs[effectiveArgsIdx];
-                        int byteOffset = entry.ByteOffset;
-
-                        if (WebGPUBackend.VerboseLogging)
-                            WebGPUBackend.Log($"[WebGPU-Debug] Packing scalar param {entry.ParamIndex} (effectiveArgs[{effectiveArgsIdx}]) at byte offset {byteOffset}: {arg}");
-
-                        // Unwrap SpecializedValue<T> to extract the inner T value
-                        if (arg != null && arg.GetType().IsGenericType && 
-                            arg.GetType().Name.StartsWith("SpecializedValue"))
-                        {
-                            arg = arg.GetType().GetProperty("Value")!.GetValue(arg);
-                        }
-
-                        if (arg is int iVal)
-                            BitConverter.GetBytes(iVal).CopyTo(packedData, byteOffset);
-                        else if (arg is float fVal)
-                            BitConverter.GetBytes(fVal).CopyTo(packedData, byteOffset);
-                        else if (arg is uint uiVal)
-                            BitConverter.GetBytes(uiVal).CopyTo(packedData, byteOffset);
-                        else if (arg is long lVal)
-                        {
-                            // emu_i64: pack as two u32 values (low word, high word)
-                            BitConverter.GetBytes((uint)(lVal & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset);
-                            if (byteOffset + 4 < packedData.Length)
-                                BitConverter.GetBytes((uint)((lVal >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 4);
-                        }
-                        else if (arg is ulong ulVal)
-                        {
-                            // emu_u64: pack as two u32 values (low word, high word)
-                            BitConverter.GetBytes((uint)(ulVal & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset);
-                            if (byteOffset + 4 < packedData.Length)
-                                BitConverter.GetBytes((uint)((ulVal >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 4);
-                        }
-                        else if (arg is LongIndex1D li1)
-                        {
-                            // LongIndex1D wraps a long — pack as emu_i64 (two u32 values)
-                            long rawVal = li1.X;
-                            BitConverter.GetBytes((uint)(rawVal & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset);
-                            if (byteOffset + 4 < packedData.Length)
-                                BitConverter.GetBytes((uint)((rawVal >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 4);
-                        }
-                        else if (arg is LongIndex2D li2)
-                        {
-                            // LongIndex2D: pack X then Y as two emu_i64 pairs
-                            BitConverter.GetBytes((uint)(li2.X & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset);
-                            if (byteOffset + 4 < packedData.Length)
-                                BitConverter.GetBytes((uint)((li2.X >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 4);
-                            if (byteOffset + 8 < packedData.Length)
-                                BitConverter.GetBytes((uint)(li2.Y & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 8);
-                            if (byteOffset + 12 < packedData.Length)
-                                BitConverter.GetBytes((uint)((li2.Y >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 12);
-                        }
-                        else if (arg is LongIndex3D li3)
-                        {
-                            // LongIndex3D: pack X, Y, Z as three emu_i64 pairs
-                            BitConverter.GetBytes((uint)(li3.X & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset);
-                            if (byteOffset + 4 < packedData.Length)
-                                BitConverter.GetBytes((uint)((li3.X >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 4);
-                            if (byteOffset + 8 < packedData.Length)
-                                BitConverter.GetBytes((uint)(li3.Y & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 8);
-                            if (byteOffset + 12 < packedData.Length)
-                                BitConverter.GetBytes((uint)((li3.Y >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 12);
-                            if (byteOffset + 16 < packedData.Length)
-                                BitConverter.GetBytes((uint)(li3.Z & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 16);
-                            if (byteOffset + 20 < packedData.Length)
-                                BitConverter.GetBytes((uint)((li3.Z >> 32) & 0xFFFFFFFFL)).CopyTo(packedData, byteOffset + 20);
-                        }
-                        else if (arg is double dVal)
-                        {
-                            if (webGpuAccel.Backend.EnableF64Emulation)
-                            {
-                                // Write full 64-bit IEEE-754 as 2 u32 values
-                                BitConverter.GetBytes(dVal).CopyTo(packedData, byteOffset);
-                            }
-                            else
-                            {
-                                BitConverter.GetBytes((float)dVal).CopyTo(packedData, byteOffset);
-                            }
-                        }
-                        else if (arg is global::ILGPU.Half hVal)
-                        {
-                            // Half occupies 2 bytes but is packed into a u32 slot.
-                            // Place the raw f16 bits in the low 16 bits so the WGSL
-                            // bitcast<vec2<f16>>(u32).x pattern extracts the correct value.
-                            ushort rawBits = global::ILGPU.Interop.FloatAsInt(hVal);
-                            BitConverter.GetBytes(rawBits).CopyTo(packedData, byteOffset);
-                        }
-                        else if (arg is byte bVal)
-                            BitConverter.GetBytes((uint)bVal).CopyTo(packedData, byteOffset);
-                        else if (arg is bool blVal)
-                            BitConverter.GetBytes(blVal ? 1u : 0u).CopyTo(packedData, byteOffset);
-                        else if (arg is Index1D idx1)
-                            BitConverter.GetBytes(idx1.X).CopyTo(packedData, byteOffset);
-                        else if (arg is Index2D idx2)
-                        {
-                            BitConverter.GetBytes(idx2.X).CopyTo(packedData, byteOffset);
-                            if (byteOffset + 4 < packedData.Length)
-                                BitConverter.GetBytes(idx2.Y).CopyTo(packedData, byteOffset + 4);
-                        }
-                        else if (arg is Index3D idx3)
-                        {
-                            BitConverter.GetBytes(idx3.X).CopyTo(packedData, byteOffset);
-                            if (byteOffset + 4 < packedData.Length)
-                                BitConverter.GetBytes(idx3.Y).CopyTo(packedData, byteOffset + 4);
-                            if (byteOffset + 8 < packedData.Length)
-                                BitConverter.GetBytes(idx3.Z).CopyTo(packedData, byteOffset + 8);
-                        }
-                        else if (arg != null && (arg.GetType().IsValueType
-                            || arg.GetType().IsDefined(typeof(System.Runtime.CompilerServices.CompilerGeneratedAttribute), false)))
-                        {
-                            // Fallback for value types and capturing lambda display classes:
-                            // serialize field bytes directly
-                            if (arg.GetType().IsValueType)
-                            {
-                                int structSize = global::ILGPU.Interop.SizeOf(arg.GetType());
-                                byte[] bytes = new byte[structSize];
-                                GetCopyStructMethod(arg.GetType()).Invoke(null, new object[] { arg, bytes });
-                                int copyLen = Math.Min(structSize, packedData.Length - byteOffset);
-                                Array.Copy(bytes, 0, packedData, byteOffset, copyLen);
-                            }
-                            else
-                            {
-                                // Display class: flatten instance fields
-                                var fields = arg.GetType().GetFields(
-                                    System.Reflection.BindingFlags.Instance |
-                                    System.Reflection.BindingFlags.Public |
-                                    System.Reflection.BindingFlags.NonPublic);
-                                int localOffset = byteOffset;
-                                foreach (var f in fields)
-                                {
-                                    var val = f.GetValue(arg)!;
-                                    int fieldSize = global::ILGPU.Interop.SizeOf(f.FieldType);
-                                    var fieldBytes = new byte[fieldSize];
-                                    GetCopyStructMethod(f.FieldType).Invoke(
-                                        null, new object[] { val, fieldBytes });
-                                    int copyLen = Math.Min(fieldSize,
-                                        packedData.Length - localOffset);
-                                    Array.Copy(fieldBytes, 0, packedData,
-                                        localOffset, copyLen);
-                                    localOffset += fieldSize;
-                                }
-                            }
-                        }
-                        else if (arg != null)
-                            throw new NotSupportedException($"Unsupported packed scalar type: {arg.GetType()}");
-
+                        var legacy = PackScalarsLegacy(totalBytes, packedScalarLookup, expandedArgs, manifest, webGpuAccel,
+                            viewElementOffsets, viewElementCounts, coalesceFieldElementOffsets,
+                            dispatchUserDim, dispatchUserDimY, dispatchUserDimZ);
+                        if (legacy.Length != packedLength || !legacy.AsSpan().SequenceEqual(packedData.AsSpan(0, packedLength)))
+                            throw new InvalidOperationException(
+                                $"[WebGPU] scalar packing mismatch in kernel '{compiledKernel.Name}': legacy "
+                                + $"{Convert.ToHexString(legacy)} vs new {Convert.ToHexString(packedData, 0, packedLength)}");
                     }
 
-                    // --- Pack view element offsets and counts ---
-                    // For each IsViewOffset entry in the manifest, pack the element offset.
-                    // For each IsViewCount entry, pack the true element count for packed-struct views.
-                    // For each IsCoalesceFieldOffset entry, pack the field's u32-slot offset within
-                    // its coalesced shared buffer (computed during coalesce-processing pre-pass).
-                    foreach (var entry in manifest)
+                    if (DiagRunKernelStopAfter == 6)
                     {
-                        if (entry.IsUserDim)
-                        {
-                            // 0 (no dimension) = no limit, matching the old override's default.
-                            uint axisDim = entry.UserDimAxis switch { 1 => dispatchUserDimY, 2 => dispatchUserDimZ, _ => dispatchUserDim };
-                            uint ud = axisDim > 0 ? axisDim : uint.MaxValue;
-                            BitConverter.GetBytes(ud).CopyTo(packedData, entry.ByteOffset);
-                            continue;
-                        }
-                        if (entry.IsCoalesceFieldOffset)
-                        {
-                            int byteOffset = entry.ByteOffset;
-                            if (byteOffset + 4 > packedData.Length)
-                            {
-                                var newData = new byte[byteOffset + 4];
-                                Array.Copy(packedData, newData, packedData.Length);
-                                packedData = newData;
-                            }
-                            int slotOffset = 0;
-                            if (coalesceFieldElementOffsets != null
-                                && coalesceFieldElementOffsets.TryGetValue((entry.CoalesceBodyStructParamIndex, entry.CoalesceFieldIndex), out int co))
-                                slotOffset = co;
-                            BitConverter.GetBytes(slotOffset).CopyTo(packedData, byteOffset);
-                            if (WebGPUBackend.VerboseLogging)
-                                WebGPUBackend.Log($"[WebGPU-Coalesce] Packed coalesce field offset: param={entry.CoalesceBodyStructParamIndex}, field={entry.CoalesceFieldIndex}, slotOffset={slotOffset}, byteOffset={byteOffset}");
-                            continue;
-                        }
-                        if (entry.IsViewOffset)
-                        {
-                            int byteOffset = entry.ByteOffset;
-                            if (byteOffset + 4 > packedData.Length)
-                            {
-                                // Extend packedData if needed (view offsets may extend beyond user scalars)
-                                var newData = new byte[byteOffset + 4];
-                                Array.Copy(packedData, newData, packedData.Length);
-                                packedData = newData;
-                            }
-                            int elemOffset = viewElementOffsets.TryGetValue(entry.ViewBindingIndex, out int eo) ? eo : 0;
-                            BitConverter.GetBytes(elemOffset).CopyTo(packedData, byteOffset);
-                            if (WebGPUBackend.VerboseLogging)
-                                WebGPUBackend.Log($"[WebGPU-Debug] Packed view offset: binding={entry.ViewBindingIndex}, elemOffset={elemOffset}, byteOffset={byteOffset}");
-                        }
-                        else if (entry.IsViewCount)
-                        {
-                            int byteOffset = entry.ByteOffset;
-                            if (byteOffset + 4 > packedData.Length)
-                            {
-                                var newData = new byte[byteOffset + 4];
-                                Array.Copy(packedData, newData, packedData.Length);
-                                packedData = newData;
-                            }
-                            int elemCount = viewElementCounts.TryGetValue(entry.ViewCountBindingIndex, out int ec) ? ec : 0;
-                            BitConverter.GetBytes(elemCount).CopyTo(packedData, byteOffset);
-                            if (WebGPUBackend.VerboseLogging)
-                                WebGPUBackend.Log($"[WebGPU-Debug] Packed view count: binding={entry.ViewCountBindingIndex}, elemCount={elemCount}, byteOffset={byteOffset}");
-                        }
+                        DiagDestroyCoalesced(coalescedBuffersToDestroyAfterDispatch);
+                        return;   // DIAGNOSTIC ABLATION - see DiagRunKernelStopAfter
                     }
-
                     // Bind-group cache: a cached entry OWNS a stable scalar buffer whose contents
                     // we rewrite on each hit; otherwise use the normal per-dispatch pooled/fresh
                     // buffer. (A bind group binds buffers, not their contents.)
@@ -2314,7 +2550,7 @@ namespace SpawnDev.ILGPU.WebGPU
                     }
                     if (!skipScalarWrite)
                     {
-                        if (batchMode) batchStream.BatchWrite(packedBuffer, packedData);
+                        if (batchMode) batchStream.BatchWrite(packedBuffer, packedData, packedLength);
                         else device.Queue.WriteBuffer(packedBuffer, 0, packedData);
                     }
                     packedDataForCache = packedData;
@@ -2334,6 +2570,11 @@ namespace SpawnDev.ILGPU.WebGPU
                 }
 
 
+                if (DiagRunKernelStopAfter is 6 or 7)
+                {
+                    DiagDestroyCoalesced(coalescedBuffersToDestroyAfterDispatch);
+                    return;   // DIAGNOSTIC ABLATION - see DiagRunKernelStopAfter
+                }
                 // Allocate and bind spinlock buffers for i64 Min/Max/Exchange atomics
                 if (compiledKernel.HasI64Spinlocks)
                 {
@@ -2440,6 +2681,11 @@ namespace SpawnDev.ILGPU.WebGPU
                         WebGPUBackend.Log($"  entries[{ei}]: binding={entries[ei].Binding}");
                 }
 
+                if (DiagRunKernelStopAfter == 8)
+                {
+                    DiagDestroyCoalesced(coalescedBuffersToDestroyAfterDispatch);
+                    return;   // DIAGNOSTIC ABLATION - see DiagRunKernelStopAfter
+                }
                 // ── WebGPU aliasing check ──────────────────────────────────
                 // WebGPU forbids binding the same buffer region to multiple
                 // read_write storage bindings in the same dispatch. This happens
@@ -2491,6 +2737,11 @@ namespace SpawnDev.ILGPU.WebGPU
                     WebGPUBackend.ProfileCpuArgsSplitMs[1] += (_profTsP2 - _profTsP1) * f;       // view bindings
                     WebGPUBackend.ProfileCpuArgsSplitMs[2] += (_profTsBind - _profTsP2) * f;     // scalar pack + upload + checks
                 } // end arg-prep phase, begin bind-group resolve
+                if (DiagRunKernelStopAfter == 2)   // DIAGNOSTIC ABLATION - see DiagRunKernelStopAfter
+                {
+                    DiagDestroyCoalesced(coalescedBuffersToDestroyAfterDispatch);
+                    return;   // the finally returns the scalar buffers
+                }
                 GPUBindGroup? bindGroup = null;
                 if (batchMode)
                 {
@@ -2612,6 +2863,13 @@ namespace SpawnDev.ILGPU.WebGPU
 
                 if (_prof) { _profTsArgs = System.Diagnostics.Stopwatch.GetTimestamp(); _profA3 = GC.GetAllocatedBytesForCurrentThread(); } // end arg-build phase, begin encode
 
+                if (DiagRunKernelStopAfter == 3)   // DIAGNOSTIC ABLATION - see DiagRunKernelStopAfter
+                {
+                    if (!bgWillCache && bindGroup != null) bindGroup.Dispose();
+                    DiagDestroyCoalesced(coalescedBuffersToDestroyAfterDispatch);
+                    return;   // the finally returns the scalar buffers
+                }
+
                 // Use the stream's shared encoder for batched submission
                 var webGpuStream = batchStream;
                 if (batchMode)
@@ -2628,6 +2886,16 @@ namespace SpawnDev.ILGPU.WebGPU
                     pass.End();
                 }
                 webGpuStream.IncrementPassCount();
+                if (DiagRunKernelStopAfter == 9)   // DIAGNOSTIC ABLATION - recorded, but no log / deferral bookkeeping
+                {
+                    if (!bgWillCache && bindGroup != null) webGpuStream.DeferBindGroupDisposal(bindGroup);
+                    if (coalescedBuffersToDestroyAfterDispatch != null)
+                        foreach (var cBuf in coalescedBuffersToDestroyAfterDispatch) webGpuStream.DeferCoalesceBufferDestroy(cBuf);
+                    foreach (var buffer in scalarBuffersToReturn) webGpuStream.DeferScalarReturn(buffer);
+                    scalarBuffersToReturn.Clear();
+                    coalescedBuffersToDestroyAfterDispatch?.Clear();
+                    return;
+                }
 
                 // Log dispatch for post-mortem debugging. Use the memoized compiled @workgroup_size
                 // (or the patched GroupDim.X when this dispatch patched it) instead of a per-dispatch
@@ -2996,9 +3264,12 @@ namespace SpawnDev.ILGPU.WebGPU
 
             /// <summary>Queues <c>queue.writeBuffer(buffer, 0, bytes)</c> for the submit, from the batch's byte arena.
             /// Only for buffers this batch alone uses (the per-dispatch scalar / stride / lock buffers).</summary>
-            internal void BatchWrite(GPUBuffer buffer, byte[] bytes)
+            internal void BatchWrite(GPUBuffer buffer, byte[] bytes) => BatchWrite(buffer, bytes, bytes.Length);
+
+            /// <summary><see cref="BatchWrite(GPUBuffer, byte[])"/> of the first <paramref name="len"/> bytes (the bytes are
+            /// copied into the arena now, so the caller may reuse <paramref name="bytes"/>).</summary>
+            internal void BatchWrite(GPUBuffer buffer, byte[] bytes, int len)
             {
-                int len = bytes.Length;
                 if ((len & 3) != 0) throw new InvalidOperationException($"[WebGPU] batched writeBuffer of {len} bytes: must be a multiple of 4");
                 if (_batchDataLen + len > _batchData.Length)
                     System.Array.Resize(ref _batchData, Math.Max(_batchData.Length * 2, _batchDataLen + len));
@@ -3043,11 +3314,24 @@ namespace SpawnDev.ILGPU.WebGPU
                 return true;
             }
 
+            private static bool? _jsSinglePass;   // the value last set on ilgpuWebGPUPlan.singlePass
+            private static int _jsAblation;        // the value last set on ilgpuWebGPUPlan.ablation
+
             private void SubmitBatch()
             {
                 var device = _webGpuAccelerator.NativeAccelerator.NativeDevice!;
                 try
                 {
+                    if (_jsSinglePass != WebGPUBackend.BatchSinglePass)
+                    {
+                        SpawnDev.SpawnJS.SpawnJSRuntime.Instance.Call<bool, int>("ilgpuWebGPUPlan.setSinglePass", WebGPUBackend.BatchSinglePass);
+                        _jsSinglePass = WebGPUBackend.BatchSinglePass;
+                    }
+                    if (_jsAblation != WebGPUBackend.DiagSubmitAblation)
+                    {
+                        SpawnDev.SpawnJS.SpawnJSRuntime.Instance.Call<int, int>("ilgpuWebGPUPlan.setAblation", WebGPUBackend.DiagSubmitAblation);
+                        _jsAblation = WebGPUBackend.DiagSubmitAblation;
+                    }
                     using var rec = HeapView.Create(new ReadOnlyMemory<double>(_batchRec, 0, _batchLen));
                     using var data = HeapView.Create(new ReadOnlyMemory<byte>(_batchData, 0, Math.Max(4, _batchDataLen)));
                     long t0 = WebGPUBackend.EnableDispatchProfiling ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;

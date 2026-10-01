@@ -3491,6 +3491,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         protected static string BitcastToU32(string expr, string sourceWgslType)
         {
+            // WGSL has no bitcast for bool (not a numeric type): 1u / 0u, matching what the host packs.
+            if (sourceWgslType == "bool")
+                return $"select(0u, 1u, {expr})";
             if (sourceWgslType == "f16")
                 return $"bitcast<u32>(vec2<f16>({expr}, f16(0.0)))";
             return $"bitcast<u32>({expr})";
@@ -3503,6 +3506,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         protected static string BitcastFromU32(string expr, string targetWgslType)
         {
+            // WGSL has no bitcast to bool: `bitcast<bool>(u32)` fails shader validation, so every kernel with a bool
+            // scalar parameter failed on WebGPU (found 2026-10-01 by ScalarPacking_AllKinds_VerifiedAgainstLegacy).
+            // The host packs a bool as 1u / 0u, so any non-zero word is true.
+            if (targetWgslType == "bool")
+                return $"({expr} != 0u)";
             if (targetWgslType == "f16")
                 return $"bitcast<vec2<f16>>({expr}).x";
             return $"bitcast<{targetWgslType}>({expr})";

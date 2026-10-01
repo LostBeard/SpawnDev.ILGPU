@@ -98,6 +98,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// Controls whether verbose logging is enabled. Set to true to enable console output.
         /// Setting this to true also sets <see cref="DiagnosticFlags"/> to <see cref="WGSLDiagnostics.All"/>.
         /// </summary>
+        /// <summary>
+        /// TEST SWITCH: pack every dispatch's scalars twice - the current packer and the legacy reference
+        /// (WebGPUAccelerator.PackScalarsLegacy) - and throw on any byte difference. Off by default. Run the WebGPU
+        /// test lanes with it on after touching scalar packing: every dispatch of every test becomes an equivalence check.
+        /// </summary>
+        public static bool VerifyScalarPacking { get; set; }
+
         public static bool VerboseLogging
         {
             get => DiagnosticFlags != WGSLDiagnostics.None;
@@ -266,6 +273,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// the scalar-param uploads ride along in one byte arena - so the host does one crossing per flush.
         /// </remarks>
         public static bool EnableDispatchBatching { get; set; } = true;
+
+        /// <summary>
+        /// The batch submit encodes a run of consecutive dispatches into ONE compute pass instead of a pass per dispatch
+        /// (wwwroot/webgpuDispatchPlan.js <c>submitBatch</c>). Ordering is unchanged by the spec: each dispatch in a
+        /// compute pass is its own usage scope, so storage writes are visible to the next dispatch as across passes.
+        /// True by default; false restores a pass per dispatch (the A/B arm).
+        /// </summary>
+        public static bool BatchSinglePass { get; set; } = true;
+
+        /// <summary>
+        /// DIAGNOSTIC ABLATION - RESULTS ARE GARBAGE WHILE NON-ZERO. Makes the JS batch submit skip part of its work so a
+        /// workload timed with it isolates that part's cost (JS timers are too coarse to time ~800 small calls one by
+        /// one): 1 = skip the per-dispatch scalar <c>queue.writeBuffer</c> records, 2 = skip <c>createBindGroup</c> + the
+        /// dispatch encode, 3 = skip the whole submit. 0 = off (default); never set it outside a measurement.
+        /// </summary>
+        public static int DiagSubmitAblation { get; set; }
 
         /// <summary>
         /// When true (DEFAULT), the WebGPU dispatch path caches the resolved compute shader per
@@ -1565,6 +1588,27 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// Returns true if this kernel uses scalar parameter packing.
         /// </summary>
         public bool HasScalarPacking => ScalarPackingManifest.Count > 0;
+
+        private int _packedScalarByteLength = -1;
+        /// <summary>
+        /// Bytes of this kernel's packed scalar buffer: the scalar slots (min 4), grown to cover every view-offset,
+        /// view-count and coalesce-offset word - in manifest order, exactly as the per-dispatch packer used to grow
+        /// its array entry by entry. Fixed per kernel, so computed once.
+        /// </summary>
+        public int PackedScalarByteLength
+        {
+            get
+            {
+                if (_packedScalarByteLength >= 0) return _packedScalarByteLength;
+                int totalSlots = 0;
+                foreach (var e in ScalarPackingManifest) totalSlots = Math.Max(totalSlots, e.ByteOffset / 4 + e.SlotCount);
+                int len = Math.Max(totalSlots * 4, 4);
+                foreach (var e in ScalarPackingManifest)
+                    if (!e.IsUserDim && (e.IsCoalesceFieldOffset || e.IsViewOffset || e.IsViewCount) && e.ByteOffset + 4 > len)
+                        len = e.ByteOffset + 4;
+                return _packedScalarByteLength = len;
+            }
+        }
 
         /// <summary>
         /// The number of @group(0) bindings emitted in the WGSL. Used to validate
