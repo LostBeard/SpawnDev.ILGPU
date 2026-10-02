@@ -237,7 +237,7 @@ namespace ILGPU.Util
             "kept body, and ILGPU then compiles the substituted body - which is " +
             "also what the CPU would execute, so the two stay in agreement. " +
             "Trimming a kernel's transitive callees away is therefore not " +
-            "possible; AOT with WasmStripILAfterAOT, which removes IL outright, " +
-            "IS incompatible and is a separate, documented constraint.";
+            "possible. AOT is compatible only while the IL is kept " +
+            "(WasmStripILAfterAOT=false); stripping it removes the frontend's input.";
     }
 }

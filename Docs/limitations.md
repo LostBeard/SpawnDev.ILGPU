@@ -120,15 +120,37 @@ GPU shader compilers may optimize away `val != val` self-comparisons or flush Na
 
 ## IL Trimming & AOT
 
-ILGPU compiles kernels at runtime by reading .NET IL (Intermediate Language). Both trimming and AOT compilation will break this:
+No longer a limitation, with one condition for AOT and one exclusion:
 
 ```xml
 <PropertyGroup>
-  <!-- REQUIRED: ILGPU needs IL reflection at runtime -->
-  <PublishTrimmed>false</PublishTrimmed>
-  <RunAOTCompilation>false</RunAOTCompilation>
+  <!-- Trimming: supported (the default for a Blazor Release publish). Nothing to configure. -->
+  <PublishTrimmed>true</PublishTrimmed>
+
+  <!-- AOT: supported, but KEEP THE IL. .NET strips IL after AOT by default, and ILGPU
+       compiles kernels FROM IL at runtime. -->
+  <RunAOTCompilation>true</RunAOTCompilation>
+  <WasmStripILAfterAOT>false</WasmStripILAfterAOT>
 </PropertyGroup>
 ```
+
+- **IL trimming is supported and enforced.** ILGPU, ILGPU.Algorithms, SpawnDev.ILGPU and SpawnDev.ILGPU.ML are
+  `IsTrimmable`, and every trim (IL2xxx) analyzer warning is a build error in those libraries, so a new reflection
+  hole fails their build instead of a consumer's app. Members ILGPU resolves by name are rooted
+  (`ILGPU/Util/TrimmingAnnotations.cs`, `SpawnDev.ILGPU/BrowserTrimRoots.cs`); a consuming app needs no trimming
+  configuration of its own. The ILGPU and ILGPU.ML test suites run against TRIMMED publishes.
+- **Blazor WebAssembly AOT is supported - with the IL kept.** `RunAOTCompilation=true` +
+  `WasmStripILAfterAOT=false`. The old "AOT breaks ILGPU" rule was about the IL being STRIPPED, not about AOT:
+  with the IL kept, the frontend reads kernels as usual, and Mono's AOT runtime keeps its interpreter fallback for
+  ILGPU's dynamically generated launchers. Verified end to end in a production app (Anaglyphohol: WebGPU kernels +
+  ILGPU.ML inference), where AOT halved the per-frame host cost (DAv3 at 168x98: 43.8 -> 21.7 ms). Costs: a much
+  larger `dotnet.native.wasm` (~55 MB with ILGPU.ML) and a long AOT build (over an hour, single core, for ILGPU.ML).
+- **Desktop NativeAOT (`PublishAot`) is NOT supported**: ILGPU emits kernel launchers with Reflection.Emit, which
+  NativeAOT cannot run. The AOT analyzer stays on in these libraries, so those sites remain visible (IL3050).
+
+> Older docs told you to set `PublishTrimmed=false` and `RunAOTCompilation=false`. Both are outdated. If a published
+> build of an older version throws `MissingMethodException` / "Not supported intrinsic type", upgrade; do not
+> disable trimming.
 
 ## SharedArrayBuffer Requirements (Wasm Backend)
 

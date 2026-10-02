@@ -353,30 +353,39 @@ Because SpawnDev.ILGPU also generates kernels dynamically (Lambda Kernels, Deleg
 
 Per-backend, off by default: `WebGPUBackend.VerboseLogging = true;` (also `WebGLBackend` / `WasmBackend`).
 
-## Blazor WebAssembly Configuration
+## Blazor WebAssembly Configuration: Trimming and AOT
 
-When publishing, one MSBuild property is required:
+Both work. The only requirement is to keep the IL when you AOT compile:
 
 ```xml
 <PropertyGroup>
-  <!-- AOT strips IL (WasmStripILAfterAOT), and ILGPU compiles kernels FROM IL -->
-  <RunAOTCompilation>false</RunAOTCompilation>
+  <!-- Trimming: supported (the default for a Blazor Release publish). Nothing to configure. -->
+  <PublishTrimmed>true</PublishTrimmed>
+
+  <!-- AOT: supported, but KEEP THE IL. .NET strips IL after AOT by default, and ILGPU
+       compiles kernels FROM IL at runtime. -->
+  <RunAOTCompilation>true</RunAOTCompilation>
+  <WasmStripILAfterAOT>false</WasmStripILAfterAOT>
 </PropertyGroup>
 ```
 
-**IL trimming is supported** - `PublishTrimmed=true` works and is the recommended
-default for browser apps, where download size matters. ILGPU roots the members it
-resolves reflectively (`ILGPU/Util/TrimmingAnnotations.cs`), so a consuming app needs
-no trimming configuration of its own and the trim analyzer stays clean.
+- **IL trimming is supported and enforced.** ILGPU, ILGPU.Algorithms, SpawnDev.ILGPU and SpawnDev.ILGPU.ML are
+  `IsTrimmable`, and every trim (IL2xxx) analyzer warning is a build error in those libraries, so a new reflection
+  hole fails their build instead of a consumer's app. Members ILGPU resolves by name are rooted
+  (`ILGPU/Util/TrimmingAnnotations.cs`, `SpawnDev.ILGPU/BrowserTrimRoots.cs`); a consuming app needs no trimming
+  configuration of its own. The ILGPU and ILGPU.ML test suites run against TRIMMED publishes.
+- **Blazor WebAssembly AOT is supported - with the IL kept.** `RunAOTCompilation=true` +
+  `WasmStripILAfterAOT=false`. The old "AOT breaks ILGPU" rule was about the IL being STRIPPED, not about AOT:
+  with the IL kept, the frontend reads kernels as usual, and Mono's AOT runtime keeps its interpreter fallback for
+  ILGPU's dynamically generated launchers. Verified end to end in a production app (Anaglyphohol: WebGPU kernels +
+  ILGPU.ML inference), where AOT halved the per-frame host cost (DAv3 at 168x98: 43.8 -> 21.7 ms). Costs: a much
+  larger `dotnet.native.wasm` (~55 MB with ILGPU.ML) and a long AOT build (over an hour, single core, for ILGPU.ML).
+- **Desktop NativeAOT (`PublishAot`) is NOT supported**: ILGPU emits kernel launchers with Reflection.Emit, which
+  NativeAOT cannot run. The AOT analyzer stays on in these libraries, so those sites remain visible (IL3050).
 
-AOT is different, and the distinction matters: trimming only removes members nothing
-references, which annotations solve. AOT removes the IL itself - the very input
-ILGPU's frontend reads to build kernels - so it cannot be annotated away.
-
-> Older versions of this README told you to set `PublishTrimmed=false`. If you are
-> upgrading and hit a `MissingMethodException` or "Not supported intrinsic type" from
-> a published build, you are on a pre-trim-safe ILGPU; upgrade rather than disabling
-> trimming.
+> Older docs told you to set `PublishTrimmed=false` and `RunAOTCompilation=false`. Both are outdated. If a published
+> build of an older version throws `MissingMethodException` / "Not supported intrinsic type", upgrade; do not
+> disable trimming.
 
 ## In Development: P2P Distributed GPU Compute
 

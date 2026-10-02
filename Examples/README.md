@@ -40,5 +40,6 @@ page to be cross-origin isolated (the templates include the `coi-serviceworker.j
 
 ## Notes
 - Each example pins `SpawnDev.ILGPU` to a released version (e.g. `4.10.0`). Bump it to try a newer release.
-- Blazor WASM examples set `<PublishTrimmed>false>` + `<RunAOTCompilation>false>` - ILGPU relies on
-  runtime IL reflection, so trimming/AOT must stay off.
+- Trimming and Blazor WASM AOT both work with current SpawnDev.ILGPU (trim safe since 5.3.1). To AOT compile, keep
+  the IL ILGPU compiles kernels from: `<RunAOTCompilation>true</RunAOTCompilation>` +
+  `<WasmStripILAfterAOT>false</WasmStripILAfterAOT>`. See [Docs/limitations.md](../Docs/limitations.md).

@@ -1,7 +1,7 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## Unreleased - float `%` is exact on every backend
+## 5.3.1 (forks 2.3.8) - 2026-10-01 - trim safe (enforced), AOT supported with the IL kept; bool/ulong scalars; exact float `%`
 
 - **Trim safe at LIBRARY level, enforced** (2026-10-01, wrapper 5.3.1-local.10, forks 2.3.8-local.2). ILGPU, ILGPU.Algorithms
   and SpawnDev.ILGPU are `IsTrimmable` and every trim (IL2xxx) warning is a build error. The August pass proved the

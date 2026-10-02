@@ -10,7 +10,8 @@
 		     trimmed app (ILGPU, ILGPU.Algorithms and SpawnDev.ILGPU are IsTrimmable, so the Blazor default
 		     TrimMode=partial trims them). The test assemblies are rooted below so no test is trimmed away. -->
 		<PublishTrimmed>true</PublishTrimmed>
-		<!-- Disable AOT compilation - ILGPU needs IL reflection to work -->
+		<!-- AOT is SUPPORTED (RunAOTCompilation=true + WasmStripILAfterAOT=false keeps the IL ILGPU compiles from);
+		     the test Demo stays on the interpreter only because an AOT build of it takes over an hour. -->
 		<RunAOTCompilation>false</RunAOTCompilation>
 		<!-- mark as testable by PlaywrightMultiTest -->
 		<PlaywrightMultiTest></PlaywrightMultiTest>

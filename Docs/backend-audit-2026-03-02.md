@@ -197,7 +197,7 @@ Features that desktop backends **don't have**, only available in browser backend
 | No `throw` in kernels | IL `throw` instruction not supported — auto-redirects handle common cases |
 | No reference types | Only value types (structs, primitives) in kernels |
 | No recursion | GPU hardware limitation shared with desktop |
-| No IL trimming or AOT | ILGPU needs IL reflection at runtime |
+| ~~No IL trimming or AOT~~ | SUPERSEDED 2026-10-01: trimming is supported and enforced; Blazor WASM AOT is supported with `WasmStripILAfterAOT=false` (see Docs/limitations.md) |
 | ~19 param max | Same ILGPU limitation as desktop — pack into structs |
 
 ---
