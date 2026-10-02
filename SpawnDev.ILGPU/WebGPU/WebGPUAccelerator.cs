@@ -2194,6 +2194,10 @@ namespace SpawnDev.ILGPU.WebGPU
                     DiagDestroyCoalesced(coalescedBuffersToDestroyAfterDispatch);
                     return;
                 }
+                // Reserve this dispatch's scalar-arena slots (every slot is a binding, so the binding count bounds them).
+                // A flush here is clean: what this dispatch recorded so far (coalesce copies) is submitted in order, and
+                // its pooled/coalesce buffers are only handed to the stream for release at the end of the dispatch.
+                if (batchMode) batchStream.EnsureArenaRoom(Math.Max(compiledKernel.ExpectedBindingCount, effectiveArgsCount) + 1);
                 // --- Phase 1: Emit bindings for non-packed params (views, structs, atomics) ---
                 // effectiveArgs[] has body structs pre-expanded into their constituent fields.
                 // Skip the index param (effectiveArgs[0..runtimeIndexSkip-1]) and packed scalars.
@@ -2390,8 +2394,7 @@ namespace SpawnDev.ILGPU.WebGPU
                     {
                         // Non-packed, non-view param (struct scalar with own binding)
                         var size = 256;
-                        var uBuffer = GetPooledScalarBuffer(device);
-                        scalarBuffersToReturn.Add(uBuffer);
+                        byte[] bytes;
 
                         if (WebGPUBackend.VerboseLogging)
                             WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Binding Struct Scalar. Value={arg}");
@@ -2404,15 +2407,12 @@ namespace SpawnDev.ILGPU.WebGPU
                             // (Marshal.SizeOf fails on generic types like ReductionImplementation<T,S,R>).
                             int structSize = global::ILGPU.Interop.SizeOf(argType);
                             int paddedSize = (int)WebGPUAlignment.AlignTo4(structSize);
-                            byte[] bytes = new byte[paddedSize];
+                            bytes = new byte[paddedSize];
 
                             // GCHandle.Alloc(Pinned) fails for boxed generic structs in Blazor WASM
                             // (ArgumentException_NotIsomorphic). Use our CopyStructToBytes<T> helper
                             // which uses MemoryMarshal.AsBytes — no GC pinning required.
                             GetCopyStructMethod(argType).Invoke(null, new object[] { arg, bytes });
-
-                            if (batchMode) batchStream.BatchWrite(uBuffer, bytes);
-                            else device.Queue.WriteBuffer(uBuffer, 0, bytes);
                             if (WebGPUBackend.VerboseLogging)
                                 WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Struct scalar {argType.Name}, Size={structSize} bytes");
                         }
@@ -2429,7 +2429,7 @@ namespace SpawnDev.ILGPU.WebGPU
                             foreach (var f in fields)
                                 totalSize += global::ILGPU.Interop.SizeOf(f.FieldType);
                             int paddedSize = (int)WebGPUAlignment.AlignTo4(totalSize);
-                            byte[] bytes = new byte[paddedSize];
+                            bytes = new byte[paddedSize];
                             int offset = 0;
                             foreach (var f in fields)
                             {
@@ -2441,14 +2441,22 @@ namespace SpawnDev.ILGPU.WebGPU
                                 Array.Copy(fieldBytes, 0, bytes, offset, fieldSize);
                                 offset += fieldSize;
                             }
-                            if (batchMode) batchStream.BatchWrite(uBuffer, bytes);
-                            else device.Queue.WriteBuffer(uBuffer, 0, bytes);
                             if (WebGPUBackend.VerboseLogging)
                                 WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Display class captures, Size={totalSize} bytes");
                         }
                         else throw new NotSupportedException($"Unsupported non-packed non-view argument type: {arg?.GetType()}");
 
-                        resource = new GPUBufferBinding { Buffer = uBuffer, Offset = 0, Size = (ulong)size };
+                        // Struct scalars are declared read_write: the read_write arena (see WebGPUBackend.BatchScalarArena).
+                        if (batchMode && batchStream.TryArenaSlot(true, bytes, bytes.Length, out var structSlot))
+                            resource = structSlot;
+                        else
+                        {
+                            var uBuffer = GetPooledScalarBuffer(device);
+                            scalarBuffersToReturn.Add(uBuffer);
+                            if (batchMode) batchStream.BatchWrite(uBuffer, bytes);
+                            else device.Queue.WriteBuffer(uBuffer, 0, bytes);
+                            resource = new GPUBufferBinding { Buffer = uBuffer, Offset = 0, Size = (ulong)size };
+                        }
                     }
 
                     entries.Add(new GPUBindGroupEntry { Binding = (uint)currentBindingIndex, Resource = resource! });
@@ -2460,18 +2468,22 @@ namespace SpawnDev.ILGPU.WebGPU
                             WebGPUBackend.Log($"[WebGPU-Debug] Arg {i}: Binding Stride Buffer. Values=[{string.Join(", ", dims)}]");
 
                         var strideSize = 256;
-                        var strideBuffer = GetPooledScalarBuffer(device);
-                        scalarBuffersToReturn.Add(strideBuffer);
-
                         var strideData = new int[dims.Length];
                         Array.Copy(dims, strideData, dims.Length);
                         var byteData = new byte[dims.Length * 4];
                         Buffer.BlockCopy(strideData, 0, byteData, 0, byteData.Length);
 
-                        if (batchMode) batchStream.BatchWrite(strideBuffer, byteData);
-                        else device.Queue.WriteBuffer(strideBuffer, 0, byteData);
+                        GPUBufferBinding strideBinding;
+                        if (!(batchMode && batchStream.TryArenaSlot(false, byteData, byteData.Length, out strideBinding)))
+                        {
+                            var strideBuffer = GetPooledScalarBuffer(device);
+                            scalarBuffersToReturn.Add(strideBuffer);
+                            if (batchMode) batchStream.BatchWrite(strideBuffer, byteData);
+                            else device.Queue.WriteBuffer(strideBuffer, 0, byteData);
+                            strideBinding = new GPUBufferBinding { Buffer = strideBuffer, Offset = 0, Size = (ulong)strideSize };
+                        }
 
-                        entries.Add(new GPUBindGroupEntry { Binding = (uint)currentBindingIndex, Resource = new GPUBufferBinding { Buffer = strideBuffer, Offset = 0, Size = (ulong)strideSize } });
+                        entries.Add(new GPUBindGroupEntry { Binding = (uint)currentBindingIndex, Resource = strideBinding });
                         currentBindingIndex++;
                     }
                 }
@@ -2523,8 +2535,16 @@ namespace SpawnDev.ILGPU.WebGPU
                     // we rewrite on each hit; otherwise use the normal per-dispatch pooled/fresh
                     // buffer. (A bind group binds buffers, not their contents.)
                     GPUBuffer packedBuffer;
+                    GPUBufferBinding? packedSlot = null;
                     bool skipScalarWrite = false;
-                    if (bgCacheHit)
+                    if (batchMode && batchStream.TryArenaSlot(false, packedData, packedLength, out var arenaSlot))
+                    {
+                        // Record batching never runs with the bind-group cache or capture (see batchMode).
+                        packedSlot = arenaSlot;
+                        packedBuffer = arenaSlot.Buffer!;
+                        skipScalarWrite = true;
+                    }
+                    else if (bgCacheHit)
                     {
                         var hitEntry = bgCachedEntry!;
                         // (a) Same scalars as the buffer already holds -> reuse with NO write at all. Always
@@ -2578,7 +2598,7 @@ namespace SpawnDev.ILGPU.WebGPU
                     entries.Add(new GPUBindGroupEntry
                     {
                         Binding = (uint)currentBindingIndex,
-                        Resource = new GPUBufferBinding { Buffer = packedBuffer, Offset = 0, Size = 256 }
+                        Resource = packedSlot ?? new GPUBufferBinding { Buffer = packedBuffer, Offset = 0, Size = 256 }
                     });
                     currentBindingIndex++;
 
@@ -3331,7 +3351,95 @@ namespace SpawnDev.ILGPU.WebGPU
                 return true;
             }
 
+            // ── Scalar arena (WebGPUBackend.BatchScalarArena) ──
+            // Two per-stream GPU buffers of 256-byte slots: [0] read (packed scalars, view strides), [1] read_write
+            // (struct scalars). A batch fills slots from 0 in dispatch order into the CPU mirror; SubmitBatch uploads
+            // each arena's used prefix in ONE writeBuffer before anything in the batch is submitted. Reusing the arena
+            // next batch is safe for the reason the upload staging buffer is: writeBuffer executes after all
+            // previously submitted work.
+            internal const int ArenaSlotBytes = 256;
+            private readonly GPUBuffer?[] _arena = new GPUBuffer?[2];
+            private readonly int[] _arenaCap = { 512, 64 };     // slots; doubled (for the next batch) on overflow
+            private readonly int[] _arenaUsed = new int[2];
+            private readonly byte[]?[] _arenaData = new byte[]?[2];
+            private readonly bool[] _arenaOverflowed = new bool[2];
+
+            /// <summary>
+            /// Makes room for one dispatch's arena slots (at most <paramref name="slots"/> per arena) before anything of
+            /// that dispatch is recorded: when the batch's arenas cannot hold them, the batch is submitted now (a flush is
+            /// always legal) and the full arena is regrown for the next batch, so a steady workload settles on ONE batch
+            /// per flush point again.
+            /// </summary>
+            internal void EnsureArenaRoom(int slots)
+            {
+                if (!WebGPUBackend.BatchScalarArena) return;
+                for (int a = 0; a < 2; a++)
+                    if (_arenaUsed[a] + slots > _arenaCap[a]) _arenaOverflowed[a] = true;
+                if (!_arenaOverflowed[0] && !_arenaOverflowed[1]) return;
+                WebGPUBackend.ScalarArenaOverflows++;
+                FlushPending();   // submits with the CURRENT arenas, resets the used counts
+                for (int a = 0; a < 2; a++)
+                {
+                    if (!_arenaOverflowed[a]) continue;
+                    _arenaOverflowed[a] = false;
+                    int cap = _arenaCap[a];
+                    while (cap < slots) cap *= 2;
+                    _arenaCap[a] = cap * 2;
+                    // The submitted batch may still be executing against the old buffer; destroy() is legal here (work
+                    // is validated at submit) and the memory is released when that work completes.
+                    var old = _arena[a];
+                    _arena[a] = null;
+                    _arenaData[a] = null;
+                    if (old != null) { try { old.Destroy(); old.Dispose(); } catch { } }
+                }
+            }
+
+            /// <summary>
+            /// Copies <paramref name="len"/> bytes of <paramref name="bytes"/> into the next slot of the read
+            /// (<paramref name="writable"/> false) or read_write arena and returns the 256-byte binding of that slot.
+            /// False when the arena is off or the value does not fit a slot - the caller binds a pooled buffer instead.
+            /// The caller must have reserved the slot with <see cref="EnsureArenaRoom"/>.
+            /// </summary>
+            internal bool TryArenaSlot(bool writable, byte[] bytes, int len, out GPUBufferBinding binding)
+            {
+                binding = null!;
+                if (!WebGPUBackend.BatchScalarArena || len > ArenaSlotBytes) return false;
+                int a = writable ? 1 : 0;
+                int k = _arenaUsed[a];
+                if (k >= _arenaCap[a]) throw new InvalidOperationException("[WebGPU] scalar arena slot not reserved (EnsureArenaRoom)");
+                var buffer = _arena[a];
+                if (buffer == null)
+                {
+                    var device = _webGpuAccelerator.NativeAccelerator.NativeDevice!;
+                    buffer = _arena[a] = device.CreateBuffer(new GPUBufferDescriptor
+                    {
+                        Label = writable ? "ScalarArenaRW" : "ScalarArena",
+                        Size = (ulong)(_arenaCap[a] * ArenaSlotBytes),
+                        Usage = GPUBufferUsage.Storage | GPUBufferUsage.CopyDst,
+                    });
+                    _arenaData[a] = new byte[_arenaCap[a] * ArenaSlotBytes];
+                }
+                System.Buffer.BlockCopy(bytes, 0, _arenaData[a]!, k * ArenaSlotBytes, len);
+                _arenaUsed[a] = k + 1;
+                WebGPUBackend.ScalarArenaSlotsUsed[a]++;
+                binding = new GPUBufferBinding { Buffer = buffer, Offset = (ulong)(k * ArenaSlotBytes), Size = ArenaSlotBytes };
+                return true;
+            }
+
+            private void DestroyArenas()
+            {
+                for (int a = 0; a < 2; a++)
+                {
+                    var old = _arena[a];
+                    _arena[a] = null;
+                    _arenaData[a] = null;
+                    _arenaUsed[a] = 0;
+                    if (old != null) { try { old.Destroy(); old.Dispose(); } catch { } }
+                }
+            }
+
             private static bool? _jsSinglePass;   // the value last set on ilgpuWebGPUPlan.singlePass
+            private static bool? _jsBindGroupReuse;   // the value last set on ilgpuWebGPUPlan.bindGroupReuse
             private static int _jsAblation;        // the value last set on ilgpuWebGPUPlan.ablation
 
             private void SubmitBatch()
@@ -3349,12 +3457,30 @@ namespace SpawnDev.ILGPU.WebGPU
                         SpawnDev.SpawnJS.SpawnJSRuntime.Instance.Call<int, int>("ilgpuWebGPUPlan.setAblation", WebGPUBackend.DiagSubmitAblation);
                         _jsAblation = WebGPUBackend.DiagSubmitAblation;
                     }
+                    if (_jsBindGroupReuse != WebGPUBackend.BatchBindGroupReuse)
+                    {
+                        SpawnDev.SpawnJS.SpawnJSRuntime.Instance.Call<bool, int>("ilgpuWebGPUPlan.setBindGroupReuse", WebGPUBackend.BatchBindGroupReuse);
+                        _jsBindGroupReuse = WebGPUBackend.BatchBindGroupReuse;
+                    }
+                    // The arenas' used prefixes ride at the END of the data array: [batch bytes][read arena][read_write arena].
+                    int arenaR = _arenaUsed[0] * ArenaSlotBytes, arenaW = _arenaUsed[1] * ArenaSlotBytes;
+                    int dataLen = _batchDataLen;
+                    if (arenaR + arenaW > 0)
+                    {
+                        if (dataLen + arenaR + arenaW > _batchData.Length)
+                            System.Array.Resize(ref _batchData, Math.Max(_batchData.Length * 2, dataLen + arenaR + arenaW));
+                        if (arenaR > 0) System.Buffer.BlockCopy(_arenaData[0]!, 0, _batchData, dataLen, arenaR);
+                        if (arenaW > 0) System.Buffer.BlockCopy(_arenaData[1]!, 0, _batchData, dataLen + arenaR, arenaW);
+                        dataLen += arenaR + arenaW;
+                    }
+                    double arenaRId = arenaR > 0 ? IdOf(_arena[0]!, "scalar arena") : 0;
+                    double arenaWId = arenaW > 0 ? IdOf(_arena[1]!, "scalar arena (read_write)") : 0;
                     using var rec = HeapView.Create(new ReadOnlyMemory<double>(_batchRec, 0, _batchLen));
-                    using var data = HeapView.Create(new ReadOnlyMemory<byte>(_batchData, 0, Math.Max(4, _batchDataLen)));
+                    using var data = HeapView.Create(new ReadOnlyMemory<byte>(_batchData, 0, Math.Max(4, dataLen)));
                     long t0 = WebGPUBackend.EnableDispatchProfiling ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
-                    SpawnDev.SpawnJS.SpawnJSRuntime.Instance.Call<GPUDevice, HeapView<double, Float64Array>, int, HeapView<byte, Uint8Array>, int, int, int>(
+                    SpawnDev.SpawnJS.SpawnJSRuntime.Instance.Call<GPUDevice, HeapView<double, Float64Array>, int, HeapView<byte, Uint8Array>, int, int, double, int, double, int, int>(
                         "ilgpuWebGPUPlan.submitBatch", device, rec, _batchLen, data, WebGPUBackend.MaxReplayPassesPerSubmit,
-                        _batchHasUploads ? _batchDataLen : 0);
+                        _batchHasUploads ? _batchDataLen : 0, arenaRId, arenaR, arenaWId, arenaW);
                     if (t0 != 0)
                     {
                         WebGPUBackend.ProfileBatchSubmitMs += (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;
@@ -3368,6 +3494,8 @@ namespace SpawnDev.ILGPU.WebGPU
                     _batchLen = 0;
                     _batchDataLen = 0;
                     _batchHasUploads = false;
+                    _arenaUsed[0] = 0;
+                    _arenaUsed[1] = 0;
                 }
             }
             private readonly List<GPUBindGroup> _pendingBindGroups = new();
@@ -3510,7 +3638,11 @@ namespace SpawnDev.ILGPU.WebGPU
 
             protected override void DisposeAcceleratorObject(bool disposing)
             {
-                if (disposing) FlushPending();
+                if (disposing)
+                {
+                    FlushPending();
+                    DestroyArenas();
+                }
             }
 
             protected override global::ILGPU.Runtime.ProfilingMarker AddProfilingMarkerInternal() => throw new NotSupportedException();

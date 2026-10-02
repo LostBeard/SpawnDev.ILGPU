@@ -284,6 +284,47 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public static bool BatchSinglePass { get; set; } = true;
 
         /// <summary>
+        /// Under record batching, the per-dispatch scalar buffers (packed scalars, view strides, struct scalars) are
+        /// 256-byte SLOTS of two per-stream arena buffers instead of pooled buffers: slot k of a batch is the k-th
+        /// scalar binding, so the whole batch's scalars go up in one <c>writeBuffer</c> per arena instead of one per
+        /// binding, and a dispatch sequence that repeats (a model's forward, frame after frame) binds the SAME
+        /// buffer/offset pairs every time - which is what lets <see cref="BatchBindGroupReuse"/> hit. Two arenas
+        /// because struct scalars are declared <c>read_write</c> and strides/packed scalars <c>read</c>, and WebGPU
+        /// rejects one buffer bound both ways in a dispatch. True by default; false restores the pooled buffers.
+        /// </summary>
+        public static bool BatchScalarArena { get; set; } = true;
+
+        /// <summary>Scalar-arena slots handed out since start: [0] read arena (packed scalars, strides), [1] read_write
+        /// arena (struct scalars). Diagnostic - lets a test prove a path really went through the arena.</summary>
+        public static readonly long[] ScalarArenaSlotsUsed = new long[2];
+
+        /// <summary>Times an arena overflowed mid-batch (the batch was submitted early and the arena regrown).</summary>
+        public static long ScalarArenaOverflows;
+
+        /// <summary>
+        /// The batch submit's bind-group cache counters (<see cref="BatchBindGroupReuse"/>): cumulative hits and misses
+        /// on this page, read from the dispatch helper. (0, 0) before the helper is loaded.
+        /// </summary>
+        public static (long Hits, long Misses) BatchBindGroupCounters
+        {
+            get
+            {
+                using var plan = SpawnDev.SpawnJS.SpawnJSRuntime.Instance.GlobalThis?.JSRef?.Get<SpawnDev.SpawnJS.SpawnJSObjectReference?>("ilgpuWebGPUPlan");
+                if (plan == null || !plan.Has("bgHits")) return (0, 0);
+                return ((long)plan.Get<double>("bgHits"), (long)plan.Get<double>("bgMisses"));
+            }
+        }
+
+        /// <summary>
+        /// The batch submit keeps the bind groups it creates, keyed by layout + every entry's (binding, buffer,
+        /// offset, size), and reuses one when the same descriptor recurs instead of calling <c>createBindGroup</c>
+        /// again. A bind group is immutable and names buffers by identity, and SpawnJS hold ids are never reused, so
+        /// an equal key IS an equal bind group. Pays off with <see cref="BatchScalarArena"/>: pooled scalar buffers come
+        /// back in a different order every flush, so their keys rarely repeat. True by default.
+        /// </summary>
+        public static bool BatchBindGroupReuse { get; set; } = true;
+
+        /// <summary>
         /// DIAGNOSTIC ABLATION - RESULTS ARE GARBAGE WHILE NON-ZERO. Makes the JS batch submit skip part of its work so a
         /// workload timed with it isolates that part's cost (JS timers are too coarse to time ~800 small calls one by
         /// one): 2 = skip <c>createBindGroup</c> + the dispatch encode (the scalar writes still run), 3 = skip the whole

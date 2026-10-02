@@ -303,8 +303,10 @@ public sealed class WebGPUDispatchPlan : IDisposable
         {
             await EnsureHelperLoadedAsync();
             // Check the FUNCTION, not just the namespace object: an older helper defines ilgpuWebGPUPlan too.
+            // setBindGroupReuse arrived with the scalar arenas (helper v4) - submitBatch alone would accept an
+            // arena batch and silently skip the arena uploads.
             using var plan = SpawnJSRuntime.Instance.GlobalThis?.JSRef?.Get<SpawnJSObjectReference?>("ilgpuWebGPUPlan");
-            HelperLoaded = plan?.Has("submitBatch") == true;
+            HelperLoaded = plan?.Has("submitBatch") == true && plan.Has("setBindGroupReuse");
         }
         catch (Exception ex)
         {

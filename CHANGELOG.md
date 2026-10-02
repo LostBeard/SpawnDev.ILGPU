@@ -1,6 +1,26 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## Unreleased (5.3.2-local) - WebGPU batched dispatch: scalar arenas + bind-group reuse
+
+- **Scalar arenas** (`WebGPUBackend.BatchScalarArena`, default on). Under record batching, the per-dispatch scalar
+  buffers (packed scalars, view strides, struct scalars) are 256-byte slots of two per-stream arena buffers instead of
+  pooled 256-byte buffers. The batch's scalars go up in ONE `writeBuffer` per arena (written before any command buffer
+  of the batch is submitted) instead of one per binding, and a repeating dispatch sequence binds the same
+  buffer/offset pairs every time. Two arenas because struct scalars are `read_write` and strides/packed scalars `read`,
+  and WebGPU rejects one buffer bound both ways in a dispatch. An arena that overflows submits the batch and doubles
+  for the next one. i64 spinlock buffers stay pooled.
+- **Bind-group reuse** (`WebGPUBackend.BatchBindGroupReuse`, default on). `submitBatch` caches bind groups per device,
+  keyed by layout + every entry's (binding, buffer id, offset, size); SpawnJS hold ids are never reused, so an equal key
+  is an equal bind group. Bounded: two generations of up to 8,192 groups (a hit in the old generation promotes;
+  the old generation is dropped at each rotation), so shapes in use stay cached and retired ones age out. Counters:
+  `WebGPUBackend.BatchBindGroupCounters`. Anaglyphohol DAv3 video at one input size: ~2.8k groups, ~1 miss per frame warm.
+- Dispatch helper `webgpuDispatchPlan.js` v4; batching requires it (an older helper on the page keeps the per-dispatch path).
+- ⚠️ **Raw WebGPU users: flush before your own submit** (behavior since 5.3.1's batched uploads, documented now). A small
+  `CopyFromCPU` (up to 64 KB) is RECORDED in the pending dispatch batch as an ordered upload, not written immediately.
+  Code that mixes ILGPU with its own `device.queue.submit` must call `accelerator.FlushPendingCommands()` (or
+  `stream.Flush()`) first, or the raw work runs before the upload lands. Found by SpawnScene's trainer: a raw dispatch
+  read an un-uploaded buffer and zeroed every opacity. Work submitted only through ILGPU is unaffected.
 ## 5.3.1 (forks 2.3.8) - 2026-10-01 - trim safe (enforced), AOT supported with the IL kept; bool/ulong scalars; exact float `%`
 
 - **Trim safe at LIBRARY level, enforced** (2026-10-01, wrapper 5.3.1-local.10, forks 2.3.8-local.2). ILGPU, ILGPU.Algorithms
