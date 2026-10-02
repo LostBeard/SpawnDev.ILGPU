@@ -37,9 +37,19 @@ namespace ILGPU.Runtime
     /// kernel(size, buffer, new DelegateSpecialization&lt;Func&lt;int,int&gt;&gt;(Negate));
     /// </code>
     /// </example>
+    /// <summary>
+    /// The wrapped delegate of a <see cref="DelegateSpecialization{TDelegate}"/>, for the launch path
+    /// (DelegateSpecializationRouter), which reads it per launch and must not use reflection to do so.
+    /// </summary>
+    internal interface IDelegateSpecialization
+    {
+        /// <summary>The wrapped delegate (null for a default-constructed value).</summary>
+        Delegate? Target { get; }
+    }
+
     [StructLayout(LayoutKind.Sequential)]
     public readonly struct DelegateSpecialization<TDelegate>
-        : IEquatable<DelegateSpecialization<TDelegate>>
+        : IEquatable<DelegateSpecialization<TDelegate>>, IDelegateSpecialization
         where TDelegate : Delegate
     {
         #region Instance
@@ -78,8 +88,9 @@ namespace ILGPU.Runtime
                     "Example: static int Negate(int x) => -x;");
             }
 
-            // Reject multicast delegates
-            if (@delegate.GetInvocationList().Length > 1)
+            // Reject multicast delegates (HasSingleTarget: GetInvocationList allocated an array per construction,
+            // and callers construct one per launch)
+            if (!@delegate.HasSingleTarget)
             {
                 throw new NotSupportedException(
                     "Multicast delegates are not supported as " +
@@ -101,6 +112,9 @@ namespace ILGPU.Runtime
             [MethodImpl(MethodImplOptions.AggressiveInlining)]
             get => _delegate;
         }
+
+        /// <inheritdoc/>
+        Delegate? IDelegateSpecialization.Target => _delegate;
 
         #endregion
 
