@@ -81,6 +81,7 @@ namespace ILGPU.Backends.PointerViews
         /// </summary>
         /// <param name="implType">The view implementation type.</param>
         /// <returns>The resolved field.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = global::ILGPU.Util.TrimmingAnnotations.RootedViewImplementation)]
         public static FieldInfo GetPtrField(Type implType) =>
             implType.GetField(nameof(ViewImplementation<int>.Ptr)).ThrowIfNull();
 
@@ -89,6 +90,7 @@ namespace ILGPU.Backends.PointerViews
         /// </summary>
         /// <param name="implType">The view implementation type.</param>
         /// <returns>The resolved field.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = global::ILGPU.Util.TrimmingAnnotations.RootedViewImplementation)]
         public static FieldInfo GetLengthField(Type implType) =>
             implType.GetField(nameof(ViewImplementation<int>.Length)).ThrowIfNull();
 
@@ -116,6 +118,7 @@ namespace ILGPU.Backends.PointerViews
         /// </summary>
         /// <param name="elementType">The element type.</param>
         /// <returns>The instantiated native method.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2060", Justification = global::ILGPU.Util.TrimmingAnnotations.UnconstrainedGeneric)]
         public static MethodInfo GetNativePtrMethod(Type elementType) =>
             GetNativePtrMethodInfo.MakeGenericMethod(elementType);
     }

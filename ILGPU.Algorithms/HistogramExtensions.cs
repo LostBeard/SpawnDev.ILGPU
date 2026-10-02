@@ -1,4 +1,5 @@
-﻿// ---------------------------------------------------------------------------------------
+﻿using System.Diagnostics.CodeAnalysis;
+// ---------------------------------------------------------------------------------------
 //                                   ILGPU Algorithms
 //                        Copyright (c) 2020-2023 ILGPU Project
 //                                    www.ilgpu.net
@@ -290,6 +291,7 @@ namespace ILGPU.Algorithms
         /// </typeparam>
         /// <param name="accelerator">The accelerator.</param>
         /// <returns>The created histogram handler.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2060", Justification = global::ILGPU.Util.TrimmingAnnotations.UnconstrainedGeneric)]
         public static Histogram<T, TStride, TBinType> CreateHistogram<
             T,
             TStride,
@@ -372,6 +374,7 @@ namespace ILGPU.Algorithms
         /// </typeparam>
         /// <param name="accelerator">The accelerator.</param>
         /// <returns>The created histogram handler.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2060", Justification = global::ILGPU.Util.TrimmingAnnotations.UnconstrainedGeneric)]
         public static HistogramUnchecked<T, TStride, TBinType> CreateHistogramUnchecked<
             T,
             TStride,

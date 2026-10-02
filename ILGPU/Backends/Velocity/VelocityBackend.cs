@@ -27,7 +27,7 @@ namespace ILGPU.Backends.Velocity
     /// Represents an automatic vectorization backend to be used with Velocity.
     /// </summary>
     /// <typeparam name="TILEmitter">The IL emitter type.</typeparam>
-    class VelocityBackend<TILEmitter> :
+    class VelocityBackend<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TILEmitter> :
         CodeGeneratorBackend<
         VelocityBackend<TILEmitter>.Handler,
         VelocityCodeGenerator<TILEmitter>.GeneratorArgs,

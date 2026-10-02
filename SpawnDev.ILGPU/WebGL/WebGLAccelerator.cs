@@ -1,4 +1,5 @@
-﻿// ---------------------------------------------------------------------------------------
+﻿using System.Diagnostics.CodeAnalysis;
+// ---------------------------------------------------------------------------------------
 //                               SpawnDev.ILGPU.WebGL
 //                 WebGL2 Compute Library for Blazor WebAssembly
 //
@@ -142,6 +143,8 @@ namespace SpawnDev.ILGPU.WebGL
             public PropertyInfo? BaseViewProperty { get; set; }
         }
 
+        [DynamicDependency(nameof(global::SpawnDev.ILGPU.BrowserTrimRoots.ViewMembers), typeof(global::SpawnDev.ILGPU.BrowserTrimRoots))]
+        [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = global::ILGPU.Util.TrimmingAnnotations.RootedViewMembers)]
         private static ReflectionMetadataCache GetOrCreateReflectionCache(Type type)
         {
             return _reflectionCache.GetOrAdd(type, t =>
@@ -214,6 +217,26 @@ namespace SpawnDev.ILGPU.WebGL
         /// Creates the dedicated GL worker by loading glWorker.js from the library's static assets.
         /// Transfers the OffscreenCanvas to the worker.
         /// </summary>
+        // Every GL worker payload is marshalled by SpawnJS reflecting over its properties. A class-level
+        // [DynamicallyAccessedMembers] is NOT enough: a payload stored in a List<object> (kernel params, outputs) lost
+        // every getter in a trimmed build (Arg_GetMethNotFnd). DynamicDependency roots them whenever this method is kept,
+        // and this method runs for every WebGL accelerator.
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(GLWorkerInitMessage))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(GLWorkerAllocBufferMessage))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(GLWorkerUploadBufferMessage))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(GLWorkerUploadRangeMessage))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(GLWorkerCopyBufferMessage))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(GLWorkerScatterMessage))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(GLWorkerFreeBufferMessage))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(GLWorkerReadbackMessage))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(GLWorkerBlitMessage))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(GLWorkerDispatchMessage))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(GLParamBufferRef))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(GLParamScalarEmu64))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(GLParamScalar))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(GLParamStruct))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(GLUniformField))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(GLOutputEntry))]
         private void InitializeGLWorker()
         {
             // Load worker from the library's static web assets (cache-bust to pick up changes)
@@ -222,7 +245,7 @@ namespace SpawnDev.ILGPU.WebGL
 
             // Transfer OffscreenCanvas to the worker
             // Canvas must be both a property of the message AND in the transfer list
-            var initMsg = new { type = "init", canvas = Canvas.JSRef! };
+            var initMsg = new GLWorkerInitMessage { canvas = Canvas };
             _glWorker.PostMessage(initMsg, new object[] { Canvas.JSRef! });
 
             _workerInitialized = true;
@@ -354,12 +377,11 @@ namespace SpawnDev.ILGPU.WebGL
             {
                 memBuffer.GlslType = glslType;
                 // Allocate in worker
-                _glWorker.PostMessage(new
+                _glWorker.PostMessage(new GLWorkerAllocBufferMessage
                 {
-                    type = "allocBuffer",
                     bufferId = memBuffer.WorkerBufferId,
                     byteSize = (int)memBuffer.LengthInBytes,
-                    glslType
+                    glslType = glslType
                 });
                 memBuffer.IsAllocatedInWorker = true;
                 memBuffer.NeedsUpload = true; // Fresh alloc always needs initial data
@@ -401,9 +423,8 @@ namespace SpawnDev.ILGPU.WebGL
                     $"backing array for buffer {memBuffer.WorkerBufferId} has no ArrayBuffer to transfer " +
                     $"(detached?) while uploading {memBuffer.LengthInBytes} bytes.");
 
-            _glWorker.PostMessage(new
+            _glWorker.PostMessage(new GLWorkerUploadBufferMessage
             {
-                type = "uploadBuffer",
                 bufferId = memBuffer.WorkerBufferId,
                 buffer = copyBuffer,
                 byteOffset = 0,
@@ -427,9 +448,8 @@ namespace SpawnDev.ILGPU.WebGL
             using var range = memBuffer.BackingArray.Slice(byteOffset, byteOffset + length);
             var rangeBuffer = range.Buffer
                 ?? throw new InvalidOperationException($"backing array range of buffer {memBuffer.WorkerBufferId} has no ArrayBuffer (detached?)");
-            _glWorker.PostMessage(new
+            _glWorker.PostMessage(new GLWorkerUploadRangeMessage
             {
-                type = "uploadBuffer",
                 bufferId = memBuffer.WorkerBufferId,
                 buffer = rangeBuffer,
                 byteOffset = 0,
@@ -443,7 +463,7 @@ namespace SpawnDev.ILGPU.WebGL
         /// </summary>
         internal void FreeWorkerBuffer(int workerBufferId)
         {
-            _glWorker?.PostMessage(new { type = "freeBuffer", bufferId = workerBufferId });
+            _glWorker?.PostMessage(new GLWorkerFreeBufferMessage { bufferId = workerBufferId });
         }
 
         /// <summary>
@@ -473,9 +493,8 @@ namespace SpawnDev.ILGPU.WebGL
                 throw new InvalidOperationException("GL worker not initialized");
             EnsureBufferInWorker(source, source.GlslType);
             EnsureBufferInWorker(destination, destination.GlslType);
-            _glWorker.PostMessage(new
+            _glWorker.PostMessage(new GLWorkerCopyBufferMessage
             {
-                type = "copyBuffer",
                 srcBufferId = source.WorkerBufferId,
                 srcByteOffset = (int)srcByteOffset,
                 dstBufferId = destination.WorkerBufferId,
@@ -504,9 +523,8 @@ namespace SpawnDev.ILGPU.WebGL
             EnsureBufferInWorker(destination, destination.GlslType);
             EnsureBufferInWorker(source, source.GlslType);
             EnsureBufferInWorker(destIndex, destIndex.GlslType);
-            _glWorker.PostMessage(new
+            _glWorker.PostMessage(new GLWorkerScatterMessage
             {
-                type = "scatter",
                 dstBufferId = destination.WorkerBufferId,
                 srcBufferId = source.WorkerBufferId,
                 destBufferId = destIndex.WorkerBufferId,
@@ -564,11 +582,10 @@ namespace SpawnDev.ILGPU.WebGL
             var tcs = new TaskCompletionSource<ArrayBuffer>();
             _pendingReadbacks[requestId] = new PendingReadback { Tcs = tcs, MemoryBuffer = memBuffer };
 
-            _glWorker!.PostMessage(new
+            _glWorker!.PostMessage(new GLWorkerReadbackMessage
             {
-                type = "readbackBuffer",
                 bufferId = memBuffer.WorkerBufferId,
-                requestId
+                requestId = requestId
             });
 
             // Wait for the worker to respond with the data
@@ -612,13 +629,12 @@ namespace SpawnDev.ILGPU.WebGL
             var tcs = new TaskCompletionSource();
             _pendingBlits[requestId] = new PendingBlit(tcs, draw);
 
-            _glWorker!.PostMessage(new
+            _glWorker!.PostMessage(new GLWorkerBlitMessage
             {
-                type = "blitBuffer",
                 bufferId = memBuffer.WorkerBufferId,
-                width,
-                height,
-                requestId
+                width = width,
+                height = height,
+                requestId = requestId
             });
 
             await tcs.Task;
@@ -687,20 +703,19 @@ namespace SpawnDev.ILGPU.WebGL
             var dispatchId = Interlocked.Increment(ref webGlAccel._nextDispatchId);
 
             // Build dispatch message — no ArrayBuffer transfers needed
-            var dispatchMsg = new
+            var dispatchMsg = new GLWorkerDispatchMessage
             {
-                type = "dispatch",
-                dispatchId,
-                programId,
+                dispatchId = dispatchId,
+                programId = programId,
                 source = compiledKernel.GLSLSource,
-                varyingNames,
-                totalVertices,
-                dimX,
-                dimY,
-                dimZ,
-                groupDimX,
-                gridDimX,
-                gridDimY,
+                varyingNames = varyingNames,
+                totalVertices = totalVertices,
+                dimX = dimX,
+                dimY = dimY,
+                dimZ = dimZ,
+                groupDimX = groupDimX,
+                gridDimX = gridDimX,
+                gridDimY = gridDimY,
                 @params = jsParams.ToArray(),
                 strides = strideMap,
                 outputs = outputs.ToArray()
@@ -854,6 +869,7 @@ namespace SpawnDev.ILGPU.WebGL
         /// Buffer arguments are sent as buffer_ref (referencing GPU-resident buffers in the worker).
         /// Returns (jsParams, strideMap, outputDescriptors).
         /// </summary>
+        [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = global::ILGPU.Util.TrimmingAnnotations.StructureLayout)]
         private static (List<object> jsParams, Dictionary<int, int[]> strides, List<object> outputs)
             MarshalArguments(WebGLCompiledKernel compiledKernel, object[] args, WebGLAccelerator webGlAccel)
         {
@@ -986,13 +1002,12 @@ namespace SpawnDev.ILGPU.WebGL
                     // When a SubView starts at a non-zero index within the parent buffer,
                     // the shader must add this offset to all texelFetch indices.
                     int elementOffset = (int)contiguous.Index;
-                    jsParams.Add(new
+                    jsParams.Add(new GLParamBufferRef
                     {
-                        kind = "buffer_ref",
                         bufferId = memBuffer.WorkerBufferId,
                         paramIndex = glslParamIndex,
                         elementCount = length,
-                        elementOffset
+                        elementOffset = elementOffset
                     });
 
                     // Extract stride dimensions for multi-dim views
@@ -1011,9 +1026,8 @@ namespace SpawnDev.ILGPU.WebGL
                     if (arg is double dVal && webGlAccel.Backend.EnableF64Emulation)
                     {
                         var bits = BitConverter.DoubleToUInt64Bits(dVal);
-                        jsParams.Add(new
+                        jsParams.Add(new GLParamScalarEmu64
                         {
-                            kind = "scalar_emu64",
                             paramIndex = glslParamIndex,
                             lo = (uint)(bits & 0xFFFFFFFF),
                             hi = (uint)(bits >> 32)
@@ -1025,9 +1039,8 @@ namespace SpawnDev.ILGPU.WebGL
                         // to the 32-bit uniform path below and arrived with its low word 0 (found 2026-10-01 by
                         // ScalarPacking_AllKinds_VerifiedAgainstLegacy).
                         var bits = arg is long lVal ? (ulong)lVal : (ulong)arg;
-                        jsParams.Add(new
+                        jsParams.Add(new GLParamScalarEmu64
                         {
-                            kind = "scalar_emu64",
                             paramIndex = glslParamIndex,
                             lo = (uint)(bits & 0xFFFFFFFF),
                             hi = (uint)(bits >> 32)
@@ -1108,11 +1121,10 @@ namespace SpawnDev.ILGPU.WebGL
                                 _ => throw new NotSupportedException($"Unsupported scalar: {arg?.GetType()}")
                             };
 
-                            jsParams.Add(new
+                            jsParams.Add(new GLParamScalar
                             {
-                                kind = "scalar",
                                 paramIndex = glslParamIndex,
-                                scalarType,
+                                scalarType = scalarType,
                                 value = EncodeUniformScalarValue(value, scalarType)
                             });
                         }
@@ -1162,9 +1174,8 @@ namespace SpawnDev.ILGPU.WebGL
                                     ulong ulvl => st == "int" ? (object)(int)(uint)ulvl : (uint)ulvl,
                                     _ => fieldVal ?? 0
                                 };
-                                jsParams.Add(new
+                                jsParams.Add(new GLParamScalar
                                 {
-                                    kind = "scalar",
                                     paramIndex = glslParamIndex,
                                     scalarType = st,
                                     value = EncodeUniformScalarValue(vl, st)
@@ -1175,9 +1186,8 @@ namespace SpawnDev.ILGPU.WebGL
                                 // Multi-field capture: IR keeps as struct.
                                 var flatFields = new List<object>();
                                 FlattenStructFieldsForUniform(arg, "", flatFields);
-                                jsParams.Add(new
+                                jsParams.Add(new GLParamStruct
                                 {
-                                    kind = "struct",
                                     paramIndex = glslParamIndex,
                                     fields = flatFields.ToArray()
                                 });
@@ -1187,9 +1197,8 @@ namespace SpawnDev.ILGPU.WebGL
                         {
                             var flatFields = new List<object>();
                             FlattenStructFieldsForUniform(arg, "", flatFields);
-                            jsParams.Add(new
+                            jsParams.Add(new GLParamStruct
                             {
-                                kind = "struct",
                                 paramIndex = glslParamIndex,
                                 fields = flatFields.ToArray()
                             });
@@ -1271,7 +1280,7 @@ namespace SpawnDev.ILGPU.WebGL
                             if (contiguous.ElementSize < 4)
                                 subWordElementSize = contiguous.ElementSize;
 
-                            outputs.Add(new
+                            outputs.Add(new GLOutputEntry
                             {
                                 bufferId = webGlMem.WorkerBufferId,
                                 paramIndex = outputInfo.ParamIndex,
@@ -1288,7 +1297,7 @@ namespace SpawnDev.ILGPU.WebGL
                                 structByteSize = outputInfo.StructByteSize,
                                 writeByteOffset = (int)(contiguous.Index * contiguous.ElementSize),
                                 writeLengthBytes = (int)contiguous.LengthInBytes,
-                                subWordElementSize
+                                subWordElementSize = subWordElementSize
                             });
                         }
                     }
@@ -1381,6 +1390,9 @@ namespace SpawnDev.ILGPU.WebGL
         /// Extracts [width, height] or [width, height, depth] dimensions from an ArrayView2D/3D argument.
         /// Used for setting stride uniforms in multi-dimensional view parameters.
         /// </summary>
+        [DynamicDependency(nameof(global::SpawnDev.ILGPU.BrowserTrimRoots.ViewMembers), typeof(global::SpawnDev.ILGPU.BrowserTrimRoots))]
+        [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = global::ILGPU.Util.TrimmingAnnotations.RootedViewMembers)]
+        [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = global::ILGPU.Util.TrimmingAnnotations.RootedViewMembers)]
         private static int[] ExtractViewDimensions(object arg, Type argType)
         {
             var flags = System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic;
@@ -1517,6 +1529,7 @@ namespace SpawnDev.ILGPU.WebGL
         /// <summary>
         /// Recursively extracts leaf primitive fields from a struct, assigning sequential field_N names.
         /// </summary>
+        [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = global::ILGPU.Util.TrimmingAnnotations.StructureLayout)]
         private static void FlattenStructFieldsForUniformRecursive(object structValue, List<object> results, ref int fieldCounter)
         {
             var fields = structValue.GetType().GetFields(BindingFlags.Public | BindingFlags.Instance);
@@ -1558,7 +1571,7 @@ namespace SpawnDev.ILGPU.WebGL
                         ulong ulv => (uint)ulv,
                         _ => fieldVal ?? 0
                     };
-                    results.Add(new { path, scalarType, value = EncodeUniformScalarValue(value, scalarType) });
+                    results.Add(new GLUniformField { path = path, scalarType = scalarType, value = EncodeUniformScalarValue(value, scalarType) });
                     fieldCounter++;
                 }
             }
@@ -1572,6 +1585,7 @@ namespace SpawnDev.ILGPU.WebGL
         /// glWorker.js. Scalar (primitive) fields are emitted as standard scalar
         /// uniforms with the same synthetic param index encoding.
         /// </summary>
+        [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = global::ILGPU.Util.TrimmingAnnotations.StructureLayout)]
         private static void EmitBodyStructDispatch(
             object structArg,
             int glslParamIndex,
@@ -1633,13 +1647,12 @@ namespace SpawnDev.ILGPU.WebGL
 
                     webGlAccel.EnsureBufferInWorker(memBuffer, entry.GlslElementType);
 
-                    jsParams.Add(new
+                    jsParams.Add(new GLParamBufferRef
                     {
-                        kind = "buffer_ref",
                         bufferId = memBuffer.WorkerBufferId,
                         paramIndex = entry.SyntheticParamIndex,
                         elementCount = length,
-                        elementOffset
+                        elementOffset = elementOffset
                     });
                 }
                 else if (entry.IsScalar)
@@ -1673,11 +1686,10 @@ namespace SpawnDev.ILGPU.WebGL
                         ulong ulv => (uint)ulv,
                         _ => fieldValue ?? 0
                     };
-                    jsParams.Add(new
+                    jsParams.Add(new GLParamScalar
                     {
-                        kind = "scalar",
                         paramIndex = entry.SyntheticParamIndex,
-                        scalarType,
+                        scalarType = scalarType,
                         value = EncodeUniformScalarValue(scalarValue, scalarType)
                     });
                 }

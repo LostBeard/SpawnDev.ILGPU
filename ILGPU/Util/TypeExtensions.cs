@@ -160,6 +160,7 @@ namespace ILGPU.Util
         /// </summary>
         /// <param name="type">The source type.</param>
         /// <returns>The resolved delegate invocation method.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = "Invoke is the runtime-implemented method of a delegate type. The trimmer keeps it on every delegate type it keeps, because the runtime calls it for every delegate invocation.")]
         public static MethodInfo? GetDelegateInvokeMethod(this Type type)
         {
             const string InvokeMethodName = "Invoke";

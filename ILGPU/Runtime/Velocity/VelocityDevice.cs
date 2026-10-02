@@ -9,6 +9,7 @@
 // Source License. See LICENSE.txt for details.
 // ---------------------------------------------------------------------------------------
 
+using System.Diagnostics.CodeAnalysis;
 using ILGPU.Backends.Velocity;
 using ILGPU.Backends.Velocity.Scalar;
 #if NET7_0_OR_GREATER
@@ -48,11 +49,12 @@ namespace ILGPU.Runtime.Velocity
     {
         #region Static
 
-        private static readonly Type[] VelocitySpecializers = new Type[]
+        private static readonly Func<VelocityTargetSpecializer>[] VelocitySpecializers =
+            new Func<VelocityTargetSpecializer>[]
         {
-            typeof(Scalar),
+            () => new Scalar(),
 #if NET7_0_OR_GREATER
-            typeof(Vec128),
+            () => new Vec128(),
 #endif
         };
 
@@ -82,9 +84,7 @@ namespace ILGPU.Runtime.Velocity
 
             Name = $"{nameof(VelocityAccelerator)}_{deviceType}";
             DeviceType = deviceType;
-            TargetSpecializer = Activator.CreateInstance(
-                    VelocitySpecializers[(int)deviceType])
-                .AsNotNullCast<VelocityTargetSpecializer>();
+            TargetSpecializer = VelocitySpecializers[(int)deviceType]();
             WarpSize = TargetSpecializer.WarpSize;
             MaxNumThreadsPerGroup = MaxNumThreadsPerMultiprocessor = WarpSize;
 #if DEBUG

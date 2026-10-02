@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -133,39 +134,40 @@ public sealed class ShaderManifest
 /// WebGPU codegen metadata across the JSON boundary. Pure, deterministic, JS-free - usable in
 /// the build-time worker AND the Blazor runtime loader.
 /// </summary>
+[JsonSourceGenerationOptions(WriteIndented = true, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull, IncludeFields = false)]
+[JsonSerializable(typeof(ShaderArtifactMeta))]
+[JsonSerializable(typeof(ShaderManifest))]
+internal partial class ShaderArtifactJsonContext : JsonSerializerContext { }
+
 public static class ShaderArtifactSerializer
 {
     /// <summary>The codegen version stamp baked into every artifact + manifest (= profile schema version).</summary>
     public static string CodegenVersion => $"v{CapabilityProfile.CurrentSchemaVersion}";
 
-    private static readonly JsonSerializerOptions Options = new()
-    {
-        WriteIndented = true,
-        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
-        // DynamicSharedOverrideInfo is an immutable struct deserialized via its constructor.
-        IncludeFields = false,
-    };
+    // Source-generated (trim / AOT safe). ShaderArtifactJsonContext carries the same options the reflection
+    // serializer used here before - WriteIndented, WhenWritingNull, no fields - so the JSON is byte-identical
+    // and manifests written by older precompiler builds still load.
 
     // ---- meta.json (per-artifact sidecar) ----
 
     /// <summary>Serialize a sidecar record to indented JSON.</summary>
     public static string SerializeMeta(ShaderArtifactMeta meta) =>
-        JsonSerializer.Serialize(meta, Options);
+        JsonSerializer.Serialize(meta, ShaderArtifactJsonContext.Default.ShaderArtifactMeta);
 
     /// <summary>Deserialize a sidecar record from JSON.</summary>
     public static ShaderArtifactMeta DeserializeMeta(string json) =>
-        JsonSerializer.Deserialize<ShaderArtifactMeta>(json, Options)
+        JsonSerializer.Deserialize(json, ShaderArtifactJsonContext.Default.ShaderArtifactMeta)
         ?? throw new FormatException("ShaderArtifactMeta JSON deserialized to null.");
 
     // ---- manifest.json ----
 
     /// <summary>Serialize the manifest to indented JSON.</summary>
     public static string SerializeManifest(ShaderManifest manifest) =>
-        JsonSerializer.Serialize(manifest, Options);
+        JsonSerializer.Serialize(manifest, ShaderArtifactJsonContext.Default.ShaderManifest);
 
     /// <summary>Deserialize the manifest from JSON.</summary>
     public static ShaderManifest DeserializeManifest(string json) =>
-        JsonSerializer.Deserialize<ShaderManifest>(json, Options)
+        JsonSerializer.Deserialize(json, ShaderArtifactJsonContext.Default.ShaderManifest)
         ?? throw new FormatException("ShaderManifest JSON deserialized to null.");
 
     // ---- WebGPU CodegenMetadata <-> DTO ----

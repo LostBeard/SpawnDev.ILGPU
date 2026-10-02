@@ -3,6 +3,42 @@
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 ## Unreleased - float `%` is exact on every backend
 
+- **Trim safe at LIBRARY level, enforced** (2026-10-01, wrapper 5.3.1-local.10, forks 2.3.8-local.2). ILGPU, ILGPU.Algorithms
+  and SpawnDev.ILGPU are `IsTrimmable` and every trim (IL2xxx) warning is a build error. The August pass proved the
+  TrimGate app (ILLink only analyzes what an app reaches); the library-level analyzer checks EVERY method and found
+  ~150 more sites: SpawnDev.ILGPU 119 (the WebGPU/WebGL/Wasm accelerators' argument marshalling, never gated), core 19
+  (CUDA/OpenCL/Velocity/argument mapper), Algorithms 12. Now 0. How:
+  - **By-name lookups of ILGPU's own members** (`BaseView`, `IntLength`, `Extent`, `XStride`, index `X/Y/Z`,
+    `SpecializedValue.Value`, ...) are ROOTED: `SpawnDev.ILGPU.BrowserTrimRoots.ViewMembers` carries a DynamicDependency
+    on the properties+fields of every view/index/stride type, and every lookup method depends on it. Before this, an app
+    that never touched e.g. `IntLength` statically could lose the getter and marshal a view wrong, silently.
+  - Struct field walks -> `StructureLayout`; own-helper `MakeGenericMethod` -> `UnconstrainedGeneric`; intrinsic handler
+    and remap types annotated (`HandlerMethods`/`PublicMethods`, incl. the `static readonly Type` fields feeding them).
+  - Velocity: specializers are created by a factory (`() => new Scalar()`) instead of `Activator` over a `Type[]` (the
+    trimmer keeps a typeof()'d type but not necessarily its constructor); `TILEmitter` carries `PublicConstructors`.
+  - `ShaderArtifactSerializer` uses a source-generated `JsonSerializerContext`. Byte parity with the old reflection
+    serializer was PROVEN (full + null-omitted meta, manifest, and old-JSON -> new reader -> identical bytes), so
+    manifests written by older precompiler builds still load. `ShaderPrecompiler.Run` is `[RequiresUnreferencedCode]`
+    (it scans an assembly; build-time only).
+  - NOT `IsAotCompatible`: Reflection.Emit launchers etc. remain (IL3050 visible, 29 core / 43 wrapper). Browser Mono
+    AOT with the IL kept runs them (interpreter fallback).
+- **Found by the first TRIMMED PMT run (and fixed):**
+  - WebGPU RadixSort (any specialized kernel): `NullReferenceException` in `ILEmitter.EmitCall` - the specialized
+    launcher looked up `SpecializationCache.GetOrCreateKernel` and `SpecializedValue.Value` by name under a WRONG
+    `EmittedType` suppression (neither type is emitted), so the trimmer removed them. Now rooted with DynamicDependency;
+    an audit of every older suppression rooted three more of the same class (SpecializationCache ctor via Activator,
+    SpecializedValue ctor by signature, index-type X/Y/Z getters).
+  - WebGL: EVERY kernel test timed out at 30 s. The GL worker was sent C# ANONYMOUS objects, which SpawnJS marshals
+    by reflecting their properties; trimmed, the getters were gone and the worker received `{}`. All payloads (messages,
+    kernel params, outputs, uniform fields) are now typed DTOs (`WebGL/WebGLWorkerMessages.cs`, same shapes, lowercase
+    names like the Wasm DTOs) rooted by DynamicDependency on `InitializeGLWorker` - a class-level
+    `[DynamicallyAccessedMembers]` alone did NOT keep the getters of DTOs stored in a `List<object>`. Wasm DTOs rooted
+    the same way. No anonymous objects remain in SpawnDev.ILGPU.
+  - Trimmed lanes: WebGPU 685/0, WebGL 557/0, Wasm 724/0.
+- **The Demo now publishes TRIMMED** (`PublishTrimmed=true`, test assemblies rooted), so every PMT run tests the
+  libraries the way consumers ship them. Previously `PublishTrimmed=false` meant PMT never exercised trimming.
+- Gate: TrimGate PASS trimmed (TrimMode=full) and untrimmed; full solution builds with 0 errors under enforcement.
+
 - **`bool` kernel SCALAR parameters work on all 6 backends** (2026-10-01, new test `BoolScalarParam_TrueAndFalse_Arrive`;
   each backend red before its fix). WebGPU emitted `bitcast<bool>(u32)` (invalid WGSL: `BitcastFromU32`/`BitcastToU32`
   now use `!= 0u` / `select(0u, 1u, ..)`); **Wasm received false for true** (scalars are spliced into the worker call as

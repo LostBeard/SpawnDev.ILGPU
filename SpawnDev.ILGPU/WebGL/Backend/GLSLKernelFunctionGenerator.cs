@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 // ---------------------------------------------------------------------------------------
 //                                 SpawnDev.ILGPU.WebGL
 //                        Copyright (c) 2024 SpawnDev Project
@@ -986,6 +987,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// parameter. Must run BEFORE AnalyzeOutputBuffers/AnalyzeInputBuffers so those
         /// passes can route through GetField for body-struct view fields.
         /// </summary>
+        [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = global::ILGPU.Util.TrimmingAnnotations.StructureLayout)]
         private void ScanBodyStructParams()
         {
             foreach (var param in Method.Parameters)

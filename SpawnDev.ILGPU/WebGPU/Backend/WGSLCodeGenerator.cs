@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 // ---------------------------------------------------------------------------------------
 //                                 SpawnDev.ILGPU.WebGPU
 //                        Copyright (c) 2024 SpawnDev Project
@@ -4562,6 +4563,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// E.g. MaxInt32 → "-2147483648", MinInt32 → "2147483647", AddInt32 → "0".
         /// Returns null if the identity cannot be determined.
         /// </summary>
+        [UnconditionalSuppressMessage("Trimming", "IL2062", Justification = "TReduction is the reduction-operation value type (AddInt32, MaxFloat, ...) that the kernel's own IL passes to an ILGPU.Algorithms Scan/Reduce call. That IL invokes IScanReduceOperation<T>.Identity / CLCommand through a constrained call, so the trimmer keeps this type's implementations of them. Activator.CreateInstance on a value type needs no constructor: it yields the default value.")]
+        [UnconditionalSuppressMessage("Trimming", "IL2065", Justification = "TReduction is the reduction-operation value type (AddInt32, MaxFloat, ...) that the kernel's own IL passes to an ILGPU.Algorithms Scan/Reduce call. That IL invokes IScanReduceOperation<T>.Identity / CLCommand through a constrained call, so the trimmer keeps this type's implementations of them. Activator.CreateInstance on a value type needs no constructor: it yields the default value.")]
         private static string? GetReductionIdentityExpr(MethodInfo? sourceMethod)
         {
             if (sourceMethod == null) return null;
@@ -4648,6 +4651,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// IScanReduceOperation, using the CLCommand property ("max", "min", "add").
         /// Returns null if the operation cannot be determined.
         /// </summary>
+        [UnconditionalSuppressMessage("Trimming", "IL2062", Justification = "TReduction is the reduction-operation value type (AddInt32, MaxFloat, ...) that the kernel's own IL passes to an ILGPU.Algorithms Scan/Reduce call. That IL invokes IScanReduceOperation<T>.Identity / CLCommand through a constrained call, so the trimmer keeps this type's implementations of them. Activator.CreateInstance on a value type needs no constructor: it yields the default value.")]
+        [UnconditionalSuppressMessage("Trimming", "IL2065", Justification = "TReduction is the reduction-operation value type (AddInt32, MaxFloat, ...) that the kernel's own IL passes to an ILGPU.Algorithms Scan/Reduce call. That IL invokes IScanReduceOperation<T>.Identity / CLCommand through a constrained call, so the trimmer keeps this type's implementations of them. Activator.CreateInstance on a value type needs no constructor: it yields the default value.")]
         private static string? GetSubgroupReduceOp(MethodInfo? sourceMethod)
         {
             if (sourceMethod == null) return null;

@@ -261,6 +261,7 @@ namespace ILGPU.Backends.IL
         /// <param name="type">The managed structure type.</param>
         /// <param name="fieldIndex">The internal field index.</param>
         /// <returns>The corresponding field info.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = global::ILGPU.Util.TrimmingAnnotations.EmittedType)]
         public static FieldInfo GetFieldInfo(Type type, int fieldIndex)
         {
             var fieldName = StructureType.GetFieldName(fieldIndex);

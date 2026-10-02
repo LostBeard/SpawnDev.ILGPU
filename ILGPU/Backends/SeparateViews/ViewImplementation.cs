@@ -41,6 +41,7 @@ namespace ILGPU.Backends.SeparateViews
         /// <param name="sourceType">The source array-view type.</param>
         /// <returns>The resolved creation method.</returns>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        [UnconditionalSuppressMessage("Trimming", "IL2060", Justification = global::ILGPU.Util.TrimmingAnnotations.UnconstrainedGeneric)]
         public static MethodInfo GetCreateMethod(Type sourceType)
         {
             sourceType.IsArrayViewType(out Type? elementType);
@@ -71,6 +72,7 @@ namespace ILGPU.Backends.SeparateViews
         /// </summary>
         /// <param name="implType">The view implementation type.</param>
         /// <returns>The resolved field.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = global::ILGPU.Util.TrimmingAnnotations.StructureLayout)]
         public static FieldInfo GetIndexField(Type implType) =>
             implType.GetField(nameof(Index)).AsNotNull();
 
@@ -79,6 +81,7 @@ namespace ILGPU.Backends.SeparateViews
         /// </summary>
         /// <param name="implType">The view implementation type.</param>
         /// <returns>The resolved field.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = global::ILGPU.Util.TrimmingAnnotations.StructureLayout)]
         public static FieldInfo GetLengthField(Type implType) =>
             implType.GetField(nameof(Length)).AsNotNull();
 

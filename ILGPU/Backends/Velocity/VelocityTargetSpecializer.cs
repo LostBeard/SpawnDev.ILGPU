@@ -9,6 +9,7 @@
 // Source License. See LICENSE.txt for details.
 // ---------------------------------------------------------------------------------------
 
+using System.Diagnostics.CodeAnalysis;
 using ILGPU.Backends.IL;
 using ILGPU.IR.Values;
 using ILGPU.Runtime.Velocity;
@@ -28,7 +29,9 @@ namespace ILGPU.Backends.Velocity
     {
         #region Static
 
-        internal static MethodInfo GetMethod<T>(string name) =>
+        internal static MethodInfo GetMethod<
+            [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.NonPublicMethods)] T>(
+            string name) =>
             typeof(T)
                 .GetMethod(name, BindingFlags.Static | BindingFlags.NonPublic)
                 .AsNotNull();
@@ -491,6 +494,7 @@ namespace ILGPU.Backends.Velocity
             ConvertScalarTo64(emitter, VelocityWarpOperationMode.U);
         }
 
+        [UnconditionalSuppressMessage("Trimming", "IL2060", Justification = global::ILGPU.Util.TrimmingAnnotations.UnconstrainedGeneric)]
         public void GetDynamicSharedMemoryLength<TILEmitter>(
             TILEmitter emitter,
             Type type)
@@ -506,6 +510,7 @@ namespace ILGPU.Backends.Velocity
             ConvertScalarTo32(emitter, VelocityWarpOperationMode.U);
         }
 
+        [UnconditionalSuppressMessage("Trimming", "IL2060", Justification = global::ILGPU.Util.TrimmingAnnotations.UnconstrainedGeneric)]
         public void GetSharedMemoryFromPool<TILEmitter>(
             TILEmitter emitter,
             Type type,

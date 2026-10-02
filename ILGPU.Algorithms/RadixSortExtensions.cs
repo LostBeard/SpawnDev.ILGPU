@@ -1264,6 +1264,7 @@ namespace ILGPU.Algorithms
         /// </typeparam>
         /// <param name="accelerator">The accelerator.</param>
         /// <returns>The created radix sort handler.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2060", Justification = global::ILGPU.Util.TrimmingAnnotations.UnconstrainedGeneric)]
         public static RadixSort<T, TStride> CreateRadixSort<
             T,
             TStride,

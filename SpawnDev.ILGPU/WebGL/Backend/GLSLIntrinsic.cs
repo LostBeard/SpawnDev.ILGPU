@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 // ---------------------------------------------------------------------------------------
 //                                 SpawnDev.ILGPU.WebGL
 //                        Copyright (c) 2024 SpawnDev Project
@@ -50,7 +51,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// <param name="handlerType">The associated target handler type.</param>
         /// <param name="methodName">The target method name (or null).</param>
         /// <param name="mode">The code-generator mode.</param>
-        public WebGLIntrinsic(System.Type handlerType, string methodName, global::ILGPU.IR.Intrinsics.IntrinsicImplementationMode mode)
+        public WebGLIntrinsic([DynamicallyAccessedMembers(global::ILGPU.Util.TrimmingAnnotations.HandlerMethods)] System.Type handlerType, string methodName, global::ILGPU.IR.Intrinsics.IntrinsicImplementationMode mode)
             : base(
                   WebGLBackend.BackendTypeWebGL,
                   handlerType,

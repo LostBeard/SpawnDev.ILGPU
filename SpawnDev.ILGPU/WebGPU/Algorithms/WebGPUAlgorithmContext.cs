@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 // ---------------------------------------------------------------------------------------
 //                               SpawnDev.ILGPU
 //                    Copyright (c) 2024-2026 SpawnDev / LostBeard
@@ -26,24 +27,28 @@ namespace SpawnDev.ILGPU.WebGPU.Algorithms
         /// <summary>
         /// The <see cref="WebGPUGroupExtensions"/> type.
         /// </summary>
+        [DynamicallyAccessedMembers(global::ILGPU.Util.TrimmingAnnotations.HandlerMethods)]
         internal static readonly Type WebGPUGroupExtensionsType =
             typeof(WebGPUGroupExtensions);
 
         /// <summary>
         /// The <see cref="WebGPUWarpExtensions"/> type.
         /// </summary>
+        [DynamicallyAccessedMembers(global::ILGPU.Util.TrimmingAnnotations.HandlerMethods)]
         internal static readonly Type WebGPUWarpExtensionsType =
             typeof(WebGPUWarpExtensions);
 
         /// <summary>
         /// The <see cref="ILGPU.Algorithms.GroupExtensions"/> type.
         /// </summary>
+        [DynamicallyAccessedMembers(global::ILGPU.Util.TrimmingAnnotations.PublicMethods)]
         internal static readonly Type GroupExtensionsType =
             typeof(global::ILGPU.Algorithms.GroupExtensions);
 
         /// <summary>
         /// The <see cref="ILGPU.Algorithms.WarpExtensions"/> type.
         /// </summary>
+        [DynamicallyAccessedMembers(global::ILGPU.Util.TrimmingAnnotations.PublicMethods)]
         internal static readonly Type WarpExtensionsType =
             typeof(global::ILGPU.Algorithms.WarpExtensions);
 
@@ -58,8 +63,8 @@ namespace SpawnDev.ILGPU.WebGPU.Algorithms
         /// </summary>
         private static void RegisterIntrinsicMapping(
             IntrinsicImplementationManager manager,
-            Type sourceType,
-            Type targetType,
+            [DynamicallyAccessedMembers(global::ILGPU.Util.TrimmingAnnotations.PublicMethods)] Type sourceType,
+            [DynamicallyAccessedMembers(global::ILGPU.Util.TrimmingAnnotations.HandlerMethods)] Type targetType,
             string name)
         {
             var sourceMethod = sourceType.GetMethod(

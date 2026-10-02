@@ -49,6 +49,8 @@ namespace ILGPU.Runtime
         /// </summary>
         /// <param name="typeBuilder">The target type builder to use.</param>
         /// <param name="fields">The source fields used for implementation.</param>
+        // SpecializedValue<T>(T) is constructed through a constructor looked up by signature: root it (a trimmed app lost it).
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicConstructors | DynamicallyAccessedMemberTypes.PublicProperties, typeof(SpecializedValue<>))]
         [UnconditionalSuppressMessage("Trimming", "IL2076",
             Justification = TrimmingAnnotations.EmittedType)]
         private static void ImplementSpecializationCacheArgs(
@@ -114,6 +116,9 @@ namespace ILGPU.Runtime
         /// <returns>
         /// A dynamic kernel launcher that automatically specializes kernels.
         /// </returns>
+        // SpecializationCache is instantiated with Activator.CreateInstance over a MakeGenericType: nothing references its
+        // constructor statically, so root the type (it is small and internal).
+        [DynamicDependency(DynamicallyAccessedMemberTypes.All, typeof(SpecializationCache<,,>))]
         [UnconditionalSuppressMessage("Trimming", "IL2076",
             Justification = TrimmingAnnotations.EmittedType)]
         public static TDelegate CreateSpecializedLauncher<TDelegate, TLoader>(
@@ -168,12 +173,14 @@ namespace ILGPU.Runtime
         /// <param name="keyStruct">The key struct.</param>
         /// <param name="cacheType">The parent cache type.</param>
         /// <returns>The specialized launcher method.</returns>
-        [UnconditionalSuppressMessage("Trimming", "IL2070",
-            Justification = TrimmingAnnotations.EmittedType)]
-        [UnconditionalSuppressMessage("Trimming", "IL2075",
-            Justification = TrimmingAnnotations.EmittedType)]
-        [UnconditionalSuppressMessage("Trimming", "IL2090",
-            Justification = TrimmingAnnotations.EmittedType)]
+        // GetOrCreateKernel and SpecializedValue<T>.Value are reached ONLY through the by-name lookups below, so a
+        // trimmed app lost them (NullReferenceException in EmitCall on the first specialized kernel - RadixSort on
+        // WebGPU). Root them explicitly.
+        [DynamicDependency("GetOrCreateKernel", typeof(SpecializationCache<,,>))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties, typeof(SpecializedValue<>))]
+        [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = "keyStruct is emitted by Reflection.Emit (its fields cannot be trimmed). SpecializationCache<,,>.GetOrCreateKernel and SpecializedValue<>.Value - looked up by name here and reached by nothing else - are rooted by the DynamicDependency attributes on this method. Delegate Invoke is runtime-implemented and always kept.")]
+        [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = "keyStruct is emitted by Reflection.Emit (its fields cannot be trimmed). SpecializationCache<,,>.GetOrCreateKernel and SpecializedValue<>.Value - looked up by name here and reached by nothing else - are rooted by the DynamicDependency attributes on this method. Delegate Invoke is runtime-implemented and always kept.")]
+        [UnconditionalSuppressMessage("Trimming", "IL2090", Justification = "keyStruct is emitted by Reflection.Emit (its fields cannot be trimmed). SpecializationCache<,,>.GetOrCreateKernel and SpecializedValue<>.Value - looked up by name here and reached by nothing else - are rooted by the DynamicDependency attributes on this method. Delegate Invoke is runtime-implemented and always kept.")]
         private static MethodInfo CreateSpecializedLauncherMethod<TDelegate>(
             RuntimeSystem runtimeSystem,
             in EntryPointDescription entry,
@@ -423,6 +430,7 @@ namespace ILGPU.Runtime
         /// <param name="kernelDelegate">The kernel-delegate instance.</param>
         /// <param name="kernel">The resolved kernel object (if any).</param>
         /// <returns>True, if a kernel object could be resolved.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = global::ILGPU.Util.TrimmingAnnotations.DisplayClass)]
         public static bool TryGetKernel<TDelegate>(
             this TDelegate kernelDelegate,
             [NotNullWhen(true)] out Kernel? kernel)

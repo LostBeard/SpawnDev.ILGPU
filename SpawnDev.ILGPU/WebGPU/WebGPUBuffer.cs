@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System;
 // ---------------------------------------------------------------------------------------
 //                               SpawnDev.ILGPU.WebGPU
@@ -160,6 +161,7 @@ namespace SpawnDev.ILGPU.WebGPU
         /// Data crosses the .NET/JS boundary. For browser backends, prefer
         /// <see cref="CopyFromJS(TypedArray, long)"/> when data is already in JS.
         /// </summary>
+        [UnconditionalSuppressMessage("Trimming", "IL2091", Justification = global::ILGPU.Util.TrimmingAnnotations.UnmanagedElement)]
         public void CopyFromHost(T[] sourceArray, long targetOffset = 0)
         {
             if (_buffer == null)
@@ -276,6 +278,7 @@ namespace SpawnDev.ILGPU.WebGPU
         /// <param name="sourceOffset">Offset in elements from the start of the GPU buffer.</param>
         /// <param name="count">Number of elements to copy. If null, copies as many as will fit in destination.</param>
         /// <returns>Number of elements actually copied.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2091", Justification = global::ILGPU.Util.TrimmingAnnotations.UnmanagedElement)]
         public async Task<long> CopyToHostAsync(T[] destination, long sourceOffset = 0, long? count = null)
         {
             if (_buffer == null)
@@ -430,6 +433,7 @@ namespace SpawnDev.ILGPU.WebGPU
         /// <param name="count">Number of TDest elements to copy.</param>
         /// <param name="destElementSize">Size of TDest in bytes (Marshal.SizeOf&lt;TDest&gt;()).</param>
         /// <returns>Number of TDest elements actually copied.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2091", Justification = global::ILGPU.Util.TrimmingAnnotations.UnmanagedElement)]
         public async Task<long> CopyToHostAsync<TDest>(TDest[] destination, long sourceOffset, long count, int destElementSize) where TDest : struct
         {
             if (_buffer == null)
@@ -597,6 +601,7 @@ namespace SpawnDev.ILGPU.WebGPU
         /// The first <see cref="CreationSiteDepth"/> caller frames that are not the allocator machinery itself, innermost
         /// first, joined by " < ". Async state-machine frames are reported by their source method name.
         /// </summary>
+        [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = global::ILGPU.Util.TrimmingAnnotations.DiagnosticStackFrame)]
         static string CreationSite()
         {
             var st = new System.Diagnostics.StackTrace(2, false);

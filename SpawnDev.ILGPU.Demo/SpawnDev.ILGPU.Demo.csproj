@@ -6,13 +6,21 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<!-- Not compression needed -->
 		<CompressionEnabled>false</CompressionEnabled>
-		<!-- Disable IL trimming to preserve ILGPU kernel methods invoked via reflection -->
-		<PublishTrimmed>false</PublishTrimmed>
+		<!-- Publish TRIMMED, as consumers ship: the PMT suite then tests the libraries the way they run in a
+		     trimmed app (ILGPU, ILGPU.Algorithms and SpawnDev.ILGPU are IsTrimmable, so the Blazor default
+		     TrimMode=partial trims them). The test assemblies are rooted below so no test is trimmed away. -->
+		<PublishTrimmed>true</PublishTrimmed>
 		<!-- Disable AOT compilation - ILGPU needs IL reflection to work -->
 		<RunAOTCompilation>false</RunAOTCompilation>
 		<!-- mark as testable by PlaywrightMultiTest -->
 		<PlaywrightMultiTest></PlaywrightMultiTest>
 	</PropertyGroup>
+
+	<!-- Tests are discovered by reflection: keep the app and the shared test assembly whole. -->
+	<ItemGroup>
+		<TrimmerRootAssembly Include="SpawnDev.ILGPU.Demo" />
+		<TrimmerRootAssembly Include="SpawnDev.ILGPU.Demo.Shared" />
+	</ItemGroup>
 
 	<!-- Inject build timestamp into assembly metadata so the app can print it to browser console -->
 	<ItemGroup>

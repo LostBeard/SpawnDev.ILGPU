@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -68,6 +69,7 @@ public static class ShaderPrecompiler
     /// targets to every <c>[PrecompiledKernel]</c> method, on top of its explicit attributes.
     /// </param>
     /// <param name="packaging">Packaging mode (v1 writes content files for all modes; Embedded wiring is a follow-up).</param>
+    [RequiresUnreferencedCode("Build-time shader precompiler: it scans every type of an assembly for kernels, which trimming cannot preserve. It runs in the precompiler worker / desktop tests against an untrimmed assembly and is never part of a trimmed browser app.")]
     public static ShaderPrecompileResult Run(
         Assembly assembly,
         string outputDir,
@@ -175,6 +177,7 @@ public static class ShaderPrecompiler
         return result;
     }
 
+    [RequiresUnreferencedCode("Build-time shader precompiler: it scans every type of an assembly for kernels, which trimming cannot preserve. It runs in the precompiler worker / desktop tests against an untrimmed assembly and is never part of a trimmed browser app.")]
     private static IEnumerable<MethodInfo> EnumerateKernelMethods(Assembly assembly)
     {
         Type[] types;

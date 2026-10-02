@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 // ---------------------------------------------------------------------------------------
 //                                 SpawnDev.ILGPU.WebGL
 //                        Copyright (c) 2024 SpawnDev Project
@@ -222,7 +223,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     IntrinsicImplementationMode.GenerateCode));
         }
 
-        private void RegisterIntrinsic(Type type, string methodName, GLSLIntrinsic.Handler handler)
+        private void RegisterIntrinsic([DynamicallyAccessedMembers(global::ILGPU.Util.TrimmingAnnotations.PublicMethods)] Type type, string methodName, GLSLIntrinsic.Handler handler)
         {
             var methods = type.GetMethods(BindingFlags.Public | BindingFlags.Static)
                 .Where(m => m.Name == methodName);
@@ -260,6 +261,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 new WebGLIntrinsic(((System.Func<float, float, float>)global::ILGPU.FloatRemainder.Rem).Method, IntrinsicImplementationMode.Redirect));
         }
 
+        [UnconditionalSuppressMessage("Trimming", "IL2060", Justification = "Closes a public generic math method over typeof(float). A primitive needs nothing preserved, and the generic math methods matched here declare no DynamicallyAccessedMembers requirement.")]
         private void RegisterMathIntrinsics()
         {
             var t = typeof(WebGLIntrinsics);
@@ -271,7 +273,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 RegisterIntrinsic(wrapper, handler);
             }
 
-            void RegAll(Type type, string name, GLSLIntrinsic.Handler handler)
+            void RegAll([DynamicallyAccessedMembers(global::ILGPU.Util.TrimmingAnnotations.PublicMethods)] Type type, string name, GLSLIntrinsic.Handler handler)
             {
                 var methods = type.GetMethods(BindingFlags.Public | BindingFlags.Static)
                     .Where(m => m.Name == name);

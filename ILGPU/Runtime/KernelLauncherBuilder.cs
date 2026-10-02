@@ -43,6 +43,14 @@ namespace ILGPU.Runtime
         /// <param name="manipulateIdx">
         /// A callback to manipulate the loaded index of a given dimension.
         /// </param>
+        // X/Y/Z of the index types are read by name: root their getters (an app that never reads index.Y statically
+        // would otherwise lose it).
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties, typeof(Index1D))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties, typeof(Index2D))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties, typeof(Index3D))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties, typeof(LongIndex1D))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties, typeof(LongIndex2D))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties, typeof(LongIndex3D))]
         [UnconditionalSuppressMessage("Trimming", "IL2070",
             Justification = TrimmingAnnotations.EmittedType)]
         private static void EmitLoadDimensions<TEmitter>(

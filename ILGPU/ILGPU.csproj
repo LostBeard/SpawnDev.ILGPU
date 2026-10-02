@@ -2,6 +2,10 @@
 
   <PropertyGroup>
     <TargetFrameworks>$(LibraryTargetFrameworks)</TargetFrameworks>
+		<!-- Trim safe, enforced: the trim analyzer runs on every build and any trim (IL2xxx) warning fails it. -->
+		<IsTrimmable>true</IsTrimmable>
+		<EnableAotAnalyzer>true</EnableAotAnalyzer>
+		<WarningsAsErrors>$(WarningsAsErrors);IL2026;IL2046;IL2057;IL2060;IL2062;IL2065;IL2067;IL2069;IL2070;IL2072;IL2073;IL2074;IL2075;IL2076;IL2077;IL2078;IL2080;IL2087;IL2088;IL2089;IL2090;IL2091;IL2092;IL2093;IL2094;IL2095;IL2106;IL2111;IL2112;IL2113;IL2114</WarningsAsErrors>
   </PropertyGroup>
 
   <PropertyGroup>
@@ -16,7 +20,7 @@
          check on push. Skipping (b) means consumers ship rc.N still pulling old Fork
          transitively and the fix is invisible. See the banner comment in
          SpawnDev.ILGPU.csproj for the full procedure. -->
-    <Version>2.3.8-local.1</Version>
+    <Version>2.3.8-local.3</Version>
     <IsPackable>true</IsPackable>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
   </PropertyGroup>

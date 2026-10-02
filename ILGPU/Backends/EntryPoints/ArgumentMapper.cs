@@ -881,6 +881,7 @@ namespace ILGPU.Backends.EntryPoints
         /// <param name="emitter">The target emitter to write to.</param>
         /// <param name="mappingHandler">The target mapping handler to use.</param>
         /// <param name="parameters">The parameter collection to map.</param>
+        [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = global::ILGPU.Util.TrimmingAnnotations.EmittedType)]
         protected T MapArgumentsStruct<TILEmitter, TMappingHandler, T>(
             in TILEmitter emitter,
             in TMappingHandler mappingHandler,

@@ -13,6 +13,7 @@
 // accelerator debugging:
 // #define DEBUG_VELOCITY
 
+using System.Diagnostics.CodeAnalysis;
 using ILGPU.Backends.EntryPoints;
 using ILGPU.Backends.IL;
 using ILGPU.Backends.Velocity.Analyses;
@@ -72,7 +73,7 @@ namespace ILGPU.Backends.Velocity
     /// </summary>
     /// <typeparam name="TILEmitter">The IL emitter type.</typeparam>
     /// <remarks>The code needs to be prepared for this code generator.</remarks>
-    abstract partial class VelocityCodeGenerator<TILEmitter> :
+    abstract partial class VelocityCodeGenerator<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TILEmitter> :
         IBackendCodeGenerator<object>
         where TILEmitter : struct, IILEmitter
     {

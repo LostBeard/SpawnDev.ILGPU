@@ -9,6 +9,7 @@
 // Source License. See LICENSE.txt for details.
 // ---------------------------------------------------------------------------------------
 
+using System.Diagnostics.CodeAnalysis;
 using ILGPU.Backends.EntryPoints;
 using ILGPU.Backends.IL;
 using ILGPU.IR;
@@ -23,7 +24,7 @@ namespace ILGPU.Backends.Velocity
     /// A generator for primary Velocity kernels.
     /// </summary>
     /// <typeparam name="TILEmitter">The IL emitter type.</typeparam>
-    sealed class VelocityKernelFunctionGenerator<TILEmitter> :
+    sealed class VelocityKernelFunctionGenerator<[DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicConstructors)] TILEmitter> :
         VelocityCodeGenerator<TILEmitter>
         where TILEmitter : struct, IILEmitter
     {

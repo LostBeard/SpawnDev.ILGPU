@@ -9,6 +9,7 @@
 // Source License. See LICENSE.txt for details.
 // ---------------------------------------------------------------------------------------
 
+using System.Diagnostics.CodeAnalysis;
 using ILGPU.Backends.IL;
 using ILGPU.Backends.OpenCL;
 using ILGPU.Resources;
@@ -448,6 +449,7 @@ namespace ILGPU.Runtime.OpenCL
 
         /// <summary cref="KernelAccelerator{TCompiledKernel, TKernel}
         /// .GenerateKernelLauncherMethod(TCompiledKernel, int)"/>
+        [UnconditionalSuppressMessage("Trimming", "IL2060", Justification = global::ILGPU.Util.TrimmingAnnotations.UnconstrainedGeneric)]
         protected override MethodInfo GenerateKernelLauncherMethod(
             CLCompiledKernel kernel,
             int customGroupSize)

@@ -306,6 +306,7 @@ namespace ILGPU.Algorithms
         /// <typeparam name="TRandomProvider">The random number provider.</typeparam>
         /// <param name="accelerator">The accelerator.</param>
         /// <returns>The created permutation handler.</returns>
+        [UnconditionalSuppressMessage("Trimming", "IL2060", Justification = global::ILGPU.Util.TrimmingAnnotations.UnconstrainedGeneric)]
         public static Permute<T, TStride, TRandomProvider> CreatePermutation<
             T,
             TStride,

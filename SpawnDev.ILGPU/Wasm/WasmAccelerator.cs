@@ -1,4 +1,5 @@
-﻿// ---------------------------------------------------------------------------------------
+﻿using System.Diagnostics.CodeAnalysis;
+// ---------------------------------------------------------------------------------------
 //                               SpawnDev.ILGPU.Wasm
 //                    WebAssembly Compute Backend for Blazor WebAssembly
 //
@@ -542,6 +543,9 @@ namespace SpawnDev.ILGPU.Wasm
             public PropertyInfo? IndexProp;
             public int ElemSize;
 
+            [DynamicDependency(nameof(global::SpawnDev.ILGPU.BrowserTrimRoots.ViewMembers), typeof(global::SpawnDev.ILGPU.BrowserTrimRoots))]
+            [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = global::ILGPU.Util.TrimmingAnnotations.RootedViewMembers)]
+            [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = global::ILGPU.Util.TrimmingAnnotations.RootedViewMembers)]
             public static ViewTypeInfo Create(Type viewType)
             {
                 var info = new ViewTypeInfo { BaseProp = viewType.GetProperty("BaseView") };
@@ -557,6 +561,7 @@ namespace SpawnDev.ILGPU.Wasm
 
         /// <summary>Instance fields of a struct kernel argument, per type (the launcher scans them for views).</summary>
         private static readonly ConcurrentDictionary<Type, FieldInfo[]> s_structFields = new();
+        [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = global::ILGPU.Util.TrimmingAnnotations.StructureLayout)]
         private static FieldInfo[] GetStructFields(Type t) => s_structFields.GetOrAdd(t,
             tt => tt.GetFields(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance));
         private static readonly ConcurrentDictionary<Type, MethodInfo> _unsafeWriteCache = new();
@@ -570,6 +575,8 @@ namespace SpawnDev.ILGPU.Wasm
         }
 
         /// <summary>Per-axis extents of an ArrayView2D/3D argument (matching the kernel's extra extent params), else null.</summary>
+        [DynamicDependency(nameof(global::SpawnDev.ILGPU.BrowserTrimRoots.ViewMembers), typeof(global::SpawnDev.ILGPU.BrowserTrimRoots))]
+        [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = global::ILGPU.Util.TrimmingAnnotations.RootedViewMembers)]
         private static int[]? ViewExtents(object? arg)
         {
             if (arg == null) return null;
@@ -587,6 +594,8 @@ namespace SpawnDev.ILGPU.Wasm
             return r;
         }
 
+        [DynamicDependency(nameof(global::SpawnDev.ILGPU.BrowserTrimRoots.ViewMembers), typeof(global::SpawnDev.ILGPU.BrowserTrimRoots))]
+        [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = global::ILGPU.Util.TrimmingAnnotations.RootedViewMembers)]
         private static StrideReflectionCache GetOrCreateStrideCache(Type argType, Type strideType)
         {
             // Two-level cache: argType → StrideProp, strideType → YStride/XStride/ZStride
@@ -959,6 +968,9 @@ namespace SpawnDev.ILGPU.Wasm
                 source, sourceOffsetInBytes, targetOffsetInBytes, lengthInBytes);
         }
 
+        [DynamicDependency(nameof(global::SpawnDev.ILGPU.BrowserTrimRoots.ViewMembers), typeof(global::SpawnDev.ILGPU.BrowserTrimRoots))]
+        [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = global::ILGPU.Util.TrimmingAnnotations.RootedViewMembers)]
+        [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = global::ILGPU.Util.TrimmingAnnotations.RootedViewMembers)]
         private async Task RunKernelAsync(
             WasmCompiledKernel compiledKernel,
             object dimension,
@@ -2727,6 +2739,12 @@ namespace SpawnDev.ILGPU.Wasm
         /// </summary>
         public static int NonBarrierMinItemsPerWorker { get; set; } = 65536;
 
+        // The worker payloads (and the response SpawnJS constructs) are read/written by reflection: root their
+        // properties and constructors unconditionally - see WebGLAccelerator.InitializeGLWorker for why the
+        // class-level [DynamicallyAccessedMembers] alone is not enough.
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(WasmBarrierDispatchMessage))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(WasmFlatDispatchMessage))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(WasmDispatchResponse))]
         private async Task DispatchToWorkers(
             int totalItems,
             int gridDimX,
@@ -3316,6 +3334,9 @@ namespace SpawnDev.ILGPU.Wasm
         /// TensorView-style body structs: emit flat view kernel args (offset, length, strides)
         /// before the struct-scratch arg so Wasm codegen can route GetField/LEA through view locals.
         /// </summary>
+        [DynamicDependency(nameof(global::SpawnDev.ILGPU.BrowserTrimRoots.ViewMembers), typeof(global::SpawnDev.ILGPU.BrowserTrimRoots))]
+        [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = global::ILGPU.Util.TrimmingAnnotations.RootedViewMembers)]
+        [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = global::ILGPU.Util.TrimmingAnnotations.RootedViewMembers)]
         private void AddBodyStructExpandedViewWasmArgs(
             object structArg,
             int argsIndex,
@@ -3423,6 +3444,7 @@ namespace SpawnDev.ILGPU.Wasm
         /// Recursively scans a struct for IArrayView fields and adds their
         /// buffers to the buffer collection (for copy-in/copy-out and NativePtr patching).
         /// </summary>
+        [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = global::ILGPU.Util.TrimmingAnnotations.StructureLayout)]
         private static void ExtractBuffersFromStruct(
             object structValue,
             Dictionary<WasmMemoryBuffer, int> uniqueBuffers,
@@ -3487,6 +3509,8 @@ namespace SpawnDev.ILGPU.Wasm
         /// Scans the struct's fields for IArrayView instances and writes the correct
         /// Wasm buffer offset at the view's NativePtr position in the serialized bytes.
         /// </summary>
+        [DynamicDependency(nameof(global::SpawnDev.ILGPU.BrowserTrimRoots.ViewMembers), typeof(global::SpawnDev.ILGPU.BrowserTrimRoots))]
+        [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = global::ILGPU.Util.TrimmingAnnotations.RootedViewMembers)]
         private static void PatchViewPointersInStruct(
             object structValue,
             byte[] bytes,
@@ -3543,6 +3567,8 @@ namespace SpawnDev.ILGPU.Wasm
         /// Element size for SubView byte-offset math. Uses the view's generic element
         /// type, not <see cref="MemoryBuffer.ElementSize"/> (can disagree after Cast).
         /// </summary>
+        [DynamicDependency(nameof(global::SpawnDev.ILGPU.BrowserTrimRoots.ViewMembers), typeof(global::SpawnDev.ILGPU.BrowserTrimRoots))]
+        [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = global::ILGPU.Util.TrimmingAnnotations.RootedViewMembers)]
         private static int GetViewElementSizeBytes(IArrayView view)
         {
             int elemSize = view.Buffer.ElementSize;
@@ -3563,6 +3589,7 @@ namespace SpawnDev.ILGPU.Wasm
             return elemSize;
         }
 
+        [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = global::ILGPU.Util.TrimmingAnnotations.StructureLayout)]
         private static void FindViewFieldsInStruct(
             object obj, Type type, int baseOffset,
             List<(IArrayView view, int bytePos)> results)
@@ -3598,6 +3625,8 @@ namespace SpawnDev.ILGPU.Wasm
             }
         }
 
+        [DynamicDependency(nameof(global::SpawnDev.ILGPU.BrowserTrimRoots.ViewMembers), typeof(global::SpawnDev.ILGPU.BrowserTrimRoots))]
+        [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = global::ILGPU.Util.TrimmingAnnotations.RootedViewMembers)]
         private static void WriteViewPtrToStructBytes(
             byte[] bytes,
             int fieldOffset,
@@ -3644,6 +3673,7 @@ namespace SpawnDev.ILGPU.Wasm
         /// Depth-first collection of every <see cref="IArrayView"/> in a struct, in
         /// declaration order. Used to patch IR view-pointer slots after a CLR blit.
         /// </summary>
+        [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = global::ILGPU.Util.TrimmingAnnotations.StructureLayout)]
         private static void CollectArrayViewsFromStruct(object structValue, List<IArrayView> results)
         {
             var fields = structValue.GetType().GetFields(
@@ -3676,6 +3706,8 @@ namespace SpawnDev.ILGPU.Wasm
         /// For primitive fields: adds the boxed primitive value.
         /// For nested structs: recurses depth-first.
         /// </summary>
+        [DynamicDependency(nameof(global::SpawnDev.ILGPU.BrowserTrimRoots.ViewMembers), typeof(global::SpawnDev.ILGPU.BrowserTrimRoots))]
+        [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = global::ILGPU.Util.TrimmingAnnotations.RootedViewMembers)]
         private static void FlattenCLRStruct(object structValue, List<object> result)
         {
             var type = structValue.GetType();

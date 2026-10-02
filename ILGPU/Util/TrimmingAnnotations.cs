@@ -86,6 +86,47 @@ namespace ILGPU.Util
             DynamicallyAccessedMemberTypes.NonPublicFields;
 
         /// <summary>
+        /// Properties and fields of ILGPU's own view, index and stride types, which the
+        /// browser backends read by name while marshalling kernel arguments.
+        /// </summary>
+        public const DynamicallyAccessedMemberTypes ViewMembers =
+            DynamicallyAccessedMemberTypes.PublicProperties |
+            DynamicallyAccessedMemberTypes.NonPublicProperties |
+            DynamicallyAccessedMemberTypes.PublicFields |
+            DynamicallyAccessedMemberTypes.NonPublicFields;
+
+        /// <summary>
+        /// Justification for a browser backend's by-name lookup of a view, index, stride
+        /// or SpecializedValue member.
+        /// </summary>
+        public const string RootedViewMembers =
+            "The member is looked up by name on one of ILGPU's own view, index, stride " +
+            "or SpecializedValue types. The enclosing method depends on " +
+            "SpawnDev.ILGPU.BrowserTrimRoots.ViewMembers, whose DynamicDependency set " +
+            "roots the properties and fields of every one of those types (all " +
+            "instantiations), so the member is present in a trimmed build. A type " +
+            "outside that set is a kernel parameter struct, whose fields the trimmer " +
+            "keeps because its layout is observable (see StructureLayout).";
+
+        /// <summary>
+        /// Justification for an unmanaged element type flowing into a SpawnJS typed-array
+        /// read or write, whose generic parameter asks for public constructors.
+        /// </summary>
+        public const string UnmanagedElement =
+            "The type argument is an unmanaged element type (a primitive or blittable " +
+            "struct) copied as raw bytes. The PublicConstructors requirement exists for " +
+            "SpawnJS wrapper types the marshaller constructs; an unmanaged element is " +
+            "never constructed, so there is nothing for the trimmer to keep.";
+
+        /// <summary>
+        /// Justification for a StackFrame.GetMethod call used only to label diagnostics.
+        /// </summary>
+        public const string DiagnosticStackFrame =
+            "Used only to put a caller name into diagnostic text. If trimming removed " +
+            "the method's metadata the frame reports null and the text falls back; no " +
+            "behaviour depends on it.";
+
+        /// <summary>
         /// Justification for the delegate-specialization router's field lookup.
         /// </summary>
         public const string SpecializedDelegate =

@@ -4,7 +4,7 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.3.1-local.9</Version>
+		<Version>5.3.1-local.11</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
 		<PackageReleaseNotes>v5.3.0 - Built on SpawnDev.SpawnJS 3.0.0 (one .NET/JS crossing per call: createBindGroup 202 -> 38 us, an unbatched WebGPU dispatch 251 -> 80 us host time). WebGPU: Dispose submits pending work first (a pending MemSetToZero broke the next submit). No ILGPU API change; forks stay 2.3.7. Requires SpawnDev.SpawnJS 3.0.0. See CHANGELOG.md.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
@@ -26,6 +26,10 @@
 		<IsPackable>true</IsPackable>
 		<LangVersion>latest</LangVersion>
 		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<!-- Trim safe, enforced: the trim analyzer runs on every build and any trim (IL2xxx) warning fails it. -->
+		<IsTrimmable>true</IsTrimmable>
+		<EnableAotAnalyzer>true</EnableAotAnalyzer>
+		<WarningsAsErrors>$(WarningsAsErrors);IL2026;IL2046;IL2057;IL2060;IL2062;IL2065;IL2067;IL2069;IL2070;IL2072;IL2073;IL2074;IL2075;IL2076;IL2077;IL2078;IL2080;IL2087;IL2088;IL2089;IL2090;IL2091;IL2092;IL2093;IL2094;IL2095;IL2106;IL2111;IL2112;IL2113;IL2114</WarningsAsErrors>
 	</PropertyGroup>
 
 	<ItemGroup>
@@ -64,8 +68,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.3.8-local.1" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.3.8-local.1" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.3.8-local.3" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.3.8-local.3" />
 	</ItemGroup>
 
 	<ItemGroup>

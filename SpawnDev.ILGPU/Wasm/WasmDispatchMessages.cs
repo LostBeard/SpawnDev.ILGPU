@@ -8,6 +8,7 @@
 // ---------------------------------------------------------------------------------------
 
 using SpawnDev.SpawnJS;
+using System.Diagnostics.CodeAnalysis;
 using SpawnDev.SpawnJS.JSObjects;
 
 namespace SpawnDev.ILGPU.Wasm
@@ -18,6 +19,9 @@ namespace SpawnDev.ILGPU.Wasm
     /// first dispatch to that worker), d.memory (SharedArrayBuffer-backed WebAssembly.Memory),
     /// and the thread range (d.threadStart, d.threadEnd).
     /// </summary>
+    // SpawnJS reads (and for the response, constructs and sets) these by reflection; nothing else touches the
+    // properties, so a trimmed app would drop them and the worker would receive / we would read {}.
+    [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors)]
     public sealed class WasmBarrierDispatchMessage
     {
         /// <summary>The async function body sent as the worker script (BuildWasmWorkerScript output).</summary>
@@ -61,6 +65,9 @@ namespace SpawnDev.ILGPU.Wasm
     /// Worker reads d.script, d.wasmBytes (optional), d.memory, and the item range
     /// (d.startIdx, d.endIdx) plus per-worker scratch (d.myScratch).
     /// </summary>
+    // SpawnJS reads (and for the response, constructs and sets) these by reflection; nothing else touches the
+    // properties, so a trimmed app would drop them and the worker would receive / we would read {}.
+    [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors)]
     public sealed class WasmFlatDispatchMessage
     {
         /// <summary>The async function body sent as the worker script (BuildWasmWorkerScript output).</summary>
@@ -93,6 +100,9 @@ namespace SpawnDev.ILGPU.Wasm
     /// done=true means the worker completed successfully. done=false means error
     /// (with error string set). diag is optional debug data captured by the worker.
     /// </summary>
+    // SpawnJS reads (and for the response, constructs and sets) these by reflection; nothing else touches the
+    // properties, so a trimmed app would drop them and the worker would receive / we would read {}.
+    [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors)]
     public sealed class WasmDispatchResponse
     {
         /// <summary>True if the worker completed dispatch successfully; false on trap or error.</summary>

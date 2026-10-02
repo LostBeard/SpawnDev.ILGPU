@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 // ---------------------------------------------------------------------------------------
 //                               SpawnDev.ILGPU.Wasm
 //                    WebAssembly Compute Backend for Blazor WebAssembly
@@ -318,6 +319,7 @@ namespace SpawnDev.ILGPU.Wasm
         /// Data crosses the .NET/JS boundary. For browser backends, prefer
         /// <see cref="CopyFromJS(TypedArray, long)"/> when data is already in JS.
         /// </summary>
+        [UnconditionalSuppressMessage("Trimming", "IL2091", Justification = global::ILGPU.Util.TrimmingAnnotations.UnmanagedElement)]
         public void CopyFromHost<T>(T[] data) where T : unmanaged
         {
             if (TryDeferHostWrite(() =>
@@ -407,6 +409,7 @@ namespace SpawnDev.ILGPU.Wasm
         /// <summary>
         /// Copies data from this buffer to the host.
         /// </summary>
+        [UnconditionalSuppressMessage("Trimming", "IL2091", Justification = global::ILGPU.Util.TrimmingAnnotations.UnmanagedElement)]
         public T[] CopyToHost<T>(long length) where T : unmanaged
         {
             GuardHostBufferRace(nameof(CopyToHost));

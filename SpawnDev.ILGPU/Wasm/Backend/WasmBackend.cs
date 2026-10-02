@@ -1,3 +1,4 @@
+using System.Diagnostics.CodeAnalysis;
 // ---------------------------------------------------------------------------------------
 //                               SpawnDev.ILGPU.Wasm
 //                    WebAssembly Compute Backend for Blazor WebAssembly
@@ -441,11 +442,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 new global::ILGPU.Backends.Wasm.WasmIntrinsic(((System.Func<double, double, double>)global::ILGPU.FloatRemainder.Rem).Method, IntrinsicImplementationMode.Redirect));
         }
 
+        [UnconditionalSuppressMessage("Trimming", "IL2060", Justification = "Closes a public generic math method over typeof(float). A primitive needs nothing preserved, and the generic math methods matched here declare no DynamicallyAccessedMembers requirement.")]
         private void RegisterMathIntrinsics()
         {
             var t = typeof(WasmIntrinsics);
 
-            void RegAll(Type type, string name)
+            void RegAll([DynamicallyAccessedMembers(global::ILGPU.Util.TrimmingAnnotations.PublicMethods)] Type type, string name)
             {
                 var methods = type.GetMethods(BindingFlags.Public | BindingFlags.Static)
                     .Where(m => m.Name == name);

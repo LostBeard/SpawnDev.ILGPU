@@ -1,4 +1,5 @@
-﻿using global::ILGPU;
+﻿using System.Diagnostics.CodeAnalysis;
+using global::ILGPU;
 using global::ILGPU.Backends;
 using global::ILGPU.Runtime;
 using SpawnDev.SpawnJS.JSObjects;
@@ -580,6 +581,7 @@ namespace SpawnDev.ILGPU.WebGPU
             span.CopyTo(dest);
         }
 
+        [UnconditionalSuppressMessage("Trimming", "IL2071", Justification = "CopyStructToBytes<T> is constrained to struct, which implies a parameterless-constructor requirement; every value type satisfies it and the method never constructs T - it reinterprets the value as bytes.")]
         private static MethodInfo GetCopyStructMethod(Type type)
         {
             return _copyStructMethodCache.GetOrAdd(type, t =>
@@ -596,6 +598,7 @@ namespace SpawnDev.ILGPU.WebGPU
         /// ReductionImplementation which contain ArrayView fields (which internally hold an IntPtr).
         /// </summary>
         private static readonly ConcurrentDictionary<Type, bool> _containsPointerCache = new();
+        [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = global::ILGPU.Util.TrimmingAnnotations.StructureLayout)]
         private static bool ContainsPointerFields(Type type)
         {
             if (!type.IsValueType || type.IsPrimitive) return false;
@@ -623,6 +626,7 @@ namespace SpawnDev.ILGPU.WebGPU
         /// This mirrors what the ILGPU compiler does when it inlines struct parameters into
         /// separate IR parameters.
         /// </summary>
+        [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = global::ILGPU.Util.TrimmingAnnotations.StructureLayout)]
         private static List<object?> FlattenStructFields(object structValue)
         {
             var result = new List<object?>();
@@ -670,6 +674,8 @@ namespace SpawnDev.ILGPU.WebGPU
             return _reflectionCache.GetOrAdd(type, BuildReflectionCache);
         }
 
+        [DynamicDependency(nameof(global::SpawnDev.ILGPU.BrowserTrimRoots.ViewMembers), typeof(global::SpawnDev.ILGPU.BrowserTrimRoots))]
+        [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = global::ILGPU.Util.TrimmingAnnotations.RootedViewMembers)]
         private static ReflectionMetadataCache BuildReflectionCache(Type type)
         {
             var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
@@ -939,6 +945,7 @@ namespace SpawnDev.ILGPU.WebGPU
         private static Func<object, IContiguousArrayView>? GetOneDViewAccessor(Type t)
             => _oneDViewAccessors.GetOrAdd(t, static tt => BuildOneDViewAccessor(tt));
         private static readonly ConcurrentDictionary<Type, Func<object, IContiguousArrayView>?> _oneDViewAccessors = new();
+        [UnconditionalSuppressMessage("Trimming", "IL2060", Justification = global::ILGPU.Util.TrimmingAnnotations.UnconstrainedGeneric)]
         private static Func<object, IContiguousArrayView>? BuildOneDViewAccessor(Type t)
         {
             if (!t.IsValueType) return null;
@@ -961,6 +968,8 @@ namespace SpawnDev.ILGPU.WebGPU
             return extractor(view);
         }
 
+        [DynamicDependency(nameof(global::SpawnDev.ILGPU.BrowserTrimRoots.ViewMembers), typeof(global::SpawnDev.ILGPU.BrowserTrimRoots))]
+        [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = global::ILGPU.Util.TrimmingAnnotations.RootedViewMembers)]
         private static Func<object, int[]> BuildDimensionExtractor(Type viewType)
         {
             var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
@@ -1038,6 +1047,8 @@ namespace SpawnDev.ILGPU.WebGPU
         }
 
         // Build a function that extracts X/Y/Z from a sub-struct type. Returns null if type has no X/Y/Z.
+        [DynamicDependency(nameof(global::SpawnDev.ILGPU.BrowserTrimRoots.ViewMembers), typeof(global::SpawnDev.ILGPU.BrowserTrimRoots))]
+        [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = global::ILGPU.Util.TrimmingAnnotations.RootedViewMembers)]
         private static Func<object, int[]>? BuildXYZAccessor(Type type)
         {
             var flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
@@ -1095,6 +1106,8 @@ namespace SpawnDev.ILGPU.WebGPU
         /// <see cref="PackScalarsInto"/> (<see cref="Backend.WebGPUBackend.VerifyScalarPacking"/> runs both on every
         /// dispatch and throws on any byte difference). Do not "optimize" it: its value is that it is the old code.
         /// </summary>
+        [DynamicDependency(nameof(global::SpawnDev.ILGPU.BrowserTrimRoots.ViewMembers), typeof(global::SpawnDev.ILGPU.BrowserTrimRoots))]
+        [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = global::ILGPU.Util.TrimmingAnnotations.RootedViewMembers)]
         private static byte[] PackScalarsLegacy(int totalBytes, Dictionary<int, ScalarPackingEntry> packedScalarLookup,
             List<object?> expandedArgs, IReadOnlyList<ScalarPackingEntry> manifest, WebGPUAccelerator webGpuAccel,
             Dictionary<int, int> viewElementOffsets, Dictionary<int, int> viewElementCounts,
@@ -1338,6 +1351,8 @@ namespace SpawnDev.ILGPU.WebGPU
         private static readonly ConcurrentDictionary<Type, PropertyInfo?> _specializedValueProperty = new();
         /// <summary>The <c>Value</c> property of a <c>SpecializedValue&lt;T&gt;</c> type, else null (cached per type - the
         /// check used to be a GetType().Name.StartsWith on every packed scalar of every dispatch).</summary>
+        [DynamicDependency(nameof(global::SpawnDev.ILGPU.BrowserTrimRoots.ViewMembers), typeof(global::SpawnDev.ILGPU.BrowserTrimRoots))]
+        [UnconditionalSuppressMessage("Trimming", "IL2070", Justification = global::ILGPU.Util.TrimmingAnnotations.RootedViewMembers)]
         private static PropertyInfo? SpecializedValueProperty(Type t) => _specializedValueProperty.GetOrAdd(t, static tt =>
             tt.IsGenericType && tt.Name.StartsWith("SpecializedValue") ? tt.GetProperty("Value") : null);
 
@@ -1448,6 +1463,7 @@ namespace SpawnDev.ILGPU.WebGPU
 
         /// <summary>The rare packed scalar that is a user struct or a capturing lambda's display class: field bytes, as
         /// the legacy packer serialized them (reflection - not on the hot path of any shipped kernel).</summary>
+        [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = global::ILGPU.Util.TrimmingAnnotations.StructureLayout)]
         private static void PackStructScalar(Span<byte> data, int byteOffset, object? arg)
         {
             if (arg == null) return;
@@ -1493,6 +1509,7 @@ namespace SpawnDev.ILGPU.WebGPU
         /// <param name="stream">The accelerator stream (not used in WebGPU).</param>
         /// <param name="dimension">The launch dimensions.</param>
         /// <param name="args">The kernel arguments.</param>
+        [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = global::ILGPU.Util.TrimmingAnnotations.StructureLayout)]
         public static void RunKernel(Kernel kernel, AcceleratorStream stream, object dimension, object[] args)
         {
             if (DiagSkipRunKernel) return;   // DIAGNOSTIC ABLATION - see DiagSkipRunKernel
@@ -3401,7 +3418,8 @@ namespace SpawnDev.ILGPU.WebGPU
             /// <see cref="Flush"/> (a fire-and-forget submit, valid synchronously on WebGPU), by
             /// Dispose, and by the accelerator's FlushPendingCommands / SynchronizeAsync drain.
             /// </summary>
-            public void FlushPending()
+            [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = global::ILGPU.Util.TrimmingAnnotations.DiagnosticStackFrame)]
+        public void FlushPending()
             {
                 if (_encoder == null && _batchLen == 0) return;
 
