@@ -8035,11 +8035,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                 // Back-edge check: if this is a loop header we've already visited,
                 // this is a back-edge — the loop handles re-iteration implicitly.
-                // A return block is the exception: with return-aware merges (StructuredReturnMerge) several arms can
-                // each end in the shared exit block, and every one of them must emit its `return;`. Skipping it as
-                // "visited" would fall through into the code after the if.
+                // A bare return path is the exception: with return-aware merges (StructuredReturnMerge) several arms
+                // can each end in the shared, code-free exit, and every one of them must emit its `return;`. Skipping
+                // it as "visited" would fall through into the code after the if.
                 if (visited.Contains(block)
-                    && !(currentLoop == null && block.Terminator is global::ILGPU.IR.Values.ReturnTerminator))
+                    && !(currentLoop == null && SpawnDev.ILGPU.CodeGen.StructuredReturnMerge.IsCodeFreeReturnPath(block)))
                 {
                     // If we're inside a loop and this is the header, push phi values for the
                     // back-edge and let the loop iterate naturally.
@@ -8190,7 +8190,30 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     {
                         _returnMerge ??= new SpawnDev.ILGPU.CodeGen.StructuredReturnMerge();
                         var returnAwareMerge = _returnMerge.FindMerge(trueTarget, falseTarget, stopBlock);
-                        if (returnAwareMerge != null) mergeNode = returnAwareMerge;
+                        if (returnAwareMerge != null)
+                        {
+                            mergeNode = returnAwareMerge;
+                            // One arm only returns: write it as a guard clause and continue with the other arm at THIS
+                            // scope. That arm dominates the code after the merge, so what it declares (a local array,
+                            // a let binding) must stay visible there; emitting it inside `if {..} else { return; }`
+                            // scoped `var local_arr_0` to the if (LocalArray_DynamicIndex_MatchesCpuOracle, 2026-10-02).
+                            bool trueReaches = _returnMerge.Reaches(trueTarget, mergeNode);
+                            bool falseReaches = _returnMerge.Reaches(falseTarget, mergeNode);
+                            if (trueReaches != falseReaches)
+                            {
+                                var returning = trueReaches ? falseTarget : trueTarget;
+                                var continuing = trueReaches ? trueTarget : falseTarget;
+                                AppendLine(trueReaches ? $"if (!{Load(branch.Condition)}) {{" : $"if ({Load(branch.Condition)}) {{");
+                                PushIndent();
+                                PushPhiValues(returning, block);
+                                GenerateStructuredCodeRecursive(returning, mergeNode, pd, visited, currentLoop);
+                                PopIndent();
+                                AppendLine("}");
+                                PushPhiValues(continuing, block);
+                                block = continuing;
+                                continue;
+                            }
+                        }
                     }
 
                     if (WebGPU.Backend.WebGPUBackend.VerboseLogging && _isScanKernel)

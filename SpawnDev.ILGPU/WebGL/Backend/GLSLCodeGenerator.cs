@@ -720,8 +720,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // Already visited → skip. Except the function's shared return path: GenerateStructuredCode emits its
             // `return` again for this arm (skipping it here dropped every early return after the first).
             if (_visitedBlocks.Contains(target))
-                return !(InnermostOpenLoop() == null
-                    && (target.Terminator is ReturnTerminator || TryGetReturnExit(target, out _)));
+                return !(InnermostOpenLoop() == null && TryGetReturnExit(target, out _));
 
             return false;
         }
@@ -748,12 +747,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         GenerateCode(sharedReturn);
                         return;
                     }
-                    // A return block with code of its own: emit it again (it ends the function, so it cannot repeat).
-                    if (current.Terminator is ReturnTerminator) goto emitAgain;
                 }
                 return;
             }
-        emitAgain:
             // This walker also emits the code after a nested loop, i.e. INSIDE the enclosing loop. A block
             // outside that loop is a loop exit - it used to be emitted inline as if the loop had ended (an
             // early `return false` from an inlined helper ran the caller's code and then kept looping).
@@ -1241,7 +1237,29 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             {
                 _returnMerge ??= new SpawnDev.ILGPU.CodeGen.StructuredReturnMerge();
                 var returnAwareMerge = _returnMerge.FindMerge(trueTarget, falseTarget, stop);
-                if (returnAwareMerge != null) merge = returnAwareMerge;
+                if (returnAwareMerge != null)
+                {
+                    merge = returnAwareMerge;
+                    // One arm only returns: a guard clause, then the other arm at THIS scope - it dominates the code
+                    // after the merge, so its declarations must stay visible there (see the WGSL walker).
+                    bool trueReaches = _returnMerge.Reaches(trueTarget, merge);
+                    bool falseReaches = _returnMerge.Reaches(falseTarget, merge);
+                    if (trueReaches != falseReaches)
+                    {
+                        var returning = trueReaches ? falseTarget : trueTarget;
+                        var continuing = trueReaches ? trueTarget : falseTarget;
+                        var guardCond = Load(ib.Condition);
+                        AppendLine(trueReaches ? $"if (!({guardCond})) {{" : $"if ({guardCond}) {{");
+                        PushIndent();
+                        PushPhiValues(returning, source);
+                        GenerateStructuredCode(returning, merge);
+                        PopIndent();
+                        AppendLine("}");
+                        PushPhiValues(continuing, source);
+                        GenerateStructuredCode(continuing, stop);
+                        return;
+                    }
+                }
             }
 
             PushPhiValues(trueTarget, source);

@@ -38,7 +38,8 @@ public sealed class StructuredReturnMerge
         // (`if (fits) { write } else { undo; return; }` merges at the write arm's own block).
         var common = new HashSet<BasicBlock>(ReachableInclusive(a));
         common.UnionWith(ReachableInclusive(b));
-        common.RemoveWhere(IsReturn);
+        // A return path is a dead end, never a merge.
+        common.RemoveWhere(m => IsReturn(m) || IsCodeFreeReturnPath(m));
         if (stop != null)
         {
             // Nothing past the enclosing region's end: its caller owns that code.
@@ -72,7 +73,11 @@ public sealed class StructuredReturnMerge
             var block = work.Pop();
             // Reaching the region's end, or code the merge leads to, means this path skipped the merge.
             if (block == stop) return false;
-            if (!IsReturn(block) && afterMerge.Contains(block)) return false;
+            // Only a CODE-FREE return path (phi blocks + a bare return) may be shared with the code after the merge:
+            // emitting it again in this arm is just a `return`. An exit block with real code (a kernel's final
+            // Group.Barrier()) is where both arms genuinely meet - copying it into one arm duplicates the code and
+            // puts a barrier in non-uniform control flow (WGSL rejects that: CrossGroupScanReuseDetector, 2026-10-02).
+            if (afterMerge.Contains(block) && !IsCodeFreeReturnPath(block)) return false;
             foreach (var succ in block.Successors)
                 if (succ != merge && seen.Add(succ)) work.Push(succ);
         }
@@ -80,6 +85,28 @@ public sealed class StructuredReturnMerge
     }
 
     static bool IsReturn(BasicBlock block) => block.Terminator is ReturnTerminator;
+
+    /// <summary>True when <paramref name="to"/> is <paramref name="from"/> or reachable from it. An arm that cannot
+    /// reach its merge only returns: the emitters write it as a guard clause (<c>if (c) { ...; return; }</c>) and keep
+    /// the other arm at the enclosing scope, because that arm dominates everything after the merge and its
+    /// declarations (a local array, a let binding) must stay visible there.</summary>
+    public bool Reaches(BasicBlock from, BasicBlock to) => from == to || Reachable(from).Contains(to);
+
+    /// <summary>True when <paramref name="block"/> is a bare return path: phi-only blocks joined by unconditional
+    /// branches, ending in a return block with no code of its own. Emitting it again is just a <c>return</c>.</summary>
+    public static bool IsCodeFreeReturnPath(BasicBlock block)
+    {
+        var current = block;
+        for (int limit = 16; current != null && limit-- > 0;)
+        {
+            foreach (var entry in current)
+                if (entry.Value is not PhiValue) return false;
+            if (current.Terminator is ReturnTerminator) return true;
+            if (current.Terminator is UnconditionalBranch ub) current = ub.Target;
+            else return false;
+        }
+        return false;
+    }
 
     HashSet<BasicBlock> ReachableInclusive(BasicBlock start)
     {
