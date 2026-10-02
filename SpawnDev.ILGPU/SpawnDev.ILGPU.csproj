@@ -4,7 +4,7 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.3.2-local.2</Version>
+		<Version>5.3.2-local.4</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
 		<PackageReleaseNotes>v5.3.1 (forks 2.3.8) - TRIM SAFE, enforced: ILGPU, ILGPU.Algorithms and SpawnDev.ILGPU are IsTrimmable and every trim warning is a build error; the full test suite passes on a TRIMMED publish. Blazor WASM AOT is supported with WasmStripILAfterAOT=false (see Docs/limitations.md). Fixes: bool kernel scalar parameters on all 6 backends; WebGL ulong scalars; float/double % exact on every backend; PTX bitcast of a constant; WebGPU dispatch host cost (single compute pass per batch, in-place scalar packing). WebGL worker messages are typed DTOs.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>

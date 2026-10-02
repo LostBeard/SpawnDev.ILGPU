@@ -83,13 +83,15 @@ namespace SpawnDev.ILGPU.WebGPU
         /// size * 8 (the view's element type is its <c>ArrayView&lt;T&gt;</c> argument).
         /// </summary>
         private static int BitsPerElementOf(IContiguousArrayView view) =>
-            _bitsPerElementCache.GetOrAdd(view.GetType(), t =>
+            // Static factory + argument: a lambda capturing `view` allocated a closure on EVERY call, hit or miss
+            // (MEASURED 2026-10-02, AOT CPU profile: ~0.2 ms a frame of DAv3 168x98).
+            _bitsPerElementCache.GetOrAdd(view.GetType(), static (t, v) =>
             {
                 var elem = t.IsGenericType ? t.GetGenericArguments()[0] : null;
                 return elem != null && Attribute.GetCustomAttribute(elem, typeof(PackedBitsAttribute)) is PackedBitsAttribute pb && pb.Bits > 0
                     ? pb.Bits
-                    : view.ElementSize * 8;
-            });
+                    : v.ElementSize * 8;
+            }, view);
 
         private static ulong Gcd(ulong a, ulong b) { while (b != 0) (a, b) = (b, a % b); return a; }
 
@@ -149,6 +151,10 @@ namespace SpawnDev.ILGPU.WebGPU
         private static HashSet<int>? _reusableBodyStructScalarSet;
         [ThreadStatic]
         private static Dictionary<int, ScalarPackingEntry>? _reusablePackedScalarLookup;
+        [ThreadStatic]
+        private static Dictionary<int, int>? _reusableViewElementOffsets;
+        [ThreadStatic]
+        private static Dictionary<int, int>? _reusableViewElementCounts;
 
         #endregion
 
@@ -1678,10 +1684,14 @@ namespace SpawnDev.ILGPU.WebGPU
                 // Track element offsets per binding index for view offset packing.
                 // When binding at offset=0 for sub-views, the element offset needs
                 // to be packed into the scalar buffer so the WGSL can read it.
-                var viewElementOffsets = new Dictionary<int, int>();
+                _reusableViewElementOffsets ??= new Dictionary<int, int>();
+                _reusableViewElementOffsets.Clear();
+                var viewElementOffsets = _reusableViewElementOffsets;
                 // For packed-struct views, the element COUNT is also sent to the GPU since
                 // arrayLength() returns CPU-allocation-size/4, not the logical element count.
-                var viewElementCounts = new Dictionary<int, int>();
+                _reusableViewElementCounts ??= new Dictionary<int, int>();
+                _reusableViewElementCounts.Clear();
+                var viewElementCounts = _reusableViewElementCounts;
 
                 // Build a lookup of packed scalar params by their args-array index.
                 // ScalarPackingManifest stores IR param.Index (0-based, includes implicit index param).
@@ -3235,9 +3245,30 @@ namespace SpawnDev.ILGPU.WebGPU
             internal bool HasPendingWork => _encoder != null || _batchLen > 0;
 
             // ── Record batch (WebGPUBackend.EnableDispatchBatching; format in wwwroot/webgpuDispatchPlan.js) ──
-            private double[] _batchRec = new double[4096];
+            // PINNED (pinned-object heap, never moved): submitHeader hands JS their heap ADDRESSES and JS views the wasm
+            // heap directly - no HeapView per submit. MEASURED 2026-10-02 (AOT CPU profile, DAv3 168x98): the two
+            // HeapView.Create calls per submit were ~0.6 ms a frame (a JS round trip each to build and drop a typed array),
+            // and the 10-argument generic Call ran through the interpreter (that instantiation is not AOT-compiled).
+            private double[] _batchRec = GC.AllocateArray<double>(4096, pinned: true);
             private int _batchLen;
-            private byte[] _batchData = new byte[16384];
+            private byte[] _batchData = GC.AllocateArray<byte>(16384, pinned: true);
+            // submitHeader's argument block (layout in wwwroot/webgpuDispatchPlan.js submitHeader).
+            private readonly double[] _submitHdr = GC.AllocateArray<double>(16, pinned: true);
+            private static double _jsHeapSourceId = -1;   // the SpawnJS instance id handed to ilgpuWebGPUPlan.setHeapSource
+
+            /// <summary>Grows a pinned batch array (contents kept). Rare: the arrays double and are kept for the stream's life.</summary>
+            private static void GrowPinned<T>(ref T[] array, int minLength) where T : unmanaged
+            {
+                var grown = GC.AllocateArray<T>(Math.Max(array.Length * 2, minLength), pinned: true);
+                array.AsSpan().CopyTo(grown);
+                array = grown;
+            }
+
+            // Marshal.UnsafeAddrOfPinnedArrayElement, not Unsafe.AsPointer(ref GetArrayDataReference(...)): in a generic
+            // method the latter hit "Assertion: should not be reached" in the Mono INTERPRETER's IL transform
+            // (interp/transform.c:6640) and killed the runtime of every non-AOT app (2026-10-02, the PMT WebGPU lane).
+            private static double AddressOf(System.Array pinnedArray)
+                => (double)Marshal.UnsafeAddrOfPinnedArrayElement(pinnedArray, 0);
             private int _batchDataLen;
             private bool _batchHasUploads;   // any tag-4 upload: submitBatch stages the data arena first
 
@@ -3256,7 +3287,7 @@ namespace SpawnDev.ILGPU.WebGPU
             private void EnsureRecords(int count)
             {
                 if (_batchLen + count <= _batchRec.Length) return;
-                System.Array.Resize(ref _batchRec, Math.Max(_batchRec.Length * 2, _batchLen + count));
+                GrowPinned(ref _batchRec, _batchLen + count);
             }
 
             private static double IdOf(SpawnDev.SpawnJS.SpawnJSObject obj, string what)
@@ -3309,7 +3340,7 @@ namespace SpawnDev.ILGPU.WebGPU
             {
                 if ((len & 3) != 0) throw new InvalidOperationException($"[WebGPU] batched writeBuffer of {len} bytes: must be a multiple of 4");
                 if (_batchDataLen + len > _batchData.Length)
-                    System.Array.Resize(ref _batchData, Math.Max(_batchData.Length * 2, _batchDataLen + len));
+                    GrowPinned(ref _batchData, _batchDataLen + len);
                 System.Buffer.BlockCopy(bytes, 0, _batchData, _batchDataLen, len);
                 EnsureRecords(5);
                 var r = _batchRec; int i = _batchLen;
@@ -3340,7 +3371,7 @@ namespace SpawnDev.ILGPU.WebGPU
             {
                 if (length <= 0 || length > MaxBatchedUploadBytes || (length & 3) != 0 || (byteOffset & 3) != 0) return false;
                 if (_batchDataLen + length > _batchData.Length)
-                    System.Array.Resize(ref _batchData, Math.Max(_batchData.Length * 2, _batchDataLen + length));
+                    GrowPinned(ref _batchData, _batchDataLen + length);
                 new ReadOnlySpan<byte>((void*)src, length).CopyTo(_batchData.AsSpan(_batchDataLen));
                 EnsureRecords(5);
                 var r = _batchRec; int i = _batchLen;
@@ -3373,6 +3404,10 @@ namespace SpawnDev.ILGPU.WebGPU
             internal void EnsureArenaRoom(int slots)
             {
                 if (!WebGPUBackend.BatchScalarArena) return;
+                // No records pending = no dispatch references a slot (slots handed out by a dispatch that then threw or
+                // ended early never got a record). Without this they piled up until a submit that never came - every
+                // "overflow" regrew the arena for nothing (seen in the DiagRunKernelStopAfter ablations, 2026-10-02).
+                if (_batchLen == 0) { _arenaUsed[0] = 0; _arenaUsed[1] = 0; }
                 for (int a = 0; a < 2; a++)
                     if (_arenaUsed[a] + slots > _arenaCap[a]) _arenaOverflowed[a] = true;
                 if (!_arenaOverflowed[0] && !_arenaOverflowed[1]) return;
@@ -3438,29 +3473,18 @@ namespace SpawnDev.ILGPU.WebGPU
                 }
             }
 
-            private static bool? _jsSinglePass;   // the value last set on ilgpuWebGPUPlan.singlePass
-            private static bool? _jsBindGroupReuse;   // the value last set on ilgpuWebGPUPlan.bindGroupReuse
-            private static int _jsAblation;        // the value last set on ilgpuWebGPUPlan.ablation
 
             private void SubmitBatch()
             {
                 var device = _webGpuAccelerator.NativeAccelerator.NativeDevice!;
                 try
                 {
-                    if (_jsSinglePass != WebGPUBackend.BatchSinglePass)
+                    var js = SpawnDev.SpawnJS.SpawnJSRuntime.Instance;
+                    double heapSourceId = js.DotnetInstance.Id;
+                    if (_jsHeapSourceId != heapSourceId)
                     {
-                        SpawnDev.SpawnJS.SpawnJSRuntime.Instance.Call<bool, int>("ilgpuWebGPUPlan.setSinglePass", WebGPUBackend.BatchSinglePass);
-                        _jsSinglePass = WebGPUBackend.BatchSinglePass;
-                    }
-                    if (_jsAblation != WebGPUBackend.DiagSubmitAblation)
-                    {
-                        SpawnDev.SpawnJS.SpawnJSRuntime.Instance.Call<int, int>("ilgpuWebGPUPlan.setAblation", WebGPUBackend.DiagSubmitAblation);
-                        _jsAblation = WebGPUBackend.DiagSubmitAblation;
-                    }
-                    if (_jsBindGroupReuse != WebGPUBackend.BatchBindGroupReuse)
-                    {
-                        SpawnDev.SpawnJS.SpawnJSRuntime.Instance.Call<bool, int>("ilgpuWebGPUPlan.setBindGroupReuse", WebGPUBackend.BatchBindGroupReuse);
-                        _jsBindGroupReuse = WebGPUBackend.BatchBindGroupReuse;
+                        js.Call<double, int>("ilgpuWebGPUPlan.setHeapSource", heapSourceId);
+                        _jsHeapSourceId = heapSourceId;
                     }
                     // The arenas' used prefixes ride at the END of the data array: [batch bytes][read arena][read_write arena].
                     int arenaR = _arenaUsed[0] * ArenaSlotBytes, arenaW = _arenaUsed[1] * ArenaSlotBytes;
@@ -3468,19 +3492,25 @@ namespace SpawnDev.ILGPU.WebGPU
                     if (arenaR + arenaW > 0)
                     {
                         if (dataLen + arenaR + arenaW > _batchData.Length)
-                            System.Array.Resize(ref _batchData, Math.Max(_batchData.Length * 2, dataLen + arenaR + arenaW));
+                            GrowPinned(ref _batchData, dataLen + arenaR + arenaW);
                         if (arenaR > 0) System.Buffer.BlockCopy(_arenaData[0]!, 0, _batchData, dataLen, arenaR);
                         if (arenaW > 0) System.Buffer.BlockCopy(_arenaData[1]!, 0, _batchData, dataLen + arenaR, arenaW);
                         dataLen += arenaR + arenaW;
                     }
                     double arenaRId = arenaR > 0 ? IdOf(_arena[0]!, "scalar arena") : 0;
                     double arenaWId = arenaW > 0 ? IdOf(_arena[1]!, "scalar arena (read_write)") : 0;
-                    using var rec = HeapView.Create(new ReadOnlyMemory<double>(_batchRec, 0, _batchLen));
-                    using var data = HeapView.Create(new ReadOnlyMemory<byte>(_batchData, 0, Math.Max(4, dataLen)));
+                    var h = _submitHdr;
+                    h[0] = IdOf(device, "device");
+                    h[1] = AddressOf(_batchRec); h[2] = _batchLen;
+                    h[3] = AddressOf(_batchData); h[4] = dataLen;
+                    h[5] = WebGPUBackend.MaxReplayPassesPerSubmit;
+                    h[6] = _batchHasUploads ? _batchDataLen : 0;
+                    h[7] = arenaRId; h[8] = arenaR; h[9] = arenaWId; h[10] = arenaW;
+                    h[11] = WebGPUBackend.BatchSinglePass ? 1 : 0;
+                    h[12] = WebGPUBackend.DiagSubmitAblation;
+                    h[13] = WebGPUBackend.BatchBindGroupReuse ? 1 : 0;
                     long t0 = WebGPUBackend.EnableDispatchProfiling ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
-                    SpawnDev.SpawnJS.SpawnJSRuntime.Instance.Call<GPUDevice, HeapView<double, Float64Array>, int, HeapView<byte, Uint8Array>, int, int, double, int, double, int, int>(
-                        "ilgpuWebGPUPlan.submitBatch", device, rec, _batchLen, data, WebGPUBackend.MaxReplayPassesPerSubmit,
-                        _batchHasUploads ? _batchDataLen : 0, arenaRId, arenaR, arenaWId, arenaW);
+                    js.Call<double, int>("ilgpuWebGPUPlan.submitHeader", AddressOf(h));
                     if (t0 != 0)
                     {
                         WebGPUBackend.ProfileBatchSubmitMs += (System.Diagnostics.Stopwatch.GetTimestamp() - t0) * 1000.0 / System.Diagnostics.Stopwatch.Frequency;

@@ -58,6 +58,31 @@
         setAblation(v) { api.ablation = v | 0; return 0; },
         noopDescriptor(desc) { return desc && desc.entries ? desc.entries.length : 0; },
 
+        // The SpawnJS instance whose wasm heap submitHeader reads (C# passes SpawnJSRuntime.DotnetInstance.Id once).
+        // getHeap() returns the CURRENT heap buffer - it re-fetches it after memory growth detached the old one.
+        setHeapSource(dotnetId) { api._heapInst = globalThis.SpawnJSInterop.getInstace(dotnetId); return 0; },
+        // The batch submit's entry from WebGPUStream.SubmitBatch: ONE number crosses - the heap address of a pinned
+        // Float64 header - and everything else is read from the wasm heap here:
+        //   [0] device id  [1] records addr  [2] record count  [3] data addr  [4] data byte length
+        //   [5] maxPassesPerSubmit  [6] upload bytes  [7..10] arenaR id, bytes, arenaW id, bytes
+        //   [11] single pass (0/1)  [12] ablation  [13] bind-group reuse (0/1)
+        // The records and data arrays are pinned C# arrays (never moved), so views over the heap at their
+        // addresses ARE the arrays - nothing is copied and no HeapView object is created per submit.
+        submitHeader(hdrAddr) {
+            const heap = api._heapInst.getHeap();
+            const h = new Float64Array(heap, hdrAddr, 14);
+            api.singlePass = h[11] !== 0;
+            api.ablation = h[12] | 0;
+            const reuse = h[13] !== 0;
+            if (reuse !== (api.bindGroupReuse !== false)) api.setBindGroupReuse(reuse);
+            const device = globalThis.SpawnJSInterop.spawnJSObjects[h[0]];
+            if (!device) throw new Error(`ilgpuWebGPUPlan.submitHeader: device (SpawnJS id ${h[0]}) is not held`);
+            const n = h[2];
+            const rec = new Float64Array(heap, h[1], n);
+            const data = new Uint8Array(heap, h[3], h[4]);
+            return api.submitBatch(device, rec, n, data, h[5], h[6], h[7], h[8], h[9], h[10]);
+        },
+
         // Rewrite the dstOffset (slot [i*7+4]) of copy entries in place - the patch surface for
         // parameterized replay (e.g. a KV-cache append whose destination row advances per decode
         // token). Entries must be tag-1 copies; throws otherwise (a wrong index would silently
@@ -359,7 +384,7 @@
     // Register - but never downgrade. A second copy of this module (another URL, an old cached file) must not
     // replace a newer one already in use: the library looks up ilgpuWebGPUPlan.submitBatch on every flush.
     // Bump HELPER_VERSION whenever the api's surface changes.
-    const HELPER_VERSION = 4;   // 2: submitBatch (plain-dispatch record batches, ordered uploads); 3: single-pass runs, setSinglePass; 4: scalar arenas, bind-group reuse
+    const HELPER_VERSION = 5;   // 2: submitBatch (plain-dispatch record batches, ordered uploads); 3: single-pass runs, setSinglePass; 4: scalar arenas, bind-group reuse; 5: submitHeader (pinned heap header)
     api.version = HELPER_VERSION;
     const existing = globalThis.ilgpuWebGPUPlan;
     if (!existing || !(existing.version >= HELPER_VERSION)) globalThis.ilgpuWebGPUPlan = api;
