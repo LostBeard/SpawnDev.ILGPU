@@ -3179,6 +3179,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         private readonly Stack<BasicBlock> _loopExitStack = new();
 
+        /// <summary>Return-aware if/else merges for the kernel walker (reachability cached per kernel).</summary>
+        private SpawnDev.ILGPU.CodeGen.StructuredReturnMerge? _returnMerge;
+
         /// <summary>
         /// The current loop's header exit target. Set by GenerateLoopConstruct so that
         /// EmitIntermediateBlocksToExit can distinguish body-break-specific blocks from
@@ -8032,7 +8035,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                 // Back-edge check: if this is a loop header we've already visited,
                 // this is a back-edge — the loop handles re-iteration implicitly.
-                if (visited.Contains(block))
+                // A return block is the exception: with return-aware merges (StructuredReturnMerge) several arms can
+                // each end in the shared exit block, and every one of them must emit its `return;`. Skipping it as
+                // "visited" would fall through into the code after the if.
+                if (visited.Contains(block)
+                    && !(currentLoop == null && block.Terminator is global::ILGPU.IR.Values.ReturnTerminator))
                 {
                     // If we're inside a loop and this is the header, push phi values for the
                     // back-edge and let the loop iterate naturally.
@@ -8173,6 +8180,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         }
 
                         mergeNode = inLoopMerge ?? stopBlock;
+                    }
+
+                    // An early `return` in an arm makes the function's exit the post-dominator; merging there emits the
+                    // rest of the function inside every arm (3^N for N `if (a || b) { ..; if (full) return; .. }` blocks:
+                    // AubsCraft's LOD mesh kernel never finished compiling). Merge where the non-returning paths meet;
+                    // the returning ones emit `return;` in place. Inside a loop, EmitBodyBreak owns early exits.
+                    if (currentLoop == null && (mergeNode == null || mergeNode.Terminator is global::ILGPU.IR.Values.ReturnTerminator))
+                    {
+                        _returnMerge ??= new SpawnDev.ILGPU.CodeGen.StructuredReturnMerge();
+                        var returnAwareMerge = _returnMerge.FindMerge(trueTarget, falseTarget, stopBlock);
+                        if (returnAwareMerge != null) mergeNode = returnAwareMerge;
                     }
 
                     if (WebGPU.Backend.WebGPUBackend.VerboseLogging && _isScanKernel)

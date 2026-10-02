@@ -123,6 +123,14 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             throw new UnsupportedTestException("WebGL: no atomic operations in vertex shaders");
 
         [TestMethod]
+        public new async Task EarlyReturnMerge_SequentialOrBlocks_CorrectOutput() =>
+            throw new UnsupportedTestException("WebGL: no atomic operations in vertex shaders (EarlyReturnMerge_SequentialOrBlocksNoAtomics covers the same control flow)");
+
+        [TestMethod]
+        public new async Task EarlyReturnMerge_SequentialOrBlocksLoopHelper_CorrectOutput() =>
+            throw new UnsupportedTestException("WebGL: no atomic operations in vertex shaders (EarlyReturnMerge_SequentialOrBlocksNoAtomics covers the same control flow)");
+
+        [TestMethod]
         public new async Task AtomicCASTest() =>
             throw new UnsupportedTestException("WebGL: no atomic operations in vertex shaders");
 

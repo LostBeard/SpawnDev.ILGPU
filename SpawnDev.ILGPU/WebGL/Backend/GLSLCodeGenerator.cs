@@ -717,16 +717,43 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (target == stop)
                 return true;
 
-            // Already visited → skip
+            // Already visited → skip. Except the function's shared return path: GenerateStructuredCode emits its
+            // `return` again for this arm (skipping it here dropped every early return after the first).
             if (_visitedBlocks.Contains(target))
-                return true;
+                return !(InnermostOpenLoop() == null
+                    && (target.Terminator is ReturnTerminator || TryGetReturnExit(target, out _)));
 
             return false;
         }
 
         protected void GenerateStructuredCode(BasicBlock current, BasicBlock? stop)
         {
-            if (current == null || current == stop || _visitedBlocks.Contains(current)) return;
+            if (current == null || current == stop) return;
+            if (_visitedBlocks.Contains(current))
+            {
+                // Every early `return` of the function reaches the SAME exit, usually through code-free phi blocks.
+                // Only the first arm to get there used to emit it: every later `return` was silently dropped and the
+                // thread ran on into the code after its if (WebGL wrong results; AubsCraft-shaped
+                // EarlyReturnMerge_SequentialOrBlocksNoAtomics). Emit the return again for each arm that reaches it.
+                if (InnermostOpenLoop() == null)
+                {
+                    if (TryGetReturnExit(current, out var sharedReturn))
+                    {
+                        var hop = current;
+                        while (hop.Terminator is UnconditionalBranch hopBranch)
+                        {
+                            PushPhiValues(hopBranch.Target, hop);
+                            hop = hopBranch.Target;
+                        }
+                        GenerateCode(sharedReturn);
+                        return;
+                    }
+                    // A return block with code of its own: emit it again (it ends the function, so it cannot repeat).
+                    if (current.Terminator is ReturnTerminator) goto emitAgain;
+                }
+                return;
+            }
+        emitAgain:
             // This walker also emits the code after a nested loop, i.e. INSIDE the enclosing loop. A block
             // outside that loop is a loop exit - it used to be emitted inline as if the loop had ended (an
             // early `return false` from an inlined helper ran the caller's code and then kept looping).
@@ -1192,6 +1219,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// <summary>
         /// Emits an if/else branch outside a loop (acyclic structured flow).
         /// </summary>
+        /// <summary>Return-aware if/else merges for the function-level walker (reachability cached per function).</summary>
+        private SpawnDev.ILGPU.CodeGen.StructuredReturnMerge? _returnMerge;
+
         protected void EmitIfBranch(IfBranch ib, BasicBlock source, BasicBlock? stop)
         {
             var trueTarget = ib.TrueTarget;
@@ -1203,6 +1233,16 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var openLoop = InnermostOpenLoop();
             if (openLoop != null && merge != null && !openLoop.Contains(merge))
                 merge = null;
+            // An early `return` in an arm makes the function's exit the post-dominator; merging there emits the rest
+            // of the function inside every arm (3^N for N `if (a || b) { ..; if (full) return; .. }` blocks: AubsCraft's
+            // LOD mesh kernel never finished compiling). Merge where the non-returning paths meet; the returning ones
+            // emit `return` in place.
+            if (openLoop == null && (merge == null || merge.Terminator is ReturnTerminator))
+            {
+                _returnMerge ??= new SpawnDev.ILGPU.CodeGen.StructuredReturnMerge();
+                var returnAwareMerge = _returnMerge.FindMerge(trueTarget, falseTarget, stop);
+                if (returnAwareMerge != null) merge = returnAwareMerge;
+            }
 
             PushPhiValues(trueTarget, source);
 
