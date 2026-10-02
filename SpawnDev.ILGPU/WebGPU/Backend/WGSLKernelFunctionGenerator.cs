@@ -8206,6 +8206,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 AppendLine(trueReaches ? $"if (!{Load(branch.Condition)}) {{" : $"if ({Load(branch.Condition)}) {{");
                                 PushIndent();
                                 PushPhiValues(returning, block);
+                                visited.ExceptWith(_returnMerge.ReturningRegion(returning));
                                 GenerateStructuredCodeRecursive(returning, mergeNode, pd, visited, currentLoop);
                                 PopIndent();
                                 AppendLine("}");

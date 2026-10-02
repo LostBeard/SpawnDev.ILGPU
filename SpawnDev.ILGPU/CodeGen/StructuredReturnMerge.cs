@@ -92,6 +92,13 @@ public sealed class StructuredReturnMerge
     /// declarations (a local array, a let binding) must stay visible there.</summary>
     public bool Reaches(BasicBlock from, BasicBlock to) => from == to || Reachable(from).Contains(to);
 
+    /// <summary>The blocks of a guard clause's returning arm: <paramref name="returningArm"/> and everything it reaches.
+    /// None of them reaches the merge, so the region is a dead end and may be emitted again for another branch that
+    /// enters it - the second test of <c>if (a || b) { ..; return; }</c> jumps into the SAME returning block the first
+    /// test's guard already emitted. The emitters un-visit this region before each guard; skipping it as "visited" left
+    /// that guard empty and the thread ran on past the return (PointerAlias_ViewStoredInTwoBranches, 2026-10-02).</summary>
+    public IEnumerable<BasicBlock> ReturningRegion(BasicBlock returningArm) => ReachableInclusive(returningArm);
+
     /// <summary>True when <paramref name="block"/> is a bare return path: phi-only blocks joined by unconditional
     /// branches, ending in a return block with no code of its own. Emitting it again is just a <c>return</c>.</summary>
     public static bool IsCodeFreeReturnPath(BasicBlock block)

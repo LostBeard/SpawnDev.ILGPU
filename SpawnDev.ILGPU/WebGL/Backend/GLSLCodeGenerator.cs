@@ -1252,6 +1252,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         AppendLine(trueReaches ? $"if (!({guardCond})) {{" : $"if ({guardCond}) {{");
                         PushIndent();
                         PushPhiValues(returning, source);
+                        _visitedBlocks.ExceptWith(_returnMerge.ReturningRegion(returning));
                         GenerateStructuredCode(returning, merge);
                         PopIndent();
                         AppendLine("}");
