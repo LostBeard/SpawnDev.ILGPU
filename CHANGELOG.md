@@ -16,6 +16,15 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   the old generation is dropped at each rotation), so shapes in use stay cached and retired ones age out. Counters:
   `WebGPUBackend.BatchBindGroupCounters`. Anaglyphohol DAv3 video at one input size: ~2.8k groups, ~1 miss per frame warm.
 - Dispatch helper `webgpuDispatchPlan.js` v4; batching requires it (an older helper on the page keeps the per-dispatch path).
+- **Batch submit through a pinned heap header** (helper v5, `submitHeader`). The record and data arrays are pinned
+  (pinned-object heap); one number crosses - the address of a pinned header - and the helper views the wasm heap at
+  the arrays' addresses. Before: two `HeapView`s per submit (a JS round trip each, ~0.6 ms a frame in an Anaglyphohol
+  DAv3 AOT profile) and a 10-argument generic `Call` whose instantiation ran in the interpreter.
+- **`DelegateSpecialization` launches without reflection** (fork 2.3.9). Each launch used to read the wrapped
+  delegate with `GetField("_delegate")` + `GetValue`, allocate a closure, and launch via `Kernel.Launch(params
+  object[])` - boxing every argument and invoking the launcher with `DynamicMethod.Invoke`. Now a typed launcher is
+  cached per (accelerator, kernel, target) and called directly; the constructor uses `HasSingleTarget`.
+- RunKernel reuses its view offset/count dictionaries; `BitsPerElementOf` no longer allocates a closure per call.
 - ⚠️ **Raw WebGPU users: flush before your own submit** (behavior since 5.3.1's batched uploads, documented now). A small
   `CopyFromCPU` (up to 64 KB) is RECORDED in the pending dispatch batch as an ordered upload, not written immediately.
   Code that mixes ILGPU with its own `device.queue.submit` must call `accelerator.FlushPendingCommands()` (or
