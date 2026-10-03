@@ -222,8 +222,13 @@ namespace PlaywrightMultiTest
                     // -p:BuildInParallel=false + -maxcpucount:1 keep the publish single-threaded so
                     // MSBuild worker nodes do not crash with MSB4166 ("Child node exited prematurely")
                     // when other crew (Riker / Tuvok) are running their own PMT sweeps in parallel.
-                    LogStatus($"Publishing {project.Name}...");
-                    var pubResult = await RunDotnetAsync($"publish \"{project.CsprojPath}\" -c Release -p:BuildInParallel=false -maxcpucount:1", project.Directory).ConfigureAwait(false);
+                    // PMT_PUBLISH_ARGS: extra publish arguments for this sweep. The AOT lane is
+                    //   PMT_PUBLISH_ARGS="-p:RunAOTCompilation=true -p:WasmStripILAfterAOT=false -p:WasmDedup=false"
+                    // (ILGPU compiles kernels from the KEPT IL; WasmDedup=false compiles the generic instances per assembly in
+                    // parallel - minutes, not an hour). Found the RadixSortPairs AOT crash class of bug (2026-10-02).
+                    var extraPublishArgs = Environment.GetEnvironmentVariable("PMT_PUBLISH_ARGS");
+                    LogStatus($"Publishing {project.Name}...{(string.IsNullOrWhiteSpace(extraPublishArgs) ? "" : $" [PMT_PUBLISH_ARGS {extraPublishArgs}]")}");
+                    var pubResult = await RunDotnetAsync($"publish \"{project.CsprojPath}\" -c Release -p:BuildInParallel=false -maxcpucount:1 {extraPublishArgs}", project.Directory).ConfigureAwait(false);
                     LogStatus($"Publish {project.Name}: exit={pubResult}");
                     if (pubResult != 0 || !File.Exists(indexPath))
                     {
