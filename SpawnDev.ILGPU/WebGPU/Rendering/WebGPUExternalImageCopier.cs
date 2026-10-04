@@ -5,6 +5,7 @@ using SpawnDev.ILGPU.WebGPU.Backend;
 using SpawnDev.SpawnJS.JSObjects;
 // SpawnJS declares this WebGPU typedef as a global using, which is visible only inside SpawnJS.
 using GPUCopyExternalImageSource = SpawnDev.SpawnJS.Union<SpawnDev.SpawnJS.JSObjects.ImageBitmap, SpawnDev.SpawnJS.JSObjects.ImageData, SpawnDev.SpawnJS.JSObjects.HTMLImageElement, SpawnDev.SpawnJS.JSObjects.HTMLVideoElement, SpawnDev.SpawnJS.JSObjects.VideoFrame, SpawnDev.SpawnJS.JSObjects.HTMLCanvasElement, SpawnDev.SpawnJS.JSObjects.OffscreenCanvas>;
+using CanvasImageSource = SpawnDev.SpawnJS.Union<SpawnDev.SpawnJS.JSObjects.HTMLImageElement, SpawnDev.SpawnJS.JSObjects.SVGImageElement, SpawnDev.SpawnJS.JSObjects.HTMLVideoElement, SpawnDev.SpawnJS.JSObjects.HTMLCanvasElement, SpawnDev.SpawnJS.JSObjects.ImageBitmap, SpawnDev.SpawnJS.JSObjects.OffscreenCanvas, SpawnDev.SpawnJS.JSObjects.VideoFrame>;
 
 namespace SpawnDev.ILGPU.WebGPU.Rendering
 {
@@ -23,6 +24,13 @@ namespace SpawnDev.ILGPU.WebGPU.Rendering
     /// first, so a kernel launched before the copy (e.g. one still reading last frame's pixels from the destination)
     /// executes before the destination is overwritten. Kernels launched after the call read the new pixels.
     /// </para>
+    /// <para>
+    /// FIREFOX: its <c>copyExternalImageToTexture</c> refuses <c>HTMLVideoElement</c> and <c>VideoFrame</c> sources
+    /// ("'source' member ... could not be converted to any of: ImageBitmap, HTMLImageElement, HTMLCanvasElement,
+    /// OffscreenCanvas"). The first refusal switches this copier to drawing such sources into a reused
+    /// <c>OffscreenCanvas</c> (a 2D <c>drawImage</c>) and copying that: one throw, then no exception per frame. Chrome
+    /// takes the direct path. <see cref="ForceFrameSourcesThroughCanvas"/> forces the fallback (tests).
+    /// </para>
     /// </remarks>
     public sealed class WebGPUExternalImageCopier : IExternalImageCopier
     {
@@ -36,6 +44,19 @@ namespace SpawnDev.ILGPU.WebGPU.Rendering
         private MemoryBuffer1D<int, Stride1D.Dense>? _staging;
         private Action<Index2D, ArrayView1D<int, Stride1D.Dense>, ArrayView1D<int, Stride1D.Dense>, int, int>? _compactRows;
         private bool _disposed;
+        // Firefox fallback (see remarks): set by the first refusal of a video / VideoFrame source.
+        private bool _frameSourcesThroughCanvas;
+        private OffscreenCanvas? _frameCanvas;
+        private CanvasRenderingContext2D? _frameContext;
+
+        /// <summary>
+        /// TEST SWITCH: always draw <c>HTMLVideoElement</c> / <c>VideoFrame</c> sources through an <c>OffscreenCanvas</c>
+        /// first - the path a browser that refuses them directly (Firefox) takes on its own.
+        /// </summary>
+        public static bool ForceFrameSourcesThroughCanvas { get; set; }
+
+        /// <summary>True once this copier has switched to the canvas fallback for video / VideoFrame sources.</summary>
+        public bool FrameSourcesThroughCanvas => _frameSourcesThroughCanvas;
 
         public WebGPUExternalImageCopier(WebGPUAccelerator accelerator)
         {
@@ -73,10 +94,23 @@ namespace SpawnDev.ILGPU.WebGPU.Rendering
             bool direct = paddedRowBytes == rowBytes;
 
             var extent = new GPUExtent3DDict { Width = (uint)width, Height = (uint)height, DepthOrArrayLayers = 1 };
-            Queue.CopyExternalImageToTexture(
-                new GPUCopyExternalImageSourceInfo { Source = source },
-                new GPUCopyExternalImageDestInfo { Texture = _texture },
-                extent);
+            bool frameSource = source.Value is HTMLVideoElement or VideoFrame;
+            if (frameSource && (_frameSourcesThroughCanvas || ForceFrameSourcesThroughCanvas))
+            {
+                CopySourceToTexture(DrawFrameToCanvas(source, width, height), extent);
+            }
+            else
+            {
+                try
+                {
+                    CopySourceToTexture(source, extent);
+                }
+                catch (Exception ex) when (frameSource && IsSourceTypeRefused(ex))
+                {
+                    _frameSourcesThroughCanvas = true;
+                    CopySourceToTexture(DrawFrameToCanvas(source, width, height), extent);
+                }
+            }
 
             GPUBuffer copyTarget;
             ulong copyOffset;
@@ -117,6 +151,46 @@ namespace SpawnDev.ILGPU.WebGPU.Rendering
             }
         }
 
+        private void CopySourceToTexture(GPUCopyExternalImageSource source, GPUExtent3DDict extent)
+        {
+            Queue.CopyExternalImageToTexture(
+                new GPUCopyExternalImageSourceInfo { Source = source },
+                new GPUCopyExternalImageDestInfo { Texture = _texture },
+                extent);
+        }
+
+        /// <summary>
+        /// The browser rejected the source's TYPE (Firefox: "could not be converted to any of ..."), as opposed to its
+        /// pixels (a tainted cross-origin source is a SecurityError, which the canvas route would hit too).
+        /// </summary>
+        private static bool IsSourceTypeRefused(Exception ex)
+            => ex.Message.Contains("could not be converted", StringComparison.OrdinalIgnoreCase)
+            || ex.Message.Contains("TypeError", StringComparison.Ordinal);
+
+        /// <summary>Draws a video / VideoFrame source into the reused fallback canvas at <paramref name="width"/> x <paramref name="height"/>.</summary>
+        private OffscreenCanvas DrawFrameToCanvas(GPUCopyExternalImageSource source, int width, int height)
+        {
+            if (_frameCanvas == null)
+            {
+                _frameCanvas = new OffscreenCanvas(width, height);
+                _frameContext = _frameCanvas.Get2DContext();
+            }
+            else if (_frameCanvas.Width != width || _frameCanvas.Height != height)
+            {
+                // a resize also resets the context state; the full-canvas draw below covers every pixel
+                _frameCanvas.Width = width;
+                _frameCanvas.Height = height;
+            }
+            CanvasImageSource image = source.Value switch
+            {
+                HTMLVideoElement video => video,
+                VideoFrame frame => frame,
+                _ => throw new InvalidOperationException("only video / VideoFrame sources take the canvas route"),
+            };
+            _frameContext!.DrawImage(image, 0, 0, width, height);
+            return _frameCanvas;
+        }
+
         /// <summary>dst[y * width + x] = src[y * srcStride + x] - drops the 256-byte row padding.</summary>
         private static void CompactRowsKernel(Index2D index, ArrayView1D<int, Stride1D.Dense> src, ArrayView1D<int, Stride1D.Dense> dst, int srcStride, int width)
         {
@@ -149,6 +223,8 @@ namespace SpawnDev.ILGPU.WebGPU.Rendering
             if (!_accelerator.IsDisposed) _accelerator.FlushPendingCommands();
             _staging?.Dispose(); _staging = null;
             _texture?.Destroy(); _texture?.Dispose(); _texture = null;
+            _frameContext?.Dispose(); _frameContext = null;
+            _frameCanvas?.Dispose(); _frameCanvas = null;
         }
     }
 }

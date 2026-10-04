@@ -37,6 +37,31 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             await ExternalImageCopyCase(acc, 130, 9, copier, seed: 3);
         });
 
+        /// <summary>
+        /// A VideoFrame source (what a video frame callback hands out), copied DIRECTLY and through the canvas fallback
+        /// that a browser refusing video / VideoFrame sources takes on its own (Firefox: "could not be converted to any
+        /// of: ImageBitmap, HTMLImageElement, HTMLCanvasElement, OffscreenCanvas"). Both must be exact.
+        /// </summary>
+        [TestMethod]
+        public async Task ExternalImageCopy_VideoFrameSource_DirectAndCanvasFallback_ExactPixelsTest() => await RunTest(async acc =>
+        {
+            RequireBrowserImageBackend(acc);
+            using (var copier = ExternalImageCopier.Create(acc))
+                await ExternalImageCopyCase(acc, 67, 41, copier, seed: 4, asVideoFrame: true);
+            var before = SpawnDev.ILGPU.WebGPU.Rendering.WebGPUExternalImageCopier.ForceFrameSourcesThroughCanvas;
+            SpawnDev.ILGPU.WebGPU.Rendering.WebGPUExternalImageCopier.ForceFrameSourcesThroughCanvas = true;
+            try
+            {
+                using var copier = ExternalImageCopier.Create(acc);
+                await ExternalImageCopyCase(acc, 67, 41, copier, seed: 5, asVideoFrame: true);
+                await ExternalImageCopyCase(acc, 64, 20, copier, seed: 6, asVideoFrame: true);   // the fallback canvas resizes
+            }
+            finally
+            {
+                SpawnDev.ILGPU.WebGPU.Rendering.WebGPUExternalImageCopier.ForceFrameSourcesThroughCanvas = before;
+            }
+        });
+
         static void RequireBrowserImageBackend(Accelerator acc)
         {
             if (acc.AcceleratorType is not (AcceleratorType.WebGPU or AcceleratorType.WebGL or AcceleratorType.Wasm))
@@ -52,7 +77,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             await ExternalImageCopyCase(acc, width, height, copier, seed: 0);
         }
 
-        static async Task ExternalImageCopyCase(Accelerator acc, int width, int height, IExternalImageCopier copier, int seed)
+        static async Task ExternalImageCopyCase(Accelerator acc, int width, int height, IExternalImageCopier copier, int seed, bool asVideoFrame = false)
         {
             // Opaque pixels (alpha 255): premultiplication cannot change the colour bytes, so the copy must be EXACT.
             var expected = new int[width * height];
@@ -84,7 +109,13 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             System.Array.Fill(init, sentinel);
             buffer.CopyFromCPU(init);
 
-            copier.CopyToBuffer(canvas, width, height, buffer.View.SubView(lead, width * height));
+            if (asVideoFrame)
+            {
+                using var frame = new VideoFrame(canvas, new VideoFrameOptions { Timestamp = 0 });
+                try { copier.CopyToBuffer(frame, width, height, buffer.View.SubView(lead, width * height)); }
+                finally { frame.Close(); }
+            }
+            else copier.CopyToBuffer(canvas, width, height, buffer.View.SubView(lead, width * height));
 
             var result = await buffer.CopyToHostAsync();
             for (int i = 0; i < lead; i++)

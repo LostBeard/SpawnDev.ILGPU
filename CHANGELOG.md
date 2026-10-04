@@ -3,6 +3,16 @@
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 ## Unreleased (5.3.2-local) - WebGPU batched dispatch: scalar arenas + bind-group reuse
 
+- **Video frames copy on Firefox: `WebGPUExternalImageCopier` falls back to a canvas** (Geordi, 5.3.2-local.7). Firefox's
+  `copyExternalImageToTexture` refuses `HTMLVideoElement` and `VideoFrame` sources ("'source' member ... could not be
+  converted to any of: ImageBitmap, HTMLImageElement, HTMLCanvasElement, OffscreenCanvas"); Chrome accepts them.
+  - The first refusal switches the copier to drawing such sources into a reused `OffscreenCanvas` (2D `drawImage`) and
+    copying that: one throw, then no exception per frame. Other source types, and every source on Chrome, are unchanged.
+    `WebGPUExternalImageCopier.FrameSourcesThroughCanvas` reports the switch; `ForceFrameSourcesThroughCanvas` forces it.
+  - Test `ExternalImageCopy_VideoFrameSource_DirectAndCanvasFallback_ExactPixelsTest`: a `VideoFrame` copied directly and
+    through the forced fallback (with a resize) is exact. MUTATION (fallback draws at half width) fails it. Scoped PMT
+    14/0 on WebGPU/WebGL/Wasm.
+
 - **Scalar arenas** (`WebGPUBackend.BatchScalarArena`, default on). Under record batching, the per-dispatch scalar
   buffers (packed scalars, view strides, struct scalars) are 256-byte slots of two per-stream arena buffers instead of
   pooled 256-byte buffers. The batch's scalars go up in ONE `writeBuffer` per arena (written before any command buffer
