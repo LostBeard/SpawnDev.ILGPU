@@ -71,6 +71,7 @@ public static class ShaderArtifactCache
 
     private static long _hits;
     private static long _misses;
+    private static long _irSkippedHits;
 
     /// <summary>Number of cache hits since process start / last <see cref="ResetStats"/>.</summary>
     public static long Hits => Interlocked.Read(ref _hits);
@@ -78,6 +79,51 @@ public static class ShaderArtifactCache
     public static long Misses => Interlocked.Read(ref _misses);
     /// <summary>Number of registered artifacts.</summary>
     public static int Count => Cache.Count;
+    /// <summary>
+    /// Hits served BEFORE the kernel's IR was built (the backend's early hook; also counted in <see cref="Hits"/>):
+    /// IR construction, IR optimization and shader generation were all skipped.
+    /// </summary>
+    public static long IrSkippedHits => Interlocked.Read(ref _irSkippedHits);
+
+    /// <summary>Records a hit served by a backend's early (pre-IR) hook.</summary>
+    internal static void CountIrSkippedHit()
+    {
+        Interlocked.Increment(ref _hits);
+        Interlocked.Increment(ref _irSkippedHits);
+    }
+
+    /// <summary>Looks an artifact up WITHOUT counting a hit or a miss (a backend's early hook, which may decline).</summary>
+    public static bool TryPeek(MethodInfo method, CapabilityProfile profile, in KernelSpecialization specialization, out ShaderArtifact artifact)
+    {
+        if (method is null) throw new ArgumentNullException(nameof(method));
+        return Cache.TryGetValue(
+            Key(KernelId(method), profile.ToCacheKeyString(), SpecKey(specialization)), out artifact!);
+    }
+
+    /// <summary>
+    /// Every registered artifact with its key parts, for EXPORT: an app persists what this session compiled (e.g. a
+    /// browser extension keeps it in its own storage) and registers it again in a later session with
+    /// <see cref="Register(string, string, string, ShaderArtifact)"/>, so those kernels skip the transpiler.
+    /// </summary>
+    public static IReadOnlyList<(string KernelId, string ProfileCacheKey, string SpecKey, ShaderArtifact Artifact)> Snapshot()
+    {
+        var list = new List<(string, string, string, ShaderArtifact)>(Cache.Count);
+        foreach (var kv in Cache)
+        {
+            var parts = kv.Key.Split("||");
+            if (parts.Length == 3) list.Add((parts[0], parts[1], parts[2], kv.Value));
+        }
+        return list;
+    }
+
+    /// <summary>Register an artifact under all three key parts (the inverse of <see cref="Snapshot"/>).</summary>
+    public static void Register(string kernelId, string profileCacheKey, string specKey, ShaderArtifact artifact)
+    {
+        if (kernelId is null) throw new ArgumentNullException(nameof(kernelId));
+        if (profileCacheKey is null) throw new ArgumentNullException(nameof(profileCacheKey));
+        if (specKey is null) throw new ArgumentNullException(nameof(specKey));
+        Cache[Key(kernelId, profileCacheKey, specKey)] = artifact ?? throw new ArgumentNullException(nameof(artifact));
+    }
 
     /// <summary>Diagnostic: a snapshot of all current cache keys (kernelId||profile||spec), newline-joined.</summary>
     public static string KeysSnapshot() => string.Join(" ;; ", Cache.Keys.OrderBy(k => k, StringComparer.Ordinal));
@@ -231,6 +277,7 @@ public static class ShaderArtifactCache
     {
         Interlocked.Exchange(ref _hits, 0);
         Interlocked.Exchange(ref _misses, 0);
+        Interlocked.Exchange(ref _irSkippedHits, 0);
     }
 
     /// <summary>

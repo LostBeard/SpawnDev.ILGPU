@@ -1308,6 +1308,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             /// <summary>Coalesce-group manifest.</summary>
             public IReadOnlyList<CoalesceGroupEntry> CoalesceManifest { get; init; }
                 = System.Array.Empty<CoalesceGroupEntry>();
+            /// <summary>
+            /// The kernel's static shared-memory size (the entry point's <see cref="SharedMemorySpecification"/>), or null
+            /// when unknown (artifacts written before it was recorded). With it, a cache hit rebuilds the entry point
+            /// without the IR and skips IR construction + optimization too, not only the WGSL generation.
+            /// </summary>
+            public int? SharedMemoryStaticSize { get; init; }
+            /// <summary>Whether the kernel uses dynamic shared memory (pairs with <see cref="SharedMemoryStaticSize"/>).</summary>
+            public bool SharedMemoryHasDynamic { get; init; }
         }
 
         /// <summary>
@@ -1350,6 +1358,52 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// WGSL is the FINAL, validated source (post-placeholder-resolution), so the reconstructed
         /// kernel is byte-identical to the codegen'd one by construction.
         /// </summary>
+        /// <summary>
+        /// Precompiled-shader cache hook, EARLY form: on a hit whose metadata records the shared-memory specification,
+        /// the compiled kernel is rebuilt straight from the cached WGSL + metadata BEFORE ILGPU builds the kernel's IR -
+        /// so a hit skips IR construction, the IR transformations and the WGSL generation. MEASURED 2026-10-04 (cold
+        /// Anaglyphohol start, Blazor AOT, CPU profile): of ~770 ms spent compiling 119 kernels, the IR part was ~400 ms
+        /// and ran even on a late (codegen-only) hit. Any other case falls through to the normal path (and its late hook).
+        /// </summary>
+        public override CompiledKernel Compile<TBackendHook>(
+            in EntryPointDescription entry,
+            in KernelSpecialization specialization,
+            TBackendHook backendHook)
+        {
+            var method = entry.MethodSource;
+            if (method != null && ShaderArtifactCache.Enabled
+                && !ShaderArtifactCache.UsesRuntimeValueSpecialization(method)
+                && ShaderArtifactCache.TryPeek(method, ProfileForThisBackend(), specialization, out var art)
+                && art.Source is { } cachedWgsl
+                && art.CodegenMetadata is WebGPUKernelMetadata { SharedMemoryStaticSize: int staticSize } meta)
+            {
+                var entryPoint = new EntryPoint(
+                    entry,
+                    new SharedMemorySpecification(staticSize, meta.SharedMemoryHasDynamic),
+                    specialization);
+                // the normal path rejects this combination after building the IR; a cached kernel passed it then
+                if (!(entryPoint.IsImplicitlyGrouped && entryPoint.SharedMemory.HasSharedMemory))
+                {
+                    ShaderArtifactCache.CountIrSkippedHit();
+                    return FromCachedArtifact(entryPoint, cachedWgsl, meta);
+                }
+            }
+            return base.Compile(entry, specialization, backendHook);
+        }
+
+        /// <summary>A compiled kernel rebuilt from a cached shader + its dispatch metadata (both cache hooks).</summary>
+        private WebGPUCompiledKernel FromCachedArtifact(EntryPoint entryPoint, string cachedWgsl, WebGPUKernelMetadata meta) =>
+            new WebGPUCompiledKernel(
+                Context,
+                entryPoint,
+                cachedWgsl,
+                meta.DynamicSharedOverrides.Count > 0 ? meta.DynamicSharedOverrides : null,
+                meta.ScalarPackingManifest.Count > 0 ? meta.ScalarPackingManifest : null,
+                meta.ExpectedBindingCount,
+                meta.I64SpinlockParamIndices.Count > 0
+                    ? new HashSet<(int, int)>(meta.I64SpinlockParamIndices) : null,
+                meta.CoalesceManifest.Count > 0 ? meta.CoalesceManifest : null);
+
         protected override CompiledKernel Compile(
             EntryPoint entryPoint,
             in BackendContext backendContext,
@@ -1369,16 +1423,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     && art.Source is { } cachedWgsl
                     && art.CodegenMetadata is WebGPUKernelMetadata meta)
                 {
-                    return new WebGPUCompiledKernel(
-                        Context,
-                        entryPoint,
-                        cachedWgsl,
-                        meta.DynamicSharedOverrides.Count > 0 ? meta.DynamicSharedOverrides : null,
-                        meta.ScalarPackingManifest.Count > 0 ? meta.ScalarPackingManifest : null,
-                        meta.ExpectedBindingCount,
-                        meta.I64SpinlockParamIndices.Count > 0
-                            ? new HashSet<(int, int)>(meta.I64SpinlockParamIndices) : null,
-                        meta.CoalesceManifest.Count > 0 ? meta.CoalesceManifest : null);
+                    return FromCachedArtifact(entryPoint, cachedWgsl, meta);
                 }
             }
 
@@ -1399,6 +1444,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         ExpectedBindingCount = wk.ExpectedBindingCount,
                         I64SpinlockParamIndices = new List<(int, int)>(wk.I64SpinlockParamIndices),
                         CoalesceManifest = wk.CoalesceManifest,
+                        SharedMemoryStaticSize = entryPoint.SharedMemory.StaticSize,
+                        SharedMemoryHasDynamic = entryPoint.SharedMemory.HasDynamicMemory,
                     },
                 });
             }

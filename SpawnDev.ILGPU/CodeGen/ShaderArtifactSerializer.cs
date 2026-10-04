@@ -75,7 +75,44 @@ public sealed class WebGpuKernelMetadataDto
     public List<SpinlockIndexDto> I64SpinlockParamIndices { get; set; } = new();
     /// <summary>Coalesce-group manifest.</summary>
     public List<CoalesceGroupEntry> CoalesceManifest { get; set; } = new();
+    /// <summary>Static shared-memory size, or null when not recorded (see WebGPUKernelMetadata.SharedMemoryStaticSize).</summary>
+    public int? SharedMemoryStaticSize { get; set; }
+    /// <summary>Whether the kernel uses dynamic shared memory.</summary>
+    public bool SharedMemoryHasDynamic { get; set; }
 }
+
+/// <summary>
+/// A session's compiled shaders, exported by <see cref="ShaderArtifactSerializer.ExportCache"/> for an app to persist
+/// (e.g. a browser extension's own storage) and import into a later session with
+/// <see cref="ShaderArtifactSerializer.ImportCache"/>.
+/// </summary>
+public sealed class ShaderCacheExport
+{
+    /// <summary>The SpawnDev.ILGPU build that generated the shaders; an import from any other build is ignored.</summary>
+    public string LibraryVersion { get; set; } = "";
+    /// <summary>The exported artifacts.</summary>
+    public List<ShaderCacheExportEntry> Entries { get; set; } = new();
+}
+
+/// <summary>One exported artifact (WebGPU: WGSL + dispatch metadata) with its full cache key.</summary>
+public sealed class ShaderCacheExportEntry
+{
+    /// <summary>Kernel identity (<see cref="ShaderArtifactCache.KernelId"/>).</summary>
+    public string KernelId { get; set; } = "";
+    /// <summary>Device capability profile key.</summary>
+    public string ProfileCacheKey { get; set; } = "";
+    /// <summary>Kernel specialization key.</summary>
+    public string SpecKey { get; set; } = "";
+    /// <summary>Shader source.</summary>
+    public string Source { get; set; } = "";
+    /// <summary>WebGPU dispatch metadata.</summary>
+    public WebGpuKernelMetadataDto WebGpu { get; set; } = new();
+}
+
+/// <summary>Compact (unindented) JSON for <see cref="ShaderCacheExport"/>: it is stored, not read by people.</summary>
+[JsonSourceGenerationOptions(WriteIndented = false, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull, IncludeFields = false)]
+[JsonSerializable(typeof(ShaderCacheExport))]
+internal partial class ShaderCacheExportJsonContext : JsonSerializerContext { }
 
 /// <summary>
 /// The full sidecar record for one (kernel, profile) artifact - serialized to
@@ -190,6 +227,8 @@ public static class ShaderArtifactSerializer
             .Select(t => new SpinlockIndexDto { ParamIdx = t.ParamIdx, FieldIdx = t.FieldIdx })
             .ToList(),
         CoalesceManifest = meta.CoalesceManifest.ToList(),
+        SharedMemoryStaticSize = meta.SharedMemoryStaticSize,
+        SharedMemoryHasDynamic = meta.SharedMemoryHasDynamic,
     };
 
     /// <summary>Map the JSON DTO back to the runtime WebGPU metadata (runtime read path).</summary>
@@ -205,7 +244,75 @@ public static class ShaderArtifactSerializer
             .Select(d => (d.ParamIdx, d.FieldIdx))
             .ToList(),
         CoalesceManifest = dto.CoalesceManifest,
+        SharedMemoryStaticSize = dto.SharedMemoryStaticSize,
+        SharedMemoryHasDynamic = dto.SharedMemoryHasDynamic,
     };
+
+    // ---- session cache export / import (an app persists what a session compiled) ----
+
+    /// <summary>
+    /// This SpawnDev.ILGPU build's identity (informational version, which carries the source revision when built from
+    /// a repository). Exported shaders are only ever imported into the SAME build: the generator or the dispatch
+    /// metadata may change between builds, and a stale artifact must never be trusted.
+    /// </summary>
+    public static string LibraryVersion =>
+        typeof(ShaderArtifactCache).Assembly
+            .GetCustomAttributes(typeof(System.Reflection.AssemblyInformationalVersionAttribute), false)
+            .OfType<System.Reflection.AssemblyInformationalVersionAttribute>().FirstOrDefault()?.InformationalVersion
+        ?? typeof(ShaderArtifactCache).Assembly.GetName().Version?.ToString() ?? "unknown";
+
+    /// <summary>
+    /// Exports the WebGPU artifacts this session compiled or imported, as compact JSON. Kernels emitted at runtime
+    /// (their identity names a dynamic assembly, new every session) are left out: they could never hit again.
+    /// </summary>
+    public static string ExportCache()
+    {
+        var export = new ShaderCacheExport { LibraryVersion = LibraryVersion };
+        foreach (var (kernelId, profileKey, specKey, artifact) in ShaderArtifactCache.Snapshot())
+        {
+            if (artifact.Backend != AcceleratorType.WebGPU || artifact.Source is null) continue;
+            if (artifact.CodegenMetadata is not WebGPUBackend.WebGPUKernelMetadata meta) continue;
+            if (kernelId.Contains(")@", StringComparison.Ordinal)) continue;
+            export.Entries.Add(new ShaderCacheExportEntry
+            {
+                KernelId = kernelId,
+                ProfileCacheKey = profileKey,
+                SpecKey = specKey,
+                Source = artifact.Source,
+                WebGpu = ToDto(meta),
+            });
+        }
+        export.Entries.Sort((a, b) => string.CompareOrdinal(a.KernelId + a.SpecKey, b.KernelId + b.SpecKey));
+        return JsonSerializer.Serialize(export, ShaderCacheExportJsonContext.Default.ShaderCacheExport);
+    }
+
+    /// <summary>
+    /// Registers the artifacts of an <see cref="ExportCache"/> JSON. Returns how many were registered: 0 when the JSON
+    /// came from a different SpawnDev.ILGPU build (or is not an export). An entry for a device profile other than the
+    /// active one simply never matches, so the runtime transpiler stays the fallback for anything not imported.
+    /// </summary>
+    public static int ImportCache(string json)
+    {
+        if (string.IsNullOrEmpty(json)) return 0;
+        ShaderCacheExport? export;
+        try { export = JsonSerializer.Deserialize(json, ShaderCacheExportJsonContext.Default.ShaderCacheExport); }
+        catch (JsonException) { return 0; }
+        if (export is null || export.LibraryVersion != LibraryVersion) return 0;
+        int count = 0;
+        foreach (var e in export.Entries)
+        {
+            if (string.IsNullOrEmpty(e.Source)) continue;
+            ShaderArtifactCache.Register(e.KernelId, e.ProfileCacheKey, e.SpecKey, new ShaderArtifact
+            {
+                Backend = AcceleratorType.WebGPU,
+                ProfileCacheKey = e.ProfileCacheKey,
+                Source = e.Source,
+                CodegenMetadata = FromDto(e.WebGpu),
+            });
+            count++;
+        }
+        return count;
+    }
 
     // ---- GeneratedKernel -> sidecar, and sidecar -> ShaderArtifact ----
 

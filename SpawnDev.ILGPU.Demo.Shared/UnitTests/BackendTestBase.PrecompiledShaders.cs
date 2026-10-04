@@ -290,5 +290,90 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     $"never hit. lookup=[{lookupKey}] registration=[{registrationKey}]");
             await Task.CompletedTask;
         });
+
+        // Static shared memory + a barrier, explicitly grouped: each group of 64 writes its tile reversed. The entry
+        // point's SharedMemorySpecification is the one thing an early (pre-IR) cache hit cannot read off the IR.
+        private static void PrecompiledShaders_SharedReverseKernel(ArrayView<float> input, ArrayView<float> output)
+        {
+            var tile = SharedMemory.Allocate<float>(64);
+            int g = Grid.GlobalIndex.X;
+            int t = Group.IdxX;
+            tile[t] = input[g];
+            Group.Barrier();
+            output[g] = tile[63 - t];
+        }
+
+        // A session's compiled shaders persisted and restored (what an app such as a browser extension does with its
+        // own storage): ExportCache -> clear -> ImportCache -> the kernels load as EARLY hits, i.e. before ILGPU builds
+        // their IR (ShaderArtifactCache.IrSkippedHits), with zero misses, and dispatch correctly - the scalar packing
+        // and the shared-memory kernel both come back from the exported metadata alone. An export from a different
+        // SpawnDev.ILGPU build must import nothing.
+        [TestMethod]
+        public async Task PrecompiledShaders_ExportImport_EarlyHitSkipsIrAndDispatches() =>
+            await RunTest(async accelerator =>
+        {
+            if (accelerator is not WebGPUAccelerator)
+                throw new UnsupportedTestException("WebGPU-only (the runtime cache hooks are WebGPU).");
+
+            const int n = 256;
+            const float mul = 5f;
+            var src = new float[n];
+            for (int i = 0; i < n; i++) src[i] = i * 0.5f + 1f;
+            using var inBuf = accelerator.Allocate1D(src);
+
+            async Task RunAndCheck(string phase)
+            {
+                var scale = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, float>(
+                    PrecompiledShaders_ScaleKernel);
+                var reverse = accelerator.LoadStreamKernel<ArrayView<float>, ArrayView<float>>(
+                    PrecompiledShaders_SharedReverseKernel);
+                using var scaled = accelerator.Allocate1D<float>(n);
+                using var reversed = accelerator.Allocate1D<float>(n);
+                scale((Index1D)n, inBuf.View, scaled.View, mul);
+                reverse(new KernelConfig(n / 64, 64), inBuf.View, reversed.View);
+                await accelerator.SynchronizeAsync();
+                var rs = await scaled.CopyToHostAsync<float>();
+                var rr = await reversed.CopyToHostAsync<float>();
+                for (int i = 0; i < n; i++)
+                {
+                    if (MathF.Abs(rs[i] - src[i] * mul) > 1e-3f)
+                        throw new Exception($"{phase}: scale WRONG @{i}: {rs[i]} != {src[i] * mul}");
+                    int mirror = (i / 64) * 64 + (63 - i % 64);
+                    if (rr[i] != src[mirror])
+                        throw new Exception($"{phase}: shared-memory reverse WRONG @{i}: {rr[i]} != {src[mirror]}");
+                }
+            }
+
+            // (1) compile (misses) and export
+            ShaderArtifactCache.Clear();
+            ShaderArtifactCache.ResetStats();
+            accelerator.ClearCache(ClearCacheMode.Everything);
+            await RunAndCheck("COMPILED");
+            string json = ShaderArtifactSerializer.ExportCache();
+            foreach (var name in new[] { "PrecompiledShaders_ScaleKernel", "PrecompiledShaders_SharedReverseKernel" })
+                if (!json.Contains(name, StringComparison.Ordinal))
+                    throw new Exception($"Export is missing {name}. KEYS=[{ShaderArtifactCache.KeysSnapshot()}]");
+
+            // (2) a fresh session's view: nothing cached, then the import
+            ShaderArtifactCache.Clear();
+            ShaderArtifactCache.ResetStats();
+            int imported = ShaderArtifactSerializer.ImportCache(json);
+            if (imported < 2) throw new Exception($"Imported {imported} artifacts, expected at least 2.");
+            accelerator.ClearCache(ClearCacheMode.Everything);   // the loads below must re-enter Backend.Compile
+            await RunAndCheck("IMPORTED");
+            if (ShaderArtifactCache.IrSkippedHits < 2 || ShaderArtifactCache.Misses != 0)
+                throw new Exception(
+                    $"Expected both kernels as early (pre-IR) hits: irSkippedHits={ShaderArtifactCache.IrSkippedHits} " +
+                    $"hits={ShaderArtifactCache.Hits} misses={ShaderArtifactCache.Misses}.");
+
+            // (3) an export from another SpawnDev.ILGPU build is never trusted
+            string foreign = json.Replace(   // as JSON writes it (the default encoder escapes the "+" of "+<commit>")
+                System.Text.Json.JsonEncodedText.Encode(ShaderArtifactSerializer.LibraryVersion).ToString(), "0.0.0-other-build", StringComparison.Ordinal);
+            if (foreign == json) throw new Exception("The export does not carry the library version.");
+            ShaderArtifactCache.Clear();
+            int foreignCount = ShaderArtifactSerializer.ImportCache(foreign);
+            if (foreignCount != 0 || ShaderArtifactCache.Count != 0)
+                throw new Exception($"An export from another build was imported ({foreignCount} artifacts).");
+        });
     }
 }

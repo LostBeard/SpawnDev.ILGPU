@@ -169,6 +169,8 @@ public static class ShaderCompiler
             ExpectedBindingCount = compiled.ExpectedBindingCount,
             I64SpinlockParamIndices = new List<(int, int)>(compiled.I64SpinlockParamIndices),
             CoalesceManifest = compiled.CoalesceManifest,
+            SharedMemoryStaticSize = compiled.EntryPoint.SharedMemory.StaticSize,
+            SharedMemoryHasDynamic = compiled.EntryPoint.SharedMemory.HasDynamicMemory,
         };
 
         return new GeneratedKernel

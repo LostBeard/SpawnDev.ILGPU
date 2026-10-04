@@ -3,6 +3,26 @@
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 ## Unreleased (5.3.2-local) - WebGPU batched dispatch: scalar arenas + bind-group reuse
 
+- **Persist a session's compiled shaders; a stored kernel skips IR too** (Geordi, 5.3.2-local.11). For apps that
+  compile the same kernels in every session (a browser extension's content script runs once per page).
+  - `ShaderArtifactSerializer.ExportCache()` writes the WebGPU artifacts this session compiled (WGSL + dispatch
+    metadata) as compact JSON; `ImportCache(json)` registers them in a later session. The export carries
+    `LibraryVersion` (this build's informational version) and an import from any other build registers nothing.
+    Kernels emitted at runtime (a dynamic assembly, new every session) are left out: they could never hit again.
+    `ShaderArtifactCache.Snapshot()` / `Register(kernelId, profileKey, specKey, artifact)` are the raw form.
+  - **Early hit.** `WebGPUBackend` now checks the cache BEFORE ILGPU builds the kernel's IR (an override of
+    `Backend.Compile<THook>(entry, specialization, hook)`), so a hit skips IR construction, the IR transformations and
+    the WGSL generation - the old hook ran after the IR and skipped only the WGSL. It needs the entry point's
+    shared-memory specification, which the metadata now records (`SharedMemoryStaticSize` / `SharedMemoryHasDynamic`,
+    also written by the offline `ShaderCompiler`); an artifact without it falls back to the old late hit.
+    `ShaderArtifactCache.IrSkippedHits` counts early hits (they also count in `Hits`); `TryPeek` looks up without
+    counting.
+  - MEASURED (Anaglyphohol cold start, Blazor AOT, CPU profile): compiling 119 DAv3 kernels took ~770 ms, ~400 ms of
+    it IR work that ran even on a hit. The store for DAv3 + VDA is 131 kernels, ~3 MB of WGSL.
+  - Test `PrecompiledShaders_ExportImport_EarlyHitSkipsIrAndDispatches`: export, clear, import, reload - both a
+    scalar-parameter kernel and a static-shared-memory kernel load as early hits with zero misses and dispatch
+    correctly; a foreign-version export imports nothing. MUTATION (early hit drops the scalar packing) fails it.
+
 - **Faster WGSL kernel compiles: two text passes in `WGSLKernelFunctionGenerator.GenerateCode`** (Geordi, 5.3.2-local.9).
   MEASURED in a cold Anaglyphohol start (DAv3 Small, Blazor AOT, CPU profile across the page load): 937 ms of the
   ~2 s to the first 3D image was ILGPU compiling kernels in C#, 541 ms of it in `GenerateCode`. Two parts were text
