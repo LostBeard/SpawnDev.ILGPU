@@ -3,6 +3,18 @@
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 ## Unreleased (5.3.2-local) - WebGPU batched dispatch: scalar arenas + bind-group reuse
 
+- **Half -> float is exact for SUBNORMALS on Wasm, WebGL and WebGPU's emulated f16** (Geordi, 5.3.2-local.8). All three
+  emulated decoders (`WasmKernelFunctionGenerator.EmitF16ToF32`, GLSL `_f16_to_f32`, WGSL `_f16_to_f32`) flushed
+  every fp16 subnormal to +-0, so 2046 of the 65536 patterns came back wrong. CUDA/OpenCL/CPU and native WebGPU f16
+  were exact. A subnormal now decodes as `mant * 2^-24`, which is exact and a NORMAL f32 (so no flush-to-zero touches
+  it), with the sign bit ORed in.
+  - Found through SpawnDev.ILGPU.ML: a model storing its weights as FP16 came out 6.9e-5 off onnxruntime on Wasm only.
+  - New tests: `Half_HalfToFloat_ExactAllPatterns` checks all 65536 patterns bit-exact against .NET's decode on all
+    six backends. `..._WebGPUEmulatedF16` does the same on WebGPU with `ForceEmulatedF16` set BEFORE its own
+    accelerator is created; RunTest's class-cached accelerator reused the natively compiled kernel, and a mutation of
+    the emulated decoder went undetected until the test was rewritten that way. MUTATION: the old WGSL decoder fails
+    it (2046 wrong). PMT `Half` filter 259/0 on all six backends.
+
 - **Video frames copy on Firefox: `WebGPUExternalImageCopier` falls back to a canvas** (Geordi, 5.3.2-local.7). Firefox's
   `copyExternalImageToTexture` refuses `HTMLVideoElement` and `VideoFrame` sources ("'source' member ... could not be
   converted to any of: ImageBitmap, HTMLImageElement, HTMLCanvasElement, OffscreenCanvas"); Chrome accepts them.

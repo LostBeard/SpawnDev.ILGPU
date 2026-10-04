@@ -6089,14 +6089,23 @@ EmitSaveAllLocals();
             Code.Add(WasmOpCodes.I32Or);
             WasmModuleBuilder.EmitLocalSet(Code, result);
 
-            // Handle exp==0 (zero/denormal): result = sign << 31
+            // Handle exp==0 (zero / SUBNORMAL): value = mant * 2^-24, exact (mant <= 1023 converts exactly, the product
+            // is a NORMAL f32 so no flush-to-zero can touch it), then OR in the sign bit (+-0 when mant == 0).
+            // Subnormals used to flush to +-0 here - found 2026-10-04 by Half_HalfToFloat_ExactAllPatterns
+            // (2046 of 65536 patterns wrong; an FP16-weight model came out 6.9e-5 off onnxruntime on Wasm only).
             WasmModuleBuilder.EmitLocalGet(Code, exp);
             Code.Add(WasmOpCodes.I32Eqz);
             Code.Add(WasmOpCodes.If);
             Code.Add(WasmOpCodes.Void);
+            WasmModuleBuilder.EmitLocalGet(Code, mant);
+            Code.Add(WasmOpCodes.F32ConvertI32U);
+            WasmModuleBuilder.EmitF32Const(Code, 5.9604644775390625e-8f);   // 2^-24
+            Code.Add(WasmOpCodes.F32Mul);
+            Code.Add(WasmOpCodes.I32ReinterpretF32);
             WasmModuleBuilder.EmitLocalGet(Code, sign);
             WasmModuleBuilder.EmitI32Const(Code, 31);
             Code.Add(WasmOpCodes.I32Shl);
+            Code.Add(WasmOpCodes.I32Or);
             WasmModuleBuilder.EmitLocalSet(Code, result);
             Code.Add(WasmOpCodes.End);
 

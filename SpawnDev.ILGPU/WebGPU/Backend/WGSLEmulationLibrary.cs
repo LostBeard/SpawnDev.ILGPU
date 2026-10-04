@@ -1361,14 +1361,15 @@ fn f64_max(a: emu_f64, b: emu_f64) -> emu_f64 {
 // ============================================================================
 
 // Expand a 16-bit Float16 bit pattern (held in the low 16 bits of a u32)
-// into a native f32 value. Denormals flush to signed zero.
+// into a native f32 value. EXACT for all 65536 patterns (subnormals included).
 fn _f16_to_f32(h: u32) -> f32 {
     let sign = (h >> 15u) & 1u;
     let exp  = (h >> 10u) & 0x1Fu;
     let mant = h & 0x3FFu;
-    // exp == 0: zero or denormal - flush to signed zero
+    // exp == 0: zero or SUBNORMAL - exact: mant * 2^-24 (a NORMAL f32, so no flush-to-zero touches it), sign ORed
+    // in (+-0 when mant == 0). Subnormals used to flush to +-0 (Half_HalfToFloat_ExactAllPatterns, 2026-10-04).
     if (exp == 0u) {
-        return bitcast<f32>(sign << 31u);
+        return bitcast<f32>(bitcast<u32>(f32(mant) * 5.9604644775390625e-8) | (sign << 31u));
     }
     // exp == 31: Inf or NaN - preserve sign, propagate mantissa into f32 NaN/Inf
     if (exp == 31u) {

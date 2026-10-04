@@ -1547,13 +1547,14 @@ vec4 f64_atan2(vec4 a, vec4 b) {
 // ============================================================================
 
 // Expand a 16-bit Float16 bit pattern (held in the low 16 bits of a uint)
-// into a native float value. Denormals flush to signed zero.
+// into a native float value. EXACT for all 65536 patterns: a subnormal is mant * 2^-24 (a NORMAL float, so
+// no flush-to-zero touches it), with the sign bit ORed in (+-0 when mant == 0).
 float _f16_to_f32(uint h) {
     uint sign = (h >> 15u) & 1u;
     uint exp  = (h >> 10u) & 0x1Fu;
     uint mant = h & 0x3FFu;
     if (exp == 0u) {
-        return uintBitsToFloat(sign << 31u);
+        return uintBitsToFloat(floatBitsToUint(float(mant) * 5.9604644775390625e-8) | (sign << 31u));
     }
     if (exp == 31u) {
         return uintBitsToFloat((sign << 31u) | (0xFFu << 23u) | (mant << 13u));

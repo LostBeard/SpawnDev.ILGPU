@@ -406,6 +406,86 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
         });
 
+        private static void HalfDecodeKernel(Index1D i,
+            ArrayView1D<global::ILGPU.Half, Stride1D.Dense> x, ArrayView1D<float, Stride1D.Dense> y) =>
+            y[i] = (float)x[i];
+
+        /// <summary>
+        /// ILGPU.Half -> float must be EXACT on every backend for ALL 65,536 patterns - every half is exactly a float, so
+        /// anything else is a decode bug. Subnormals are the point: found 2026-10-04 through SpawnDev.ILGPU.ML, where a
+        /// model storing its weights as FP16 came out 6.9e-5 off onnxruntime on Wasm only (CUDA/OpenCL/WebGPU exact).
+        /// </summary>
+        [TestMethod]
+        public async Task Half_HalfToFloat_ExactAllPatterns() => await RunTest(HalfDecodeAllPatterns);
+
+        /// <summary>
+        /// The same on WebGPU's EMULATED f16 path (a browser without <c>shader-f16</c>), forced with
+        /// <see cref="SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.ForceEmulatedF16"/>. A dev machine with native f16
+        /// never runs the emulated decoder otherwise.
+        /// ⚠️ NOT RunTest: the base caches ONE accelerator per class, and the kernel it compiled natively for
+        /// <see cref="Half_HalfToFloat_ExactAllPatterns"/> was simply reused (a mutation of the emulated decoder went
+        /// undetected). The switch must be set BEFORE an accelerator of our own is created.
+        /// </summary>
+        [TestMethod]
+        public async Task Half_HalfToFloat_ExactAllPatterns_WebGPUEmulatedF16()
+        {
+            var before = SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.ForceEmulatedF16;
+            SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.ForceEmulatedF16 = true;
+            try
+            {
+                var (context, accelerator) = await CreateAcceleratorAsync();
+                try
+                {
+                    if (accelerator is not SpawnDev.ILGPU.WebGPU.WebGPUAccelerator webGpu)
+                        throw new UnsupportedTestException("WebGPU's emulated f16 path only");
+                    if (webGpu.Backend.HasShaderF16)
+                        throw new Exception("ForceEmulatedF16 did not take: the backend still reports native shader-f16");
+                    await HalfDecodeAllPatterns(accelerator);
+                }
+                finally
+                {
+                    accelerator.Dispose();
+                    context.Dispose();
+                }
+            }
+            finally
+            {
+                SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.ForceEmulatedF16 = before;
+            }
+        }
+
+        private async Task HalfDecodeAllPatterns(Accelerator accelerator)
+        {
+            const int n = 65536;
+            var halves = new global::ILGPU.Half[n];
+            for (int i = 0; i < n; i++)
+            {
+                ushort bits = (ushort)i;
+                halves[i] = System.Runtime.CompilerServices.Unsafe.As<ushort, global::ILGPU.Half>(ref bits);
+            }
+            using var inBuf = accelerator.Allocate1D(halves);
+            using var outBuf = accelerator.Allocate1D<float>(n);
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D,
+                ArrayView1D<global::ILGPU.Half, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>>(HalfDecodeKernel);
+            k(n, inBuf.View, outBuf.View);
+            await accelerator.SynchronizeAsync();
+            var got = await outBuf.CopyToHostAsync<float>();
+            int bad = 0, firstBad = -1, badSubnormals = 0;
+            for (int i = 0; i < n; i++)
+            {
+                float want = (float)System.BitConverter.UInt16BitsToHalf((ushort)i);   // .NET: exact IEEE decode
+                bool ok = float.IsNaN(want) ? float.IsNaN(got[i])
+                    : System.BitConverter.SingleToInt32Bits(want) == System.BitConverter.SingleToInt32Bits(got[i]);
+                if (ok) continue;
+                bad++;
+                if (firstBad < 0) firstBad = i;
+                if ((i & 0x7C00) == 0 && (i & 0x03FF) != 0) badSubnormals++;
+            }
+            if (bad > 0)
+                throw new Exception($"Half->float decode ({BackendName}): {bad} of 65536 patterns wrong ({badSubnormals} subnormal); " +
+                    $"first 0x{firstBad:X4} -> {got[firstBad]:R}, want {(float)System.BitConverter.UInt16BitsToHalf((ushort)firstBad):R}.");
+        }
+
         [TestMethod]
         public async Task Float8E4M3_FromSingleFn_OverflowToNaN() => await RunTest(async accelerator =>
         {
