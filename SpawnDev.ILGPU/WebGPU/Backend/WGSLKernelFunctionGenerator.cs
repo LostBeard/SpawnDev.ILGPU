@@ -19,19 +19,38 @@ using System.Text;
 
 namespace SpawnDev.ILGPU.WebGPU.Backend
 {
-    internal sealed class WGSLKernelFunctionGenerator : WGSLCodeGenerator
+    internal sealed partial class WGSLKernelFunctionGenerator : WGSLCodeGenerator
     {
         #region Pre-compiled Regex Patterns
 
+        // SOURCE-GENERATED ([GeneratedRegex]), not RegexOptions.Compiled: Compiled needs Reflection.Emit, which browser
+        // WebAssembly does not have, so those patterns ran on the regex INTERPRETER. MEASURED 2026-10-04 (cold Anaglyphohol
+        // start, AOT, CPU profile): ~80 ms of the 937 ms the page spent compiling kernels was interpreted Regex.Replace.
+        // The generated matchers are plain C# - AOT-compiled with the rest of the app, same semantics.
+
         // Let-to-var hoisting for inlined helper functions (matches v_N and v_N_suffix names)
-        private static readonly System.Text.RegularExpressions.Regex s_inlineLetPattern =
-            new(@"^(\s*)let\s+(v_\d+(?:_\w+)?)\s*=\s*(.+);",
-                System.Text.RegularExpressions.RegexOptions.Multiline | System.Text.RegularExpressions.RegexOptions.Compiled);
+        private static readonly System.Text.RegularExpressions.Regex s_inlineLetPattern = InlineLetPattern();
+        [System.Text.RegularExpressions.GeneratedRegex(@"^(\s*)let\s+(v_\d+(?:_\w+)?)\s*=\s*(.+);",
+            System.Text.RegularExpressions.RegexOptions.Multiline)]
+        private static partial System.Text.RegularExpressions.Regex InlineLetPattern();
 
         // Var declaration hoisting to function scope
-        private static readonly System.Text.RegularExpressions.Regex s_varHoistPattern =
-            new(@"^(\s*)var\s+(v_\d+\w*)\s*:\s*([^;=]+?)\s*(?:=\s*(.+?))?\s*;\s*$",
-                System.Text.RegularExpressions.RegexOptions.Multiline | System.Text.RegularExpressions.RegexOptions.Compiled);
+        private static readonly System.Text.RegularExpressions.Regex s_varHoistPattern = VarHoistPattern();
+        [System.Text.RegularExpressions.GeneratedRegex(@"^(\s*)var\s+(v_\d+\w*)\s*:\s*([^;=]+?)\s*(?:=\s*(.+?))?\s*;\s*$",
+            System.Text.RegularExpressions.RegexOptions.Multiline)]
+        private static partial System.Text.RegularExpressions.Regex VarHoistPattern();
+
+        // "var v_N : type;" declarations (the declared-type map)
+        [System.Text.RegularExpressions.GeneratedRegex(@"\bvar\s+(v_\w+)\s*:\s*([\w<>]+)\s*;")]
+        private static partial System.Text.RegularExpressions.Regex VarDeclPattern();
+
+        // the name a "let name =" line declares
+        [System.Text.RegularExpressions.GeneratedRegex(@"^\s*let\s+(\w+)\s*=")]
+        private static partial System.Text.RegularExpressions.Regex LetNamePattern();
+
+        // "v_N = expr;" assignments
+        [System.Text.RegularExpressions.GeneratedRegex(@"(?m)^\s*(v_\w+)\s*=\s*([^;]+);")]
+        private static partial System.Text.RegularExpressions.Regex AssignPattern();
 
         #endregion
 
@@ -3638,7 +3657,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // v_b = v_a * v_c (f32); ...). Without it, the 2nd+ link falls back to the i32 default.
                 var missingDeclInferredTypes = new Dictionary<string, string>(System.StringComparer.Ordinal);
                 foreach (System.Text.RegularExpressions.Match dm in
-                    System.Text.RegularExpressions.Regex.Matches(generatedCode, @"\bvar\s+(v_\w+)\s*:\s*([\w<>]+)\s*;"))
+                    VarDeclPattern().Matches(generatedCode))
                 {
                     missingDeclInferredTypes[dm.Groups[1].Value] = dm.Groups[2].Value;
                 }
@@ -3779,7 +3798,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         var hoistedByName = new Dictionary<string, string>(System.StringComparer.Ordinal);
                         foreach (var decl in hoistedLetDeclarations)
                         {
-                            var m = System.Text.RegularExpressions.Regex.Match(decl, @"^\s*let\s+(\w+)\s*=");
+                            var m = LetNamePattern().Match(decl);
                             string name = m.Success ? m.Groups[1].Value : decl;
                             if (hoistedByName.TryGetValue(name, out var previous))
                             {
@@ -3856,8 +3875,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     {
                         allKnownTypes[pm.Groups[2].Value] = pm.Groups[3].Value.Trim();
                     }
-                    var s_assignRe = new System.Text.RegularExpressions.Regex(
-                        @"(?m)^\s*(v_\w+)\s*=\s*([^;]+);");
+                    var s_assignRe = AssignPattern();
                     var arithOps = new[] { " + ", " - ", " * ", " / ", " % " };
                     bool changed = true;
                     while (changed)
@@ -3910,43 +3928,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 string fullBody = Builder.ToString(signatureInsertPosition,
                     Builder.Length - signatureInsertPosition);
                 var lines = fullBody.Split('\n');
-                int removedCount = 0;
-
-                for (int li = 0; li < lines.Length; li++)
+                int removedCount = EliminateDeadVarDeclarations(lines);
+#if DEAD_VAR_ELIM_CHECK
                 {
-                    if (lines[li] == null) continue;
-                    var trimmed = lines[li].TrimStart();
-                    string varName = null;
-
-                    // Match: "var v_N :" or "var v_N_suffix :"
-                    if (trimmed.StartsWith("var v_"))
-                    {
-                        int nameEnd = trimmed.IndexOfAny(new[] { ' ', ':' }, 4);
-                        if (nameEnd > 4)
-                            varName = trimmed.Substring(4, nameEnd - 4);
-                    }
-
-                    if (varName == null) continue;
-                    string fullVarName = varName;
-
-                    // Check if this variable appears on any other line (word-boundary match)
-                    bool referenced = false;
-                    for (int lj = 0; lj < lines.Length; lj++)
-                    {
-                        if (lj == li || lines[lj] == null) continue;
-                        if (ContainsWordBoundary(lines[lj], fullVarName))
-                        {
-                            referenced = true;
-                            break;
-                        }
-                    }
-
-                    if (!referenced)
-                    {
-                        lines[li] = null; // Mark for removal
-                        removedCount++;
-                    }
+                    var reference = fullBody.Split('\n');
+                    int referenceRemoved = EliminateDeadVarDeclarationsReference(reference);
+                    if (referenceRemoved != removedCount || !System.Linq.Enumerable.SequenceEqual(reference, lines))
+                        throw new System.InvalidOperationException($"[DeadVarElim] token pass ({removedCount}) differs from the reference scan ({referenceRemoved}) in {_kernelMethodName}");
                 }
+#endif
 
                 if (removedCount > 0)
                 {
@@ -4039,6 +4029,107 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Otherwise, we use 'let ' to declare it locally.
             return _hoistedPrimitives.Contains(value) ? "" : "let ";
         }
+
+        /// <summary>
+        /// PHASE 4 of <see cref="GenerateCode()"/>: removes hoisted "var v_N : type;" declaration lines whose variable no
+        /// other (remaining) line mentions as a whole word. Lines are scanned in order and a removed line no longer counts
+        /// as a reference for the lines after it. Returns the number removed; removed lines become null.
+        /// </summary>
+        /// <remarks>
+        /// One tokenizing pass + a per-identifier count of the lines that mention it. The previous form searched every
+        /// line for every declaration (O(declarations x body)): MEASURED 2026-10-04 in a cold Anaglyphohol start (DAv3,
+        /// AOT, CPU profile) it was ~150-250 ms of the 937 ms the page spent compiling kernels.
+        /// </remarks>
+        private static int EliminateDeadVarDeclarations(string[] lines)
+        {
+            // identifiers of each line (distinct), and how many lines mention each identifier
+            var lineWords = new HashSet<string>[lines.Length];
+            var linesMentioning = new Dictionary<string, int>(StringComparer.Ordinal);
+            for (int li = 0; li < lines.Length; li++)
+            {
+                var line = lines[li];
+                if (line == null) continue;
+                HashSet<string> words = null;
+                int i = 0;
+                while (i < line.Length)
+                {
+                    if (!IsWordChar(line[i])) { i++; continue; }
+                    int start = i;
+                    while (i < line.Length && IsWordChar(line[i])) i++;
+                    var word = line.Substring(start, i - start);
+                    words ??= new HashSet<string>(StringComparer.Ordinal);
+                    if (words.Add(word))
+                        linesMentioning[word] = linesMentioning.TryGetValue(word, out int c) ? c + 1 : 1;
+                }
+                lineWords[li] = words;
+            }
+
+            int removedCount = 0;
+            for (int li = 0; li < lines.Length; li++)
+            {
+                string varName = DeadVarCandidate(lines[li]);
+                if (varName == null) continue;
+                bool referenced;
+                if (IsWordOnly(varName))
+                {
+                    // mentioned by a line other than this declaration (which mentions it as a whole word itself)
+                    linesMentioning.TryGetValue(varName, out int mentions);
+                    bool selfMentions = lineWords[li] != null && lineWords[li].Contains(varName);
+                    referenced = mentions - (selfMentions ? 1 : 0) > 0;
+                }
+                else
+                {
+                    // a name with a non-word character is never one token: fall back to the substring scan
+                    referenced = false;
+                    for (int lj = 0; lj < lines.Length && !referenced; lj++)
+                        if (lj != li && lines[lj] != null && ContainsWordBoundary(lines[lj], varName)) referenced = true;
+                }
+                if (referenced) continue;
+                lines[li] = null;
+                removedCount++;
+                if (lineWords[li] != null)
+                    foreach (var word in lineWords[li]) linesMentioning[word]--;
+            }
+            return removedCount;
+        }
+
+        /// <summary>The variable a "var v_N :" / "var v_N_suffix :" declaration line declares, else null.</summary>
+        private static string DeadVarCandidate(string line)
+        {
+            if (line == null) return null;
+            var trimmed = line.TrimStart();
+            if (!trimmed.StartsWith("var v_")) return null;
+            int nameEnd = trimmed.IndexOfAny(s_varNameEnd, 4);
+            return nameEnd > 4 ? trimmed.Substring(4, nameEnd - 4) : null;
+        }
+        private static readonly char[] s_varNameEnd = { ' ', ':' };
+
+        private static bool IsWordOnly(string s)
+        {
+            foreach (var c in s) if (!IsWordChar(c)) return false;
+            return s.Length > 0;
+        }
+
+#if DEAD_VAR_ELIM_CHECK
+        /// <summary>The original O(declarations x body) scan, kept only to check <see cref="EliminateDeadVarDeclarations"/>.</summary>
+        private static int EliminateDeadVarDeclarationsReference(string[] lines)
+        {
+            int removedCount = 0;
+            for (int li = 0; li < lines.Length; li++)
+            {
+                string varName = DeadVarCandidate(lines[li]);
+                if (varName == null) continue;
+                bool referenced = false;
+                for (int lj = 0; lj < lines.Length; lj++)
+                {
+                    if (lj == li || lines[lj] == null) continue;
+                    if (ContainsWordBoundary(lines[lj], varName)) { referenced = true; break; }
+                }
+                if (!referenced) { lines[li] = null; removedCount++; }
+            }
+            return removedCount;
+        }
+#endif
 
         /// <summary>
         /// Checks if <paramref name="text"/> contains <paramref name="word"/> as a

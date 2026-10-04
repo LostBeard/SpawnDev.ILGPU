@@ -3,6 +3,19 @@
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 ## Unreleased (5.3.2-local) - WebGPU batched dispatch: scalar arenas + bind-group reuse
 
+- **Faster WGSL kernel compiles: two text passes in `WGSLKernelFunctionGenerator.GenerateCode`** (Geordi, 5.3.2-local.9).
+  MEASURED in a cold Anaglyphohol start (DAv3 Small, Blazor AOT, CPU profile across the page load): 937 ms of the
+  ~2 s to the first 3D image was ILGPU compiling kernels in C#, 541 ms of it in `GenerateCode`. Two parts were text
+  processing of WGSL already generated:
+  - Dead-variable elimination (PHASE 4) searched every line for every hoisted `var v_N` declaration
+    (O(declarations x body); ~150-250 ms). It is now one tokenizing pass plus a per-identifier count of the lines that
+    mention it; a removed line still stops counting as a reference for the lines after it, as before. EQUIVALENCE:
+    with `DEAD_VAR_ELIM_CHECK` defined, every generated kernel also runs the old scan and throws on any difference -
+    the full PMT WebGPU lane (693 pass / 0 fail / 8 skip) ran that way with no difference.
+  - The post-processing regexes were `RegexOptions.Compiled`, which browser WebAssembly cannot honour (no
+    Reflection.Emit), so they ran on the regex interpreter (~80 ms). They are `[GeneratedRegex]` now: plain C#,
+    AOT-compiled with the app. One was also constructed on every kernel compile.
+
 - **Half -> float is exact for SUBNORMALS on Wasm, WebGL and WebGPU's emulated f16** (Geordi, 5.3.2-local.8). All three
   emulated decoders (`WasmKernelFunctionGenerator.EmitF16ToF32`, GLSL `_f16_to_f32`, WGSL `_f16_to_f32`) flushed
   every fp16 subnormal to +-0, so 2046 of the 65536 patterns came back wrong. CUDA/OpenCL/CPU and native WebGPU f16
