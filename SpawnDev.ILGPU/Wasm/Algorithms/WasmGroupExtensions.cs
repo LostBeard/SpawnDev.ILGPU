@@ -94,6 +94,10 @@ namespace SpawnDev.ILGPU.Wasm.Algorithms
             scanResults[Group.IdxX] = sharedMemory[Group.IdxX];
             Group.Barrier();
 
+            // Right boundary = the group's INCLUSIVE total, paired with an ExclusiveScanNextIteration that adds nothing
+            // more (PTX's pairing). Computing the exclusive right boundary here instead (CPU/OpenCL's pairing) made the
+            // Wasm backend emit a function that fails to compile ("expected 1 elements on the stack for return, found
+            // 0"), with a ternary and with Math.Max alike - a Wasm codegen bug, recorded separately.
             boundaries = new ScanBoundaries<T>(
                 scanResults[0],
                 scanResults[Group.DimX - 1]);
@@ -164,11 +168,13 @@ namespace SpawnDev.ILGPU.Wasm.Algorithms
             where T : unmanaged
             where TScanOperation : struct, IScanReduceOperation<T>
         {
+            // rightBoundary is the previous chunk's INCLUSIVE total (ExclusiveScanWithBoundaries above), so the next chunk
+            // starts at left + right. This also added the last lane's value (CPU/OpenCL's pairing, for an EXCLUSIVE
+            // right boundary) and counted it twice per chunk: CreateScan(Exclusive) went wrong past one chunk
+            // (2026-10-05). No barrier is needed in place of the Broadcast's: each scan call's own barriers order its
+            // shared-memory writes after the previous call's reads.
             var scanOperation = default(TScanOperation);
-            var nextBoundary = scanOperation.Apply(leftBoundary, rightBoundary);
-            return scanOperation.Apply(
-                nextBoundary,
-                Group.Broadcast(currentValue, Group.DimX - 1));
+            return scanOperation.Apply(leftBoundary, rightBoundary);
         }
 
         /// <summary>

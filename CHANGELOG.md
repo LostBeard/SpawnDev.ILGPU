@@ -1,6 +1,29 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.3.3 (forks 2.3.9) - unreleased - exclusive scan on WebGPU and Wasm
+
+- **`CreateScan(ScanKind.Exclusive)` was wrong on WebGPU and Wasm past one chunk** (Tuvok, 5.3.3-local.1). A global
+  scan covers its input in workgroup-sized chunks (1,024 elements on a 1,024-thread WebGPU group), carrying each chunk's
+  total into the next through the backend's `ExclusiveScanWithBoundaries` right boundary and
+  `ExclusiveScanNextIteration`. Backends pair those two differently: PTX returns the INCLUSIVE total and adds nothing;
+  CPU/OpenCL return the EXCLUSIVE value of the last lane and `NextIteration` adds the last lane's value. WebGPU and Wasm
+  mixed them - an inclusive total plus the last lane - so every chunk whose last element was non-zero counted it twice.
+  Every first error sat at a multiple of 1,024 and was exactly one too high. Found by SpawnScene, whose GPU densify
+  compacts 600K-1.6M splats with an exclusive scan: kept rows collided (~250-300 lost per densify step) and some output
+  rows were never written.
+  - WebGPU (`WebGPUGroupExtensions`): the right boundary is now the last lane's exclusive value (CPU/OpenCL pairing).
+  - Wasm (`WasmGroupExtensions`): `ExclusiveScanNextIteration` no longer adds the last lane (PTX pairing). Computing the
+    exclusive boundary there instead made the Wasm backend emit a function that fails to compile ("expected 1 elements
+    on the stack for return, found 0") - a separate Wasm codegen bug, not fixed here.
+  - Inclusive scans were correct everywhere; CPU, CUDA, OpenCL and WebGL exclusive scans were correct.
+  - Tests: `GlobalExclusiveScanAtScaleTest` / `GlobalInclusiveScanAtScaleTest` (n = 4,097 / 70,000 / 615,764 /
+    1,600,003, sparse and dense, against a CPU prefix sum, all backends; the global-scan tests stopped at 8,000).
+    Before the fix the exclusive one failed on WebGPU, WebGPU-no-subgroups and Wasm, with every first error +1 at a
+    multiple of 1,024. `AlgorithmScanWithBoundariesTest` now checks the PAIR exactly - the backend's own
+    `ExclusiveScanNextIteration` on its own boundaries must give the group's total - where it accepted any right
+    boundary from 0 to the total. PMT `Scan` on all backends: 190/0/30.
+
 ## 5.3.2 (forks 2.3.9) - 2026-10-04 - persisted shaders with early (pre-IR) hits, faster WGSL generation, exact subnormal Half, Firefox video copy, WebGPU batched-dispatch arenas; SpawnDev.SpawnJS 3.0.1
 
 - **DelegateSpecialization kernels have a stable identity, so their shaders persist too** (Geordi, 5.3.2-local.12,

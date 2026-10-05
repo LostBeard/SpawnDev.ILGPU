@@ -875,7 +875,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             int groupSize = Math.Min(32, accelerator.Device.MaxNumThreadsPerGroup);
             using var inputBuf = accelerator.Allocate1D<int>(groupSize);
             using var outputBuf = accelerator.Allocate1D<int>(groupSize);
-            using var boundaryBuf = accelerator.Allocate1D<int>(2); // [leftBoundary, rightBoundary]
+            using var boundaryBuf = accelerator.Allocate1D<int>(3); // [leftBoundary, rightBoundary, next iteration's left]
 
             // Each thread contributes value 2
             var inputData = new int[groupSize];
@@ -905,6 +905,13 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new Exception($"ScanWithBoundaries left boundary out of range. Got {bounds[0]}, expected 0..{totalSum}");
             if (bounds[1] < 0 || bounds[1] > totalSum)
                 throw new Exception($"ScanWithBoundaries right boundary out of range. Got {bounds[1]}, expected 0..{totalSum}");
+            // What the boundary is FOR, exactly: a multi-chunk scan's next chunk starts at
+            // ExclusiveScanNextIteration(left, right, value) - the whole chunk's total. Backends pair the two
+            // differently (PTX: inclusive right, nothing added; CPU/OpenCL: exclusive right + the last lane's value),
+            // so the PAIR is the contract. WebGPU and Wasm mixed them - inclusive right + last lane - and counted the
+            // last element twice per chunk: CreateScan(Exclusive) wrong past one chunk (2026-10-05).
+            if (bounds[2] != totalSum)
+                throw new Exception($"ScanWithBoundaries next iteration: got {bounds[2]}, expected {totalSum} (the group's total)");
         });
 
 
@@ -2641,11 +2648,16 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 val, out ScanBoundaries<int> boundaries);
             output[gid] = scanned;
 
+            // Every thread takes part: the next-iteration step may broadcast across the group.
+            int next = GroupExtensions.ExclusiveScanNextIteration<int, AddInt32>(
+                default(AddInt32).Identity, boundaries.RightBoundary, val);
+
             // First thread writes boundaries
             if (Group.IsFirstThread)
             {
                 boundaryOutput[0] = boundaries.LeftBoundary;
                 boundaryOutput[1] = boundaries.RightBoundary;
+                boundaryOutput[2] = next;
             }
         }
 

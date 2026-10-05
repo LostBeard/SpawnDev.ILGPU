@@ -92,9 +92,16 @@ namespace SpawnDev.ILGPU.WebGPU.Algorithms
             where TScanOperation : struct, IScanReduceOperation<T>
         {
             var sharedMemory = InclusiveScanImplementation<T, TScanOperation>(value);
+            // The EXCLUSIVE scan's boundaries, as the CPU (ILGroupExtensions) and OpenCL/PTX define them: the right
+            // boundary is the last lane's exclusive value - the sum of every lane BUT the last - because
+            // ExclusiveScanNextIteration adds the last lane's value itself. The inclusive total here counted the last
+            // element twice at every chunk of a multi-chunk scan: CreateScan(Exclusive) went wrong from the first
+            // 1,024-element chunk whose last element was non-zero (SpawnScene densify, 2026-10-05).
             boundaries = new ScanBoundaries<T>(
                 sharedMemory[0],
-                sharedMemory[Group.Dimension.Size - 1]);
+                Group.Dimension.Size > 1
+                    ? sharedMemory[Group.Dimension.Size - 2]
+                    : default(TScanOperation).Identity);
             T result = Group.IsFirstThread
                 ? default(TScanOperation).Identity
                 : sharedMemory[Group.LinearIndex - 1];
