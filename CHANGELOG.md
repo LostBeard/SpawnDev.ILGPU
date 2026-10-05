@@ -1,7 +1,12 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.3.3 (forks 2.3.9) - unreleased - exclusive scan on WebGPU and Wasm
+## 5.3.3 (forks 2.3.9) - 2026-10-05 - exclusive scan on WebGPU and Wasm
+
+- **Open (not fixed here): a Wasm codegen bug.** In `WasmGroupExtensions.ExclusiveScanWithBoundaries`, building the
+  right boundary from a conditional (`DimX > 1 ? scanResults[DimX - 2] : Identity`, or `scanResults[Math.Max(0,
+  DimX - 2)]`) made the Wasm backend emit a function WebAssembly rejects: "expected 1 elements on the stack for
+  return, found 0". The scan fix avoids it (Wasm uses PTX's boundary pairing); the codegen fault itself is open.
 
 - **`CreateScan(ScanKind.Exclusive)` was wrong on WebGPU and Wasm past one chunk** (Tuvok, 5.3.3-local.1). A global
   scan covers its input in workgroup-sized chunks (1,024 elements on a 1,024-thread WebGPU group), carrying each chunk's
