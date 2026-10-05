@@ -3,6 +3,18 @@
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 ## Unreleased (5.3.2-local) - WebGPU batched dispatch: scalar arenas + bind-group reuse
 
+- **DelegateSpecialization kernels have a stable identity, so their shaders persist too** (Geordi, 5.3.2-local.12,
+  forks 2.3.9-local.3). `DelegateSpecializationRewriter` named each specialization's dynamic assembly with a GUID, so
+  the kernel's identity changed every session and an exported shader could never hit again: they were the only
+  kernels an app recompiled on every start (ILGPU.ML's broadcast Add/Mul/Div: 3 per Anaglyphohol page). The name is
+  now a stable FNV-1a hash of the kernel's and its targets' signatures (still distinct per specialization).
+  `ShaderArtifactSerializer.IsExportable(kernelId)` says which identities export (static kernels + these).
+  - Test `PrecompiledShaders_DelegateSpecialization_ExportsAndHitsAcrossRewrites`: a specialization compiled on one
+    accelerator, exported, imported and re-emitted on a FRESH accelerator loads as an early (pre-IR) hit and runs
+    correctly. MUTATION (GUID naming back) fails it. PMT `DelegateSpec` on all backends 60/0/5; `PrecompiledShaders`
+    WebGPU 9/0.
+  - ILGPU core change: all four package versions bumped together (`_check-fork-version-sync.bat` OK).
+
 - **Persist a session's compiled shaders; a stored kernel skips IR too** (Geordi, 5.3.2-local.11). For apps that
   compile the same kernels in every session (a browser extension's content script runs once per page).
   - `ShaderArtifactSerializer.ExportCache()` writes the WebGPU artifacts this session compiled (WGSL + dispatch

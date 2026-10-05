@@ -37,6 +37,34 @@ namespace ILGPU.Runtime
         /// <returns>
         /// A MethodInfo for the synthetic method that can be compiled by ILGPU.
         /// </returns>
+        /// <summary>
+        /// A stable (cross-process, cross-machine) 64-bit FNV-1a hash of a specialization: the kernel's and every target's
+        /// declaring type, name, generic arguments and parameter types, with the target's parameter index. Never
+        /// <see cref="object.GetHashCode"/> (per-process, and not unique).
+        /// </summary>
+        internal static string StableSpecializationHash(
+            MethodInfo originalMethod,
+            Dictionary<int, MethodInfo> targetMethods)
+        {
+            static string Sig(MethodInfo m)
+            {
+                var generic = m.IsGenericMethod
+                    ? "<" + string.Join(",", m.GetGenericArguments().Select(t => t.FullName ?? t.Name)) + ">"
+                    : "";
+                return (m.DeclaringType?.FullName ?? "<global>") + "." + m.Name + generic + "(" +
+                    string.Join(",", m.GetParameters().Select(p => p.ParameterType.FullName ?? p.ParameterType.Name)) + ")";
+            }
+            var text = Sig(originalMethod) + "|" + string.Join("|",
+                targetMethods.OrderBy(kv => kv.Key).Select(kv => kv.Key + "=" + Sig(kv.Value)));
+            ulong hash = 14695981039346656037UL;
+            foreach (char c in text)
+            {
+                hash ^= c;
+                hash *= 1099511628211UL;
+            }
+            return hash.ToString("x16");
+        }
+
         [UnconditionalSuppressMessage("Trimming", "IL2026",
             Justification = TrimmingAnnotations.ILFrontend)]
         public static MethodInfo RewriteKernel(
@@ -59,8 +87,13 @@ namespace ILGPU.Runtime
 
             // Create a dynamic assembly with IgnoresAccessChecksTo
             // so the synthetic method can call private/internal targets.
+            // Its NAME is part of the kernel's identity (every variant's type is "DelegateSpecKernel" and its method
+            // "<orig>_Specialized", so the assembly is what tells two specializations apart). It is DETERMINISTIC - a
+            // hash of the kernel and its targets - not a GUID: the same specialization gets the same identity in every
+            // session, so its compiled shader can be stored and reused (SpawnDev.ILGPU ShaderArtifactCache export /
+            // import); a GUID made these the only kernels an app recompiled on every start (3 per Anaglyphohol page).
             var asmName = new AssemblyName("ILGPUDelegateSpec_" +
-                originalMethod.Name + "_" + Guid.NewGuid().ToString("N")[..8]);
+                originalMethod.Name + "_" + StableSpecializationHash(originalMethod, targetMethods));
 
             // Collect all assemblies we need access to
             var accessAssemblies = new HashSet<string>();

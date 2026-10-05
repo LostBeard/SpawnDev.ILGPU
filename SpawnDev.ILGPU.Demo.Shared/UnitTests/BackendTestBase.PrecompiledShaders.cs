@@ -375,5 +375,55 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             if (foreignCount != 0 || ShaderArtifactCache.Count != 0)
                 throw new Exception($"An export from another build was imported ({foreignCount} artifacts).");
         });
+
+        // A DelegateSpecialization kernel is emitted at runtime into a dynamic assembly. Its name is now a stable hash of
+        // the kernel and its target, so the SAME specialization rewritten again (a fresh accelerator = a new launcher, the
+        // case of every new session) has the same identity: it exports, imports and loads as an early (pre-IR) hit.
+        [TestMethod]
+        public async Task PrecompiledShaders_DelegateSpecialization_ExportsAndHitsAcrossRewrites()
+        {
+            ShaderArtifactCache.Clear();
+            ShaderArtifactCache.ResetStats();
+            const int len = 64;
+
+            async Task<string?> RunOnFreshAccelerator(bool expectEarlyHit)
+            {
+                var (context, accelerator) = await CreateAcceleratorAsync();
+                try
+                {
+                    if (accelerator is not WebGPUAccelerator)
+                        throw new UnsupportedTestException("WebGPU-only (the runtime cache hooks are WebGPU).");
+                    var src = new int[len];
+                    for (int i = 0; i < len; i++) src[i] = i + 1;
+                    using var buf = accelerator.Allocate1D(src);
+                    long irSkippedBefore = ShaderArtifactCache.IrSkippedHits, missesBefore = ShaderArtifactCache.Misses;
+                    var map = accelerator.LoadAutoGroupedStreamKernel<
+                        Index1D, ArrayView<int>, DelegateSpecialization<Func<int, int>>>(MapKernel);
+                    map((Index1D)len, buf.View, new DelegateSpecialization<Func<int, int>>(Negate));
+                    await accelerator.SynchronizeAsync();
+                    var r = await buf.CopyToHostAsync<int>();
+                    for (int i = 0; i < len; i++)
+                        if (r[i] != -(i + 1)) throw new Exception($"specialized kernel WRONG @{i}: {r[i]} != {-(i + 1)}");
+                    if (expectEarlyHit && (ShaderArtifactCache.IrSkippedHits <= irSkippedBefore || ShaderArtifactCache.Misses != missesBefore))
+                        throw new Exception(
+                            $"The re-emitted specialization was not an early hit: irSkippedHits {irSkippedBefore}->{ShaderArtifactCache.IrSkippedHits}, " +
+                            $"misses {missesBefore}->{ShaderArtifactCache.Misses}. KEYS=[{ShaderArtifactCache.KeysSnapshot()}]");
+                    return expectEarlyHit ? null : ShaderArtifactSerializer.ExportCache();
+                }
+                finally
+                {
+                    accelerator.Dispose();
+                    context.Dispose();
+                }
+            }
+
+            var json = await RunOnFreshAccelerator(expectEarlyHit: false);
+            if (json == null || !json.Contains("ILGPUDelegateSpec_MapKernel_", StringComparison.Ordinal))
+                throw new Exception($"The DelegateSpecialization kernel was not exported. KEYS=[{ShaderArtifactCache.KeysSnapshot()}]");
+            ShaderArtifactCache.Clear();
+            ShaderArtifactCache.ResetStats();
+            if (ShaderArtifactSerializer.ImportCache(json) < 1) throw new Exception("Nothing imported.");
+            await RunOnFreshAccelerator(expectEarlyHit: true);
+        }
     }
 }

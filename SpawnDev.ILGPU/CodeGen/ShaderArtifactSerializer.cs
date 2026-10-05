@@ -262,6 +262,15 @@ public static class ShaderArtifactSerializer
         ?? typeof(ShaderArtifactCache).Assembly.GetName().Version?.ToString() ?? "unknown";
 
     /// <summary>
+    /// Whether a kernel identity is the same in every session, so its artifact can be exported: any statically compiled
+    /// kernel, and a DelegateSpecialization kernel (its dynamic assembly is named by a stable hash of the kernel and its
+    /// targets). Other runtime-emitted kernels name a new dynamic assembly every session and could never hit again.
+    /// </summary>
+    public static bool IsExportable(string kernelId) =>
+        !kernelId.Contains(")@", StringComparison.Ordinal)
+        || kernelId.Contains(")@ILGPUDelegateSpec_", StringComparison.Ordinal);
+
+    /// <summary>
     /// Exports the WebGPU artifacts this session compiled or imported, as compact JSON. Kernels emitted at runtime
     /// (their identity names a dynamic assembly, new every session) are left out: they could never hit again.
     /// </summary>
@@ -272,7 +281,7 @@ public static class ShaderArtifactSerializer
         {
             if (artifact.Backend != AcceleratorType.WebGPU || artifact.Source is null) continue;
             if (artifact.CodegenMetadata is not WebGPUBackend.WebGPUKernelMetadata meta) continue;
-            if (kernelId.Contains(")@", StringComparison.Ordinal)) continue;
+            if (!IsExportable(kernelId)) continue;
             export.Entries.Add(new ShaderCacheExportEntry
             {
                 KernelId = kernelId,
