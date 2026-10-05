@@ -4,9 +4,9 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.3.2-local.12</Version>
+		<Version>5.3.2</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>v5.3.1 (forks 2.3.8) - TRIM SAFE, enforced: ILGPU, ILGPU.Algorithms and SpawnDev.ILGPU are IsTrimmable and every trim warning is a build error; the full test suite passes on a TRIMMED publish. Blazor WASM AOT is supported with WasmStripILAfterAOT=false (see Docs/limitations.md). Fixes: bool kernel scalar parameters on all 6 backends; WebGL ulong scalars; float/double % exact on every backend; PTX bitcast of a constant; WebGPU dispatch host cost (single compute pass per batch, in-place scalar packing). WebGL worker messages are typed DTOs.</PackageReleaseNotes>
+		<PackageReleaseNotes>v5.3.2 (forks 2.3.9) - on SpawnDev.SpawnJS 3.0.1. An app that references SpawnDev.SpawnJS 3.0.0 directly gets NU1605 (downgrade): move it to 3.0.1. Persist a session's compiled WebGPU shaders: ShaderArtifactSerializer.ExportCache/ImportCache (version-stamped), and a stored kernel now loads as an EARLY cache hit that skips IR construction, IR optimization and WGSL generation (an app restarting often - a browser extension's content script - skips nearly all of its kernel compiles). DelegateSpecialization kernels have a stable identity, so they persist too. WGSL generation ~40% faster (dead-variable pass, source-generated regexes). Half to float exact for subnormals on Wasm, WebGL and emulated-f16 WebGPU. Firefox: video frames copy through a canvas fallback. WebGPU batched dispatch: scalar arenas, bind-group reuse, pinned-header submit. See CHANGELOG.md.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -33,7 +33,7 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<PackageReference Include="SpawnDev.SpawnJS" Version="3.0.0" />
+		<PackageReference Include="SpawnDev.SpawnJS" Version="3.0.1" />
 	</ItemGroup>
 
 	<ItemGroup>
@@ -68,8 +68,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.3.9-local.3" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.3.9-local.3" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.3.9" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.3.9" />
 	</ItemGroup>
 
 	<ItemGroup>

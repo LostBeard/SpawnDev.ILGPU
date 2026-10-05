@@ -1,7 +1,7 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## Unreleased (5.3.2-local) - WebGPU batched dispatch: scalar arenas + bind-group reuse
+## 5.3.2 (forks 2.3.9) - 2026-10-04 - persisted shaders with early (pre-IR) hits, faster WGSL generation, exact subnormal Half, Firefox video copy, WebGPU batched-dispatch arenas; SpawnDev.SpawnJS 3.0.1
 
 - **DelegateSpecialization kernels have a stable identity, so their shaders persist too** (Geordi, 5.3.2-local.12,
   forks 2.3.9-local.3). `DelegateSpecializationRewriter` named each specialization's dynamic assembly with a GUID, so
