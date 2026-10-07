@@ -119,16 +119,19 @@ namespace ILGPU.Runtime
     {
         #region Static
 
+        // Properties, NOT static fields: a static constructor on this generic view struct is an ingredient of a Mono WASM
+        // AOT "function signature mismatch" (see ArrayView<T>'s Static region, 2026-10-07).
+
         /// <summary>
         /// Represents the native size of a single element.
         /// </summary>
-        public static readonly int ElementSize = ArrayView<T>.ElementSize;
+        public static int ElementSize => ArrayView<T>.ElementSize;
 
         /// <summary>
         /// Represents an empty view that is not valid and has a length of 0 elements
         /// and a default stride initialized with its default value.
         /// </summary>
-        public static readonly <#= typeName #><T, TStride> Empty = GetEmpty(default);
+        public static <#= typeName #><T, TStride> Empty => GetEmpty(default);
 
         /// <summary>
         /// Returns an empty view using the given stride.

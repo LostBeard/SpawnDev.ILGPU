@@ -176,10 +176,18 @@ namespace ILGPU
     {
         #region Static
 
+        // NO static fields on this generic STRUCT (2026-10-07). A static constructor on a generic view struct is one of the
+        // ingredients of a Mono WASM AOT fault: once a bound delegate exists to a runtime-instantiated generic method whose
+        // signature carries a generic struct wrapping the view (ILGPU builds exactly that launcher for every grid-stride body
+        // - CreateInitializer, CreateScan, reductions), shared generic AOT code calling HasNoData on the view jumps to a
+        // target with the wrong signature ("RuntimeError: function signature mismatch") or asserts in interp.c:2737. Reduced
+        // to an ILGPU-free repro; the same repro passes once the statics are properties. The values live in the generic
+        // static CLASS ArrayViewStatics<T> (computed once, as before); these forward to it.
+
         /// <summary>
         /// Represents the native size of a single element.
         /// </summary>
-        public static readonly int ElementSize = Interop.SizeOf<T>();
+        public static int ElementSize => ArrayViewStatics<T>.ElementSize;
 
         /// <summary>
         /// The number of bits a single element occupies in a buffer. Equals
@@ -187,26 +195,12 @@ namespace ILGPU
         /// <see cref="PackedBitsAttribute"/> (the 4-bit Int4 / UInt4 / Float4E2M1) reports its
         /// packed width (4), so the buffer allocates ceil(N * BitsPerElement / 8) bytes (2/byte).
         /// </summary>
-        public static readonly int BitsPerElement =
-            Attribute.GetCustomAttribute(typeof(T), typeof(PackedBitsAttribute))
-                is PackedBitsAttribute packed && packed.Bits > 0
-                ? packed.Bits
-                : ElementSize * 8;
+        public static int BitsPerElement => ArrayViewStatics<T>.BitsPerElement;
 
         /// <summary>
         /// Represents an empty view that is not valid and has a length of 0 elements.
         /// </summary>
-        public static readonly ArrayView<T> Empty;
-
-        /// <summary>
-        /// Per-thread scratch element used by the CPU (IL) backend to return a by-value
-        /// decoded element for packed sub-byte views (<see cref="BitsPerElement"/> &lt; 8).
-        /// The managed ref model cannot address a nibble in place, so a packed read decodes
-        /// the nibble into this scratch and returns a ref to it. Thread-static so concurrent
-        /// CPU kernel threads do not clobber each other.
-        /// </summary>
-        [ThreadStatic]
-        private static T PackedElementScratch;
+        public static ArrayView<T> Empty => default;
 
         #endregion
 
@@ -415,7 +409,7 @@ namespace ILGPU
 
         /// <summary>
         /// Decodes a packed sub-byte element (<see cref="BitsPerElement"/> &lt; 8) by value into
-        /// the per-thread <see cref="PackedElementScratch"/> and returns a ref to it. Used only by
+        /// the per-thread <see cref="ArrayViewStatics{T}.PackedElementScratch"/> and returns a ref to it. Used only by
         /// the CPU (IL) backend, which runs this managed body directly; the GPU backends lower the
         /// indexer to a nibble-addressing load and never reach here.
         /// </summary>
@@ -435,8 +429,8 @@ namespace ILGPU
             // Keep only this element's bits in the low part of the byte; the consuming
             // conversion operator (e.g. QInt4->int) sign/zero-extends from there.
             byte raw = (byte)((packedByte >> shift) & mask);
-            PackedElementScratch = Unsafe.As<byte, T>(ref raw);
-            return ref PackedElementScratch;
+            ArrayViewStatics<T>.PackedElementScratch = Unsafe.As<byte, T>(ref raw);
+            return ref ArrayViewStatics<T>.PackedElementScratch;
         }
 
         #endregion
@@ -642,5 +636,33 @@ namespace ILGPU
             view.BaseView.SubView(0, view.Length);
 
         #endregion
+    }
+
+    /// <summary>
+    /// The per-element-type values of <see cref="ArrayView{T}"/>, held by a static CLASS so the view struct itself carries
+    /// no static fields (see the note in <see cref="ArrayView{T}"/>'s Static region).
+    /// </summary>
+    /// <typeparam name="T">The element type.</typeparam>
+    internal static class ArrayViewStatics<T> where T : unmanaged
+    {
+        /// <summary>The native size of a single element.</summary>
+        public static readonly int ElementSize = Interop.SizeOf<T>();
+
+        /// <summary>Bits a single element occupies in a buffer (packed sub-byte types report their width).</summary>
+        public static readonly int BitsPerElement =
+            Attribute.GetCustomAttribute(typeof(T), typeof(PackedBitsAttribute))
+                is PackedBitsAttribute packed && packed.Bits > 0
+                ? packed.Bits
+                : ElementSize * 8;
+
+        /// <summary>
+        /// Per-thread scratch element used by the CPU (IL) backend to return a by-value
+        /// decoded element for packed sub-byte views (<see cref="BitsPerElement"/> &lt; 8).
+        /// The managed ref model cannot address a nibble in place, so a packed read decodes
+        /// the nibble into this scratch and returns a ref to it. Thread-static so concurrent
+        /// CPU kernel threads do not clobber each other.
+        /// </summary>
+        [ThreadStatic]
+        public static T PackedElementScratch;
     }
 }

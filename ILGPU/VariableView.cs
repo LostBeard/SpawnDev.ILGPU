@@ -28,7 +28,8 @@ namespace ILGPU
         /// <summary>
         /// Represents the native size of a single element.
         /// </summary>
-        public static readonly int VariableSize = Interop.SizeOf<T>();
+        // A property, not a static field: no static constructor on generic device structs (ArrayView<T>'s note, 2026-10-07).
+        public static int VariableSize => Interop.SizeOf<T>();
 
         #endregion
 

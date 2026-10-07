@@ -32,7 +32,8 @@ namespace ILGPU.Util
         /// <summary>
         /// Represents the native size of a single element.
         /// </summary>
-        public static readonly int ElementSize = Interop.SizeOf<DataBlock<T1, T2>>();
+        // A property, not a static field: no static constructor on generic device structs (ArrayView<T>'s note, 2026-10-07).
+        public static int ElementSize => Interop.SizeOf<DataBlock<T1, T2>>();
 
         #endregion
 
@@ -167,7 +168,8 @@ namespace ILGPU.Util
         /// <summary>
         /// Represents the native size of a single element.
         /// </summary>
-        public static readonly int ElementSize = Interop.SizeOf<DataBlock<T1, T2, T3>>();
+        // A property, not a static field: no static constructor on generic device structs (ArrayView<T>'s note, 2026-10-07).
+        public static int ElementSize => Interop.SizeOf<DataBlock<T1, T2, T3>>();
 
         #endregion
 
@@ -311,7 +313,8 @@ namespace ILGPU.Util
         /// <summary>
         /// Represents the native size of a single element.
         /// </summary>
-        public static readonly int ElementSize = Interop.SizeOf<DataBlock<T1, T2, T3, T4>>();
+        // A property, not a static field: no static constructor on generic device structs (ArrayView<T>'s note, 2026-10-07).
+        public static int ElementSize => Interop.SizeOf<DataBlock<T1, T2, T3, T4>>();
 
         #endregion
 
@@ -464,7 +467,8 @@ namespace ILGPU.Util
         /// <summary>
         /// Represents the native size of a single element.
         /// </summary>
-        public static readonly int ElementSize = Interop.SizeOf<DataBlock<T1, T2, T3, T4, T5>>();
+        // A property, not a static field: no static constructor on generic device structs (ArrayView<T>'s note, 2026-10-07).
+        public static int ElementSize => Interop.SizeOf<DataBlock<T1, T2, T3, T4, T5>>();
 
         #endregion
 
@@ -626,7 +630,8 @@ namespace ILGPU.Util
         /// <summary>
         /// Represents the native size of a single element.
         /// </summary>
-        public static readonly int ElementSize = Interop.SizeOf<DataBlock<T1, T2, T3, T4, T5, T6>>();
+        // A property, not a static field: no static constructor on generic device structs (ArrayView<T>'s note, 2026-10-07).
+        public static int ElementSize => Interop.SizeOf<DataBlock<T1, T2, T3, T4, T5, T6>>();
 
         #endregion
 
@@ -797,7 +802,8 @@ namespace ILGPU.Util
         /// <summary>
         /// Represents the native size of a single element.
         /// </summary>
-        public static readonly int ElementSize = Interop.SizeOf<DataBlock<T1, T2, T3, T4, T5, T6, T7>>();
+        // A property, not a static field: no static constructor on generic device structs (ArrayView<T>'s note, 2026-10-07).
+        public static int ElementSize => Interop.SizeOf<DataBlock<T1, T2, T3, T4, T5, T6, T7>>();
 
         #endregion
 
@@ -977,7 +983,8 @@ namespace ILGPU.Util
         /// <summary>
         /// Represents the native size of a single element.
         /// </summary>
-        public static readonly int ElementSize = Interop.SizeOf<DataBlock<T1, T2, T3, T4, T5, T6, T7, T8>>();
+        // A property, not a static field: no static constructor on generic device structs (ArrayView<T>'s note, 2026-10-07).
+        public static int ElementSize => Interop.SizeOf<DataBlock<T1, T2, T3, T4, T5, T6, T7, T8>>();
 
         #endregion
 
@@ -1166,7 +1173,8 @@ namespace ILGPU.Util
         /// <summary>
         /// Represents the native size of a single element.
         /// </summary>
-        public static readonly int ElementSize = Interop.SizeOf<DataBlock<T1, T2, T3, T4, T5, T6, T7, T8, T9>>();
+        // A property, not a static field: no static constructor on generic device structs (ArrayView<T>'s note, 2026-10-07).
+        public static int ElementSize => Interop.SizeOf<DataBlock<T1, T2, T3, T4, T5, T6, T7, T8, T9>>();
 
         #endregion
 
@@ -1364,7 +1372,8 @@ namespace ILGPU.Util
         /// <summary>
         /// Represents the native size of a single element.
         /// </summary>
-        public static readonly int ElementSize = Interop.SizeOf<DataBlock<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>>();
+        // A property, not a static field: no static constructor on generic device structs (ArrayView<T>'s note, 2026-10-07).
+        public static int ElementSize => Interop.SizeOf<DataBlock<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>>();
 
         #endregion
 
@@ -1571,7 +1580,8 @@ namespace ILGPU.Util
         /// <summary>
         /// Represents the native size of a single element.
         /// </summary>
-        public static readonly int ElementSize = Interop.SizeOf<DataBlock<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11>>();
+        // A property, not a static field: no static constructor on generic device structs (ArrayView<T>'s note, 2026-10-07).
+        public static int ElementSize => Interop.SizeOf<DataBlock<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11>>();
 
         #endregion
 
@@ -1787,7 +1797,8 @@ namespace ILGPU.Util
         /// <summary>
         /// Represents the native size of a single element.
         /// </summary>
-        public static readonly int ElementSize = Interop.SizeOf<DataBlock<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12>>();
+        // A property, not a static field: no static constructor on generic device structs (ArrayView<T>'s note, 2026-10-07).
+        public static int ElementSize => Interop.SizeOf<DataBlock<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12>>();
 
         #endregion
 
@@ -2012,7 +2023,8 @@ namespace ILGPU.Util
         /// <summary>
         /// Represents the native size of a single element.
         /// </summary>
-        public static readonly int ElementSize = Interop.SizeOf<DataBlock<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13>>();
+        // A property, not a static field: no static constructor on generic device structs (ArrayView<T>'s note, 2026-10-07).
+        public static int ElementSize => Interop.SizeOf<DataBlock<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13>>();
 
         #endregion
 
@@ -2246,7 +2258,8 @@ namespace ILGPU.Util
         /// <summary>
         /// Represents the native size of a single element.
         /// </summary>
-        public static readonly int ElementSize = Interop.SizeOf<DataBlock<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14>>();
+        // A property, not a static field: no static constructor on generic device structs (ArrayView<T>'s note, 2026-10-07).
+        public static int ElementSize => Interop.SizeOf<DataBlock<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14>>();
 
         #endregion
 
@@ -2489,7 +2502,8 @@ namespace ILGPU.Util
         /// <summary>
         /// Represents the native size of a single element.
         /// </summary>
-        public static readonly int ElementSize = Interop.SizeOf<DataBlock<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15>>();
+        // A property, not a static field: no static constructor on generic device structs (ArrayView<T>'s note, 2026-10-07).
+        public static int ElementSize => Interop.SizeOf<DataBlock<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15>>();
 
         #endregion
 

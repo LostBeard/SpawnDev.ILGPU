@@ -53,7 +53,8 @@ namespace ILGPU.Util
         /// <summary>
         /// Represents the native size of a single element.
         /// </summary>
-        public static readonly int ElementSize = Interop.SizeOf<DataBlock<<#= typeParams.TypeParams #>>>();
+        // A property, not a static field: no static constructor on generic device structs (ArrayView<T>'s note, 2026-10-07).
+        public static int ElementSize => Interop.SizeOf<DataBlock<<#= typeParams.TypeParams #>>>();
 
         #endregion
 
