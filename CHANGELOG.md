@@ -1,6 +1,27 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.3.5 (forks 2.3.10) - unreleased (5.3.5-local.1) - no static fields on generic view structs (Mono WASM AOT)
+
+- **A Blazor WASM AOT app trapped with "RuntimeError: function signature mismatch"** (Tuvok, SpawnScene). After ILGPU
+  built a launcher for a kernel whose parameter is a generic struct wrapping a view - every grid-stride body:
+  `CreateInitializer`, `CreateScan`, reductions - shared generic AOT code calling a generic method over that view
+  (`Allocate1D(int[])` -> `CopyFromCPU<int>` -> `HasNoData<ArrayView1D<int, Dense>>`) jumped to a target with the wrong
+  signature, or asserted in `interp.c:2737` (`init_jit_call_info`, gsharedvt out-sig wrapper not in the image).
+  `WasmDedup=true` traps too. In SpawnScene an int[] upload after a training (GpuDensify's `CreateScan`) killed the page.
+  - Reduced to a repro with NO ILGPU code: a generic view struct whose `HasNoData<TView>` instance is not precompiled,
+    STATIC FIELDS on that struct (a static constructor), a bound delegate to a runtime-instantiated generic method whose
+    signature carries a generic body wrapping the view, and a cross-assembly shared generic call to `HasNoData` on it.
+    As static properties the same repro passes. A Mono runtime fault; ILGPU now avoids its ingredient.
+  - `ArrayView<T>`'s `ElementSize` / `BitsPerElement` / thread-static packed scratch moved to the generic static class
+    `ArrayViewStatics<T>` (computed once, as before; the struct forwards through static properties; `Empty => default`).
+    `ArrayView1D/2D/3D` (`ArrayViews.tt`) `ElementSize` / `Empty`, `DataBlock<...>` (`DataBlocks.tt`) `ElementSize` and
+    `VariableView<T>.VariableSize` are static properties. Public names unchanged; no consumer reads them as fields.
+  - Test: `GenericDeviceStructsDeclareNoStaticFieldsTest` (all lanes) - red-checked by re-adding a static field to
+    `VariableView<T>` (fails, naming it). The suite runs browser lanes interpreted, so this guard keeps the cause out;
+    the AOT effect was verified in SpawnScene's AOT build (every trapping probe passes, its trainer gate passes on AOT).
+  - Full PMT against 5.3.5-local.1: 4638 passed / 0 failed / 387 skipped (5.3.2 full: 4617/0/387).
+
 ## 5.3.4 (forks 2.3.9) - 2026-10-07 - device-to-device CopyTo on WebGPU and Wasm
 
 - **`src.CopyTo(dst)` between two device buffers threw on WebGPU and Wasm** (Tuvok). ILGPU dispatches a view copy to
