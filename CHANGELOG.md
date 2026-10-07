@@ -1,7 +1,7 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.3.5 (forks 2.3.10) - unreleased (5.3.5-local.1) - no static fields on generic view structs (Mono WASM AOT)
+## 5.3.5 (forks 2.3.10) - 2026-10-07 - no static fields on generic view structs (Mono WASM AOT)
 
 - **A Blazor WASM AOT app trapped with "RuntimeError: function signature mismatch"** (Tuvok, SpawnScene). After ILGPU
   built a launcher for a kernel whose parameter is a generic struct wrapping a view - every grid-stride body:

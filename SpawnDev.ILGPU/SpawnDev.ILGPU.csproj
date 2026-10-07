@@ -4,9 +4,9 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.3.5-local.1</Version>
+		<Version>5.3.5</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>v5.3.3 (forks 2.3.9) - FIX: CreateScan(Exclusive) was wrong on WebGPU and Wasm past one workgroup-sized chunk (the last element of every chunk counted twice). Inclusive scans, and CPU/CUDA/OpenCL/WebGL, were correct. See CHANGELOG.md.</PackageReleaseNotes>
+		<PackageReleaseNotes>v5.3.5 (forks 2.3.10) - FIX: Blazor WASM AOT apps trapped with "RuntimeError: function signature mismatch" after a grid-stride kernel launcher (CreateInitializer/CreateScan/reductions) was built for a generic body struct - a Mono runtime fault whose ingredient was static fields on ILGPU generic view structs. ArrayView/ArrayView1D/2D/3D, DataBlock and VariableView no longer declare static fields (same public names, now properties). See CHANGELOG.md.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -68,8 +68,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.3.10-local.1" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.3.10-local.1" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.3.10" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.3.10" />
 	</ItemGroup>
 
 	<ItemGroup>
