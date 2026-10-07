@@ -568,10 +568,20 @@ namespace SpawnDev.ILGPU.Wasm
             in ArrayView<byte> sourceView,
             in ArrayView<byte> targetView)
         {
-            GuardHostBufferRace(nameof(CopyTo));
             int srcOffset = (int)sourceView.LoadEffectiveAddressAsPtr();
             int length = (int)sourceView.LengthInBytes;
 
+            // Device to device: ILGPU calls CopyTo on the SOURCE buffer (view.CopyTo(target)), and the target can be
+            // another Wasm buffer - which has no host pointer (Marshal.Copy threw ArgumentNullException "destination",
+            // 2026-10-07, DeviceCopyToFromSourceSideTest). Take the same ORDERED path as target.CopyFrom(source), so the
+            // copy still runs after any kernel producing this buffer.
+            if (((IContiguousArrayView)targetView).Buffer is WasmMemoryBuffer wasmTarget)
+            {
+                wasmTarget.CopyFromBufferOrdered(stream, this, srcOffset, (long)targetView.LoadEffectiveAddressAsPtr(), length);
+                return;
+            }
+
+            GuardHostBufferRace(nameof(CopyTo));
             using var srcUint8 = new Uint8Array(SharedBuffer, srcOffset, length);
             byte[] data = srcUint8.ReadBytes();
 

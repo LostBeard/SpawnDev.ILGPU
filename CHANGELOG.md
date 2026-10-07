@@ -1,6 +1,20 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.3.4 (forks 2.3.9) - 2026-10-07 - device-to-device CopyTo on WebGPU and Wasm
+
+- **`src.CopyTo(dst)` between two device buffers threw on WebGPU and Wasm** (Tuvok). ILGPU dispatches a view copy to
+  the SOURCE buffer's `CopyTo`, and both browser backends treated every target as host memory: WebGPU threw
+  "Synchronous GPU to CPU copies are not supported in WebGPU backend" and Wasm threw `ArgumentNullException`
+  ("destination", a Marshal.Copy to a device buffer's null host pointer). Only `dst.CopyFrom(src)` worked. Found by
+  SpawnScene copying a `SuperResolutionPipeline` result (a `MemoryBuffer2D`'s flat view) into a 1D buffer.
+  - WebGPU (`WebGPUMemoryBuffer.CopyTo`): a WebGPU target records `CopyBufferToBuffer`, as `CopyFrom`'s device branch does.
+  - Wasm (`WasmMemoryBuffer.CopyTo`): a Wasm target takes the target's ORDERED device copy (`CopyFromBufferOrdered`),
+    so it still runs after the kernel producing the source.
+  - WebGL and the desktop backends were already right. Host targets are unchanged (still async-only on the browser).
+  - Test: `DeviceCopyToFromSourceSideTest` (a 1D buffer with a pending producer, and a 2D buffer's flat view, both
+    copied by `CopyTo` into 1D, all backends) - failed on WebGPU and Wasm before the fix. PMT `Copy`: 244/0/45.
+
 ## 5.3.3 (forks 2.3.9) - 2026-10-05 - exclusive scan on WebGPU and Wasm
 
 - **Open (not fixed here): a Wasm codegen bug.** In `WasmGroupExtensions.ExclusiveScanWithBoundaries`, building the

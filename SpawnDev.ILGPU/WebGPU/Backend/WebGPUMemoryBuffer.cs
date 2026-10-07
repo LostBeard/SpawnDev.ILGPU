@@ -122,6 +122,29 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         protected override void CopyTo(AcceleratorStream stream, in ArrayView<byte> source, in ArrayView<byte> destination)
         {
+            // GPU to GPU: ILGPU calls CopyTo on the SOURCE buffer (view.CopyTo(target)), and the target can be another
+            // WebGPU buffer - record CopyBufferToBuffer exactly as CopyFrom's device branch does. This used to throw
+            // for every target, so `gpuView.CopyTo(gpuView)` failed on WebGPU while `target.CopyFrom(gpuView)` worked
+            // (found 2026-10-07 copying a MemoryBuffer2D's view into a 1D buffer, SpawnScene super-resolution).
+            var destContiguous = (IContiguousArrayView)destination;
+            if (destContiguous.Buffer is WebGPUMemoryBuffer destMemBuffer)
+            {
+                var accelerator = (WebGPUAccelerator)Accelerator;
+                var srcContiguous = (IContiguousArrayView)source;
+                var srcMemBuffer = srcContiguous.Buffer as WebGPUMemoryBuffer
+                    ?? throw new InvalidOperationException("Source buffer is not a WebGPU memory buffer");
+                var srcGpuBuffer = srcMemBuffer.NativeBuffer.NativeBuffer
+                    ?? throw new InvalidOperationException("Source GPU buffer is null");
+                var dstGpuBuffer = destMemBuffer.NativeBuffer.NativeBuffer
+                    ?? throw new InvalidOperationException("Destination GPU buffer is null");
+                var paddedBytes = WebGPUAlignment.AlignTo4(source.Length);
+                accelerator.RecordCopyBuffer(stream,
+                    srcGpuBuffer, (ulong)srcContiguous.Index,
+                    dstGpuBuffer, (ulong)destContiguous.Index,
+                    (ulong)paddedBytes);
+                return;
+            }
+
             // GPU to CPU - This is inherently async in WebGPU.
             // For now, we throw as ILGPU expects sync behavior here.
             // Users should use CopyToHostAsync in WebGPUBuffer for now.

@@ -184,5 +184,39 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                         $"CopyFromAsync produced wrong data at {i}: expected {i * 2}, got {result[i]}");
             }
         });
-    }
+    
+        /// <summary>
+        /// Device-to-device copy from the SOURCE side: <c>src.CopyTo(dst)</c> (ILGPU dispatches it to the source buffer's
+        /// CopyTo) must work and order after the producer exactly like <c>dst.CopyFrom(src)</c>, including out of a
+        /// 2D buffer's flat view. On WebGPU CopyTo threw "Synchronous GPU to CPU copies are not supported" for EVERY
+        /// target, device ones included (2026-10-07, SpawnScene copying a SuperResolutionPipeline 2D result to 1D).
+        /// </summary>
+        [TestMethod]
+        public async Task DeviceCopyToFromSourceSideTest() => await RunTest(async accelerator =>
+        {
+            const int count = 64;
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(SyncContract_FillKernel);
+            using var src = accelerator.Allocate1D<int>(count);
+            using var dst = accelerator.Allocate1D<int>(count);
+            kernel((Index1D)count, src.View);   // pending producer: src[i] = i*2
+            src.View.CopyTo(dst.View);
+            await accelerator.SynchronizeAsync();
+            var dr = await dst.CopyToHostAsync<int>();
+            for (int i = 0; i < count; i++)
+                if (dr[i] != i * 2)
+                    throw new Exception($"src.CopyTo(dst) wrong at {i}: expected {i * 2}, got {dr[i]}");
+
+            // Out of a 2D buffer's flat (BaseView) - a 1D dense view of its rows.
+            using var src2 = accelerator.Allocate2DDenseX<int>(new Index2D(8, count / 8));
+            kernel((Index1D)count, src2.View.BaseView);
+            using var dst2 = accelerator.Allocate1D<int>(count);
+            ArrayView1D<int, Stride1D.Dense> flat = src2.View.BaseView;
+            flat.CopyTo(dst2.View);
+            await accelerator.SynchronizeAsync();
+            var r2 = await dst2.CopyToHostAsync<int>();
+            for (int i = 0; i < count; i++)
+                if (r2[i] != i * 2)
+                    throw new Exception($"2D flat view CopyTo 1D wrong at {i}: expected {i * 2}, got {r2[i]}");
+        });
+}
 }
