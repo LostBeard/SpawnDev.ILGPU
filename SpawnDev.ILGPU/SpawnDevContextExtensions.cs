@@ -97,7 +97,8 @@ namespace SpawnDev.ILGPU
         /// <summary>
         /// Creates the preferred accelerator.
         /// Browser priority: WebGPU > WebGL > Wasm > CPU.
-        /// Desktop priority: Cuda > OpenCL > CPU (via GetPreferredDevice).
+        /// Desktop priority: Cuda > discrete OpenCL GPU > integrated OpenCL GPU > other OpenCL > CPU
+        /// (via <see cref="DevicePreference.OrderByPreference"/>).
         /// </summary>
         /// <param name="context">The ILGPU context (must have devices registered).</param>
         /// <returns>The best available accelerator.</returns>
@@ -163,10 +164,9 @@ namespace SpawnDev.ILGPU
                 }
             }
 
-            // Desktop: Cuda > OpenCL > CPU  |  Browser fallback: CPU
-            // Prefer non-CPU when a GPU backend is compatible.
-            var preferred = compatible.FirstOrDefault(d => d.AcceleratorType != AcceleratorType.CPU)
-                            ?? compatible[0];
+            // Desktop: Cuda > discrete OpenCL GPU > integrated OpenCL GPU > other OpenCL > CPU
+            // (see DevicePreference)  |  Browser fallback: CPU
+            var preferred = compatible.OrderByPreference()[0];
             return preferred.CreateAccelerator(context);
         }
 
