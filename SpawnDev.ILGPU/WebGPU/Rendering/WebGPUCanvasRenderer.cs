@@ -18,9 +18,16 @@ namespace SpawnDev.ILGPU.WebGPU.Rendering
     /// pass clear landed, and no validation error was raised - while compute dispatches were correct.
     /// The old fullscreen-triangle blit therefore produced a blank canvas while the kernel ran at full
     /// speed. A compute blit uses only the path ILGPU itself already depends on.
-    /// ⚠️ alphaMode is "premultiplied", NOT the default "opaque": on the same machine drawImage() from an
-    /// "opaque"-configured WebGPU canvas returned fully transparent pixels even when the texture held the
-    /// correct data. The shader forces alpha = 1, which is visually identical to "opaque".
+    /// ⚠️ alphaMode is "opaque", with a ONE-TIME check that falls back to "premultiplied". On the same HD 620,
+    /// drawImage() from an "opaque"-configured WebGPU canvas returned fully transparent pixels even when the
+    /// texture held the correct data; "premultiplied" worked. But "premultiplied" is not free elsewhere:
+    /// MEASURED 2026-10-08 on an RTX 4070 / Chrome, drawImage() from a "premultiplied" WebGPU canvas BLOCKED the
+    /// main thread ~3 ms per present at 900x700 and ~6-9 ms at 1920x1080, while "opaque" took ~0.01 ms (the
+    /// compute pass, rgba8unorm and STORAGE_BINDING usage measured free). So the first present also draws the
+    /// "opaque" canvas into a private 1x1 2D canvas (same drawImage call, default alpha) and reads that pixel:
+    /// alpha 255 keeps "opaque", anything else switches this renderer to "premultiplied" and re-presents the
+    /// frame. The caller's canvas is never cleared or read (a caller's 2D context with alpha:false would always
+    /// read 255 and hide the bug). The shader forces alpha = 1 in both modes, so both look identical.
     /// </remarks>
     public sealed class WebGPUCanvasRenderer : ICanvasRenderer
     {
@@ -42,6 +49,15 @@ namespace SpawnDev.ILGPU.WebGPU.Rendering
         private const string CanvasFormat = "rgba8unorm";
         private const uint WorkgroupSize = 8;
         private bool _disposed;
+        // WORKAROUND: Intel HD 620 (2017 driver) drawImage() of an "opaque" WebGPU canvas reads back transparent.
+        // Starts "opaque" (fast); the first present verifies it and may switch to "premultiplied" (see remarks).
+        private string _alphaMode = "opaque";
+        private bool _alphaModeChecked;
+
+        /// <summary>The canvas alphaMode in use: "opaque", or "premultiplied" after the first-present check failed.</summary>
+        internal string AlphaMode => _alphaMode;
+        /// <summary>TEST SWITCH: make the first-present check see a transparent pixel, as the HD 620 does.</summary>
+        internal static bool TestSimulateOpaqueReadsTransparent { get; set; }
 
         // WGSL: storage-buffer -> storage-texture blit.
         // Pixel buffer is packed RGBA little-endian uint32: R in bits 0–7, G 8–15, B 16–23, A 24–31,
@@ -148,25 +164,59 @@ fn cs_main(@builtin(global_invocation_id) gid : vec3<u32>) {
             var gpuBuffer = webGpuMemBuf.NativeBuffer.NativeBuffer
                 ?? throw new InvalidOperationException("Underlying GPUBuffer is null.");
 
-            // Flush any pending kernel dispatches before this buffer is read by the render pass.
+            // Flush any pending kernel dispatches before this buffer is read by the blit.
             _accelerator.FlushPendingCommands();
 
+            if (_alphaModeChecked)
+            {
+                PresentFrame(gpuBuffer, width, height);
+                return Task.CompletedTask;
+            }
+
+            // First present: verify "opaque" survives drawImage() on this device (see remarks).
+            _alphaModeChecked = true;
+            PresentFrame(gpuBuffer, width, height);
+            if (_alphaMode == "opaque" && !OpaqueReadBackWorks())
+            {
+                _alphaMode = "premultiplied";
+                _lastWidth = 0; _lastHeight = 0;   // reconfigure the canvas with the new alphaMode
+                PresentFrame(gpuBuffer, width, height);
+            }
+            return Task.CompletedTask;
+        }
+
+        private bool OpaqueReadBackWorks()
+        {
+            if (TestSimulateOpaqueReadsTransparent) return false;
+            // One 1x1 draw + readback per renderer, on its first present only, into a private canvas.
+            using var probe = new HTMLCanvasElement { Width = 1, Height = 1 };
+            using var probeCtx = probe.GetContext<CanvasRenderingContext2D>("2d");
+            if (probeCtx == null) return true;
+            probeCtx.DrawImage(_internalCanvas!);
+            using var imageData = probeCtx.GetImageData(0, 0, 1, 1);
+            if (imageData == null) return true;
+            using var data = imageData.Data;
+            return data[3] == 255;
+        }
+
+        private void PresentFrame(GPUBuffer gpuBuffer, uint width, uint height)
+        {
             if (width != _lastWidth || height != _lastHeight)
             {
                 _lastWidth = width;
                 _lastHeight = height;
-                _internalCanvas.Width = (int)width;
+                _internalCanvas!.Width = (int)width;
                 _internalCanvas.Height = (int)height;
-                _canvasCtx.Configure(new GPUCanvasConfiguration
+                _canvasCtx!.Configure(new GPUCanvasConfiguration
                 {
                     Device = Device,
                     Format = CanvasFormat,
                     Usage = (uint)GPUTextureUsage.StorageBinding,
-                    AlphaMode = "premultiplied",
+                    AlphaMode = _alphaMode,
                 });
             }
 
-            using var currentTexture = _canvasCtx.GetCurrentTexture();
+            using var currentTexture = _canvasCtx!.GetCurrentTexture();
             using var textureView = currentTexture.CreateView();
 
             using var bindGroup = Device.CreateBindGroup(new GPUBindGroupDescriptor
@@ -202,9 +252,7 @@ fn cs_main(@builtin(global_invocation_id) gid : vec3<u32>) {
             Queue.Submit(_submitArray);
 
             // Blit internal WebGPU canvas to the display canvas via 2d context.
-            _displayCtx.DrawImage(_internalCanvas);
-
-            return Task.CompletedTask;
+            _displayCtx!.DrawImage(_internalCanvas!);
         }
 
         private void DisposeGpuResources()

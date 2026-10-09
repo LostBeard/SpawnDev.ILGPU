@@ -48,6 +48,36 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             renderer.AttachCanvas(canvas);
             await CanvasPresentCase(acc, renderer, canvas, 67, 41, seed: 3, opaque: false, asUInt: false);
             await CanvasPresentCase(acc, renderer, canvas, 1920, 1080, seed: 4, opaque: false, asUInt: true);
+            Console.WriteLine($"[CanvasRenderer] WebGPU alphaMode after first-present check: {((SpawnDev.ILGPU.WebGPU.Rendering.WebGPUCanvasRenderer)renderer).AlphaMode}");
+        });
+
+        /// <summary>
+        /// The HD 620 path: the first-present check sees a transparent pixel from the "opaque" canvas (simulated here),
+        /// so the renderer must switch to "premultiplied" and still present every pixel exactly - the first frame
+        /// (re-presented after the switch) and later frames across a resize. On every other device tested this path
+        /// never runs on its own, so without this test it would ship unexercised.
+        /// </summary>
+        [TestMethod]
+        public async Task CanvasRenderer_WebGPU_PremultipliedFallback_ExactPixelsTest() => await RunTest(async acc =>
+        {
+            if (acc is not SpawnDev.ILGPU.WebGPU.WebGPUAccelerator wgpu)
+                throw new UnsupportedTestException("WebGPU renderer alphaMode fallback");
+            SpawnDev.ILGPU.WebGPU.Rendering.WebGPUCanvasRenderer.TestSimulateOpaqueReadsTransparent = true;
+            try
+            {
+                using var renderer = new SpawnDev.ILGPU.WebGPU.Rendering.WebGPUCanvasRenderer(wgpu);
+                using var canvas = new HTMLCanvasElement();
+                renderer.AttachCanvas(canvas);
+                await CanvasPresentCase(acc, renderer, canvas, 67, 41, seed: 5, opaque: false, asUInt: false);
+                if (renderer.AlphaMode != "premultiplied")
+                    throw new Exception($"check saw a transparent pixel but alphaMode stayed '{renderer.AlphaMode}'");
+                await CanvasPresentCase(acc, renderer, canvas, 1920, 1080, seed: 6, opaque: false, asUInt: true);
+                await CanvasPresentCase(acc, renderer, canvas, 130, 9, seed: 7, opaque: true, asUInt: false);
+            }
+            finally
+            {
+                SpawnDev.ILGPU.WebGPU.Rendering.WebGPUCanvasRenderer.TestSimulateOpaqueReadsTransparent = false;
+            }
         });
 
         static async Task CanvasPresentCase(Accelerator acc, ICanvasRenderer renderer, HTMLCanvasElement canvas,
