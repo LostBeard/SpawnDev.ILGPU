@@ -254,6 +254,58 @@ public class AcceleratorRequirementsTests
         return Task.CompletedTask;
     }
 
+    // ── DevicePreference (PR #9, 2026-10-08): hybrid laptops got the integrated GPU or Intel's OpenCL CPU runtime
+    //    instead of the discrete GPU. Checked on the REAL device list of this host: CUDA first, discrete OpenCL GPUs
+    //    before integrated ones (CL_DEVICE_HOST_UNIFIED_MEMORY), OpenCL GPUs before other OpenCL devices, CPU last,
+    //    and the preferred-accelerator APIs agree with GetBestDevice().
+
+    [TestMethod]
+    public async Task DevicePreference_RanksCudaThenDiscreteThenIntegratedThenCpu()
+    {
+        using var context = Context.CreateDefault();
+        var ordered = context.Devices.OrderByPreference();
+        if (ordered.Count != context.Devices.Length)
+            throw new Exception($"OrderByPreference returned {ordered.Count} of {context.Devices.Length} devices.");
+        static string Kind(Device d) => d switch
+        {
+            { AcceleratorType: AcceleratorType.Cuda } => "cuda",
+            ILGPU.Runtime.OpenCL.CLDevice cl when cl.DeviceType.HasFlag(ILGPU.Runtime.OpenCL.CLDeviceType.CL_DEVICE_TYPE_GPU)
+                => IsHostUnified(cl) ? "cl-igpu" : "cl-dgpu",
+            { AcceleratorType: AcceleratorType.OpenCL } => "cl-other",
+            { AcceleratorType: AcceleratorType.CPU } => "cpu",
+            _ => "other",
+        };
+        var desc = string.Join(", ", ordered.Select(d => $"{Kind(d)}:{d.Name}({d.MemorySize >> 20} MB)"));
+        Console.WriteLine($"[DevicePreference] desktop order: {desc}");
+        Console.WriteLine($"[DevicePreference] upstream GetPreferredDevice(false) = {context.GetPreferredDevice(preferCPU: false).AcceleratorType} {context.GetPreferredDevice(preferCPU: false).Name}");
+        var rank = new[] { "cuda", "cl-dgpu", "cl-igpu", "cl-other", "other", "cpu" };
+        int last = -1;
+        foreach (var d in ordered)
+        {
+            int r = Array.IndexOf(rank, Kind(d));
+            if (r < last) throw new Exception($"{Kind(d)} {d.Name} ranked after a worse device: {desc}");
+            last = r;
+        }
+        var best = context.GetBestDevice();
+        if (!ReferenceEquals(best, ordered[0])) throw new Exception($"GetBestDevice() = {best.Name}, expected {ordered[0].Name}");
+        if (context.Devices.Any(d => d.AcceleratorType == AcceleratorType.Cuda) && best.AcceleratorType != AcceleratorType.Cuda)
+            throw new Exception($"Host has CUDA but GetBestDevice() = {best.AcceleratorType} {best.Name}: {desc}");
+
+        using (var acc = context.CreatePreferredAccelerator(AcceleratorRequirements.None))
+            if (acc.AcceleratorType != best.AcceleratorType || acc.Name != best.Name)
+                throw new Exception($"CreatePreferredAccelerator picked {acc.AcceleratorType} {acc.Name}, GetBestDevice is {best.AcceleratorType} {best.Name}");
+        using (var acc = await context.CreatePreferredAcceleratorAsync())
+            if (acc.AcceleratorType != best.AcceleratorType || acc.Name != best.Name)
+                throw new Exception($"CreatePreferredAcceleratorAsync picked {acc.AcceleratorType} {acc.Name}, GetBestDevice is {best.AcceleratorType} {best.Name}");
+    }
+
+    // Independent of DevicePreference's own query: CL_DEVICE_HOST_UNIFIED_MEMORY (0x1035).
+    static bool IsHostUnified(ILGPU.Runtime.OpenCL.CLDevice cl) =>
+        ILGPU.Runtime.OpenCL.CLAPI.CurrentAPI.GetDeviceInfo(cl.DeviceId, (ILGPU.Runtime.OpenCL.CLDeviceInfoType)0x1035, out int unified)
+            == ILGPU.Runtime.OpenCL.CLError.CL_SUCCESS
+            ? unified != 0
+            : cl.Vendor == ILGPU.Runtime.OpenCL.CLDeviceVendor.Intel;
+
     // ── RequiresScatterStores: in-kernel scatter / multi-element-per-thread output. WebGL is
     //    the only backend that can't do it (Transform-Feedback captures one record per vertex
     //    at the thread's own slot). The WebGL rule-out is verified in the browser suite (the

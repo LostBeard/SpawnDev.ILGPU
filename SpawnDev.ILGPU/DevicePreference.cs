@@ -28,7 +28,7 @@ public static class DevicePreference
     /// <summary>
     /// Returns the devices ordered best-first:
     /// CUDA, then discrete OpenCL GPUs, then integrated OpenCL GPUs, then other OpenCL devices (CPU runtimes,
-    /// accelerators), then any other non-CPU device, then CPU. Ties are broken by memory size (largest first),
+    /// accelerators), then the browser backends (WebGPU, WebGL, Wasm), then any other non-CPU device, then CPU. Ties are broken by memory size (largest first),
     /// then by the original order.
     /// </summary>
     public static IReadOnlyList<Device> OrderByPreference(this IEnumerable<Device> devices)
@@ -65,10 +65,19 @@ public static class DevicePreference
                 return IsIntegrated(cl) ? 2 : 1;
             case AcceleratorType.OpenCL:
                 return 3;
-            case AcceleratorType.CPU:
-                return 5;
-            default:
+            // Browser backends get explicit ranks in the documented WebGPU > WebGL > Wasm order. Do NOT let them
+            // fall into one bucket sorted by MemorySize: Wasm reports 2 GB, WebGL 256 MB and WebGPU its
+            // maxBufferSize, so the memory tie-break would put Wasm ahead of WebGPU.
+            case AcceleratorType.WebGPU:
                 return 4;
+            case AcceleratorType.WebGL:
+                return 5;
+            case AcceleratorType.Wasm:
+                return 6;
+            case AcceleratorType.CPU:
+                return 8;
+            default:
+                return 7;
         }
     }
 

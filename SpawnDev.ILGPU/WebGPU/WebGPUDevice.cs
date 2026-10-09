@@ -76,10 +76,12 @@ namespace SpawnDev.ILGPU.WebGPU
                 {
                     // Compare every identifying field, not just .Device - Chrome leaves .Device empty, which
                     // made two different GPUs compare equal ("" == "").
+                    // A null default adapter with a non-null high-performance one keeps the high-performance one
+                    // rather than enumerating nothing.
                     adoptedHighPerf = highPerfAdapter != null &&
-                        adapter != null &&
+                        (adapter == null ||
                         (highPerfInfo?.Vendor, highPerfInfo?.Architecture, highPerfInfo?.Device, highPerfInfo?.Description)
-                            != (baseInfo?.Vendor, baseInfo?.Architecture, baseInfo?.Device, baseInfo?.Description);
+                            != (baseInfo?.Vendor, baseInfo?.Architecture, baseInfo?.Device, baseInfo?.Description));
                 }
 
                 // A distinct high-performance adapter goes FIRST, so devices[0] - what callers and
