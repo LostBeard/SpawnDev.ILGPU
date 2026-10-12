@@ -4,9 +4,9 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.3.6-local.1</Version>
+		<Version>5.3.6</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>v5.3.5 (forks 2.3.10) - FIX: Blazor WASM AOT apps trapped with "RuntimeError: function signature mismatch" after a grid-stride kernel launcher (CreateInitializer/CreateScan/reductions) was built for a generic body struct - a Mono runtime fault whose ingredient was static fields on ILGPU generic view structs. ArrayView/ArrayView1D/2D/3D, DataBlock and VariableView no longer declare static fields (same public names, now properties). See CHANGELOG.md.</PackageReleaseNotes>
+		<PackageReleaseNotes>v5.3.6 (forks 2.3.11) - GPU memory pressure: holders of idle device memory (buffer pools) register with their accelerator, and every allocation first makes room by reclaiming from them, least recently used first, BEFORE the driver spills to system RAM (Windows CUDA sysmem fallback never fails an allocation, so reclaim-after-failure never ran). Accelerator.TryGetFreeMemory (CUDA), DeviceMemoryHeadroomBytes; reclaim stands down during CUDA stream capture. On SpawnDev.SpawnJS 3.0.3. See CHANGELOG.md.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -33,7 +33,7 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-		<PackageReference Include="SpawnDev.SpawnJS" Version="3.0.1" />
+		<PackageReference Include="SpawnDev.SpawnJS" Version="3.0.3" />
 	</ItemGroup>
 
 	<ItemGroup>
@@ -68,8 +68,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.3.11-local.1" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.3.11-local.1" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.3.11" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.3.11" />
 	</ItemGroup>
 
 	<ItemGroup>

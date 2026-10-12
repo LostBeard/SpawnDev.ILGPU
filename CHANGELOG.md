@@ -1,6 +1,28 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.3.6 (forks 2.3.11) - 2026-10-12 - reclaim idle GPU memory before the driver spills
+
+- **A process running several models ran out of VRAM without ever failing an allocation** (Vertex: a chat model,
+  Whisper, Kokoro and a sentence encoder on a 12 GB RTX 4070). On Windows the NVIDIA driver's default "CUDA sysmem
+  fallback" places an allocation that does not fit in system RAM instead of failing it, so a reclaim that waits for an
+  allocation to throw never runs. MEASURED: 14.7 GB of live buffers, 7.3 GB of it idle in buffer pools, 1.4 GB spilled,
+  and a one-sentence reply took 5.5 minutes. Reclaim was also per pool: one model could not free another's idle memory.
+  - `IDeviceMemoryReclaimer` (ReclaimableBytes, LastUsedTimestamp, Reclaim): a holder of memory it can give back.
+    `accelerator.RegisterReclaimer` / `UnregisterReclaimer`; `accelerator.ReclaimDeviceMemory(bytes)` asks the holders,
+    least recently used first.
+  - Once anything is registered, `Accelerator.AllocateRaw` checks free device memory first (`TryGetFreeMemory`: CUDA
+    `cuMemGetInfo`, cached for `FreeMemoryCacheDuration` against the allocations made since) and reclaims when the
+    allocation would leave less than the headroom (`DeviceMemoryHeadroomBytes`, default 512 MiB capped at 5% of the
+    card). An allocation that still throws gets the same reclaim and one retry. Nothing registered = one null check.
+  - Reclaim stands down while any CUDA stream on the accelerator is capturing (`CudaStream` Begin/EndCapture and
+    dispose maintain the count): a free during a Global-mode capture invalidates it and poisons the context.
+  - SpawnDev.ILGPU.ML 5.3.7 registers every `BufferPool`.
+  - Tests (CUDA): `Tests_MemoryPressure_ReclaimsIdleMemoryBeforeAllocating` - red-checked: with the pre-allocation check
+    disabled the holder gave back 0 MiB (the driver accepted every allocation by spilling) -
+    and `Tests_MemoryPressure_LeastRecentlyUsedHolderGivesBackFirst`.
+- On SpawnDev.SpawnJS 3.0.3.
+
 ## 5.3.5 (forks 2.3.10) - 2026-10-07 - no static fields on generic view structs (Mono WASM AOT)
 
 - **A Blazor WASM AOT app trapped with "RuntimeError: function signature mismatch"** (Tuvok, SpawnScene). After ILGPU
