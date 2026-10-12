@@ -461,7 +461,57 @@ namespace ILGPU.Runtime
                 throw new ArgumentOutOfRangeException(nameof(elementSize));
 
             Bind();
+            if (ReclaimRegistry == null)
+                return AllocateRawInternal(length, elementSize, bitsPerElement);
+
+            // Something on this accelerator holds memory it can give back: make room BEFORE allocating, since
+            // a driver that spills to system RAM never fails the allocation (see MemoryPressure).
+            long bytes = bitsPerElement > 0
+                ? (length * bitsPerElement + 7) / 8
+                : length * elementSize;
+            MemoryPressure.BeforeAllocate(this, bytes);
+            try
+            {
+                return AllocateRawInternal(length, elementSize, bitsPerElement);
+            }
+            catch (Exception)
+            {
+                // Not an exception filter: a filter runs before the backend's own finally blocks, so reclaiming
+                // inside one could block on a lock the failed allocation still holds.
+                if (!MemoryPressure.ReclaimAfterFailure(this, bytes))
+                    throw;
+            }
             return AllocateRawInternal(length, elementSize, bitsPerElement);
+        }
+
+        /// <summary>
+        /// Holders of reclaimable memory on this accelerator (see <see cref="MemoryPressure"/>); null until
+        /// the first registration, which keeps allocation free of any extra work for everyone else.
+        /// </summary>
+        internal MemoryPressure.ReclaimRegistry? ReclaimRegistry;
+
+        /// <summary>
+        /// Streams of this accelerator currently recording a graph (CUDA stream capture). Memory-pressure
+        /// reclaim stands down while it is non-zero: freeing memory during a Global-mode capture invalidates the
+        /// capture and poisons the context.
+        /// </summary>
+        internal int ActiveStreamCaptures;
+
+        /// <summary>
+        /// Free device memory to keep in reserve when reclaimers are registered, or null for
+        /// <see cref="MemoryPressure.DefaultHeadroomBytes"/> (capped at 5% of the device's memory).
+        /// </summary>
+        public long? DeviceMemoryHeadroomBytes { get; set; }
+
+        /// <summary>
+        /// Reports how much device memory is free right now, on backends that can tell (CUDA). Returns false
+        /// when the backend has no such query.
+        /// </summary>
+        /// <param name="freeBytes">The free device memory in bytes.</param>
+        public virtual bool TryGetFreeMemory(out long freeBytes)
+        {
+            freeBytes = 0;
+            return false;
         }
 
         /// <summary>

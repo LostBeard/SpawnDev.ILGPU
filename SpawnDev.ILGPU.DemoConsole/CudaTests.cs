@@ -178,4 +178,117 @@ public class CudaTests : BackendTestBase
             if (output[i] != input[i])
                 throw new Exception($"LoadVectorizedFloat2: index {i}: expected {input[i]}, got {output[i]}");
     });
+
+    /// <summary>Test holder of idle device memory: gives buffers back newest-first when asked.</summary>
+    sealed class IdleMemoryHolder : IDeviceMemoryReclaimer
+    {
+        public readonly List<MemoryBuffer1D<byte, Stride1D.Dense>> Idle = new();
+        public long Reclaimed;
+        public long LastUsedTimestamp { get; set; }
+        public long ReclaimableBytes { get { long n = 0; foreach (var b in Idle) n += b.LengthInBytes; return n; } }
+        public long Reclaim(long bytesWanted)
+        {
+            long freed = 0;
+            while (freed < bytesWanted && Idle.Count > 0)
+            {
+                var b = Idle[^1];
+                Idle.RemoveAt(Idle.Count - 1);
+                freed += b.LengthInBytes;
+                b.Dispose();
+            }
+            Reclaimed += freed;
+            return freed;
+        }
+        public void DisposeAll() { foreach (var b in Idle) b.Dispose(); Idle.Clear(); }
+    }
+
+    /// <summary>
+    /// An allocation that would cut into the headroom makes a registered holder give back idle memory BEFORE the
+    /// allocation, so the device never runs out. A driver with CUDA sysmem fallback (Windows' default) never fails
+    /// the allocation - it spills it into system RAM - so reclaiming only after a failure never ran there
+    /// (Vertex 2026-10-12: 7.3 GB idle in buffer pools, 1.4 GB spilled, replies took minutes). Red-check: without
+    /// the pre-allocation check the three new chunks spill and free memory ends below the headroom.
+    /// </summary>
+    [TestMethod]
+    public async Task Tests_MemoryPressure_ReclaimsIdleMemoryBeforeAllocating() =>
+        await RunTest(async accelerator =>
+    {
+        if (!accelerator.TryGetFreeMemory(out long free))
+            throw new UnsupportedTestException("backend cannot report free device memory");
+        const long Chunk = 256L * 1024 * 1024;
+        const long Headroom = 512L * 1024 * 1024;
+        accelerator.DeviceMemoryHeadroomBytes = Headroom;
+        var holder = new IdleMemoryHolder();
+        var fresh = new List<MemoryBuffer1D<byte, Stride1D.Dense>>();
+        try
+        {
+            // Fill the device with idle memory until only headroom + 2 chunks are free (nothing registered yet,
+            // so this filling does not reclaim anything).
+            while (free > Headroom + 2 * Chunk)
+            {
+                holder.Idle.Add(accelerator.Allocate1D<byte>(Chunk));
+                accelerator.TryGetFreeMemory(out free);
+            }
+            if (holder.Idle.Count < 4)
+                throw new UnsupportedTestException($"too little free device memory to test ({free / 1048576} MiB)");
+            accelerator.RegisterReclaimer(holder);
+
+            // Three more chunks do not fit above the headroom: the holder must make room first.
+            for (int i = 0; i < 3; i++)
+                fresh.Add(accelerator.Allocate1D<byte>(Chunk));
+            foreach (var b in fresh)
+                b.MemSetToZero();
+            await accelerator.SynchronizeAsync();
+            accelerator.TryGetFreeMemory(out long after);
+
+            if (holder.Reclaimed < Chunk)
+                throw new Exception($"holder gave back {holder.Reclaimed / 1048576} MiB; expected at least one {Chunk / 1048576} MiB chunk");
+            // Allow half a chunk of slack for the driver's own bookkeeping; a spill leaves far less than this.
+            if (after < Headroom - Chunk / 2)
+                throw new Exception($"free device memory fell to {after / 1048576} MiB, below the {Headroom / 1048576} MiB headroom: the allocations spilled");
+        }
+        finally
+        {
+            accelerator.UnregisterReclaimer(holder);
+            accelerator.DeviceMemoryHeadroomBytes = null;
+            foreach (var b in fresh) b.Dispose();
+            holder.DisposeAll();
+        }
+    });
+
+    /// <summary>The least recently used holder gives memory back first; the active one keeps its buffers.</summary>
+    [TestMethod]
+    public async Task Tests_MemoryPressure_LeastRecentlyUsedHolderGivesBackFirst() =>
+        await RunTest(async accelerator =>
+    {
+        const long Chunk = 16L * 1024 * 1024;
+        var idle = new IdleMemoryHolder { LastUsedTimestamp = 100 };
+        var active = new IdleMemoryHolder { LastUsedTimestamp = 200 };
+        try
+        {
+            for (int i = 0; i < 2; i++)
+            {
+                idle.Idle.Add(accelerator.Allocate1D<byte>(Chunk));
+                active.Idle.Add(accelerator.Allocate1D<byte>(Chunk));
+            }
+            // Registered active-first so list order cannot pass for LRU order.
+            accelerator.RegisterReclaimer(active);
+            accelerator.RegisterReclaimer(idle);
+            long freed = accelerator.ReclaimDeviceMemory(Chunk + Chunk / 2);
+            if (freed != 2 * Chunk || idle.Reclaimed != 2 * Chunk || active.Reclaimed != 0)
+                throw new Exception($"freed {freed}, least recent gave {idle.Reclaimed}, most recent gave {active.Reclaimed}; " +
+                                    $"expected the least recent to give both its chunks and the most recent none");
+            freed = accelerator.ReclaimDeviceMemory(Chunk);
+            if (freed != Chunk || active.Reclaimed != Chunk)
+                throw new Exception($"second reclaim freed {freed}; the most recent holder should give one chunk once the other is empty");
+        }
+        finally
+        {
+            accelerator.UnregisterReclaimer(idle);
+            accelerator.UnregisterReclaimer(active);
+            idle.DisposeAll();
+            active.DisposeAll();
+        }
+        await Task.CompletedTask;
+    });
 }

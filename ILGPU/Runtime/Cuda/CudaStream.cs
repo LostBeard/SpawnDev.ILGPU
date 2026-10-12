@@ -11,6 +11,7 @@
 
 using System;
 using System.Diagnostics.CodeAnalysis;
+using System.Threading;
 using static ILGPU.Runtime.Cuda.CudaAPI;
 
 namespace ILGPU.Runtime.Cuda
@@ -129,6 +130,23 @@ namespace ILGPU.Runtime.Cuda
             }
             using var binding = Accelerator.BindScoped();
             CudaGraphNativeMethods.BeginCapture(StreamPtr, mode);
+            // While any stream captures, memory-pressure reclaim stands down: a cuMemFree (or cuMemAlloc)
+            // during a Global-mode capture invalidates it and poisons the context (see MemoryPressure).
+            if (!_capturing)
+            {
+                _capturing = true;
+                Interlocked.Increment(ref Accelerator.ActiveStreamCaptures);
+            }
+        }
+
+        private bool _capturing;
+
+        private void CaptureEnded()
+        {
+            if (!_capturing)
+                return;
+            _capturing = false;
+            Interlocked.Decrement(ref Accelerator.ActiveStreamCaptures);
         }
 
         /// <summary>
@@ -141,8 +159,16 @@ namespace ILGPU.Runtime.Cuda
         public CudaGraph EndCapture()
         {
             using var binding = Accelerator.BindScoped();
-            var graph = CudaGraphNativeMethods.EndCapture(StreamPtr);
-            return new CudaGraph((CudaAccelerator)Accelerator, graph);
+            try
+            {
+                var graph = CudaGraphNativeMethods.EndCapture(StreamPtr);
+                return new CudaGraph((CudaAccelerator)Accelerator, graph);
+            }
+            finally
+            {
+                // An invalidated capture throws here, but the stream has still left capture mode.
+                CaptureEnded();
+            }
         }
 
         /// <summary>
@@ -166,6 +192,7 @@ namespace ILGPU.Runtime.Cuda
         /// </summary>
         protected override void DisposeAcceleratorObject(bool disposing)
         {
+            CaptureEnded(); // a stream destroyed mid-capture no longer captures
             if (!responsibleForHandle || streamPtr == IntPtr.Zero)
                 return;
 

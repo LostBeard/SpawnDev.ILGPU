@@ -464,6 +464,13 @@ namespace ILGPU.Runtime.Cuda
             return free;
         }
 
+        /// <summary cref="Accelerator.TryGetFreeMemory(out long)"/>
+        public override bool TryGetFreeMemory(out long freeBytes)
+        {
+            freeBytes = GetFreeMemory();
+            return true;
+        }
+
         #endregion
 
         #region Allocation
