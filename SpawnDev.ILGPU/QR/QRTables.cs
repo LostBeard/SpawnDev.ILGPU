@@ -8,10 +8,30 @@ namespace SpawnDev.ILGPU.QR;
 public static class QRTables
 {
     /// <summary>Error correction level.</summary>
-    public enum ECLevel { L = 0, M = 1, Q = 2, H = 3 }
+    public enum ECLevel
+    {
+        /// <summary>Low: recovers about 7% of codewords.</summary>
+        L = 0,
+        /// <summary>Medium: recovers about 15% of codewords.</summary>
+        M = 1,
+        /// <summary>Quartile: recovers about 25% of codewords.</summary>
+        Q = 2,
+        /// <summary>High: recovers about 30% of codewords.</summary>
+        H = 3
+    }
 
-    /// <summary>Data encoding mode.</summary>
-    public enum Mode { Numeric = 1, Alphanumeric = 2, Byte = 4, Kanji = 8 }
+    /// <summary>Data encoding mode. Each value equals the mode's 4-bit indicator in ISO/IEC 18004.</summary>
+    public enum Mode
+    {
+        /// <summary>Numeric mode (digits 0-9), indicator 0001.</summary>
+        Numeric = 1,
+        /// <summary>Alphanumeric mode (0-9, A-Z, space, $ % * + - . / :), indicator 0010.</summary>
+        Alphanumeric = 2,
+        /// <summary>Byte mode (8-bit data), indicator 0100.</summary>
+        Byte = 4,
+        /// <summary>Kanji mode (Shift JIS double-byte), indicator 1000.</summary>
+        Kanji = 8
+    }
 
     /// <summary>
     /// Error correction block info for a specific version + EC level.

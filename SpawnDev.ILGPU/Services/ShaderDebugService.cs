@@ -31,19 +31,33 @@ public class ShaderDebugService : IAsyncBackgroundService, IAsyncDisposable
     private const string STORE_NAME = "handles";
     private const string KEY = "debugFolder";
 
+    /// <summary>The selected (or restored) debug output folder, or null when none is set.</summary>
     public FileSystemDirectoryHandle? DebugDirectory => _debugDir;
     /// <summary>The current run's timestamped subfolder (created on first shader compile or StartNewRun).</summary>
     public FileSystemDirectoryHandle? CurrentRunDirectory => _runDir;
     /// <summary>Timestamp string for the current run (e.g., "2026-03-24_14-32-15").</summary>
     public string? CurrentRunTimestamp { get; private set; }
+    /// <summary>True when a debug folder is set (picked or restored from IndexedDB).</summary>
     public bool HasDebugFolder => _debugDir != null;
+    /// <summary>Read permission on the restored folder, checked without prompting during restore.</summary>
     public bool HasReadPermission { get; private set; }
+    /// <summary>True when the folder is writable. Shaders are only dumped while this is true.</summary>
     public bool HasWritePermission { get; private set; }
+    /// <summary>
+    /// True when a folder is set but not writable (typically after a restore in a new session); call
+    /// <see cref="RequestWritePermissionAsync"/> from a user gesture to grant it.
+    /// </summary>
     public bool NeedsPermissionGrant => _debugDir != null && !HasWritePermission;
+    /// <summary>Name of the debug folder, or null when none is set.</summary>
     public string? FolderName { get; private set; }
 
     private bool _restoreAttempted;
 
+    /// <summary>
+    /// Creates the service and subscribes to the WebGPU, Wasm and WebGL compile events so every compiled
+    /// kernel is dumped once a writable folder is set. The saved folder is restored by <see cref="Ready"/>.
+    /// </summary>
+    /// <param name="js">The SpawnJS runtime.</param>
     public ShaderDebugService(SpawnJSRuntime js)
     {
         _js = js;
@@ -380,6 +394,10 @@ prompted for filesystem permission and the folder is automatically reconnected.
         DisposeRunDirs();
     }
 
+    /// <summary>
+    /// Unsubscribes from the backend compile events and releases the folder handles. The saved folder in
+    /// IndexedDB is kept.
+    /// </summary>
     public async ValueTask DisposeAsync()
     {
         WebGPUBackend.OnShaderCompiled -= OnWGSLCompiled;

@@ -139,13 +139,19 @@ namespace SpawnDev.ILGPU.Wasm.Backend
     /// </summary>
     public class WasmParamInfo
     {
+        /// <summary>Index of the parameter in the IR kernel method's parameter list.</summary>
         public int Index { get; set; }
+        /// <summary>Generated name for diagnostics (<c>param{Index}</c>).</summary>
         public string Name { get; set; } = "";
+        /// <summary>True if the parameter is an array view (passed as a linear-memory pointer).</summary>
         public bool IsView { get; set; }
         /// <summary>User body struct (e.g. TensorView) with embedded views expanded to flat view args.</summary>
         public bool IsBodyStruct { get; set; }
+        /// <summary>True if the parameter is passed by value (a primitive or a struct), not as a view.</summary>
         public bool IsScalar { get; set; }
+        /// <summary>The Wasm value type of the parameter's function argument (i32 for views and structs).</summary>
         public byte WasmType { get; set; } = WasmOpCodes.I32;
+        /// <summary>For views: the element size in bytes from the IR element type. Default 4.</summary>
         public int ElementSize { get; set; } = 4;
 
         /// <summary>

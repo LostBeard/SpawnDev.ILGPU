@@ -1799,15 +1799,26 @@ uint _f32_to_e2m1(float f) {
         /// Gets the full emulation library based on which features are enabled.
         /// Overload that defaults <c>includeF16</c> to false for source compatibility.
         /// </summary>
+        /// <param name="includeF64">When true, emits the f64 emulation helpers.</param>
+        /// <param name="useOzakiF64">When true (and <paramref name="includeF64"/>), emits the Ozaki vec4 f64 helpers instead of the Dekker vec2 ones.</param>
+        /// <param name="includeI64">When true, emits the i64/u64 (uvec2) emulation helpers.</param>
+        /// <returns>The concatenated GLSL helper source.</returns>
         public static string GetEmulationLibrary(bool includeF64, bool useOzakiF64, bool includeI64)
             => GetEmulationLibrary(includeF64, useOzakiF64, includeI64, includeF16: false);
 
         /// <summary>
         /// Gets the full emulation library based on which features are enabled.
         /// </summary>
+        /// <param name="includeF64">When true, emits the f64 emulation helpers.</param>
+        /// <param name="useOzakiF64">When true (and <paramref name="includeF64"/>), emits the Ozaki vec4 f64 helpers instead of the Dekker vec2 ones.</param>
+        /// <param name="includeI64">When true, emits the i64/u64 (uvec2) emulation helpers.</param>
         /// <param name="includeF16">When true, emits the Float16 bit-conversion helpers
         /// (<c>_f16_to_f32</c>, <c>_f32_to_f16</c>). WebGL has no native f16, so this is
         /// the only f16 path available on this backend.</param>
+        /// <param name="includeBF16">When true, emits the BFloat16 conversion helpers.</param>
+        /// <param name="includeFP8">When true, emits the FP8 (E4M3/E5M2) conversion helpers.</param>
+        /// <param name="includeFP4">When true, emits the FP4 (E2M1) conversion helpers.</param>
+        /// <returns>The concatenated GLSL helper source.</returns>
         public static string GetEmulationLibrary(bool includeF64, bool useOzakiF64, bool includeI64, bool includeF16, bool includeBF16 = false, bool includeFP8 = false, bool includeFP4 = false)
         {
             var sb = new System.Text.StringBuilder();

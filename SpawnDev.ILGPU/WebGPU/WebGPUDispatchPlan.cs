@@ -53,7 +53,7 @@ public sealed class WebGPUDispatchPlan : IDisposable
     /// captures two plans at two values of a loop variable (e.g. an LLM decode step at pastLen P and
     /// P+1) can diff the snapshots to find every scalar byte and copy offset that depends on the
     /// variable, then patch them per replay (<see cref="PatchScalarInt"/> /
-    /// <see cref="PatchCopyDstOffsets"/>).
+    /// <see cref="PatchCopyDstOffsetsAsync"/>).
     /// </summary>
     public bool CaptureScalarSnapshots { get; set; }
 

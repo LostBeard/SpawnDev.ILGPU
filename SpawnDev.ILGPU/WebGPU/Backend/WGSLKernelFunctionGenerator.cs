@@ -413,17 +413,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             ScanMethodCallsRecursive(Method, paramIndex => paramIndex, visited);
         }
 
-        /// <summary>
-        /// Walk all Store / GenericAtomic ops in the kernel (and all helper methods it
-        /// calls) and identify body-struct view fields that are the WRITE TARGET. These
-        /// fields cannot participate in coalesce — the coalesce path concatenates input
-        /// data into a shared buffer at host-time and binds it once; output writes
-        /// within the kernel land in that shared buffer rather than in the original
-        /// output ArrayView's GPU storage. The host doesn't copy back, so the output
-        /// buffer stays at zero. Surfaced 2026-05-05 by Tests23_RegisterHeavyBody —
-        /// 12 ArrayView<int> fields plus an Out field, all coalesced together, kernel
-        /// writes Out[0]=sum into the shared buffer instead of bOut.
-        /// </summary>
+        // Walk all Store / GenericAtomic ops in the kernel (and all helper methods it
+        // calls) and identify body-struct view fields that are the WRITE TARGET. These
+        // fields cannot participate in coalesce — the coalesce path concatenates input
+        // data into a shared buffer at host-time and binds it once; output writes
+        // within the kernel land in that shared buffer rather than in the original
+        // output ArrayView's GPU storage. The host doesn't copy back, so the output
+        // buffer stays at zero. Surfaced 2026-05-05 by Tests23_RegisterHeavyBody —
+        // 12 ArrayView<int> fields plus an Out field, all coalesced together, kernel
+        // writes Out[0]=sum into the shared buffer instead of bOut.
         /// <summary>
         /// Scans the kernel IR (and recursively any reachable NoInlining helpers) for
         /// `MethodCall` nodes and records the observed `MemoryAddressSpace` for each
@@ -7949,7 +7947,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         /// <summary>
         /// Kernel-specific GetViewLength: resolves the view back to a kernel parameter
-        /// and emits i32(arrayLength(&paramN)) for storage buffer bindings.
+        /// and emits i32(arrayLength(&amp;paramN)) for storage buffer bindings.
         /// </summary>
         public override void GenerateCode(global::ILGPU.IR.Values.GetViewLength value)
         {

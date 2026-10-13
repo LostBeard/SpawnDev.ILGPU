@@ -39,14 +39,14 @@ namespace SpawnDev.ILGPU.WebGPU.Algorithms
             typeof(WebGPUWarpExtensions);
 
         /// <summary>
-        /// The <see cref="ILGPU.Algorithms.GroupExtensions"/> type.
+        /// The <see cref="global::ILGPU.Algorithms.GroupExtensions"/> type.
         /// </summary>
         [DynamicallyAccessedMembers(global::ILGPU.Util.TrimmingAnnotations.PublicMethods)]
         internal static readonly Type GroupExtensionsType =
             typeof(global::ILGPU.Algorithms.GroupExtensions);
 
         /// <summary>
-        /// The <see cref="ILGPU.Algorithms.WarpExtensions"/> type.
+        /// The <see cref="global::ILGPU.Algorithms.WarpExtensions"/> type.
         /// </summary>
         [DynamicallyAccessedMembers(global::ILGPU.Util.TrimmingAnnotations.PublicMethods)]
         internal static readonly Type WarpExtensionsType =

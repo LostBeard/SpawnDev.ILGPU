@@ -55,6 +55,38 @@ public class AcceleratorRequirementsTests
         return Task.CompletedTask;
     }
 
+    // RequiresSubGroups is a correctness gate (2026-10-13): the CPU accelerator simulates warps and CUDA has them, so
+    // both pass; until then CPU was rejected. Checked against a real Warp.Shuffle run on the CPU accelerator, so the
+    // gate is tied to what the backend actually does, not to the table it is written from.
+    [TestMethod]
+    public Task Satisfies_SubGroups_PassesOnCpuAndCuda()
+    {
+        using var context = Context.CreateDefault();
+        var req = new AcceleratorRequirements { RequiresSubGroups = true };
+        foreach (var device in context.Devices.Where(d => d.AcceleratorType is AcceleratorType.CPU or AcceleratorType.Cuda))
+            if (!device.Satisfies(req))
+                throw new Exception($"{device.AcceleratorType} {device.Name} must satisfy RequiresSubGroups.");
+
+        var cpu = context.Devices.First(d => d.AcceleratorType == AcceleratorType.CPU);
+        using var acc = cpu.CreateAccelerator(context);
+        int warp = acc.WarpSize, n = warp * 4;
+        using var output = acc.Allocate1D<int>(n);
+        var kernel = acc.LoadStreamKernel<ArrayView<int>>(view =>
+        {
+            int lane = Warp.LaneIdx;
+            // Each lane reads its mirror lane's value: lane L gets (warp - 1 - L) * 10 of the same warp.
+            int v = Warp.Shuffle(lane * 10, Warp.WarpSize - 1 - lane);
+            view[Grid.GlobalIndex.X] = v;
+        });
+        kernel(new KernelConfig(4, warp), output.View);
+        acc.Synchronize();
+        var got = output.GetAsArray1D();
+        for (int i = 0; i < n; i++)
+            if (got[i] != (warp - 1 - i % warp) * 10)
+                throw new Exception($"CPU Warp.Shuffle wrong at {i}: got {got[i]}, expected {(warp - 1 - i % warp) * 10} (warp size {warp})");
+        return Task.CompletedTask;
+    }
+
     [TestMethod]
     public Task Satisfies_LowPrecisionFloats_AllDevicesPass()
     {

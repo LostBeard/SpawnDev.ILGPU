@@ -259,6 +259,16 @@ Represents a WebGPU device available in the browser.
 
 `GetDevicesAsync()` lists a distinct high-performance adapter first (devices are compared on vendor, architecture, device and description), then the default adapter.
 
+### WebGPUILGPUDevice
+
+The ILGPU device `context.GetWebGPUDevices()` returns.
+
+| Member | Type | Description |
+|--------|------|-------------|
+| `CreateAcceleratorAsync(context, options?)` | `Task<WebGPUAccelerator>` | Create an accelerator. More than one can be created from the same device (each later one requests a fresh adapter for the same GPU) |
+| `AdapterSupportsShaderF16` / `AdapterSupportsSubgroups` | `bool` | The adapter's features, known before any accelerator exists; `AcceleratorRequirements` selection reads them |
+| `NativeDevice` | `WebGPUDevice` | The JS-side adapter wrapper (limits, `SupportedFeatures`, `PrintInfo`) |
+
 ### WebGPUNativeAccelerator
 
 Low-level WebGPU operations — for advanced users who need direct GPU API access.

@@ -91,7 +91,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 // laptop: both requests returned the Intel), so this only takes effect in browsers that
                 // honor it. The user-side switch there is Windows Graphics settings or Chrome's
                 // --force_high_performance_gpu launch flag.
-                if (adoptedHighPerf) devices.Add(new WebGPUDevice(highPerfAdapter!, devices.Count));
+                if (adoptedHighPerf) devices.Add(new WebGPUDevice(highPerfAdapter!, devices.Count, "high-performance"));
                 if (adapter != null) devices.Add(new WebGPUDevice(adapter, devices.Count));
 
                 // On a single-GPU machine the high-performance request resolves to the SAME physical
@@ -160,9 +160,10 @@ namespace SpawnDev.ILGPU.WebGPU
             "dual-source-blending",
         };
 
-        internal WebGPUDevice(GPUAdapter adapter, int deviceIndex)
+        internal WebGPUDevice(GPUAdapter adapter, int deviceIndex, string? powerPreference = null)
         {
             _adapter = adapter ?? throw new ArgumentNullException(nameof(adapter));
+            _powerPreference = powerPreference;
             _deviceIndex = deviceIndex;
 
             // Get adapter info safely.
@@ -241,6 +242,51 @@ namespace SpawnDev.ILGPU.WebGPU
         /// Returns the native WebGPU adapter.
         /// </summary>
         public GPUAdapter Adapter => _adapter;
+
+        private readonly string? _powerPreference;
+        private bool _adapterTaken;
+
+        /// <summary>
+        /// The adapter to create a <c>GPUDevice</c> from. A <c>GPUAdapter</c> can create ONE device: after
+        /// <c>requestDevice</c> it is "consumed" and another <c>requestDevice</c> rejects. The first call returns
+        /// the enumerated <see cref="Adapter"/> (still owned by this object); later calls request a fresh adapter
+        /// with the same power preference, which the caller owns and must dispose once its device exists.
+        /// Throws if the browser now returns a different GPU (re-enumerate with a new <c>Context</c> then).
+        /// </summary>
+        internal async Task<(GPUAdapter Adapter, bool CallerOwns)> TakeAdapterForDeviceAsync()
+        {
+            if (!_adapterTaken)
+            {
+                _adapterTaken = true;
+                return (_adapter, false);
+            }
+            using var navigator = SpawnJSRuntime.Instance.Get<Navigator>("navigator");
+            using var gpu = navigator.Gpu
+                ?? throw new InvalidOperationException("WebGPU is no longer available in this browser.");
+            var fresh = _powerPreference == null
+                ? await gpu.RequestAdapter()
+                : await gpu.RequestAdapter(new GPURequestAdapterOptions { PowerPreference = _powerPreference });
+            if (fresh == null)
+                throw new InvalidOperationException($"requestAdapter returned null while creating another accelerator on '{Name}'.");
+            string vendor = "Unknown", architecture = "Unknown";
+            bool isFallback = false;
+            try
+            {
+                using var info = fresh.Info;
+                if (!string.IsNullOrWhiteSpace(info?.Vendor)) vendor = info!.Vendor;
+                if (!string.IsNullOrWhiteSpace(info?.Architecture)) architecture = info!.Architecture;
+                isFallback = fresh.IsFallbackAdapter;
+            }
+            catch { }
+            if (vendor != Vendor || architecture != Architecture || isFallback != IsFallbackAdapter)
+            {
+                fresh.Dispose();
+                throw new InvalidOperationException(
+                    $"The browser now returns a different WebGPU adapter ({vendor} {architecture}) than the one this device was " +
+                    $"enumerated with ({Vendor} {Architecture}). Create a new Context to re-enumerate the devices.");
+            }
+            return (fresh, true);
+        }
 
         /// <summary>
         /// Returns the device name.

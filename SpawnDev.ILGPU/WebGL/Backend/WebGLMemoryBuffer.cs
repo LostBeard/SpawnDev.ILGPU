@@ -39,6 +39,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// </summary>
         internal string GlslType { get; set; } = "float";
 
+        /// <summary>
+        /// Allocates the CPU-side backing array and reserves a GL worker buffer id. The worker-side buffer is
+        /// allocated on first use.
+        /// </summary>
+        /// <param name="accelerator">The owning <see cref="WebGLAccelerator"/>.</param>
+        /// <param name="length">Number of elements.</param>
+        /// <param name="elementSize">Element size in bytes.</param>
+        /// <param name="bitsPerElement">Bits per element for packed sub-byte types, or 0.</param>
+        /// <exception cref="ArgumentOutOfRangeException">The size exceeds <see cref="int.MaxValue"/> bytes.</exception>
         public WebGLMemoryBuffer(Accelerator accelerator, long length, int elementSize, int bitsPerElement = 0)
             : base(accelerator, length, elementSize, bitsPerElement)
         {
@@ -68,6 +77,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             _backingArray = new Uint8Array(newBuffer);
         }
 
+        /// <summary>
+        /// Reads the buffer back from the GL worker (after pending dispatches) and returns the bytes as a JS
+        /// <see cref="Uint8Array"/>, without copying them into the .NET heap.
+        /// </summary>
+        /// <param name="sourceByteOffset">Byte offset to start reading at.</param>
+        /// <param name="copyBytes">Number of bytes to read, or null for the rest of the buffer.</param>
+        /// <returns>A Uint8Array the caller should dispose.</returns>
         public Task<Uint8Array> CopyToHostUint8ArrayAsync(long sourceByteOffset = 0, long? copyBytes = null)
         {
             // Request readback from the GL worker first
@@ -95,6 +111,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             CommitHostWrite((int)targetByteOffset, (int)srcBytes.Length);
         }
 
+        /// <summary>
+        /// Copies into this buffer. A CPU source is copied zero-copy from WASM linear memory into the backing array
+        /// and uploaded to the GL worker (now if the buffer is already there, otherwise before the next dispatch);
+        /// a WebGL source is copied inside the GL worker (ordered with dispatches).
+        /// </summary>
+        /// <param name="stream">The accelerator stream.</param>
+        /// <param name="source">The source byte range.</param>
+        /// <param name="destination">The byte range of this buffer to write.</param>
+        /// <exception cref="NotSupportedException">The source is neither CPU nor WebGL memory.</exception>
         protected override void CopyFrom(
             AcceleratorStream stream,
             in ArrayView<byte> source,
@@ -223,6 +248,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 chunkSizeInBytes, cancellationToken);
         }
 
+        /// <summary>
+        /// Copies from this buffer. A WebGL destination is copied inside the GL worker (ordered with dispatches).
+        /// A CPU destination is read from the CPU-side backing array, which is stale after a kernel write; use
+        /// <c>CopyToHostAsync</c> for GPU-&gt;CPU readback.
+        /// </summary>
+        /// <param name="stream">The accelerator stream.</param>
+        /// <param name="source">The byte range of this buffer to read.</param>
+        /// <param name="destination">The destination byte range.</param>
+        /// <exception cref="NotSupportedException">The destination is neither CPU nor WebGL memory.</exception>
         protected override void CopyTo(
             AcceleratorStream stream,
             in ArrayView<byte> source,
@@ -263,6 +297,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
+        /// <summary>
+        /// Fills <paramref name="view"/> with <paramref name="value"/> in the CPU-side backing array, then uploads the
+        /// range to the GL worker (or marks the buffer for upload if it is not in the worker yet).
+        /// </summary>
+        /// <param name="stream">The accelerator stream.</param>
+        /// <param name="value">The byte value to write.</param>
+        /// <param name="view">The byte range of this buffer to fill.</param>
         protected override void MemSet(
             AcceleratorStream stream,
             byte value,
@@ -296,6 +337,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         }
 
 
+        /// <summary>Frees the GPU-resident buffer in the GL worker and releases the CPU-side backing array.</summary>
+        /// <param name="disposing">True when disposing managed resources.</param>
         protected override void DisposeAcceleratorObject(bool disposing)
         {
             if (_disposed) return;

@@ -118,6 +118,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         #region Methods
 
+        /// <summary>
+        /// Returns the WGSL type name for a basic value type. 64-bit types use the emulated aliases
+        /// (<c>emu_i64</c>, <c>emu_f64</c>) when emulation is on for this kernel; sub-word integers widen to
+        /// <c>i32</c>; bf16/FP8/FP4 (and f16 without <c>shader-f16</c>) are held as <c>f32</c>.
+        /// </summary>
+        /// <param name="type">The basic value type.</param>
+        /// <returns>The WGSL type name, or null for an unmapped type.</returns>
         public string GetBasicValueType(BasicValueType type)
         {
             // Use per-kernel overrides if set, otherwise fall back to global options
@@ -142,6 +149,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             };
         }
 
+        /// <summary>
+        /// Returns the WGSL type name for an arithmetic basic value type. Unsigned types map to <c>u32</c> (or
+        /// <c>emu_u64</c>); 64-bit types use the emulated aliases when emulation is on; sub-word types widen to
+        /// 32 bits; bf16/FP8/FP4 (and f16 without <c>shader-f16</c>) are held as <c>f32</c>.
+        /// </summary>
+        /// <param name="type">The arithmetic basic value type.</param>
+        /// <returns>The WGSL type name, or null for an unmapped type.</returns>
         public string GetBasicValueType(ArithmeticBasicValueType type)
         {
             // Use per-kernel overrides if set, otherwise fall back to global options
@@ -261,6 +275,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             return name;
         }
 
+        /// <summary>
+        /// Writes a WGSL <c>struct</c> definition (fields <c>field_0</c>, <c>field_1</c>, ...) for every mapped
+        /// structure type that is not a built-in WGSL type, including struct types first registered while
+        /// emitting other definitions.
+        /// </summary>
+        /// <param name="builder">The target builder.</param>
         public void GenerateTypeDefinitions(StringBuilder builder)
         {
             // Emit struct definitions.
@@ -327,6 +347,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         #endregion
 
+        /// <summary>Disposes the type map's reader/writer lock.</summary>
+        /// <param name="disposing">True when disposing managed resources.</param>
         protected override void Dispose(bool disposing)
         {
             readerWriterLock.Dispose();

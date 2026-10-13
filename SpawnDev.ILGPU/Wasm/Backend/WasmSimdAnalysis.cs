@@ -36,6 +36,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// <summary>Total IR values examined.</summary>
         public int TotalValues { get; init; }
 
+        /// <summary>Formats the result as <c>Vectorizable=... (Reason); laneVariant=N/Total</c>.</summary>
+        /// <returns>A one-line diagnostic string.</returns>
         public override string ToString() =>
             $"Vectorizable={Vectorizable} ({Reason}); laneVariant={LaneVariantCount}/{TotalValues}";
     }

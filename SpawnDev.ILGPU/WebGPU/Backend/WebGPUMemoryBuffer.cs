@@ -6,10 +6,20 @@ using System.Runtime.InteropServices;
 
 namespace SpawnDev.ILGPU.WebGPU.Backend
 {
+    /// <summary>
+    /// ILGPU <see cref="MemoryBuffer"/> backed by a WebGPU <c>GPUBuffer</c> (sizes padded to 4 bytes).
+    /// GPU-&gt;CPU readback is async-only (<c>CopyToHostAsync</c>); uploads and GPU-&gt;GPU copies are synchronous and
+    /// ordered with pending dispatches.
+    /// </summary>
     public class WebGPUMemoryBuffer : MemoryBuffer, IBrowserMemoryBuffer
     {
         private readonly WebGPUBuffer<byte>? _buffer;
 
+        /// <summary>Allocates the GPU buffer through the accelerator.</summary>
+        /// <param name="accelerator">The owning accelerator.</param>
+        /// <param name="length">Number of elements.</param>
+        /// <param name="elementSize">Element size in bytes.</param>
+        /// <param name="bitsPerElement">Bits per element for packed sub-byte types, or 0.</param>
         public WebGPUMemoryBuffer(WebGPUAccelerator accelerator, long length, int elementSize, int bitsPerElement = 0)
             : base(accelerator, length, elementSize, bitsPerElement)
         {
@@ -26,6 +36,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // _buffer intentionally left null — subclass overrides NativeBuffer
         }
 
+        /// <summary>
+        /// Reads the buffer back from the GPU and returns the bytes as a JS <see cref="Uint8Array"/>, without copying
+        /// them into the .NET heap.
+        /// </summary>
+        /// <param name="sourceByteOffset">Byte offset to start reading at.</param>
+        /// <param name="copyBytes">Number of bytes to read, or null for the rest of the buffer.</param>
+        /// <returns>A Uint8Array the caller should dispose.</returns>
         public Task<Uint8Array> CopyToHostUint8ArrayAsync(long sourceByteOffset = 0, long? copyBytes = null) => NativeBuffer.CopyToHostUint8ArrayAsync(sourceByteOffset, copyBytes);
 
         /// <inheritdoc/>
@@ -40,6 +57,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public virtual WebGPUBuffer<byte> NativeBuffer => _buffer!;
 
         // Implementation of abstract members
+        /// <summary>
+        /// Copies into this buffer. A CPU source is uploaded zero-copy from WASM linear memory: small uploads are
+        /// recorded in the pending batch, larger ones flush pending work and use <c>queue.writeBuffer</c>. A WebGPU
+        /// source is recorded as an ordered <c>copyBufferToBuffer</c>.
+        /// </summary>
+        /// <param name="stream">The accelerator stream.</param>
+        /// <param name="source">The source byte range.</param>
+        /// <param name="destination">The byte range of this buffer to write.</param>
+        /// <exception cref="InvalidOperationException">A non-CPU source is not a WebGPU buffer.</exception>
         protected override void CopyFrom(AcceleratorStream stream, in ArrayView<byte> source, in ArrayView<byte> destination)
         {
             if (source.GetAcceleratorType() == AcceleratorType.CPU)
@@ -120,6 +146,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+        /// <summary>
+        /// Copies from this buffer to another WebGPU buffer as an ordered <c>copyBufferToBuffer</c>. GPU-&gt;CPU copies
+        /// are async-only on WebGPU.
+        /// </summary>
+        /// <param name="stream">The accelerator stream.</param>
+        /// <param name="source">The byte range of this buffer to read.</param>
+        /// <param name="destination">The destination byte range.</param>
+        /// <exception cref="NotSupportedException">The destination is not a WebGPU buffer (use <c>CopyToHostAsync</c>).</exception>
         protected override void CopyTo(AcceleratorStream stream, in ArrayView<byte> source, in ArrayView<byte> destination)
         {
             // GPU to GPU: ILGPU calls CopyTo on the SOURCE buffer (view.CopyTo(target)), and the target can be another
@@ -229,6 +263,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 chunkSizeInBytes, cancellationToken);
         }
 
+        /// <summary>
+        /// Fills <paramref name="view"/> with <paramref name="value"/>. Zero is recorded as an ordered
+        /// <c>clearBuffer</c> in the pending batch; other values flush pending work and use <c>queue.writeBuffer</c>.
+        /// The length is padded to a multiple of 4 bytes.
+        /// </summary>
+        /// <param name="stream">The accelerator stream.</param>
+        /// <param name="value">The byte value to write.</param>
+        /// <param name="view">The byte range of this buffer to fill.</param>
         protected override void MemSet(AcceleratorStream stream, byte value, in ArrayView<byte> view)
         {
             var length = (int)view.Length;
@@ -264,6 +306,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
         // DisposeAcceleratorObject is protected (not protected internal) in base AcceleratorObject
+        /// <summary>Submits any pending accelerator work that may reference this buffer, then destroys the GPU buffer.</summary>
+        /// <param name="disposing">True when disposing managed resources; nothing is done otherwise.</param>
         protected override void DisposeAcceleratorObject(bool disposing)
         {
             if (!disposing) return;

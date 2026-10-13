@@ -37,27 +37,43 @@ namespace SpawnDev.ILGPU
     public readonly struct GpuMatrix4x4
     {
         // Row 0 (from .NET column 0)
+        /// <summary>Row 0, column 0 (from .NET <c>M11</c>).</summary>
         public readonly float R00;
+        /// <summary>Row 0, column 1 (from .NET <c>M21</c>).</summary>
         public readonly float R01;
+        /// <summary>Row 0, column 2 (from .NET <c>M31</c>).</summary>
         public readonly float R02;
+        /// <summary>Row 0, column 3: X translation (from .NET <c>M41</c>).</summary>
         public readonly float R03;
 
         // Row 1 (from .NET column 1)
+        /// <summary>Row 1, column 0 (from .NET <c>M12</c>).</summary>
         public readonly float R10;
+        /// <summary>Row 1, column 1 (from .NET <c>M22</c>).</summary>
         public readonly float R11;
+        /// <summary>Row 1, column 2 (from .NET <c>M32</c>).</summary>
         public readonly float R12;
+        /// <summary>Row 1, column 3: Y translation (from .NET <c>M42</c>).</summary>
         public readonly float R13;
 
         // Row 2 (from .NET column 2)
+        /// <summary>Row 2, column 0 (from .NET <c>M13</c>).</summary>
         public readonly float R20;
+        /// <summary>Row 2, column 1 (from .NET <c>M23</c>).</summary>
         public readonly float R21;
+        /// <summary>Row 2, column 2 (from .NET <c>M33</c>).</summary>
         public readonly float R22;
+        /// <summary>Row 2, column 3: Z translation (from .NET <c>M43</c>).</summary>
         public readonly float R23;
 
         // Row 3 (from .NET column 3)
+        /// <summary>Row 3, column 0 (from .NET <c>M14</c>).</summary>
         public readonly float R30;
+        /// <summary>Row 3, column 1 (from .NET <c>M24</c>).</summary>
         public readonly float R31;
+        /// <summary>Row 3, column 2 (from .NET <c>M34</c>).</summary>
         public readonly float R32;
+        /// <summary>Row 3, column 3 (from .NET <c>M44</c>).</summary>
         public readonly float R33;
 
         /// <summary>

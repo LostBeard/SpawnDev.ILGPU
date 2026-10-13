@@ -470,6 +470,9 @@ fn f64_round_away(v: emu_f64) -> emu_f64 {
 }
 ";
 
+        /// <summary>
+        /// WGSL type alias for Dekker emulated emu_f64 (a vec2 of f32: high + low).
+        /// </summary>
         public const string F64TypeAlias = "alias emu_f64 = vec2<f32>;";
 
         /// <summary>
@@ -1629,9 +1632,14 @@ fn _f32_to_e2m1(f: f32) -> u32 {
         /// <summary>
         /// Gets the full emulation library based on which features are enabled.
         /// </summary>
+        /// <param name="includeF64">When true, emits the emu_f64 type alias and f64 helpers.</param>
+        /// <param name="useOzakiF64">When true (and <paramref name="includeF64"/>), uses the Ozaki vec4 f64 library instead of Dekker vec2.</param>
+        /// <param name="includeI64">When true, emits the emu_i64/emu_u64 type aliases and i64 helpers.</param>
         /// <param name="includeF16">When true, emits the Float16 bit-conversion helpers
         /// (<c>_f16_to_f32</c>, <c>_f32_to_f16</c>). Required when the kernel touches
         /// Float16 and the browser lacks the <c>shader-f16</c> feature.</param>
+        /// <param name="includeBF16">When true, emits the BFloat16 conversion helpers.</param>
+        /// <returns>The concatenated WGSL helper source.</returns>
         public static string GetEmulationLibrary(bool includeF64, bool useOzakiF64, bool includeI64, bool includeF16, bool includeBF16 = false)
         {
             var sb = new System.Text.StringBuilder();
@@ -1725,9 +1733,18 @@ fn _f32_to_e2m1(f: f32) -> u32 {
         /// Scans <paramref name="kernelBody"/> for emulation function calls and
         /// includes only the needed subset, preserving dependency order.
         /// </summary>
+        /// <param name="includeF64">When true, emits the emu_f64 type alias and ALL f64 helpers (not trimmed:
+        /// helper function bodies that call them are not yet in <paramref name="kernelBody"/>).</param>
+        /// <param name="useOzakiF64">When true (and <paramref name="includeF64"/>), uses the Ozaki vec4 f64 library instead of Dekker vec2.</param>
+        /// <param name="includeI64">When true, emits the emu_i64/emu_u64 type aliases and ALL i64 helpers (not trimmed).</param>
         /// <param name="includeF16">When true, considers the Float16 bit-conversion
         /// helpers (<c>_f16_to_f32</c>, <c>_f32_to_f16</c>) for inclusion. Each is
         /// emitted only if the kernel body actually calls it.</param>
+        /// <param name="kernelBody">The generated WGSL text scanned for calls to the trimmed helper families (f16, bf16, FP8, FP4).</param>
+        /// <param name="includeBF16">When true, emits the BFloat16 helpers the kernel body calls.</param>
+        /// <param name="includeFP8">When true, emits the FP8 (E4M3/E5M2) helpers the kernel body calls.</param>
+        /// <param name="includeFP4">When true, emits the FP4 (E2M1) helpers the kernel body calls.</param>
+        /// <returns>The WGSL helper source.</returns>
         public static string GetMinimalEmulationLibrary(
             bool includeF64, bool useOzakiF64, bool includeI64, bool includeF16,
             string kernelBody, bool includeBF16 = false, bool includeFP8 = false,

@@ -278,6 +278,10 @@ namespace SpawnDev.ILGPU.Wasm
         /// <param name="accelerator">The associated accelerator.</param>
         /// <param name="length">The number of elements to allocate.</param>
         /// <param name="elementSize">The size of each element in bytes.</param>
+        /// <param name="bitsPerElement">
+        /// Bits per element for packed sub-byte types (for example 4 for QInt4), or 0 for whole-byte
+        /// types. Packed buffers allocate <c>ceil(length * bitsPerElement / 8)</c> bytes.
+        /// </param>
         public WasmMemoryBuffer(
             Accelerator accelerator,
             long length,
@@ -501,6 +505,16 @@ namespace SpawnDev.ILGPU.Wasm
                 chunkSizeInBytes, cancellationToken);
         }
 
+        /// <summary>
+        /// Waits for the accelerator's pending dispatches (<c>SynchronizeAsync</c>), then returns a
+        /// <see cref="Uint8Array"/> over this buffer's <see cref="SharedArrayBuffer"/>. The result is a
+        /// view of the buffer's memory, not a copy: later writes to the buffer are visible through it.
+        /// Returns an empty array when the buffer has no backing store.
+        /// </summary>
+        /// <param name="sourceByteOffset">Byte offset of the first byte to expose. Default 0.</param>
+        /// <param name="copyBytes">Number of bytes to expose; null means to the end of the buffer.</param>
+        /// <returns>A byte view over the requested range.</returns>
+        /// <exception cref="ArgumentOutOfRangeException">The range lies outside the buffer.</exception>
         public async Task<Uint8Array> CopyToHostUint8ArrayAsync(long sourceByteOffset = 0, long? copyBytes = null)
         {
             if (SharedBuffer == null) return new Uint8Array();

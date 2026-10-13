@@ -117,7 +117,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             /// The maximum workgroup size for this kernel, derived from KernelSpecialization.
             /// When set, this overrides the hardcoded default workgroup sizes (64 for 1D, etc.)
             /// to match the actual group dimension used during kernel compilation.
-            /// This is critical for explicitly grouped kernels where SpecializedValue<int>(groupDim)
+            /// This is critical for explicitly grouped kernels where SpecializedValue&lt;int&gt;(groupDim)
             /// triggers recompilation with a specific group size that must match @workgroup_size.
             /// </summary>
             public int? MaxWorkgroupSize { get; }
@@ -217,7 +217,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             /// at signature emit + LEA emit time.
             ///
             /// The fix: when N coalesced ArrayView params are passed positionally to a
-            /// NoInlining helper, each "let v_X = &leader_binding;" alias points to the
+            /// NoInlining helper, each "let v_X = &amp;leader_binding;" alias points to the
             /// SAME WGSL ptr — Tint rejects with "invalid aliased pointer argument" or
             /// (more subtly) the helper reads from the same slot N times because the
             /// kernel-side per-member offset isn't passed across the call.
@@ -225,8 +225,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             /// Fix shape: helper signature collapses N coalesced same-group args into 1
             /// LEADER ptr + N i32 offset args. The kernel call site emits the leader ptr
             /// ONCE and the per-arg offset values per member. The helper's LEA on each
-            /// coalesced param uses `&(*leaderPtr)[offsetArg + idxExpr]` instead of
-            /// `&(*p_X)[idxExpr]`. (Local.15+ helper-sig coalesce-aware emit, 2026-05-05.)
+            /// coalesced param uses `&amp;(*leaderPtr)[offsetArg + idxExpr]` instead of
+            /// `&amp;(*p_X)[idxExpr]`. (Local.15+ helper-sig coalesce-aware emit, 2026-05-05.)
             /// </summary>
             public Dictionary<(Method method, int paramIdx), HelperParamCoalesceEntry> HelperParamCoalesceInfo { get; } = new();
         }
@@ -261,15 +261,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         public class Variable
         {
+            /// <summary>Creates a variable.</summary>
+            /// <param name="name">The WGSL identifier.</param>
+            /// <param name="type">The WGSL type name.</param>
             public Variable(string name, string type)
             {
                 Name = name;
                 Type = type;
             }
 
+            /// <summary>The WGSL identifier.</summary>
             public string Name { get; }
+            /// <summary>The WGSL type name (for example <c>i32</c>, <c>vec2&lt;u32&gt;</c>).</summary>
             public string Type { get; }
 
+            /// <summary>Returns <see cref="Name"/>.</summary>
+            /// <returns>The variable name.</returns>
             public override string ToString() => Name;
         }
 
@@ -277,21 +284,29 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         #region Instance
 
+        /// <summary>Counter for unique <c>v_N</c> variable names.</summary>
         protected int varCounter = 0;
+        /// <summary>Counter for unique label names.</summary>
         protected int labelCounter = 0;
+        /// <summary>Maps IR values to their WGSL variables.</summary>
         protected readonly Dictionary<Value, Variable> valueVariables = new();
         private readonly Dictionary<BasicBlock, string> blockLabels = new();
+        /// <summary>The generator arguments this generator was created with.</summary>
         protected readonly GeneratorArgs _baseArgs;
 
         // Local array support (NewArray + LoadArrayElementAddress)
+        /// <summary>Maps an Alloca/NewArray variable name to its WGSL local array name.</summary>
         protected readonly Dictionary<string, string> _allocaArrayNames = new();
+        /// <summary>Counter for unique local array names.</summary>
         protected int _localArrayCounter = 0;
 
         // Track local alloca variable names (declared as WGSL 'var', NOT pointers).
         // Store/Load/LoadFieldAddress must NOT use pointer dereference (*) on these.
+        /// <summary>Names of local allocas declared as WGSL <c>var</c> (not pointers), which must not be dereferenced.</summary>
         protected readonly HashSet<string> _localAllocaVarNames = new();
 
         // Flag to tracking if we are generating code within the state machine loop
+        /// <summary>True while emitting code inside the block state machine.</summary>
         protected bool IsStateMachineActive { get; set; } = false;
 
         /// <summary>
@@ -323,8 +338,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// for correct bit extraction).
         /// </summary>
         protected bool _kernelReferencesF16Helpers { get; set; } = false;
+        /// <summary>Set when emitted code calls the BFloat16 conversion helpers, so the header includes them.</summary>
         protected bool _kernelReferencesBF16Helpers { get; set; } = false;
+        /// <summary>Set when emitted code calls the FP8 conversion helpers, so the header includes them.</summary>
         protected bool _kernelReferencesFP8Helpers { get; set; } = false;
+        /// <summary>Set when emitted code calls the FP4 conversion helpers, so the header includes them.</summary>
         protected bool _kernelReferencesFP4Helpers { get; set; } = false;
 
         private StringBuilder prefixBuilder = new StringBuilder();
@@ -475,6 +493,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             return variable;
         }
 
+        /// <summary>Same as <see cref="Load(Value)"/>; used by the intrinsic generators.</summary>
+        /// <param name="value">The IR value.</param>
+        /// <returns>The bound variable.</returns>
         public Variable LoadIntrinsicValue(Value value) => Load(value);
 
         /// <summary>
@@ -485,6 +506,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             valueVariables[value] = variable;
         }
 
+        /// <summary>Names of variables already declared in the shader source.</summary>
         protected readonly HashSet<string> declaredVariables = new();
 
         /// <summary>
@@ -1256,12 +1278,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         #region Value Visitors - Implementation
 
         // Parameters
+        /// <summary>Parameters need no code in the body; emits nothing.</summary>
+        /// <param name="parameter">The IR parameter.</param>
         public virtual void GenerateCode(Parameter parameter)
         {
             // Parameters are typically handled in the kernel generator
         }
 
         // Arithmetic
+        /// <summary>
+        /// Base binary arithmetic codegen: WGSL operators and builtins, with emulated 64-bit operands routed
+        /// through the emulation library. The kernel generator overrides this.
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(BinaryArithmeticValue value)
         {
             var target = Load(value);
@@ -1502,6 +1531,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+        /// <summary>Emits a unary arithmetic operation (delegates to <c>GenerateUnOp</c>).</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(UnaryArithmeticValue value)
         {
             GenerateUnOp(value);
@@ -1648,6 +1679,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             AppendLine($"{target} = {result};");
         }
 
+        /// <summary>Emits a ternary arithmetic value; multiply-add becomes WGSL <c>fma(a, b, c)</c>.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(TernaryArithmeticValue value)
         {
             var target = Load(value);
@@ -1666,6 +1699,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
         // Comparisons
+        /// <summary>
+        /// Base comparison codegen: WGSL comparison operators, with emulated 64-bit operands routed through the
+        /// emulation library's compare helpers. The kernel generator overrides this.
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(CompareValue value)
         {
             var target = Load(value);
@@ -1815,6 +1853,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             => WgslIsNaNExpr(operand, wgslType);
 
         // Conversions
+        /// <summary>Emits a type conversion using <see cref="BuildConvertExpression"/>.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(ConvertValue value)
         {
             var target = Load(value);
@@ -2170,6 +2210,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
         // Memory Operations
+        /// <summary>
+        /// Base load codegen: <c>atomicLoad</c> for atomic pointers, a direct read for local alloca vars, a
+        /// <c>bitcast</c> when the pointee type differs from the result type, otherwise <c>*ptr</c>.
+        /// </summary>
+        /// <param name="loadVal">The IR load.</param>
         public virtual void GenerateCode(global::ILGPU.IR.Values.Load loadVal)
         {
             var target = Load(loadVal);
@@ -2207,6 +2252,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+        /// <summary>
+        /// Base store codegen: <c>atomicStore</c> for atomic pointers, a direct assignment for local alloca vars,
+        /// otherwise <c>*ptr = value</c>.
+        /// </summary>
+        /// <param name="storeVal">The IR store.</param>
         public virtual void GenerateCode(global::ILGPU.IR.Values.Store storeVal)
         {
             var address = Load(storeVal.Target);
@@ -2236,6 +2286,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+        /// <summary>
+        /// True when <paramref name="ptr"/> points to an element whose WGSL type is atomic, or to an Index1D /
+        /// LongIndex1D element; loads and stores through it use <c>atomicLoad</c> / <c>atomicStore</c>.
+        /// </summary>
+        /// <param name="ptr">The pointer value.</param>
+        /// <returns>True for an atomic pointer.</returns>
         protected virtual bool IsAtomicPointer(Value ptr)
         {
             if (ptr.Type is global::ILGPU.IR.Types.PointerType ptrType)
@@ -2249,6 +2305,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             return false;
         }
 
+        /// <summary>Base implementation emits <c>let v = &amp;source[offset];</c>.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(LoadElementAddress value)
         {
             var target = Load(value);
@@ -2312,6 +2370,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+        /// <summary>
+        /// Base implementation: aliases a view of shared memory to the shared array name, otherwise binds the view
+        /// to its pointer with <c>let</c> (hoisted while the state machine is active).
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(global::ILGPU.IR.Values.NewView value)
         {
             var target = Load(value);
@@ -2356,7 +2419,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// <summary>
         /// Generates code for GetViewLength (ArrayView.Length).
         /// Base implementation emits a comment; override in kernel generator
-        /// to emit arrayLength(&paramN) for storage buffer bindings.
+        /// to emit arrayLength(&amp;paramN) for storage buffer bindings.
         /// </summary>
         public virtual void GenerateCode(global::ILGPU.IR.Values.GetViewLength value)
         {
@@ -2370,6 +2433,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             AppendLine($"{target} = {lengthType}(arrayLength(&{source}));");
         }
 
+        /// <summary>
+        /// Emits a pointer to a structure field: <c>&amp;v.field_N</c> for local alloca vars, otherwise
+        /// <c>&amp;(*p).field_N</c> (x/y/z on index types).
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(LoadFieldAddress value)
         {
             var target = Load(value);
@@ -2399,11 +2467,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             Builder.AppendLine();
         }
 
+        /// <summary>Emits nothing; allocations are declared up front by <c>SetupAllocations</c>.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(Alloca value)
         {
             // Already handled in SetupAllocations
         }
 
+        /// <summary>
+        /// Declares a WGSL local <c>var</c> array sized by the product of the constant dimensions (hoisted to
+        /// function scope while the state machine is active).
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(global::ILGPU.IR.Values.NewArray value)
         {
             // NewArray creates a local array — declare it
@@ -2428,6 +2503,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+        /// <summary>
+        /// Emits <c>let v = &amp;array[index];</c> for a local array element, or <c>&amp;alloca</c> when the array is a
+        /// scalarized single-element alloca.
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(global::ILGPU.IR.Values.LoadArrayElementAddress value)
         {
             var target = Load(value);
@@ -2491,6 +2571,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
         // Constants
+        /// <summary>
+        /// Emits a constant. Emulated f64 constants use <c>f64_from_ieee754_bits(lo, hi)</c>, emulated i64
+        /// constants reference a deduplicated module-scope <c>_c_i64_N</c> const, and Inf/NaN go through
+        /// runtime helper functions since WGSL cannot const-evaluate non-finite values.
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(PrimitiveValue value)
         {
             var target = Load(value);
@@ -2605,6 +2691,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             return str;
         }
 
+        /// <summary>Emits the zero value of the type, <c>T()</c>.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(NullValue value)
         {
             var target = Load(value);
@@ -2612,6 +2700,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             AppendLine($"{target} = {target.Type}(); // null");
         }
 
+        /// <summary>Emits <c>workgroupBarrier(); storageBarrier();</c> for a group-level barrier; other kinds emit nothing.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(global::ILGPU.IR.Values.Barrier value)
         {
             if (value.Kind == global::ILGPU.IR.Values.BarrierKind.GroupLevel)
@@ -2621,6 +2711,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+        /// <summary>WGSL has no strings; emits the string as a comment when <c>WebGPUBackend.EmitDebugStrings</c> is set.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(StringValue value)
         {
             if (WebGPUBackend.EmitDebugStrings)
@@ -2628,6 +2720,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
         // Phi
+        /// <summary>Declares the phi's variable; branches emit the incoming assignments.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(PhiValue value)
         {
             var target = Load(value);
@@ -2635,6 +2729,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
         // Structures
+        /// <summary>Emits a WGSL struct constructor with one argument per field.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(StructureValue value)
         {
             var target = Load(value);
@@ -2650,6 +2746,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             AppendLine(sb.ToString());
         }
 
+        /// <summary>
+        /// Base implementation: reads one structure field (<c>field_N</c>, or a swizzle on index types and vec4
+        /// elements).
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(GetField value)
         {
             var target = Load(value);
@@ -2675,6 +2776,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             AppendLine($"{target} = {source}.{fieldName};");
         }
 
+        /// <summary>
+        /// Base implementation: copies the source structure and assigns one field (<c>field_N</c>, or a swizzle
+        /// on index types and vec4 elements).
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(SetField value)
         {
             var target = Load(value);
@@ -2700,6 +2806,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             AppendLine($"{target}.{fieldName} = {fieldValue};");
         }
 
+        /// <summary>
+        /// True when <paramref name="type"/> looks like an ILGPU Index1D/2D/3D type (by type name), whose
+        /// fields map to the WGSL swizzles x, y, z.
+        /// </summary>
+        /// <param name="type">The IR type.</param>
+        /// <returns>True for an index type.</returns>
         protected bool IsIndexType(TypeNode type)
         {
             var typeName = type.ToString();
@@ -2708,6 +2820,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
         // Device Constants
+        /// <summary>Base implementation emits the group index, <c>i32(group_id.x/y/z)</c>; the kernel generator overrides it.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(GridIndexValue value)
         {
             var target = Load(value);
@@ -2722,6 +2836,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             AppendLine($"{target} = i32(group_id.{dim});");
         }
 
+        /// <summary>Emits the thread index within the group, <c>i32(local_id.x/y/z)</c>.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(GroupIndexValue value)
         {
             var target = Load(value);
@@ -2736,6 +2852,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             AppendLine($"{target} = i32(local_id.{dim});");
         }
 
+        /// <summary>
+        /// Base implementation emits <c>i32(num_workgroups.x/y/z)</c> (number of groups, not threads); the kernel
+        /// generator overrides it.
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(GridDimensionValue value)
         {
             var target = Load(value);
@@ -2755,6 +2876,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
 
+        /// <summary>Base implementation emits <c>i32(workgroup_size.x/y/z)</c>; the kernel generator overrides it.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(GroupDimensionValue value)
         {
             var target = Load(value);
@@ -2769,6 +2892,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             AppendLine($"{target} = i32(workgroup_size.{dim});");
         }
 
+        /// <summary>
+        /// Emits the warp size: <c>subgroup_size</c> when subgroups are available, otherwise
+        /// <c>workgroup_size.x</c>.
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(WarpSizeValue value)
         {
             var target = Load(value);
@@ -2779,6 +2907,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 AppendLine($"{target} = i32(workgroup_size.x);");
         }
 
+        /// <summary>
+        /// Emits the lane index: <c>subgroup_invocation_id</c> when subgroups are available, otherwise
+        /// <c>local_index % workgroup_size.x</c>.
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(LaneIdxValue value)
         {
             var target = Load(value);
@@ -2790,6 +2923,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
         // Control Flow
+        /// <summary>Emits <c>return;</c> or <c>return value;</c>.</summary>
+        /// <param name="value">The IR return terminator.</param>
         public virtual void GenerateCode(ReturnTerminator value)
         {
             // WGSL supports `return;` anywhere - inside loops, switch cases, etc.
@@ -2813,6 +2948,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+        /// <summary>State-machine branch: pushes phi values and sets <c>current_block</c> to the target.</summary>
+        /// <param name="branch">The IR branch.</param>
         public virtual void GenerateCode(UnconditionalBranch branch)
         {
             EmitPhiAssignments(branch.BasicBlock, branch.Target);
@@ -2821,6 +2958,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             EmitStateMachineContinue();
         }
 
+        /// <summary>
+        /// State-machine branch: emits an if/else whose arms push phi values and set <c>current_block</c>.
+        /// </summary>
+        /// <param name="branch">The IR branch.</param>
         public virtual void GenerateCode(IfBranch branch)
         {
             var cond = Load(branch.Condition);
@@ -2841,6 +2982,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             EmitStateMachineContinue();
         }
 
+        /// <summary>
+        /// State-machine branch: emits a WGSL <c>switch</c> whose cases push phi values and set <c>current_block</c>.
+        /// </summary>
+        /// <param name="branch">The IR branch.</param>
         public virtual void GenerateCode(SwitchBranch branch)
         {
             var selector = Load(branch.Condition);
@@ -2872,6 +3017,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             EmitStateMachineContinue();
         }
 
+        /// <summary>
+        /// Emits the phi copies for the edge <paramref name="sourceBlock"/> to <paramref name="targetBlock"/>
+        /// as one parallel copy (see <see cref="EmitPhiCopies"/>).
+        /// </summary>
+        /// <param name="sourceBlock">The predecessor block.</param>
+        /// <param name="targetBlock">The block whose phis receive values.</param>
         protected void EmitPhiAssignments(BasicBlock sourceBlock, BasicBlock targetBlock)
         {
             var copies = new List<(Variable Target, Variable Source)>();
@@ -2962,6 +3113,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
         // Method Calls
+        /// <summary>
+        /// Base method-call codegen: maps known math names to emulated-f64 helpers or WGSL builtins, detects
+        /// fallback warp/group Reduce implementations and emits subgroup operations, and otherwise emits a
+        /// type-correct zero. The kernel and helper generators override this.
+        /// </summary>
+        /// <param name="methodCall">The IR method call.</param>
         public virtual void GenerateCode(MethodCall methodCall)
         {
             var target = Load(methodCall);
@@ -3307,6 +3464,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
 
         // Casts
+        /// <summary>Emits a plain copy of the integer as the pointer value.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(IntAsPointerCast value)
         {
             var target = Load(value);
@@ -3315,6 +3474,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             AppendLine($"{target} = {source}; // intAsPtr");
         }
 
+        /// <summary>Emits a constructor cast of the pointer value to the target integer type.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(PointerAsIntCast value)
         {
             var target = Load(value);
@@ -3323,6 +3484,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             AppendLine($"{target} = {target.Type}({source}); // ptrAsInt");
         }
 
+        /// <summary>Base implementation emits a plain copy.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(PointerCast value)
         {
             var target = Load(value);
@@ -3331,6 +3494,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             AppendLine($"{target} = {source}; // ptrCast");
         }
 
+        /// <summary>Emits a copy; a pointer-typed result is bound with <c>let</c> since WGSL pointers cannot be <c>var</c>.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(AddressSpaceCast value)
         {
             var target = Load(value);
@@ -3349,6 +3514,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             AppendLine($"{target} = {source}; // addrSpaceCast");
         }
 
+        /// <summary>
+        /// Emits a bit reinterpretation from float to integer: <c>bitcast</c>, or the emulation encoder (f64 to
+        /// IEEE bits, emulated f16, bf16, FP8, FP4) so emulated types yield their real bit pattern.
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(FloatAsIntCast value)
         {
             var target = Load(value);
@@ -3422,6 +3592,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+        /// <summary>
+        /// Emits a bit reinterpretation from integer to float: <c>bitcast</c>, or the emulation decoder (f64 from
+        /// IEEE bits, emulated f16, bf16, FP8, FP4) for emulated float types.
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(IntAsFloatCast value)
         {
             var target = Load(value);
@@ -3540,6 +3715,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         protected virtual bool IsEmulated64BitAtomicTarget(Value target) => false;
 
+        /// <summary>
+        /// Base atomic codegen: native WGSL atomics for 32-bit values; for emulated 64-bit integers, two 32-bit
+        /// atomics for And/Or/Xor and emulation-helper sequences for the other kinds. The kernel generator
+        /// overrides this.
+        /// </summary>
+        /// <param name="value">The IR value.</param>
+        /// <exception cref="NotSupportedException">An arithmetic atomic on an emulated f64, or an unsupported atomic kind.</exception>
         public virtual void GenerateCode(GenericAtomic value)
         {
             var target = Load(value);
@@ -3747,6 +3929,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
 
+        /// <summary>Emits <c>atomicCompareExchangeWeak(...).old_value</c> for 32-bit values.</summary>
+        /// <param name="value">The IR value.</param>
+        /// <exception cref="NotSupportedException">The value is a 64-bit integer (WGSL has no 64-bit CAS).</exception>
         public virtual void GenerateCode(AtomicCAS value)
         {
             var target = Load(value);
@@ -3772,17 +3957,27 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
 
 
+        /// <summary>Emits <c>workgroupBarrier();</c>.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(MemoryBarrier value)
         {
             AppendLine("workgroupBarrier();");
         }
 
+        /// <summary>Emits <c>workgroupBarrier();</c> (the predicate is not evaluated).</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(PredicateBarrier value)
         {
             AppendLine("workgroupBarrier();");
         }
 
         // Warp Operations
+        /// <summary>
+        /// Emits a broadcast. Group-level: the origin thread writes <c>_broadcast_temp</c> between workgroup
+        /// barriers. Warp-level: <c>subgroupBroadcastFirst</c> when subgroups are available, otherwise lane 0's
+        /// value read through <c>_warp_shuffle_buf</c>.
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(Broadcast value)
         {
             var target = Load(value);
@@ -3825,6 +4020,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+        /// <summary>
+        /// Emits a warp shuffle: <c>subgroupShuffle</c>/<c>Xor</c>/<c>Up</c>/<c>Down</c> per shuffle kind when
+        /// subgroups are available, otherwise a shared-memory exchange through <c>_warp_shuffle_buf</c> with
+        /// workgroup barriers.
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(WarpShuffle value)
         {
             var target = Load(value);
@@ -3881,6 +4082,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             _ => operand,
         };
 
+        /// <summary>
+        /// Emits a sub-warp shuffle: the matching WGSL subgroup builtin when subgroups are available, otherwise
+        /// a shared-memory exchange through <c>_warp_shuffle_buf</c> with workgroup barriers.
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(SubWarpShuffle value)
         {
             var target = Load(value);
@@ -3907,17 +4113,25 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
         // Debug/IO
+        /// <summary>Debug assertions are dropped; emits nothing.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(DebugAssertOperation value)
         {
             // WGSL doesn't support debug assertions
         }
 
+        /// <summary>Kernel output (printf-style) is not supported; emits nothing.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(WriteToOutput value)
         {
             // WGSL doesn't support stdout
         }
 
         // Other
+        /// <summary>
+        /// Emits a select: WGSL <c>select(falseValue, trueValue, cond)</c>, or an if/else when either operand is a load.
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(Predicate value)
         {
             var target = Load(value);
@@ -3945,6 +4159,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+        /// <summary>Base implementation emits a placeholder 0 for the dynamic shared memory length.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(DynamicMemoryLengthValue value)
         {
             var target = Load(value);
@@ -3953,6 +4169,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             AppendLine($"{target} = 0; // dynamic memory length (placeholder)");
         }
 
+        /// <summary>Emits a plain copy of the source; alignment is not applied.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(AlignTo value)
         {
             var target = Load(value);
@@ -3961,6 +4179,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             AppendLine($"{target} = {source}; // alignTo");
         }
 
+        /// <summary>Binds the result to the source view (AsAligned is a compile-time hint; nothing is emitted).</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(AsAligned value)
         {
             // AsAligned is a compile-time alignment hint - the runtime view is unchanged, so
@@ -3972,11 +4192,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             Bind(value, source);
         }
 
+        /// <summary>Inline-language emit values are not supported; emits nothing.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(LanguageEmitValue value)
         {
             // Raw WGSL emission - not commonly used
         }
 
+        /// <summary>
+        /// Emits code for a throw: WGSL has no exceptions, so it writes a comment and leaves the state machine
+        /// (<c>current_block = -1</c>) or returns.
+        /// </summary>
+        /// <param name="value">The throwing IR value.</param>
         public virtual void GenerateThrow(Value value)
         {
             // WebGPU does not support exceptions. 
@@ -4054,6 +4281,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         #region Math Intrinsics
 
+        /// <summary>Intrinsic handler for Abs: emits the emulated-f64 helper for emulated doubles, otherwise WGSL <c>abs(x)</c>.</summary>
+        /// <param name="backend">The WebGPU backend.</param>
+        /// <param name="codeGenerator">The code generator to emit into.</param>
+        /// <param name="value">The intrinsic <see cref="MethodCall"/>; other values are ignored.</param>
         public static void GenerateAbs(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
             if (TryEmitEmulatedF64Intrinsic(codeGenerator, value, "Abs")) return;
@@ -4066,6 +4297,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+        /// <summary>
+        /// Intrinsic handler for Sign: emits the emulated-f64 helper for emulated doubles, otherwise WGSL
+        /// <c>sign(x)</c>, wrapped in <c>i32(...)</c> when the result type is an integer.
+        /// </summary>
+        /// <param name="backend">The WebGPU backend.</param>
+        /// <param name="codeGenerator">The code generator to emit into.</param>
+        /// <param name="value">The intrinsic <see cref="MethodCall"/>; other values are ignored.</param>
         public static void GenerateSign(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
             if (TryEmitEmulatedF64Intrinsic(codeGenerator, value, "Sign")) return;
@@ -4083,6 +4321,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+        /// <summary>
+        /// Intrinsic handler for Round: emits the emulated-f64 helper for emulated doubles, otherwise WGSL
+        /// <c>round(x)</c> (which rounds halves to even).
+        /// </summary>
+        /// <param name="backend">The WebGPU backend.</param>
+        /// <param name="codeGenerator">The code generator to emit into.</param>
+        /// <param name="value">The intrinsic <see cref="MethodCall"/>; other values are ignored.</param>
         public static void GenerateRound(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
             if (TryEmitEmulatedF64Intrinsic(codeGenerator, value, "Round")) return;
@@ -4095,6 +4340,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+        /// <summary>Intrinsic handler for Truncate: emits the emulated-f64 helper for emulated doubles, otherwise WGSL <c>trunc(x)</c>.</summary>
+        /// <param name="backend">The WebGPU backend.</param>
+        /// <param name="codeGenerator">The code generator to emit into.</param>
+        /// <param name="value">The intrinsic <see cref="MethodCall"/>; other values are ignored.</param>
         public static void GenerateTruncate(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
             if (TryEmitEmulatedF64Intrinsic(codeGenerator, value, "Truncate")) return;
@@ -4107,6 +4356,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+        /// <summary>Intrinsic handler for Atan2(y, x): emits the emulated-f64 helper for emulated doubles, otherwise WGSL <c>atan2(y, x)</c>.</summary>
+        /// <param name="backend">The WebGPU backend.</param>
+        /// <param name="codeGenerator">The code generator to emit into.</param>
+        /// <param name="value">The intrinsic <see cref="MethodCall"/>; other values are ignored.</param>
         public static void GenerateAtan2(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
             if (TryEmitEmulatedF64Intrinsic(codeGenerator, value, "Atan2")) return;
@@ -4120,6 +4373,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+        /// <summary>Intrinsic handler for Max: emits the emulated-f64 helper for emulated doubles, otherwise WGSL <c>max(a, b)</c>.</summary>
+        /// <param name="backend">The WebGPU backend.</param>
+        /// <param name="codeGenerator">The code generator to emit into.</param>
+        /// <param name="value">The intrinsic <see cref="MethodCall"/>; other values are ignored.</param>
         public static void GenerateMax(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
             if (TryEmitEmulatedF64Intrinsic(codeGenerator, value, "Max")) return;
@@ -4133,6 +4390,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+        /// <summary>Intrinsic handler for Min: emits the emulated-f64 helper for emulated doubles, otherwise WGSL <c>min(a, b)</c>.</summary>
+        /// <param name="backend">The WebGPU backend.</param>
+        /// <param name="codeGenerator">The code generator to emit into.</param>
+        /// <param name="value">The intrinsic <see cref="MethodCall"/>; other values are ignored.</param>
         public static void GenerateMin(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
             if (TryEmitEmulatedF64Intrinsic(codeGenerator, value, "Min")) return;
@@ -4146,6 +4407,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+        /// <summary>
+        /// Intrinsic handler for Pow: emits the emulated-f64 helper for emulated doubles, otherwise WGSL
+        /// <c>pow(abs(b), e)</c> with the sign restored for a negative base and an odd integer exponent.
+        /// </summary>
+        /// <param name="backend">The WebGPU backend.</param>
+        /// <param name="codeGenerator">The code generator to emit into.</param>
+        /// <param name="value">The intrinsic <see cref="MethodCall"/>; other values are ignored.</param>
         public static void GeneratePow(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
             if (TryEmitEmulatedF64Intrinsic(codeGenerator, value, "Pow")) return;
@@ -4160,6 +4428,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+        /// <summary>Intrinsic handler for Clamp: emits the emulated-f64 helper for emulated doubles, otherwise WGSL <c>clamp(v, min, max)</c>.</summary>
+        /// <param name="backend">The WebGPU backend.</param>
+        /// <param name="codeGenerator">The code generator to emit into.</param>
+        /// <param name="value">The intrinsic <see cref="MethodCall"/>; other values are ignored.</param>
         public static void GenerateClamp(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
             if (TryEmitEmulatedF64Intrinsic(codeGenerator, value, "Clamp")) return;
@@ -4174,6 +4446,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+        /// <summary>Intrinsic handler for FusedMultiplyAdd: emits the emulated-f64 helper for emulated doubles, otherwise WGSL <c>fma(x, y, z)</c>.</summary>
+        /// <param name="backend">The WebGPU backend.</param>
+        /// <param name="codeGenerator">The code generator to emit into.</param>
+        /// <param name="value">The intrinsic <see cref="MethodCall"/>; other values are ignored.</param>
         public static void GenerateFusedMultiplyAdd(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
         {
             if (TryEmitEmulatedF64Intrinsic(codeGenerator, value, "FusedMultiplyAdd")) return;

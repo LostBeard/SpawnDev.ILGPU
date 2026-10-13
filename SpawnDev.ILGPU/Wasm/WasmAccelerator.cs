@@ -69,7 +69,15 @@ namespace SpawnDev.ILGPU.Wasm
 
         // Pending async work (kernel dispatches)
         internal readonly List<Task> _pendingWork = new();
+        /// <summary>
+        /// Diagnostic: implicit-index argument handling of the latest dispatch (full detail for the
+        /// first 4 dispatches, only the dispatch number after that). Read by tests.
+        /// </summary>
         public static string? _lastImplicitIndexDebug;
+        /// <summary>
+        /// Diagnostic: struct-argument serialization of the latest dispatch (scratch offset and view
+        /// pointers per struct argument), or null when it had none. Read by tests.
+        /// </summary>
         public static string? _lastStructSerialDebug;
 
         // Worker count for parallel dispatch
@@ -614,6 +622,9 @@ namespace SpawnDev.ILGPU.Wasm
         }
 
         // Backend instance
+        /// <summary>
+        /// The Wasm backend that compiles this accelerator's kernels.
+        /// </summary>
         public WasmBackend Backend { get; private set; } = null!;
 
         /// <summary>
@@ -760,14 +771,24 @@ namespace SpawnDev.ILGPU.Wasm
         #region Kernel Execution
 
         /// <summary>
-        /// Executes a Wasm kernel. Called by the dynamic launcher.
-        /// </summary>
-        /// <summary>
         /// Recent dispatch log for diagnostics. Captures last N kernel dispatches.
         /// </summary>
         public static string _dispatchLog = "";
+        /// <summary>
+        /// Diagnostic: number of <see cref="RunKernel"/> calls since startup (process-wide).
+        /// </summary>
         public static int _dispatchCount = 0;
 
+        /// <summary>
+        /// Executes a Wasm kernel. Called by the dynamic launcher. The dispatch is queued on the
+        /// accelerator's pending work and runs asynchronously on the Web Worker pool; use
+        /// <c>SynchronizeAsync</c> to wait for it.
+        /// </summary>
+        /// <param name="kernel">The loaded <see cref="WasmKernel"/>.</param>
+        /// <param name="stream">The stream the launch was issued on.</param>
+        /// <param name="dimension">The launch dimension (an index or a <c>KernelConfig</c>).</param>
+        /// <param name="args">The kernel arguments.</param>
+        /// <exception cref="ObjectDisposedException">The accelerator has been disposed.</exception>
         public static void RunKernel(Kernel kernel, AcceleratorStream stream, object dimension, object[] args)
         {
             var wasmAccel = (WasmAccelerator)kernel.Accelerator;
@@ -3878,6 +3899,11 @@ namespace SpawnDev.ILGPU.Wasm
             return new WasmMemoryBuffer(this, length, elementSize, bitsPerElement);
         }
 
+        /// <summary>
+        /// Always throws: a synchronous wait is not possible on the single Blazor thread. Use
+        /// <c>await SynchronizeAsync()</c> to wait for pending dispatches.
+        /// </summary>
+        /// <exception cref="NotSupportedException">Always.</exception>
         protected override void SynchronizeInternal() =>
             // Synchronous Synchronize() is DESKTOP-ONLY. On Wasm (single-threaded Blazor, worker-pool
             // dispatch) the main thread cannot block-wait on in-flight worker kernels; the old behavior
@@ -3970,6 +3996,15 @@ namespace SpawnDev.ILGPU.Wasm
 
         #region Required Overrides (stubs)
 
+        /// <summary>
+        /// Returns a fixed group size of 64, ignoring the kernel, shared memory and
+        /// <paramref name="maxGroupSize"/>.
+        /// </summary>
+        /// <param name="kernel">The kernel (unused).</param>
+        /// <param name="dynamicSharedMemorySizeInBytes">Dynamic shared memory size (unused).</param>
+        /// <param name="maxGroupSize">Maximum group size (unused).</param>
+        /// <param name="groupSize">Receives 64.</param>
+        /// <returns>64.</returns>
         protected override int EstimateGroupSizeInternal(
             Kernel kernel, int dynamicSharedMemorySizeInBytes,
             int maxGroupSize,
@@ -3979,6 +4014,15 @@ namespace SpawnDev.ILGPU.Wasm
             return 64;
         }
 
+        /// <summary>
+        /// Returns a fixed group size of 64, ignoring the kernel, shared memory and
+        /// <paramref name="maxGroupSize"/>.
+        /// </summary>
+        /// <param name="kernel">The kernel (unused).</param>
+        /// <param name="computeSharedMemorySize">Shared memory size callback (unused).</param>
+        /// <param name="maxGroupSize">Maximum group size (unused).</param>
+        /// <param name="groupSize">Receives 64.</param>
+        /// <returns>64.</returns>
         protected override int EstimateGroupSizeInternal(
             Kernel kernel, Func<int, int> computeSharedMemorySize,
             int maxGroupSize, out int groupSize)
@@ -3987,25 +4031,60 @@ namespace SpawnDev.ILGPU.Wasm
             return 64;
         }
 
+        /// <summary>Returns 1; occupancy is not modeled on Wasm.</summary>
+        /// <param name="kernel">The kernel (unused).</param>
+        /// <param name="groupSize">The group size (unused).</param>
+        /// <param name="dynamicSharedMemorySizeInBytes">Dynamic shared memory size (unused).</param>
+        /// <returns>1.</returns>
         protected override int EstimateMaxActiveGroupsPerMultiprocessorInternal(
             Kernel kernel, int groupSize, int dynamicSharedMemorySizeInBytes) => 1;
 
+        /// <summary>No-op; peer access is not supported on Wasm.</summary>
+        /// <param name="otherAccelerator">The other accelerator.</param>
         protected override void EnablePeerAccessInternal(Accelerator otherAccelerator) { }
+        /// <summary>No-op; peer access is not supported on Wasm.</summary>
+        /// <param name="otherAccelerator">The other accelerator.</param>
         protected override void DisablePeerAccessInternal(Accelerator otherAccelerator) { }
+        /// <summary>Returns false; peer access is not supported on Wasm.</summary>
+        /// <param name="otherAccelerator">The other accelerator.</param>
+        /// <returns>False.</returns>
         protected override bool CanAccessPeerInternal(Accelerator otherAccelerator) => false;
 
+        /// <summary>Returns <c>default</c>; accelerator extensions are not supported on Wasm.</summary>
+        /// <typeparam name="TExtension">The extension type.</typeparam>
+        /// <typeparam name="TExtensionProvider">The extension provider type.</typeparam>
+        /// <param name="provider">The extension provider (unused).</param>
+        /// <returns><c>default</c> (null for reference types).</returns>
         public override TExtension CreateExtension<TExtension, TExtensionProvider>(TExtensionProvider provider) =>
             default!;
 
+        /// <summary>Creates a new <see cref="WasmStream"/> for this accelerator.</summary>
+        /// <returns>The new stream.</returns>
         protected override AcceleratorStream CreateStreamInternal() =>
             new WasmStream(this);
 
+        /// <summary>Always throws; page locking is not supported on Wasm.</summary>
+        /// <typeparam name="T">The element type.</typeparam>
+        /// <param name="ptr">The pinned host pointer.</param>
+        /// <param name="numElements">The number of elements.</param>
+        /// <returns>Never returns.</returns>
+        /// <exception cref="NotSupportedException">Always.</exception>
         protected override PageLockScope<T> CreatePageLockFromPinnedInternal<T>(IntPtr ptr, long numElements) =>
             throw new NotSupportedException("Page locking is not supported in Wasm backend.");
 
+        /// <summary>No-op; binding to the current thread needs no work on Wasm.</summary>
         protected override void OnBind() { }
+        /// <summary>No-op; unbinding from the current thread needs no work on Wasm.</summary>
         protected override void OnUnbind() { }
 
+        /// <summary>
+        /// Disposes the accelerator: marks it disposed so new dispatches throw, faults any task still
+        /// waiting on a worker reply, detaches its worker message handlers, and releases its private
+        /// linear memory and private worker pool. The shared worker pool and the shared linear memory
+        /// used by default accelerators stay alive; shared-pool workers still checked out by this
+        /// accelerator are terminated and removed from the pool.
+        /// </summary>
+        /// <param name="disposing">True when called from <c>Dispose</c>.</param>
         protected override void DisposeAccelerator_SyncRoot(bool disposing)
         {
             if (disposing)
@@ -4118,11 +4197,22 @@ namespace SpawnDev.ILGPU.Wasm
     /// </summary>
     public class WasmKernel : Kernel
     {
+        /// <summary>
+        /// Creates a loaded Wasm kernel.
+        /// </summary>
+        /// <param name="accelerator">The owning accelerator.</param>
+        /// <param name="compiledKernel">The compiled kernel (a <see cref="WasmCompiledKernel"/>).</param>
+        /// <param name="launcher">The generated launcher method that calls <see cref="WasmAccelerator.RunKernel"/>.</param>
         public WasmKernel(Accelerator accelerator, CompiledKernel compiledKernel, MethodInfo launcher)
             : base(accelerator, compiledKernel, launcher) { }
 
+        /// <summary>
+        /// The compiled kernel, typed as <see cref="WasmCompiledKernel"/>.
+        /// </summary>
         public new WasmCompiledKernel CompiledKernel => (WasmCompiledKernel)base.CompiledKernel;
 
+        /// <summary>No-op; the kernel holds no native resources (the module bytes are managed).</summary>
+        /// <param name="disposing">True when called from <c>Dispose</c>.</param>
         protected override void DisposeAcceleratorObject(bool disposing) { }
     }
 }

@@ -18,7 +18,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
     /// </summary>
     public class WasmFuncType
     {
+        /// <summary>Parameter value types, as <see cref="WasmOpCodes"/> value-type bytes.</summary>
         public byte[] ParamTypes { get; set; } = Array.Empty<byte>();
+        /// <summary>Result value types, as <see cref="WasmOpCodes"/> value-type bytes.</summary>
         public byte[] ResultTypes { get; set; } = Array.Empty<byte>();
     }
 
@@ -27,7 +29,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
     /// </summary>
     public class WasmLocal
     {
+        /// <summary>Number of consecutive locals of <see cref="Type"/> this entry declares.</summary>
         public uint Count { get; set; }
+        /// <summary>The locals' value type, as a <see cref="WasmOpCodes"/> value-type byte.</summary>
         public byte Type { get; set; }
     }
 
@@ -36,7 +40,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
     /// </summary>
     public class WasmFuncBody
     {
+        /// <summary>Local declarations (excluding parameters). Adjacent entries of the same type are merged on emit.</summary>
         public List<WasmLocal> Locals { get; set; } = new();
+        /// <summary>The instruction bytes, without the closing <c>end</c> opcode (added on emit).</summary>
         public byte[] Code { get; set; } = Array.Empty<byte>();
     }
 

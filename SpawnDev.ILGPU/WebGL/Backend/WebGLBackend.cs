@@ -564,6 +564,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// </summary>
         public IReadOnlyList<BodyStructBindingEntry> BodyStructManifest { get; }
 
+        /// <summary>Creates a compiled WebGL kernel. Null metadata lists become empty lists.</summary>
+        /// <param name="context">The ILGPU context.</param>
+        /// <param name="entryPoint">The kernel entry point.</param>
+        /// <param name="glslSource">The generated GLSL ES 3.0 vertex shader source.</param>
+        /// <param name="parameterBindings">Parameter binding metadata.</param>
+        /// <param name="outputVaryings">Transform Feedback output varying metadata.</param>
+        /// <param name="bodyStructManifest">Per-field body-struct metadata.</param>
         public WebGLCompiledKernel(
             Context context,
             EntryPoint entryPoint,
@@ -585,6 +592,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
     /// </summary>
     public class WebGLArgumentMapper : ArgumentMapper
     {
+        /// <summary>Creates the argument mapper.</summary>
+        /// <param name="context">The ILGPU context.</param>
         public WebGLArgumentMapper(Context context) : base(context) { }
 
         /// <summary>

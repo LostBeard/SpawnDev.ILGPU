@@ -1370,8 +1370,19 @@ namespace SpawnDev.ILGPU.WebGPU
         /// MEASURED 2026-10-01 (Anaglyphohol DAv3 video frame, WebGPU, browser, unprofiled ablation): the packing
         /// step was ~6.3 ms of a ~46 ms frame across 789 dispatches.
         /// </summary>
+        /// <param name="data">The destination bytes (already zeroed).</param>
         /// <param name="scalarBytes">The scalar-slot length the legacy packer wrote the scalars into BEFORE growing its
         /// array for view offsets - its "next word only if inside the array" bounds are against this, not the final length.</param>
+        /// <param name="packedScalarLookup">Scalar packing entries keyed by index into <paramref name="expandedArgs"/>.</param>
+        /// <param name="expandedArgs">The dispatch's expanded kernel arguments.</param>
+        /// <param name="manifest">The kernel's scalar packing manifest (view offset/count, coalesce offset and user-dimension slots).</param>
+        /// <param name="f64Emulation">True to write doubles as 8 IEEE-754 bytes; false writes them as f32.</param>
+        /// <param name="viewElementOffsets">Element offset per view binding index.</param>
+        /// <param name="viewElementCounts">Element count per view binding index.</param>
+        /// <param name="coalesceFieldElementOffsets">Element offset per coalesced (param, field), or null.</param>
+        /// <param name="dispatchUserDim">The user dispatch size in X (0 writes <see cref="uint.MaxValue"/>).</param>
+        /// <param name="dispatchUserDimY">The user dispatch size in Y (0 writes <see cref="uint.MaxValue"/>).</param>
+        /// <param name="dispatchUserDimZ">The user dispatch size in Z (0 writes <see cref="uint.MaxValue"/>).</param>
         private static void PackScalarsInto(Span<byte> data, int scalarBytes, Dictionary<int, ScalarPackingEntry> packedScalarLookup,
             List<object?> expandedArgs, IReadOnlyList<ScalarPackingEntry> manifest, bool f64Emulation,
             Dictionary<int, int> viewElementOffsets, Dictionary<int, int> viewElementCounts,
@@ -3036,8 +3047,20 @@ namespace SpawnDev.ILGPU.WebGPU
             }
         }
 
+        /// <summary>Allocates a <see cref="WebGPUMemoryBuffer"/>.</summary>
+        /// <param name="length">Number of elements.</param>
+        /// <param name="elementSize">Element size in bytes.</param>
+        /// <param name="bitsPerElement">Bits per element for packed sub-byte types, or 0.</param>
+        /// <returns>The new buffer.</returns>
         protected override MemoryBuffer AllocateRawInternal(long length, int elementSize, int bitsPerElement) => new WebGPUMemoryBuffer(this, length, elementSize, bitsPerElement);
+        /// <summary>Creates a WebGPU accelerator stream (records and batches GPU commands).</summary>
+        /// <returns>The new stream.</returns>
         protected override AcceleratorStream CreateStreamInternal() => new WebGPUStream(this);
+        /// <summary>
+        /// Always throws: synchronous <c>Synchronize()</c> is desktop-only. Use <see cref="SynchronizeAsync()"/> to wait,
+        /// or <c>Flush()</c> to submit without waiting.
+        /// </summary>
+        /// <exception cref="NotSupportedException">Always.</exception>
         protected override void SynchronizeInternal() =>
             // Synchronous Synchronize() is DESKTOP-ONLY. On WebGPU (browser, single-threaded) the
             // device cannot be block-waited; the old behavior silently flushed WITHOUT waiting, which
@@ -3058,16 +3081,20 @@ namespace SpawnDev.ILGPU.WebGPU
         public override bool RequiresAsyncDeviceCopy => true;
 
         /// <summary>
-        /// Real async drain. The synchronous <see cref="Accelerator.Synchronize"/>
-        /// only flushes the command encoder (non-blocking); this awaits
+        /// Real async drain. The synchronous <see cref="Accelerator.Synchronize"/> throws
+        /// <see cref="NotSupportedException"/> on WebGPU; this submits pending work and awaits
         /// <c>queue.OnSubmittedWorkDone()</c> so submitted GPU work has actually
         /// finished before the caller reads results. Overrides the core default.
         /// </summary>
         public override Task SynchronizeAsync() =>
             WebGPUAcceleratorExtensions.SynchronizeAsync(this);
 
+        /// <summary>No-op: WebGPU has no per-thread context to bind.</summary>
         protected override void OnBind() { }
+        /// <summary>No-op: WebGPU has no per-thread context to unbind.</summary>
         protected override void OnUnbind() { }
+        /// <summary>Releases this device's pooled scalar buffers, then disposes the native WebGPU accelerator.</summary>
+        /// <param name="disposing">True when disposing managed resources; nothing is done otherwise.</param>
         protected override void DisposeAccelerator_SyncRoot(bool disposing)
         {
             if (!disposing) return;
@@ -3090,13 +3117,48 @@ namespace SpawnDev.ILGPU.WebGPU
                 try { buf.Destroy(); buf.Dispose(); } catch { /* device may already be gone */ }
             }
         }
+        /// <summary>Accelerator extensions are not supported on WebGPU; returns <c>default</c>.</summary>
+        /// <typeparam name="TExtension">The extension type.</typeparam>
+        /// <typeparam name="TExtensionProvider">The extension provider type.</typeparam>
+        /// <param name="provider">The extension provider (unused).</param>
+        /// <returns><c>default</c>.</returns>
         public override TExtension CreateExtension<TExtension, TExtensionProvider>(TExtensionProvider provider) => default;
+        /// <summary>Page-locked host memory is not supported on WebGPU.</summary>
+        /// <typeparam name="T">The element type.</typeparam>
+        /// <param name="ptr">The pinned host pointer.</param>
+        /// <param name="numElements">The number of elements.</param>
+        /// <returns>Never returns.</returns>
+        /// <exception cref="NotSupportedException">Always.</exception>
         protected override PageLockScope<T> CreatePageLockFromPinnedInternal<T>(IntPtr ptr, long numElements) => throw new NotSupportedException();
+        /// <summary>Returns a fixed group size of 64 (no occupancy calculation).</summary>
+        /// <param name="kernel">The kernel.</param>
+        /// <param name="dynamicSharedMemorySize">Dynamic shared memory size in bytes (unused).</param>
+        /// <param name="maxGridSize">Maximum grid size (unused).</param>
+        /// <param name="groupSize">Receives 64.</param>
+        /// <returns>64.</returns>
         protected override int EstimateGroupSizeInternal(Kernel kernel, int dynamicSharedMemorySize, int maxGridSize, out int groupSize) { groupSize = 64; return 64; }
+        /// <summary>Returns a fixed group size of 64 (no occupancy calculation).</summary>
+        /// <param name="kernel">The kernel.</param>
+        /// <param name="computeSharedMemorySize">Shared memory size callback (unused).</param>
+        /// <param name="maxGridSize">Maximum grid size (unused).</param>
+        /// <param name="groupSize">Receives 64.</param>
+        /// <returns>64.</returns>
         protected override int EstimateGroupSizeInternal(Kernel kernel, Func<int, int> computeSharedMemorySize, int maxGridSize, out int groupSize) { groupSize = 64; return 64; }
+        /// <summary>Returns 1; occupancy is not queried on WebGPU.</summary>
+        /// <param name="kernel">The kernel.</param>
+        /// <param name="groupSize">The group size (unused).</param>
+        /// <param name="dynamicSharedMemorySize">Dynamic shared memory size in bytes (unused).</param>
+        /// <returns>1.</returns>
         protected override int EstimateMaxActiveGroupsPerMultiprocessorInternal(Kernel kernel, int groupSize, int dynamicSharedMemorySize) => 1;
+        /// <summary>No-op: WebGPU has no peer access.</summary>
+        /// <param name="other">The other accelerator.</param>
         protected override void EnablePeerAccessInternal(Accelerator other) { }
+        /// <summary>No-op: WebGPU has no peer access.</summary>
+        /// <param name="other">The other accelerator.</param>
         protected override void DisablePeerAccessInternal(Accelerator other) { }
+        /// <summary>Always false: WebGPU has no peer access.</summary>
+        /// <param name="other">The other accelerator.</param>
+        /// <returns>False.</returns>
         protected override bool CanAccessPeerInternal(Accelerator other) => false;
 
         /// <summary>

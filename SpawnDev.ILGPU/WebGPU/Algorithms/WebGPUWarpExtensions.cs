@@ -23,14 +23,14 @@ namespace SpawnDev.ILGPU.WebGPU.Algorithms
     {
         #region Reduce
 
-        /// <summary cref="ILGPU.Algorithms.WarpExtensions.Reduce{T, TReduction}(T)"/>
+        /// <summary cref="global::ILGPU.Algorithms.WarpExtensions.Reduce{T, TReduction}(T)"/>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static T Reduce<T, TReduction>(T value)
             where T : unmanaged
             where TReduction : struct, IScanReduceOperation<T> =>
             AllReduce<T, TReduction>(value);
 
-        /// <summary cref="ILGPU.Algorithms.WarpExtensions.AllReduce{T, TReduction}(T)"/>
+        /// <summary cref="global::ILGPU.Algorithms.WarpExtensions.AllReduce{T, TReduction}(T)"/>
         public static T AllReduce<T, TReduction>(T value)
             where T : unmanaged
             where TReduction : struct, IScanReduceOperation<T>
@@ -60,7 +60,7 @@ namespace SpawnDev.ILGPU.WebGPU.Algorithms
 
         #region Scan
 
-        /// <summary cref="ILGPU.Algorithms.WarpExtensions.ExclusiveScan{T, TScanOperation}(T)"/>
+        /// <summary cref="global::ILGPU.Algorithms.WarpExtensions.ExclusiveScan{T, TScan}(T)"/>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static T ExclusiveScan<T, TScanOperation>(T value)
             where T : unmanaged
@@ -91,7 +91,7 @@ namespace SpawnDev.ILGPU.WebGPU.Algorithms
                 : sharedMemory[warpOffset + Warp.LaneIdx - 1];
         }
 
-        /// <summary cref="ILGPU.Algorithms.WarpExtensions.InclusiveScan{T, TScanOperation}(T)"/>
+        /// <summary cref="global::ILGPU.Algorithms.WarpExtensions.InclusiveScan{T, TScan}(T)"/>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static T InclusiveScan<T, TScanOperation>(T value)
             where T : unmanaged

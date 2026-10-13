@@ -1314,11 +1314,22 @@ namespace SpawnDev.ILGPU.WebGL
 
         #region Abstract Method Implementations
 
+        /// <summary>Allocates a <see cref="WebGLMemoryBuffer"/>.</summary>
+        /// <param name="length">Number of elements.</param>
+        /// <param name="elementSize">Element size in bytes.</param>
+        /// <param name="bitsPerElement">Bits per element for packed sub-byte types, or 0.</param>
+        /// <returns>The new buffer.</returns>
         protected override MemoryBuffer AllocateRawInternal(long length, int elementSize, int bitsPerElement) =>
             new WebGLMemoryBuffer(this, length, elementSize, bitsPerElement);
 
+        /// <summary>Creates a WebGL accelerator stream.</summary>
+        /// <returns>The new stream.</returns>
         protected override AcceleratorStream CreateStreamInternal() => new WebGLStream(this);
 
+        /// <summary>
+        /// Always throws: synchronous <c>Synchronize()</c> is desktop-only. Use <see cref="SynchronizeAsync()"/>.
+        /// </summary>
+        /// <exception cref="NotSupportedException">Always.</exception>
         protected override void SynchronizeInternal() =>
             // Synchronous Synchronize() is DESKTOP-ONLY. On WebGL (browser, worker-offloaded) the
             // dispatches run async on the GL worker and cannot be block-waited; the old no-op
@@ -1337,20 +1348,24 @@ namespace SpawnDev.ILGPU.WebGL
         public override bool RequiresAsyncDeviceCopy => true;
 
         /// <summary>
-        /// Real async drain. The synchronous <see cref="Accelerator.Synchronize"/> is a
-        /// no-op under worker offloading; this awaits all pending GL-worker dispatches.
+        /// Real async drain. The synchronous <see cref="Accelerator.Synchronize"/> throws
+        /// <see cref="NotSupportedException"/> on WebGL; this awaits all pending GL-worker dispatches.
         /// Overrides the core default so algorithm-layer async readback is correct.
         /// </summary>
         public override Task SynchronizeAsync() =>
             WebGLAcceleratorExtensions.SynchronizeAsync(this);
 
+        /// <summary>No-op: WebGL has no per-thread context to bind.</summary>
         protected override void OnBind() { }
+        /// <summary>No-op: WebGL has no per-thread context to unbind.</summary>
         protected override void OnUnbind() { }
 
         /// <summary>The worker listeners, kept so they can be detached. See where they are attached.</summary>
         private Action<SpawnDev.SpawnJS.JSObjects.MessageEvent>? _workerMessageHandler;
         private Action<SpawnDev.SpawnJS.JSObjects.Event>? _workerErrorHandler;
 
+        /// <summary>Detaches the worker event listeners, terminates the GL worker and disposes the canvas.</summary>
+        /// <param name="disposing">True when disposing managed resources.</param>
         protected override void DisposeAccelerator_SyncRoot(bool disposing)
         {
             if (disposing)
@@ -1377,13 +1392,48 @@ namespace SpawnDev.ILGPU.WebGL
             }
         }
 
+        /// <summary>Accelerator extensions are not supported on WebGL; returns <c>default</c>.</summary>
+        /// <typeparam name="TExtension">The extension type.</typeparam>
+        /// <typeparam name="TExtensionProvider">The extension provider type.</typeparam>
+        /// <param name="provider">The extension provider (unused).</param>
+        /// <returns><c>default</c>.</returns>
         public override TExtension CreateExtension<TExtension, TExtensionProvider>(TExtensionProvider provider) => default;
+        /// <summary>Page-locked host memory is not supported on WebGL.</summary>
+        /// <typeparam name="T">The element type.</typeparam>
+        /// <param name="ptr">The pinned host pointer.</param>
+        /// <param name="numElements">The number of elements.</param>
+        /// <returns>Never returns.</returns>
+        /// <exception cref="NotSupportedException">Always.</exception>
         protected override PageLockScope<T> CreatePageLockFromPinnedInternal<T>(IntPtr ptr, long numElements) => throw new NotSupportedException();
+        /// <summary>Group size estimation is not meaningful on WebGL; reports a group size of 1 and returns 1.</summary>
+        /// <param name="kernel">The kernel.</param>
+        /// <param name="dynamicSharedMemorySize">Dynamic shared memory size in bytes (unused).</param>
+        /// <param name="maxGridSize">Maximum grid size (unused).</param>
+        /// <param name="groupSize">Receives 1.</param>
+        /// <returns>1.</returns>
         protected override int EstimateGroupSizeInternal(Kernel kernel, int dynamicSharedMemorySize, int maxGridSize, out int groupSize) { groupSize = 1; return 1; }
+        /// <summary>Group size estimation is not meaningful on WebGL; reports a group size of 1 and returns 1.</summary>
+        /// <param name="kernel">The kernel.</param>
+        /// <param name="computeSharedMemorySize">Shared memory size callback (unused).</param>
+        /// <param name="maxGridSize">Maximum grid size (unused).</param>
+        /// <param name="groupSize">Receives 1.</param>
+        /// <returns>1.</returns>
         protected override int EstimateGroupSizeInternal(Kernel kernel, Func<int, int> computeSharedMemorySize, int maxGridSize, out int groupSize) { groupSize = 1; return 1; }
+        /// <summary>Returns 1; occupancy estimation is not meaningful on WebGL.</summary>
+        /// <param name="kernel">The kernel.</param>
+        /// <param name="groupSize">The group size (unused).</param>
+        /// <param name="dynamicSharedMemorySize">Dynamic shared memory size in bytes (unused).</param>
+        /// <returns>1.</returns>
         protected override int EstimateMaxActiveGroupsPerMultiprocessorInternal(Kernel kernel, int groupSize, int dynamicSharedMemorySize) => 1;
+        /// <summary>No-op: WebGL has no peer access.</summary>
+        /// <param name="other">The other accelerator.</param>
         protected override void EnablePeerAccessInternal(Accelerator other) { }
+        /// <summary>No-op: WebGL has no peer access.</summary>
+        /// <param name="other">The other accelerator.</param>
         protected override void DisablePeerAccessInternal(Accelerator other) { }
+        /// <summary>Always false: WebGL has no peer access.</summary>
+        /// <param name="other">The other accelerator.</param>
+        /// <returns>False.</returns>
         protected override bool CanAccessPeerInternal(Accelerator other) => false;
 
         /// <summary>
@@ -1704,6 +1754,10 @@ namespace SpawnDev.ILGPU.WebGL
     /// </summary>
     public class WebGLKernel : Kernel
     {
+        /// <summary>Creates the kernel.</summary>
+        /// <param name="accelerator">The owning accelerator.</param>
+        /// <param name="compiledKernel">The compiled WebGL kernel.</param>
+        /// <param name="launcher">The kernel launcher method.</param>
         public WebGLKernel(Accelerator accelerator, CompiledKernel compiledKernel, MethodInfo launcher)
             : base(accelerator, compiledKernel, launcher) { }
 

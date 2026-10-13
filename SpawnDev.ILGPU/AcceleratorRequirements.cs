@@ -64,9 +64,9 @@ public sealed class AcceleratorRequirements
 
     /// <summary>
     /// Kernel must run on NATIVE Float16 hardware. Rules out backends where Float16 is
-    /// emulated: WebGL (always emulated), Wasm (always emulated), WebGPU without the
-    /// <c>shader-f16</c> feature, OpenCL devices without <c>cl_khr_fp16</c>. Leaves
-    /// CPU / CUDA and native-capable WebGPU / OpenCL.
+    /// emulated: WebGL (always emulated), Wasm (always emulated), WebGPU adapters without the
+    /// <c>shader-f16</c> feature (or with <c>WebGPUBackend.ForceEmulatedF16</c> set), OpenCL devices
+    /// without <c>cl_khr_fp16</c>. Leaves CPU / CUDA and native-capable WebGPU / OpenCL.
     /// </summary>
     public bool RequiresFloat16Native { get; init; }
 
@@ -188,9 +188,10 @@ public sealed class AcceleratorRequirements
     public bool RequiresInt64Atomics { get; init; }
 
     /// <summary>
-    /// Kernel uses <c>Warp.Shuffle</c> / <c>Group.Broadcast</c> or other subgroup primitives.
-    /// Rules out WebGL, Wasm, CPU. WebGPU and OpenCL are device-dependent (need the adapter
-    /// feature / Khronos subgroup extension); CUDA always supports it.
+    /// Kernel uses <c>Warp.Shuffle</c> / <c>Group.Broadcast</c> or other subgroup (warp) primitives.
+    /// Rules out WebGL, WebGPU adapters without the <c>subgroups</c> feature, and OpenCL devices without the
+    /// Khronos/Intel subgroup extensions. CUDA always passes. Wasm (emulated warps, <c>WarpSize</c> 8) and CPU
+    /// (simulated warps) pass: they produce the same results, without hardware warp speed.
     /// </summary>
     public bool RequiresSubGroups { get; init; }
 
@@ -360,12 +361,15 @@ public static class AcceleratorRequirementsExtensions
 
     private static bool HasFloat16Native(Device device)
     {
-        // Native-or-nothing: CUDA (SM_53+), OpenCL w/ cl_khr_fp16. WebGPU with shader-f16
-        // is harder to detect pre-accelerator here; treat as non-native for the selection
-        // gate (worst case, caller gets a CPU/CUDA fallback; pinning to WebGPU directly
-        // still works when the adapter has shader-f16).
+        // Native-or-nothing: CUDA (SM_53+), OpenCL w/ cl_khr_fp16, WebGPU whose adapter offers shader-f16.
+        // WebGPU: the adapter's features are known at enumeration and the accelerator requests shader-f16
+        // whenever the adapter has it, so the adapter list is what the accelerator will get. Until 2026-10-13
+        // WebGPU was always rejected here, so a browser kernel that asked for native f16 fell through to ILGPU's
+        // CPU accelerator on the UI thread. ForceEmulatedF16 (test flag) is read live, as the accelerator does.
         if (device.Capabilities is CLCapabilityContext cl)
             return cl.Float16Native;
+        if (device is WebGPU.WebGPUILGPUDevice webGpu)
+            return webGpu.AdapterSupportsShaderF16 && !WebGPU.Backend.WebGPUBackend.ForceEmulatedF16;
         return device.AcceleratorType == AcceleratorType.CPU
             || device.AcceleratorType == AcceleratorType.Cuda;
     }
@@ -416,14 +420,15 @@ public static class AcceleratorRequirementsExtensions
         _ => true,
     };
 
+    // A correctness gate: can this backend RUN Warp.* / Group.Broadcast correctly. Wasm emulates warps (WarpSize 8,
+    // shared-memory exchange) and the CPU accelerator simulates them; both match the other backends, so they pass
+    // (until 2026-10-13 both were rejected). WebGPU needs the adapter's 'subgroups' feature, read at enumeration
+    // (the accelerator requests it whenever the adapter has it). WebGL has no shared memory or barriers at all.
     private static bool HasSubGroups(Device device) => device.AcceleratorType switch
     {
         AcceleratorType.WebGL => false,
-        AcceleratorType.Wasm => false,
-        AcceleratorType.CPU => false,
         AcceleratorType.OpenCL => device.Capabilities is CLCapabilityContext cl && cl.SubGroups,
-        // WebGPU adapter feature detection would need the adapter instance; treat as
-        // compatible here and let the actual dispatch fail if the adapter lacks it.
+        AcceleratorType.WebGPU => device is not WebGPU.WebGPUILGPUDevice webGpu || webGpu.AdapterSupportsSubgroups,
         _ => true,
     };
 

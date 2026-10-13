@@ -20,17 +20,32 @@ namespace SpawnDev.ILGPU.Rendering
         private int _cachedHeight;
         private bool _disposed;
 
+        /// <summary>Creates a renderer that reads pixel buffers from <paramref name="accelerator"/>.</summary>
+        /// <param name="accelerator">The accelerator that owns the buffers passed to <c>PresentAsync</c>.</param>
+        /// <exception cref="ArgumentNullException"><paramref name="accelerator"/> is null.</exception>
         public CPUCanvasRenderer(Accelerator accelerator)
         {
             _accelerator = accelerator ?? throw new ArgumentNullException(nameof(accelerator));
         }
 
+        /// <summary>
+        /// Attaches the renderer to <paramref name="canvas"/> through its "2d" context, releasing the
+        /// previous context and cached <c>ImageData</c>.
+        /// </summary>
+        /// <param name="canvas">The canvas to draw to.</param>
         public void AttachCanvas(HTMLCanvasElement canvas)
         {
             DisposeRenderingResources();
             _ctx = canvas.GetContext<CanvasRenderingContext2D>("2d");
         }
 
+        /// <summary>
+        /// Copies a packed RGBA8 buffer (one <c>uint</c> per pixel, Extent.X = width, Extent.Y = height)
+        /// into the canvas with <c>putImageData</c>. Browser-backed buffers are read with
+        /// <see cref="IBrowserMemoryBuffer.CopyToHostUint8ArrayAsync(long, long?)"/>; other buffers are read
+        /// with a synchronous <c>Synchronize</c> + <c>CopyToCPU</c>. Does nothing if no canvas is attached.
+        /// </summary>
+        /// <param name="buffer">The pixel buffer to present.</param>
         public async Task PresentAsync(MemoryBuffer2D<uint, Stride2D.DenseX> buffer)
         {
             if (_ctx == null) return;
@@ -54,6 +69,13 @@ namespace SpawnDev.ILGPU.Rendering
             _ctx.PutImageData(_imageData!, 0, 0);
         }
 
+        /// <summary>
+        /// Copies a packed RGBA8 buffer (one <c>int</c> per pixel, Extent.X = width, Extent.Y = height)
+        /// into the canvas with <c>putImageData</c>. Browser-backed buffers are read with
+        /// <see cref="IBrowserMemoryBuffer.CopyToHostUint8ArrayAsync(long, long?)"/>; other buffers are read
+        /// with a synchronous <c>Synchronize</c> + <c>CopyToCPU</c>. Does nothing if no canvas is attached.
+        /// </summary>
+        /// <param name="buffer">The pixel buffer to present.</param>
         public async Task PresentAsync(MemoryBuffer2D<int, Stride2D.DenseX> buffer)
         {
             if (_ctx == null) return;
@@ -96,6 +118,7 @@ namespace SpawnDev.ILGPU.Rendering
             _cachedWidth = 0; _cachedHeight = 0;
         }
 
+        /// <summary>Releases the canvas context and cached <c>ImageData</c>. Does not dispose the accelerator.</summary>
         public void Dispose()
         {
             if (_disposed) return;

@@ -36,6 +36,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// </summary>
         public readonly struct GeneratorArgs
         {
+            /// <summary>Creates the arguments with empty output-varying, binding and body-struct collections.</summary>
+            /// <param name="backend">The parent backend.</param>
+            /// <param name="typeGenerator">The type generator.</param>
+            /// <param name="entryPoint">The kernel entry point.</param>
+            /// <param name="sharedAllocations">Shared memory allocations.</param>
+            /// <param name="dynamicSharedAllocations">Dynamic shared memory allocations.</param>
             public GeneratorArgs(
                 WebGLBackend backend,
                 GLSLTypeGenerator typeGenerator,
@@ -95,6 +101,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// </summary>
         public readonly struct PackedViewParamInfo
         {
+            /// <summary>Creates the info.</summary>
+            /// <param name="isFloat4">True for FP4 (Float4E2M1).</param>
+            /// <param name="isUnsigned">True for QUInt4; ignored when <paramref name="isFloat4"/> is true.</param>
             public PackedViewParamInfo(bool isFloat4, bool isUnsigned)
             {
                 IsFloat4 = isFloat4;
@@ -111,14 +120,21 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// </summary>
         public class Variable
         {
+            /// <summary>Creates a variable.</summary>
+            /// <param name="name">The GLSL identifier.</param>
+            /// <param name="type">The GLSL type name.</param>
             public Variable(string name, string type)
             {
                 Name = name;
                 Type = type;
             }
 
+            /// <summary>The GLSL identifier.</summary>
             public string Name { get; }
+            /// <summary>The GLSL type name (for example <c>int</c>, <c>vec2</c>, <c>struct_3</c>).</summary>
             public string Type { get; }
+            /// <summary>Returns <see cref="Name"/>.</summary>
+            /// <returns>The variable name.</returns>
             public override string ToString() => Name;
         }
 
@@ -126,15 +142,23 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         #region Instance
 
+        /// <summary>Counter for unique <c>v_N</c> variable names.</summary>
         protected int varCounter = 0;
+        /// <summary>Counter for unique label names.</summary>
         protected int labelCounter = 0;
+        /// <summary>Maps IR values to their GLSL variables.</summary>
         protected readonly Dictionary<Value, Variable> valueVariables = new();
         private readonly Dictionary<BasicBlock, string> blockLabels = new();
         // True while emitting a multi-block body: Declare() writes every declaration into
         // VariableBuilder, which is spliced in at function scope, so a variable defined inside
         // one structured branch or loop body is visible wherever it is used.
+        /// <summary>When true, <see cref="Declare"/> writes declarations into <see cref="VariableBuilder"/> (function scope).</summary>
         protected bool HoistDeclarations { get; set; } = false;
 
+        /// <summary>Initializes the generator for <paramref name="method"/> and computes its CFG, post-dominators and loops.</summary>
+        /// <param name="args">The shared generator arguments.</param>
+        /// <param name="method">The IR method to generate.</param>
+        /// <param name="allocas">The method's allocations.</param>
         protected GLSLCodeGenerator(in GeneratorArgs args, Method method, Allocas allocas)
         {
             Backend = args.Backend;
@@ -152,28 +176,46 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         #region Properties
 
+        /// <summary>The parent WebGL backend.</summary>
         public WebGLBackend Backend { get; }
+        /// <summary>Maps IR types to GLSL type names.</summary>
         public GLSLTypeGenerator TypeGenerator { get; }
+        /// <summary>The IR method being generated.</summary>
         public Method Method { get; }
+        /// <summary>The method's allocations.</summary>
         public Allocas Allocas { get; }
+        /// <summary>The GLSL source being generated for this method.</summary>
         public StringBuilder Builder { get; protected set; }
+        /// <summary>Hoisted variable declarations, spliced in at function scope for multi-block bodies.</summary>
         public StringBuilder VariableBuilder { get; } = new StringBuilder();
+        /// <summary>The backend's intrinsic implementation provider.</summary>
         public global::ILGPU.IR.Intrinsics.IntrinsicImplementationProvider<GLSLIntrinsic.Handler> ImplementationProvider => Backend.IntrinsicProvider;
+        /// <summary>Current indentation depth (four spaces per level).</summary>
         protected int IndentLevel { get; set; } = 0;
 
         #endregion
 
         #region IBackendCodeGenerator
 
+        /// <summary>Writes the shader header (declarations that precede the function code).</summary>
+        /// <param name="builder">The target builder.</param>
         public abstract void GenerateHeader(StringBuilder builder);
+        /// <summary>Generates the GLSL code for <see cref="Method"/> into <see cref="Builder"/>.</summary>
         public abstract void GenerateCode();
+        /// <summary>No-op: GLSL constants are emitted inline.</summary>
+        /// <param name="builder">The target builder (unused).</param>
         public void GenerateConstants(StringBuilder builder) { }
+        /// <summary>Appends this generator's <see cref="Builder"/> to <paramref name="builder"/>.</summary>
+        /// <param name="builder">The target builder.</param>
         public void Merge(StringBuilder builder) => builder.Append(Builder);
 
         #endregion
 
         #region Variable Management
 
+        /// <summary>Creates a new <c>v_N</c> variable of the value's GLSL type and binds it to <paramref name="value"/>.</summary>
+        /// <param name="value">The IR value.</param>
+        /// <returns>The new variable.</returns>
         protected Variable Allocate(Value value)
         {
             var name = $"v_{varCounter++}";
@@ -183,6 +225,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             return variable;
         }
 
+        /// <summary>Creates a new unbound <c>v_N</c> variable of the GLSL type for <paramref name="type"/>.</summary>
+        /// <param name="type">The IR type.</param>
+        /// <returns>The new variable.</returns>
         protected Variable AllocateType(TypeNode type)
         {
             var name = $"v_{varCounter++}";
@@ -190,6 +235,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             return new Variable(name, glslType);
         }
 
+        /// <summary>Returns the variable bound to <paramref name="value"/>, allocating one if none exists.</summary>
+        /// <param name="value">The IR value.</param>
+        /// <returns>The bound variable.</returns>
         public Variable Load(Value value)
         {
             if (!valueVariables.TryGetValue(value, out var variable))
@@ -199,22 +247,38 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             return variable;
         }
 
+        /// <summary>Same as <see cref="Load(Value)"/>; used by the intrinsic generators.</summary>
+        /// <param name="value">The IR value.</param>
+        /// <returns>The bound variable.</returns>
         public Variable LoadIntrinsicValue(Value value) => Load(value);
 
+        /// <summary>Binds <paramref name="value"/> to an existing <paramref name="variable"/> (an alias, no declaration).</summary>
+        /// <param name="value">The IR value.</param>
+        /// <param name="variable">The variable to bind.</param>
         protected void Bind(Value value, Variable variable)
         {
             valueVariables[value] = variable;
         }
 
+        /// <summary>Names of variables already declared in the shader source.</summary>
         protected readonly HashSet<string> declaredVariables = new();
+        /// <summary>Names of declared <c>bool</c> variables (GLSL needs the logical operators for them).</summary>
         protected readonly HashSet<string> booleanVariables = new();
         // Maps LAEA pointer variable names to their array[index] expressions
+        /// <summary>Maps a LoadArrayElementAddress variable name to its <c>array[index]</c> expression.</summary>
         protected readonly Dictionary<string, string> _leaArrayExprs = new();
         // Maps Alloca value variable names to their GLSL array names
+        /// <summary>Maps an Alloca/NewArray variable name to its GLSL local array name.</summary>
         protected readonly Dictionary<string, string> _allocaArrayNames = new();
         // Tracks Alloca values for array declarations
+        /// <summary>Counter for unique <c>local_arr_N</c> array names.</summary>
         protected int _localArrayCounter = 0;
 
+        /// <summary>
+        /// Declares <paramref name="variable"/> once (later calls are ignored), into <see cref="VariableBuilder"/>
+        /// when <see cref="HoistDeclarations"/> is set, otherwise inline.
+        /// </summary>
+        /// <param name="variable">The variable to declare.</param>
         protected void Declare(Variable variable)
         {
             if (declaredVariables.Contains(variable.Name)) return;
@@ -367,8 +431,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         #region Label Management
 
+        /// <summary>Returns a new unique label name for this method.</summary>
+        /// <returns>The label name.</returns>
         protected string DeclareLabel() => $"L_{Method.Id}_{labelCounter++}";
 
+        /// <summary>Returns the label name for <paramref name="block"/>, creating it on first use.</summary>
+        /// <param name="block">The block.</param>
+        /// <returns>The label name.</returns>
         protected string GetBlockLabel(BasicBlock block)
         {
             if (!blockLabels.TryGetValue(block, out var label))
@@ -379,35 +448,46 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             return label;
         }
 
+        /// <summary>No-op: GLSL has no labels or goto.</summary>
+        /// <param name="label">The label name.</param>
         protected void MarkLabel(string label) { }
 
         #endregion
 
         #region Code Emission Helpers
 
+        /// <summary>Appends four spaces per <see cref="IndentLevel"/> to <see cref="Builder"/>.</summary>
         protected void AppendIndent()
         {
             for (int i = 0; i < IndentLevel; i++)
                 Builder.Append("    ");
         }
 
+        /// <summary>Increases the indent level by one.</summary>
         protected void PushIndent() => IndentLevel++;
+        /// <summary>Decreases the indent level by one.</summary>
         protected void PopIndent() => IndentLevel--;
 
+        /// <summary>Appends an indented line to <see cref="Builder"/>.</summary>
+        /// <param name="line">The line text.</param>
         protected void AppendLine(string line)
         {
             AppendIndent();
             Builder.AppendLine(line);
         }
 
+        /// <summary>Appends a line to <see cref="Builder"/> without indentation.</summary>
+        /// <param name="line">The line text.</param>
         protected void AppendLineRaw(string line) => Builder.AppendLine(line);
 
+        /// <summary>Writes the opening brace of a function body and indents.</summary>
         protected void BeginFunctionBody()
         {
             Builder.AppendLine("{");
             PushIndent();
         }
 
+        /// <summary>Unindents and writes the closing brace of a function body.</summary>
         protected void FinishFunctionBody()
         {
             PopIndent();
@@ -418,6 +498,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         #region IR Traversal
 
+        /// <summary>
+        /// Emits the method body: local allocations first, then a single block directly (including its
+        /// terminator), or multiple blocks through the structured walker with all declarations hoisted to
+        /// function scope.
+        /// </summary>
         protected void GenerateCodeInternal()
         {
             var blocks = Method.Blocks;
@@ -463,6 +548,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             GenerateStructuredCode(Method.EntryBlock, null);
         }
 
+        /// <summary>
+        /// Declares a GLSL variable for each allocation: an array when the alloca is an array (or a scalarized
+        /// user array with a NewView consumer), otherwise a scalar.
+        /// </summary>
+        /// <param name="allocas">The allocations to declare.</param>
+        /// <param name="addressSpace">The allocations' address space (not used by the GLSL declaration).</param>
         protected void SetupAllocations(AllocaKindInformation allocas, MemoryAddressSpace addressSpace)
         {
             foreach (var allocaInfo in allocas)
@@ -515,10 +606,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         #region Structured Control Flow
 
         // CFG analyses for the structured walker, computed once per method.
+        /// <summary>Control-flow graph of the method (reverse post-order, forwards).</summary>
         protected readonly CFG<ReversePostOrder, Forwards> _cfg;
+        /// <summary>Post-dominator tree, used to find if/else merge blocks.</summary>
         protected readonly Dominators<Backwards> _postDominators;
+        /// <summary>Loop analysis of the method.</summary>
         protected readonly Loops<ReversePostOrder, Forwards> _loops;
+        /// <summary>Blocks already emitted by the structured walker.</summary>
         protected readonly HashSet<BasicBlock> _visitedBlocks = new();
+        /// <summary>Headers of the loops whose <c>for</c> is currently open, innermost on top.</summary>
         protected readonly Stack<BasicBlock> _activeLoopHeaders = new();
         /// <summary>
         /// The current loop's header exit target. Used by EmitBreakWithIntermediateCode
@@ -540,11 +636,16 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// </summary>
         protected sealed class GlslLoopExit
         {
+            /// <summary>The block where post-loop code starts.</summary>
             public BasicBlock? NormalExit;
+            /// <summary>Name of the int flag variable recording which divergent destination a break chose (0 = normal exit).</summary>
             public string Flag = "";
+            /// <summary>Placeholder line emitted before the loop; replaced by the flag declaration when the loop has divergent exits, else removed.</summary>
             public string SentinelLine = "";
+            /// <summary>Break destinations other than <see cref="NormalExit"/>, in flag order (flag value = index + 1).</summary>
             public readonly List<BasicBlock> Divergent = new();
         }
+        /// <summary>Exit bookkeeping per emitted loop.</summary>
         protected readonly Dictionary<Loops<ReversePostOrder, Forwards>.Node, GlslLoopExit> _glslLoopExits = new();
 
         /// <summary>The innermost loop whose for() is currently open, or null.</summary>
@@ -581,6 +682,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             return false;
         }
 
+        /// <summary>
+        /// Leaves <paramref name="loop"/> for a divergent <paramref name="destination"/>: sets the loop's exit flag to
+        /// the destination's 1-based index (registering it if new) and emits <c>break;</c>.
+        /// </summary>
+        /// <param name="loop">The loop being exited.</param>
+        /// <param name="destination">The block to resume at after the loop.</param>
         protected void EmitFlaggedBreak(Loops<ReversePostOrder, Forwards>.Node loop, BasicBlock destination)
         {
             var info = _glslLoopExits[loop];
@@ -663,6 +770,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 GenerateStructuredCode(merge, stop);
         }
 
+        /// <summary>Emits every non-terminator value of <paramref name="block"/>.</summary>
+        /// <param name="block">The block to emit.</param>
         protected void GenerateBlockCode(BasicBlock block)
         {
             // Emit all non-terminator values in the block
@@ -725,6 +834,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             return false;
         }
 
+        /// <summary>
+        /// Structured control-flow walker: emits <paramref name="current"/> and its successors as GLSL
+        /// if/else/for/break/continue until <paramref name="stop"/> is reached.
+        /// </summary>
+        /// <param name="current">The block to emit.</param>
+        /// <param name="stop">The block at which emission stops, or null.</param>
         protected void GenerateStructuredCode(BasicBlock current, BasicBlock? stop)
         {
             if (current == null || current == stop) return;
@@ -1212,12 +1327,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
-        /// <summary>
-        /// Emits an if/else branch outside a loop (acyclic structured flow).
-        /// </summary>
         /// <summary>Return-aware if/else merges for the function-level walker (reachability cached per function).</summary>
         private SpawnDev.ILGPU.CodeGen.StructuredReturnMerge? _returnMerge;
 
+        /// <summary>
+        /// Emits an if/else branch outside a loop (acyclic structured flow), then continues at the merge block.
+        /// </summary>
+        /// <param name="ib">The IR if-branch terminator.</param>
+        /// <param name="source">The block that ends in <paramref name="ib"/>.</param>
+        /// <param name="stop">The block at which emission stops, or null.</param>
         protected void EmitIfBranch(IfBranch ib, BasicBlock source, BasicBlock? stop)
         {
             var trueTarget = ib.TrueTarget;
@@ -1548,6 +1666,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             return false;
         }
 
+        /// <summary>True when <paramref name="block"/> contains any value other than phis and terminators.</summary>
+        /// <param name="block">The block to inspect.</param>
+        /// <returns>True if the block has real code.</returns>
         protected static bool HasNonPhiInstructions(BasicBlock block)
         {
             foreach (var value in block)
@@ -1593,6 +1714,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         #region Value Visitors - Dispatch
 
+        /// <summary>
+        /// Emits code for one IR value: skips side-effect-free void values, routes throws to
+        /// <see cref="GenerateThrow"/>, uses a registered intrinsic generator when one exists, and otherwise
+        /// dispatches to the matching <c>GenerateCode</c> overload.
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         protected void GenerateCodeFor(Value value)
         {
             // Same exclusion list as WGSL: void-typed Values without observable
@@ -1687,8 +1814,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         #region Value Visitors - Implementation
 
+        /// <summary>Parameters need no code in the body; emits nothing.</summary>
+        /// <param name="parameter">The IR parameter.</param>
         public virtual void GenerateCode(Parameter parameter) { }
 
+        /// <summary>
+        /// Emits a binary arithmetic operation. Emulated f64 operands use the <c>f64_*</c> library helpers;
+        /// other operands use GLSL operators or builtins.
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(BinaryArithmeticValue value)
         {
             var target = Load(value);
@@ -1922,6 +2056,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
+        /// <summary>Emits a unary arithmetic operation (delegates to <c>GenerateUnOp</c>).</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(UnaryArithmeticValue value) => GenerateUnOp(value);
 
         /// <summary>
@@ -2136,6 +2272,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             return null; // Signal that we already assigned target
         }
 
+        /// <summary>Emits a ternary arithmetic value (multiply-add) as <c>(a * b + c)</c>.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(TernaryArithmeticValue value)
         {
             var target = Load(value);
@@ -2147,6 +2285,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{target} = ({first} * {second} + {third});");
         }
 
+        /// <summary>
+        /// Emits a comparison. Emulated f64 operands go through the <c>f64_lt</c>/<c>f64_eq</c>/... helpers, scalar
+        /// floats get explicit NaN handling for unordered and equality compares, and unsigned integer compares
+        /// cast both sides to <c>uint</c>.
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(CompareValue value)
         {
             var target = Load(value);
@@ -2252,11 +2396,19 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         // 0 instead of the expected value (this is why `(short)0x8000 >> 15` returned 0x1 on WebGL).
         // The `(v ^ signbit) - signbit` idiom is fully defined: mask to width, flip the sign bit,
         // subtract it back. e.g. 0x8000 -> (0 - 0x8000) = 0xFFFF8000; 0x7FFF -> (0xFFFF - 0x8000) = 0x7FFF.
+        /// <summary>Returns a GLSL expression sign-extending the low 16 bits of the int <paramref name="expr"/>.</summary>
+        /// <param name="expr">A GLSL int expression.</param>
+        /// <returns>The sign-extended expression.</returns>
         protected static string SignExtend16(string expr) =>
             $"(((({expr}) & 0xFFFF) ^ 0x8000) - 0x8000)";
+        /// <summary>Returns a GLSL expression sign-extending the low 8 bits of the int <paramref name="expr"/>.</summary>
+        /// <param name="expr">A GLSL int expression.</param>
+        /// <returns>The sign-extended expression.</returns>
         protected static string SignExtend8(string expr) =>
             $"(((({expr}) & 0xFF) ^ 0x80) - 0x80)";
 
+        /// <summary>Emits a type conversion using <see cref="BuildConvertExpression"/>.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(ConvertValue value)
         {
             var target = Load(value);
@@ -2363,7 +2515,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         }
 
         /// <summary>
-        /// Math.CopySign for a scalar float: |x| carrying the SIGN BIT of y (a `y < 0.0` test
+        /// Math.CopySign for a scalar float: |x| carrying the SIGN BIT of y (a `y &lt; 0.0` test
         /// misses -0.0).
         /// </summary>
         protected static string CopySignExpression(string x, string y) =>
@@ -2487,6 +2639,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         }
 
         // Memory Operations — GLSL has no pointers; arrays accessed directly
+        /// <summary>
+        /// Emits a load: from the recorded <c>array[index]</c> expression for a local array element, otherwise a
+        /// copy of the source variable.
+        /// </summary>
+        /// <param name="loadVal">The IR load.</param>
         public virtual void GenerateCode(global::ILGPU.IR.Values.Load loadVal)
         {
             var target = Load(loadVal);
@@ -2499,6 +2656,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 AppendLine($"{target} = {source};");
         }
 
+        /// <summary>
+        /// Emits a store: to the recorded <c>array[index]</c> expression for a local array element, otherwise an
+        /// assignment to the address variable (cast to its type if needed).
+        /// </summary>
+        /// <param name="storeVal">The IR store.</param>
         public virtual void GenerateCode(global::ILGPU.IR.Values.Store storeVal)
         {
             var address = Load(storeVal.Target);
@@ -2516,8 +2678,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
+        /// <summary>Whether <paramref name="ptr"/> addresses atomic storage. Always false on WebGL (no atomics).</summary>
+        /// <param name="ptr">The pointer value.</param>
+        /// <returns>False in the base implementation.</returns>
         protected virtual bool IsAtomicPointer(Value ptr) => false;
 
+        /// <summary>Base implementation declares the target and emits only a comment.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(LoadElementAddress value)
         {
             var target = Load(value);
@@ -2529,6 +2696,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"// LEA: {target} = {source}[{offset}]");
         }
 
+        /// <summary>Base implementation copies the view's pointer value.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(global::ILGPU.IR.Values.NewView value)
         {
             var target = Load(value);
@@ -2548,6 +2717,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{target} = 0; // GetViewLength (base: no param info)");
         }
 
+        /// <summary>Base implementation declares the target and emits only a comment.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(LoadFieldAddress value)
         {
             var target = Load(value);
@@ -2564,6 +2735,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"// LFA: {target} = {source}.{fieldName}");
         }
 
+        /// <summary>
+        /// For an array allocation, declares a GLSL local array plus an int pointer variable set to 0;
+        /// scalar allocations emit nothing here.
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(Alloca value)
         {
             // Handle array allocations: declare GLSL local arrays
@@ -2587,6 +2763,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
+        /// <summary>Declares a GLSL local array sized by the product of the constant dimensions.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(global::ILGPU.IR.Values.NewArray value)
         {
             // NewArray creates a local array — declare it as a GLSL array
@@ -2606,6 +2784,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{elementType} {arrayName}[{arraySize}];");
         }
 
+        /// <summary>
+        /// Records the <c>array[index]</c> expression for a local array element so later loads and stores
+        /// use it directly; emits only a comment.
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(global::ILGPU.IR.Values.LoadArrayElementAddress value)
         {
             var target = Load(value);
@@ -2666,6 +2849,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         }
 
         // Constants
+        /// <summary>
+        /// Emits a constant. Emulated f64 constants are decoded on the host into their vec2/vec4 components
+        /// (as raw float bits), emulated i64 constants become <c>uvec2(lo, hi)</c>, and Inf/NaN use
+        /// <c>uintBitsToFloat</c> since GLSL ES 3.0 has no literal for them.
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(PrimitiveValue value)
         {
             var target = Load(value);
@@ -2750,6 +2939,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             return str;
         }
 
+        /// <summary>Emits the zero/default value of the type (a full per-field constructor for structs).</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(NullValue value)
         {
             var target = Load(value);
@@ -2765,17 +2956,23 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
+        /// <summary>Barriers do not exist in WebGL2 vertex shaders; emits only a comment.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(global::ILGPU.IR.Values.Barrier value)
         {
             // WebGL2 vertex shaders do not support barriers
             AppendLine("// barrier not supported in WebGL2 vertex shaders");
         }
 
+        /// <summary>GLSL has no strings; emits the string as a comment.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(StringValue value)
         {
             AppendLine($"// String: {value.String}");
         }
 
+        /// <summary>Declares the phi's variable; the structured walker emits the incoming assignments.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(PhiValue value)
         {
             var target = Load(value);
@@ -2783,6 +2980,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         }
 
         // Structures
+        /// <summary>Emits a GLSL struct constructor with one argument per field.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(StructureValue value)
         {
             var target = Load(value);
@@ -2798,6 +2997,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine(sb.ToString());
         }
 
+        /// <summary>Reads one structure field (<c>field_N</c>, or x/y/z on index types).</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(GetField value)
         {
             var target = Load(value);
@@ -2814,6 +3015,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{target} = {source}.{fieldName};");
         }
 
+        /// <summary>Copies the source structure and assigns one field (<c>field_N</c>, or x/y/z on index types).</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(SetField value)
         {
             var target = Load(value);
@@ -2832,6 +3035,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{target}.{fieldName} = {fieldValue};");
         }
 
+        /// <summary>
+        /// True when <paramref name="type"/> looks like an ILGPU Index1D/2D/3D type (by type name), whose
+        /// fields map to the GLSL swizzles x, y, z.
+        /// </summary>
+        /// <param name="type">The IR type.</param>
+        /// <returns>True for an index type.</returns>
         protected bool IsIndexType(TypeNode type)
         {
             var typeName = type.ToString();
@@ -2840,6 +3049,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         }
 
         // Device Constants — mapped from gl_VertexID in kernel generator
+        /// <summary>Base implementation emits 0; the kernel generator overrides it.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(GridIndexValue value)
         {
             var target = Load(value);
@@ -2847,6 +3058,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{target} = 0; // GridIndex not supported in WebGL2 TF");
         }
 
+        /// <summary>Base implementation emits 0; the kernel generator overrides it.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(GroupIndexValue value)
         {
             var target = Load(value);
@@ -2854,6 +3067,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{target} = 0; // GroupIndex not supported in WebGL2 TF");
         }
 
+        /// <summary>Base implementation emits 0; the kernel generator overrides it.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(GridDimensionValue value)
         {
             var target = Load(value);
@@ -2861,6 +3076,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{target} = 0; // GridDimension not supported in WebGL2 TF");
         }
 
+        /// <summary>Base implementation emits 0; the kernel generator overrides it.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(GroupDimensionValue value)
         {
             var target = Load(value);
@@ -2868,6 +3085,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{target} = 0; // GroupDimension not supported in WebGL2 TF");
         }
 
+        /// <summary>Base implementation emits 1 (WebGL has no warps).</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(WarpSizeValue value)
         {
             var target = Load(value);
@@ -2875,6 +3094,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{target} = 1; // No warps in WebGL2");
         }
 
+        /// <summary>Base implementation emits 0 (WebGL has no warp lanes).</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(LaneIdxValue value)
         {
             var target = Load(value);
@@ -2883,6 +3104,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         }
 
         // Control Flow
+        /// <summary>Emits <c>return;</c> or <c>return value;</c>.</summary>
+        /// <param name="value">The IR return terminator.</param>
         public virtual void GenerateCode(ReturnTerminator value)
         {
             // GLSL allows `return` anywhere, including inside the structured walker's loops.
@@ -2900,19 +3123,28 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         // Reaching one of these means a block was emitted outside the walker - fail loudly
         // rather than silently dropping control flow (which is how [NoInlining] helpers lost
         // every loop and branch before).
+        /// <summary>Always throws; branches are emitted only by the structured walker.</summary>
+        /// <param name="branch">The IR branch.</param>
+        /// <exception cref="InvalidOperationException">Always.</exception>
         public virtual void GenerateCode(UnconditionalBranch branch) =>
             throw new InvalidOperationException($"GLSL: branch {branch} reached value codegen outside the structured walker ({Method.Name}).");
 
+        /// <summary>Always throws; branches are emitted only by the structured walker.</summary>
+        /// <param name="branch">The IR branch.</param>
+        /// <exception cref="InvalidOperationException">Always.</exception>
         public virtual void GenerateCode(IfBranch branch) =>
             throw new InvalidOperationException($"GLSL: branch {branch} reached value codegen outside the structured walker ({Method.Name}).");
 
+        /// <summary>Always throws; branches are emitted only by the structured walker.</summary>
+        /// <param name="branch">The IR branch.</param>
+        /// <exception cref="InvalidOperationException">Always.</exception>
         public virtual void GenerateCode(SwitchBranch branch) =>
             throw new InvalidOperationException($"GLSL: branch {branch} reached value codegen outside the structured walker ({Method.Name}).");
 
         /// <summary>
         /// An emulated 64-bit shift (<paramref name="shiftFn"/> = i64_shl / u64_shr / i64_shr on a
         /// uvec2 (lo, hi)). When the shift amount is a compile-time constant - every 64-bit rotate
-        /// (`(x >> n) | (x << (64 - n))`) and most shifts in hashing/crypto code - the result is
+        /// (`(x &gt;&gt; n) | (x &lt;&lt; (64 - n))`) and most shifts in hashing/crypto code - the result is
         /// emitted as a branch-free expression with exactly the library function's result for that
         /// amount, instead of a call whose three runtime branches (== 0, >= 64, >= 32) the driver
         /// compiler must process at EVERY inlined call site. Blake2b.Compress (96 G mixes x 8 shifts)
@@ -2948,6 +3180,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         }
 
         // Method Calls
+        /// <summary>
+        /// Emits a method call. A user method with a body becomes a call to its generated GLSL function
+        /// (ref arguments pass the caller's alloca directly); otherwise known math names map to the
+        /// emulated-f64 helpers or GLSL builtins. Unmapped Scan/Reduce intrinsics throw
+        /// <see cref="SpawnDev.ILGPU.UnsupportedKernelFeatureException"/>; any other unmapped call yields 0.
+        /// </summary>
+        /// <param name="methodCall">The IR method call.</param>
         public virtual void GenerateCode(MethodCall methodCall)
         {
             // Void-returning calls have no result variable - skip Load + Declare
@@ -3147,6 +3386,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         }
 
         // Casts
+        /// <summary>Emits a plain copy of the integer as the pointer value.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(IntAsPointerCast value)
         {
             var target = Load(value); var source = Load(value.Value);
@@ -3154,6 +3395,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{target} = {source}; // intAsPtr");
         }
 
+        /// <summary>Emits a constructor cast of the pointer value to the target integer type.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(PointerAsIntCast value)
         {
             var target = Load(value); var source = Load(value.Value);
@@ -3161,6 +3404,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{target} = {target.Type}({source}); // ptrAsInt");
         }
 
+        /// <summary>Emits a plain copy; GLSL pointers are integer indices.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(PointerCast value)
         {
             var target = Load(value); var source = Load(value.Value);
@@ -3168,6 +3413,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{target} = {source}; // ptrCast");
         }
 
+        /// <summary>Emits a plain copy; GLSL has no address spaces.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(AddressSpaceCast value)
         {
             var target = Load(value); var source = Load(value.Value);
@@ -3175,6 +3422,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{target} = {source}; // addrSpaceCast");
         }
 
+        /// <summary>
+        /// Emits a bit reinterpretation from float to integer: <c>floatBitsToInt</c>, or the emulation encoder
+        /// (f64 to IEEE bits, f16, bf16, FP8, FP4) so emulated types yield their real bit pattern.
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(FloatAsIntCast value)
         {
             var target = Load(value); var source = Load(value.Value);
@@ -3213,6 +3465,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 AppendLine($"{target} = floatBitsToInt({source});");
         }
 
+        /// <summary>
+        /// Emits a bit reinterpretation from integer to float: <c>intBitsToFloat</c>, or the emulation decoder
+        /// (f64 from IEEE bits, f16, bf16, FP8, FP4) for emulated float types.
+        /// </summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(IntAsFloatCast value)
         {
             var target = Load(value); var source = Load(value.Value);
@@ -3246,6 +3503,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         // Atomics & Barriers — not supported in WebGL2 vertex shaders.
         // MUST throw at compile time - silent zeros produce wrong results
         // that users trust as correct. No silent garbage.
+        /// <summary>Always throws: WebGL2 vertex shaders have no atomic operations.</summary>
+        /// <param name="value">The IR value.</param>
+        /// <exception cref="SpawnDev.ILGPU.UnsupportedKernelFeatureException">Always.</exception>
         public virtual void GenerateCode(GenericAtomic value)
         {
             throw new SpawnDev.ILGPU.UnsupportedKernelFeatureException(
@@ -3255,6 +3515,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     "Consumers can declare RequiresAtomics = true on AcceleratorRequirements to filter WebGL at selection time.");
         }
 
+        /// <summary>Always throws: WebGL2 vertex shaders have no atomic operations.</summary>
+        /// <param name="value">The IR value.</param>
+        /// <exception cref="SpawnDev.ILGPU.UnsupportedKernelFeatureException">Always.</exception>
         public virtual void GenerateCode(AtomicCAS value)
         {
             throw new SpawnDev.ILGPU.UnsupportedKernelFeatureException(
@@ -3264,17 +3527,23 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     "Consumers can declare RequiresAtomics = true on AcceleratorRequirements to filter WebGL at selection time.");
         }
 
+        /// <summary>Memory barriers do not exist in WebGL2 vertex shaders; emits only a comment.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(MemoryBarrier value)
         {
             AppendLine("// memoryBarrier not supported in WebGL2 TF shaders");
         }
 
+        /// <summary>Predicate barriers do not exist in WebGL2 vertex shaders; emits only a comment.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(PredicateBarrier value)
         {
             AppendLine("// predicateBarrier not supported in WebGL2 TF shaders");
         }
 
         // Warp Operations — not supported
+        /// <summary>WebGL has no warps; emits a copy of the thread's own value.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(Broadcast value)
         {
             var target = Load(value);
@@ -3283,6 +3552,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{target} = {source}; // broadcast fallback");
         }
 
+        /// <summary>WebGL has no warps; emits a copy of the thread's own value.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(WarpShuffle value)
         {
             var target = Load(value);
@@ -3291,6 +3562,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{target} = {source}; // shuffle fallback");
         }
 
+        /// <summary>WebGL has no warps; emits a copy of the thread's own value.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(SubWarpShuffle value)
         {
             var target = Load(value);
@@ -3300,10 +3573,16 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         }
 
         // Debug/IO
+        /// <summary>Debug assertions are dropped; emits nothing.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(DebugAssertOperation value) { }
+        /// <summary>Kernel output (printf-style) is not supported; emits nothing.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(WriteToOutput value) { }
 
         // Other
+        /// <summary>Emits a select: <c>t = cond ? trueValue : falseValue;</c>.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(Predicate value)
         {
             var target = Load(value);
@@ -3314,6 +3593,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{target} = {cond} ? {trueVal} : {falseVal};");
         }
 
+        /// <summary>Emits 0 for the dynamic shared memory length (WebGL has no shared memory).</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(DynamicMemoryLengthValue value)
         {
             var target = Load(value);
@@ -3321,6 +3602,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{target} = 0; // dynamic memory length (placeholder)");
         }
 
+        /// <summary>Emits a plain copy of the source; alignment is not applied in GLSL.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(AlignTo value)
         {
             var target = Load(value); var source = Load(value.Source);
@@ -3328,6 +3611,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{target} = {source}; // alignTo");
         }
 
+        /// <summary>Binds the result to the source view (AsAligned is a compile-time hint; nothing is emitted).</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(AsAligned value)
         {
             // AsAligned is a compile-time alignment hint - the runtime view is unchanged, so alias
@@ -3338,8 +3623,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             Bind(value, source);
         }
 
+        /// <summary>Inline-language emit values are not supported in GLSL; emits nothing.</summary>
+        /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(LanguageEmitValue value) { }
 
+        /// <summary>
+        /// Emits code for a throw: GLSL has no exceptions, so it writes a comment and a <c>return</c> (with the
+        /// return type's default value for non-void functions) so every code path returns.
+        /// </summary>
+        /// <param name="value">The throwing IR value.</param>
         public virtual void GenerateThrow(Value value)
         {
             AppendLine($"// [GLSL] Throw encountered: {value} (Ignored/Unreachable)");
@@ -3373,6 +3665,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             return null;
         }
 
+        /// <summary>
+        /// Intrinsic handler for Abs: emits <c>f64_abs</c> / <c>i64_abs</c> for emulated 64-bit operands, a plain copy
+        /// for ulong, otherwise GLSL <c>abs(x)</c>.
+        /// </summary>
+        /// <param name="backend">The WebGL backend.</param>
+        /// <param name="cg">The code generator to emit into.</param>
+        /// <param name="value">The intrinsic <see cref="MethodCall"/>; other values are ignored.</param>
         public static void GenerateAbs(WebGLBackend backend, GLSLCodeGenerator cg, Value value)
         {
             if (value is MethodCall mc)
@@ -3387,6 +3686,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
+        /// <summary>Intrinsic handler for Sign: emits the emulated-f64 helper for emulated doubles, otherwise GLSL <c>sign(x)</c>.</summary>
+        /// <param name="backend">The WebGL backend.</param>
+        /// <param name="cg">The code generator to emit into.</param>
+        /// <param name="value">The intrinsic <see cref="MethodCall"/>; other values are ignored.</param>
         public static void GenerateSign(WebGLBackend backend, GLSLCodeGenerator cg, Value value)
         {
             if (TryEmitEmulatedF64Intrinsic(backend, cg, value, "Sign")) return;
@@ -3399,6 +3702,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
+        /// <summary>
+        /// Intrinsic handler for Round: emits the emulated-f64 helper for emulated doubles, otherwise GLSL
+        /// <c>roundEven(x)</c> so halves round to even like Math.Round.
+        /// </summary>
+        /// <param name="backend">The WebGL backend.</param>
+        /// <param name="cg">The code generator to emit into.</param>
+        /// <param name="value">The intrinsic <see cref="MethodCall"/>; other values are ignored.</param>
         public static void GenerateRound(WebGLBackend backend, GLSLCodeGenerator cg, Value value)
         {
             if (TryEmitEmulatedF64Intrinsic(backend, cg, value, "Round")) return;
@@ -3413,6 +3723,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
+        /// <summary>Intrinsic handler for Truncate: emits the emulated-f64 helper for emulated doubles, otherwise GLSL <c>trunc(x)</c>.</summary>
+        /// <param name="backend">The WebGL backend.</param>
+        /// <param name="cg">The code generator to emit into.</param>
+        /// <param name="value">The intrinsic <see cref="MethodCall"/>; other values are ignored.</param>
         public static void GenerateTruncate(WebGLBackend backend, GLSLCodeGenerator cg, Value value)
         {
             if (TryEmitEmulatedF64Intrinsic(backend, cg, value, "Truncate")) return;
@@ -3425,6 +3739,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
+        /// <summary>Intrinsic handler for Atan2(y, x): emits the emulated-f64 helper for emulated doubles, otherwise GLSL <c>atan(y, x)</c>.</summary>
+        /// <param name="backend">The WebGL backend.</param>
+        /// <param name="cg">The code generator to emit into.</param>
+        /// <param name="value">The intrinsic <see cref="MethodCall"/>; other values are ignored.</param>
         public static void GenerateAtan2(WebGLBackend backend, GLSLCodeGenerator cg, Value value)
         {
             if (TryEmitEmulatedF64Intrinsic(backend, cg, value, "Atan2")) return;
@@ -3438,6 +3756,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
+        /// <summary>
+        /// Intrinsic handler for Max: emits the <c>f64_max</c> / <c>i64_max</c> / <c>u64_max</c> emulation helper
+        /// for emulated 64-bit operands, otherwise GLSL <c>max(a, b)</c>.
+        /// </summary>
+        /// <param name="backend">The WebGL backend.</param>
+        /// <param name="cg">The code generator to emit into.</param>
+        /// <param name="value">The intrinsic <see cref="MethodCall"/>; other values are ignored.</param>
         public static void GenerateMax(WebGLBackend backend, GLSLCodeGenerator cg, Value value)
         {
             if (value is MethodCall mc)
@@ -3451,6 +3776,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
+        /// <summary>
+        /// Intrinsic handler for Min: emits the <c>f64_min</c> / <c>i64_min</c> / <c>u64_min</c> emulation helper
+        /// for emulated 64-bit operands, otherwise GLSL <c>min(a, b)</c>.
+        /// </summary>
+        /// <param name="backend">The WebGL backend.</param>
+        /// <param name="cg">The code generator to emit into.</param>
+        /// <param name="value">The intrinsic <see cref="MethodCall"/>; other values are ignored.</param>
         public static void GenerateMin(WebGLBackend backend, GLSLCodeGenerator cg, Value value)
         {
             if (value is MethodCall mc)
@@ -3464,6 +3796,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
+        /// <summary>Intrinsic handler for Pow: emits the emulated-f64 helper for emulated doubles, otherwise GLSL <c>pow(base, exponent)</c>.</summary>
+        /// <param name="backend">The WebGL backend.</param>
+        /// <param name="cg">The code generator to emit into.</param>
+        /// <param name="value">The intrinsic <see cref="MethodCall"/>; other values are ignored.</param>
         public static void GeneratePow(WebGLBackend backend, GLSLCodeGenerator cg, Value value)
         {
             if (TryEmitEmulatedF64Intrinsic(backend, cg, value, "Pow")) return;
@@ -3477,6 +3813,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
+        /// <summary>Intrinsic handler for Clamp: emits the emulated-f64 helper for emulated doubles, otherwise GLSL <c>clamp(v, min, max)</c>.</summary>
+        /// <param name="backend">The WebGL backend.</param>
+        /// <param name="cg">The code generator to emit into.</param>
+        /// <param name="value">The intrinsic <see cref="MethodCall"/>; other values are ignored.</param>
         public static void GenerateClamp(WebGLBackend backend, GLSLCodeGenerator cg, Value value)
         {
             if (TryEmitEmulatedF64Intrinsic(backend, cg, value, "Clamp")) return;
@@ -3491,6 +3831,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
+        /// <summary>
+        /// Intrinsic handler for FusedMultiplyAdd: emits the emulated-f64 helper for emulated doubles,
+        /// otherwise <c>x * y + z</c> (GLSL ES 3.0 has no fma builtin, so this is not a single rounding).
+        /// </summary>
+        /// <param name="backend">The WebGL backend.</param>
+        /// <param name="cg">The code generator to emit into.</param>
+        /// <param name="value">The intrinsic <see cref="MethodCall"/>; other values are ignored.</param>
         public static void GenerateFusedMultiplyAdd(WebGLBackend backend, GLSLCodeGenerator cg, Value value)
         {
             if (TryEmitEmulatedF64Intrinsic(backend, cg, value, "FusedMultiplyAdd")) return;
@@ -3505,6 +3852,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
+        /// <summary>Intrinsic handler for a reciprocal square root call: emits GLSL <c>inversesqrt(x)</c>.</summary>
+        /// <param name="backend">The WebGL backend.</param>
+        /// <param name="cg">The code generator to emit into.</param>
+        /// <param name="value">The intrinsic <see cref="MethodCall"/>; other values are ignored.</param>
         public static void GenerateRsqrt(WebGLBackend backend, GLSLCodeGenerator cg, Value value)
         {
             if (value is MethodCall mc)
@@ -3516,6 +3867,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
+        /// <summary>Intrinsic handler for a reciprocal call: emits <c>t = 1.0 / x;</c>.</summary>
+        /// <param name="backend">The WebGL backend.</param>
+        /// <param name="cg">The code generator to emit into.</param>
+        /// <param name="value">The intrinsic <see cref="MethodCall"/>; other values are ignored.</param>
         public static void GenerateRcp(WebGLBackend backend, GLSLCodeGenerator cg, Value value)
         {
             if (value is MethodCall mc)

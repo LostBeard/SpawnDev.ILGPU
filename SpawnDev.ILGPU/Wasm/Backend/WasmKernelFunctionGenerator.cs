@@ -237,7 +237,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         private int _phaseStateOffset = 0;
 
         /// <summary>
-        /// Byte positions in <see cref="Code"/> where a full-locals SAVE block must be
+        /// Byte positions in <see cref="WasmCodeGenerator.Code"/> where a full-locals SAVE block must be
         /// inserted. Saves are DEFERRED (not emitted inline) so every save covers the
         /// FINAL local count — symmetric with the deferred restore prologue. Without this,
         /// an inline save at an early barrier captured only <c>_locals.Count</c>-as-of-then,
@@ -371,6 +371,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// </summary>
         internal int SharedMemorySizeValue => _sharedMemorySize;
 
+        /// <summary>
+        /// Initializes a generator for the kernel method, or for a helper method emitted as its own
+        /// Wasm function (see <c>GenerateAsHelper</c>).
+        /// </summary>
+        /// <param name="args">The generator arguments shared by all generators of the kernel.</param>
+        /// <param name="method">The method to generate.</param>
+        /// <param name="allocas">The method's allocations.</param>
         public WasmKernelFunctionGenerator(
             in GeneratorArgs args,
             Method method,
@@ -1704,6 +1711,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         // === Control Flow Overrides ===
 
+        /// <summary>
+        /// Exits the function. A helper first stores its return value in its result local (and, in
+        /// phase mode, writes the done flag to scratch). In state-machine mode the state is set out
+        /// of range and control branches back to the dispatch loop, which exits; otherwise the
+        /// kernel (and phase-mode helpers) return i32 0.
+        /// </summary>
+        /// <param name="returnTerminator">The return terminator.</param>
         public override void GenerateCode(ReturnTerminator returnTerminator)
         {
             // Helper functions: store return value before exiting
@@ -1744,6 +1758,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
         }
 
+        /// <summary>
+        /// In state-machine mode, assigns the edge's phi values and jumps to the target block.
+        /// Emits nothing outside state-machine mode.
+        /// </summary>
+        /// <param name="branch">The unconditional branch.</param>
         public override void GenerateCode(UnconditionalBranch branch)
         {
             if (!_isStateMachine) return;
@@ -1753,6 +1772,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             EmitBranchToBlock(targetBlock);
         }
 
+        /// <summary>
+        /// In state-machine mode, emits <c>if/else</c> on the condition; each arm assigns its own
+        /// edge's phi values and jumps to its target block. Emits nothing outside state-machine mode.
+        /// </summary>
+        /// <param name="branch">The conditional branch.</param>
         public override void GenerateCode(IfBranch branch)
         {
             if (!_isStateMachine) return;
@@ -1776,6 +1800,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             Code.Add(WasmOpCodes.End);
         }
 
+        /// <summary>
+        /// In state-machine mode, tests each case with an <c>if</c> chain, assigns that edge's phi
+        /// values and jumps to the case's block, falling through to the default block. Emits
+        /// nothing outside state-machine mode.
+        /// </summary>
+        /// <param name="branch">The switch branch.</param>
         public override void GenerateCode(SwitchBranch branch)
         {
             if (!_isStateMachine) return;
@@ -1845,6 +1875,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             (pt.BasicValueType == BasicValueType.Int8 || pt.BasicValueType == BasicValueType.Int16)
                 ? pt.Size : 0;
 
+        /// <summary>
+        /// Emits a typed memory load, including the narrow encodings (Half, FP8, sub-word integers).
+        /// A structure load copies the data into a scratch slot so later stores to the source do
+        /// not change the loaded value. In barrier kernels some loads use atomic loads.
+        /// </summary>
+        /// <param name="value">The load.</param>
         public override void GenerateCode(Load value)
         {
             // Global Float16 loads (e.g. ArrayView1D<Half>[idx]) must not use the
@@ -2370,6 +2406,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
 
+        /// <summary>
+        /// Computes an element address as <c>base + index * elementSize</c>, resolving the view's
+        /// base pointer through parameters and body structs. Packed 4-bit views (QInt4, Float4E2M1)
+        /// passed directly as parameters produce a nibble address (<c>2 * base + index</c>).
+        /// </summary>
+        /// <param name="value">The load-element-address value.</param>
+        /// <exception cref="UnsupportedKernelFeatureException">
+        /// A packed 4-bit view is reached through a structure parameter.
+        /// </exception>
         public override void GenerateCode(LoadElementAddress value)
         {
             // Packed 4-bit (QInt4): the buffer is 2 nibbles/byte. The DIRECT-param path below encodes a
@@ -2568,6 +2613,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         #region Override: GetField for ArrayView decomposition
 
+        /// <summary>
+        /// Reads a structure field. Handles the implicit 2D/3D index (decomposed from the global
+        /// index), view parameters and views inside body structs (pointer, length and stride read
+        /// from their dedicated parameter locals), and structures held in memory (typed load at the
+        /// field offset).
+        /// </summary>
+        /// <param name="value">The get-field value.</param>
         public override void GenerateCode(GetField value)
         {
             var target = AllocateLocal(value, GetWasmType(value));
@@ -2878,6 +2930,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>
+        /// Reinterprets float bits as an integer. Half and BFloat16 values (held as promoted f32)
+        /// are converted back to their 16-bit patterns; other types use the base reinterpret.
+        /// </summary>
+        /// <param name="value">The float-as-int cast.</param>
         public override void GenerateCode(FloatAsIntCast value)
         {
             // Float16 lives in an F32 Wasm local (promoted). A plain I32ReinterpretF32
@@ -2940,6 +2997,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             base.GenerateCode(value);
         }
 
+        /// <summary>
+        /// Reinterprets integer bits as a float. For Half and BFloat16 targets the low 16 bits are
+        /// expanded to the promoted f32 value; other types use the base reinterpret.
+        /// </summary>
+        /// <param name="value">The int-as-float cast.</param>
         public override void GenerateCode(IntAsFloatCast value)
         {
             // Reverse of FloatAsIntCast: when the target is Float16, the source I32 holds
@@ -2998,6 +3060,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             base.GenerateCode(value);
         }
 
+        /// <summary>
+        /// For a structure held in memory, writes the new field value at the field's byte offset and
+        /// returns the same base address (the structure is updated in place). Other cases fall back
+        /// to the base handler.
+        /// </summary>
+        /// <param name="value">The set-field value.</param>
         public override void GenerateCode(SetField value)
         {
             // SetField modifies a field of a struct and returns the modified struct.
@@ -3152,6 +3220,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             Code.Add(WasmOpCodes.End); // end loop
         }
 
+        /// <summary>
+        /// Emits a typed memory store, including the narrow encodings (Half, FP8, sub-word integers)
+        /// and structure copies. Stores into a kernel parameter are recorded so the dispatcher can
+        /// skip copying input-only buffers back to the host. In barrier kernels some stores use a
+        /// verified atomic store.
+        /// </summary>
+        /// <param name="value">The store.</param>
         public override void GenerateCode(Store value)
         {
             var target = value.Target.Resolve();
@@ -3621,6 +3696,11 @@ EmitSaveAllLocals();
             }
         }
 
+        /// <summary>
+        /// Materializes a structure in per-thread scratch memory: reserves its IR size (8-byte
+        /// aligned), stores each field at its IR offset, and sets the result local to the base address.
+        /// </summary>
+        /// <param name="value">The structure value.</param>
         public override void GenerateCode(StructureValue value)
         {
             // StructureValue constructs a struct from field values.
@@ -4237,6 +4317,11 @@ EmitSaveAllLocals();
 
         #region Override: Device Constants
 
+        /// <summary>
+        /// Stores <c>Group.Idx</c> for one axis by decomposing the linear thread index within the
+        /// group (<c>threadIdX</c>) X-fastest over the per-axis group sizes.
+        /// </summary>
+        /// <param name="value">The group index value.</param>
         public override void GenerateCode(GroupIndexValue value)
         {
             var target = AllocateLocal(value);
@@ -4272,6 +4357,11 @@ EmitSaveAllLocals();
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>
+        /// Stores <c>Grid.Idx</c> for one axis by decomposing the linear group index
+        /// (<c>globalIdx / groupSize</c>) X-fastest over the per-axis grid sizes.
+        /// </summary>
+        /// <param name="value">The grid index value.</param>
         public override void GenerateCode(GridIndexValue value)
         {
             var target = AllocateLocal(value);
@@ -4322,6 +4412,11 @@ EmitSaveAllLocals();
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>
+        /// Stores <c>Group.Dim</c> for one axis: X and Y come from the dispatched per-axis group
+        /// sizes; Z is the total group size divided by X * Y.
+        /// </summary>
+        /// <param name="value">The group dimension value.</param>
         public override void GenerateCode(GroupDimensionValue value)
         {
             var target = AllocateLocal(value);
@@ -4341,6 +4436,11 @@ EmitSaveAllLocals();
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>
+        /// Stores <c>Grid.Dim</c> for one axis: X and Y are the axis thread count divided by the
+        /// group size on that axis; Z is always 1.
+        /// </summary>
+        /// <param name="value">The grid dimension value.</param>
         public override void GenerateCode(GridDimensionValue value)
         {
             var target = AllocateLocal(value);
@@ -4368,6 +4468,8 @@ EmitSaveAllLocals();
         // IsFirstLane / IsLastLane derive from LaneIdx + WarpSize in IL (Warp.cs). Warp.Shuffle is
         // emulated via shared memory + a barrier (see GenerateCode(WarpShuffle)). The base
         // WasmCodeGenerator emits the WarpSize=1 / LaneIdx=0 stubs; these overrides make them real.
+        /// <summary>Stores the emulated warp size, <see cref="WasmBackend.WasmWarpSize"/> (8).</summary>
+        /// <param name="value">The warp size value.</param>
         public override void GenerateCode(WarpSizeValue value)
         {
             var target = AllocateLocal(value);
@@ -4375,6 +4477,8 @@ EmitSaveAllLocals();
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>Stores the emulated lane index, <c>threadIdX % WasmWarpSize</c>.</summary>
+        /// <param name="value">The lane index value.</param>
         public override void GenerateCode(LaneIdxValue value)
         {
             var target = AllocateLocal(value);
@@ -4385,6 +4489,11 @@ EmitSaveAllLocals();
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>
+        /// Stores the dynamic shared memory length (element count), read from the kernel's
+        /// <c>dynamicSharedLen</c> parameter set at dispatch time.
+        /// </summary>
+        /// <param name="value">The dynamic memory length value.</param>
         public override void GenerateCode(DynamicMemoryLengthValue value)
         {
             // Dynamic shared memory length = element count (passed at dispatch time via kernel param 8)
@@ -5122,7 +5231,18 @@ EmitSaveAllLocals();
         // source lane (the frontend lowers Down/Up/Xor into it — see ILGPU Warp.cs), so we don't branch
         // on ShuffleKind; we mask it into the warp (origin % WarpSize) for bounds-safety. Two barriers
         // (publish + reuse-guard) — counted as 2 in the barrier scans, same as Broadcast.
+        /// <summary>
+        /// Emulates <c>Warp.Shuffle</c> through shared memory: each lane writes its value to a per-lane
+        /// slot, a barrier publishes the writes, the lane reads the source lane's slot, and a second
+        /// barrier guards slot reuse.
+        /// </summary>
+        /// <param name="shuffle">The warp shuffle.</param>
         public override void GenerateCode(WarpShuffle shuffle) => EmitWarpShuffle(shuffle);
+        /// <summary>
+        /// Emulates a sub-warp shuffle through shared memory, the same way as
+        /// <see cref="GenerateCode(WarpShuffle)"/>.
+        /// </summary>
+        /// <param name="shuffle">The sub-warp shuffle.</param>
         public override void GenerateCode(SubWarpShuffle shuffle) => EmitWarpShuffle(shuffle);
 
         private void EmitWarpShuffle(ShuffleOperation shuffle)
@@ -5499,6 +5619,8 @@ EmitSaveAllLocals();
             return size;
         }
 
+        /// <summary>Emits an <c>atomic.fence</c>. This orders memory only; it does not synchronize threads.</summary>
+        /// <param name="barrier">The memory barrier.</param>
         public override void GenerateCode(MemoryBarrier barrier)
         {
             // MemoryBarrier (fence) — emit atomic.fence or just a barrier
@@ -5954,6 +6076,14 @@ EmitSaveAllLocals();
             return viewFieldCount == 1 && int32FieldCount >= 4;
         }
 
+        /// <summary>
+        /// True if <paramref name="type"/> is a single array view: a pointer
+        /// (<see cref="AddressSpaceType"/>), or a structure whose only pointer field is its first
+        /// direct field (e.g. <c>ArrayView1D</c>). Structures with several pointer fields and
+        /// TensorView-like body structs return false; they are marshalled as structs.
+        /// </summary>
+        /// <param name="type">The IR type to test.</param>
+        /// <returns>True for a single-view type.</returns>
         protected bool IsViewType(TypeNode type)
         {
             if (type is AddressSpaceType)
@@ -6309,8 +6439,8 @@ EmitSaveAllLocals();
         /// Emits inline Wasm to convert an FP8 raw byte (i32, low 8 bits on stack) to f32.
         /// <paramref name="isE4M3"/> selects E4M3FN (1/4/3 bias 7, no Inf) vs E5M2 (1/5/2 bias 15,
         /// IEEE Inf/NaN). Direct port of the managed ConvertFloat8E*M*ToFloat (CPU-verified 0/256,
-        /// matches the OpenCL/WGSL/GLSL helpers). The subnormal normalize is UNROLLED (E4M3 <=3,
-        /// E5M2 <=2 shifts) so no loop is needed in the linear bytecode - exact, not approximated.
+        /// matches the OpenCL/WGSL/GLSL helpers). The subnormal normalize is UNROLLED (E4M3 &lt;=3,
+        /// E5M2 &lt;=2 shifts) so no loop is needed in the linear bytecode - exact, not approximated.
         /// </summary>
         private void EmitFP8ToF32(bool isE4M3)
         {

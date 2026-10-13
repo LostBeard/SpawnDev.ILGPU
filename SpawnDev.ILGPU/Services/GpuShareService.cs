@@ -3,15 +3,42 @@ using SpawnDev.SpawnJS.JSObjects;
 
 namespace SpawnDev.ILGPU.Services
 {
+    /// <summary>
+    /// Arguments for an intercepted <c>navigator.gpu.requestAdapter</c> call, passed to
+    /// <see cref="GpuShareService.OnAdapterRequested"/> and <see cref="GpuShareService.OnAdapterCreated"/> handlers.
+    /// </summary>
     public class GPUAdapterReturnOverride
     {
+        /// <summary>
+        /// The adapter to return. Null when the request arrives; a <see cref="GpuShareService.OnAdapterRequested"/>
+        /// handler that sets it makes the hook return this adapter without calling the original
+        /// <c>requestAdapter</c>. Holds the created adapter when <see cref="GpuShareService.OnAdapterCreated"/> fires.
+        /// </summary>
         public GPUAdapter? Adapter { get; set; }
+        /// <summary>
+        /// The request options passed by the caller (may be null). Handlers may replace them; the final value is
+        /// passed to the original <c>requestAdapter</c>.
+        /// </summary>
         public SpawnJSObject? Options { get; set; }
 
     }
+    /// <summary>
+    /// Arguments for an intercepted <c>GPUAdapter.requestDevice</c> call, passed to the
+    /// <c>OnDeviceRequested</c> and <c>OnDeviceCreated</c> handlers of <see cref="GPUAdapterHook"/> and
+    /// <see cref="GpuShareService"/>.
+    /// </summary>
     public class GPUDeviceReturnOverride
     {
+        /// <summary>
+        /// The device to return. Null when the request arrives; an <c>OnDeviceRequested</c> handler that sets it
+        /// makes the hook return this device without calling the original <c>requestDevice</c>. Holds the
+        /// returned device when <c>OnDeviceCreated</c> fires.
+        /// </summary>
         public GPUDevice? Device { get; set; }
+        /// <summary>
+        /// The request options passed by the caller (may be null). Handlers may replace them; the final value is
+        /// passed to the original <c>requestDevice</c>.
+        /// </summary>
         public SpawnJSObject? Options { get; set; }
     }
     /// <summary>
@@ -20,6 +47,13 @@ namespace SpawnDev.ILGPU.Services
     /// </summary>
     public class GpuShareService : IBackgroundService
     {
+        /// <summary>
+        /// When true (default), a <c>requestAdapter</c> call returns <see cref="FirstAdapter"/> and a
+        /// <c>requestDevice</c> call on a hooked adapter returns <see cref="FirstDevice"/> once one has been
+        /// captured, so every caller shares one adapter and device. This service's <see cref="OnAdapterRequested"/>
+        /// and <see cref="OnDeviceRequested"/> are not raised for a request answered this way. When false, every
+        /// request goes through the events and the original API.
+        /// </summary>
         public bool ForceShare = true; // set to false to disable sharing and just log the created adapter
         /// <summary>
         /// Gets the first available GPU adapter from the collection of GPU adapters.
@@ -35,15 +69,48 @@ namespace SpawnDev.ILGPU.Services
         /// environments where multiple adapters or devices may exist. If no GPU adapters are available, or if the first
         /// adapter does not contain any devices, the property returns null.</remarks>
         public GPUDevice? FirstDevice => GPUAdapterHooks.FirstOrDefault()?.Devices.FirstOrDefault();
+        /// <summary>
+        /// Raised before a hooked adapter calls its original <c>requestDevice</c> (not raised when
+        /// <see cref="ForceShare"/> supplies an existing device). Handlers run one at a time in subscription
+        /// order and are awaited; they may change <see cref="GPUDeviceReturnOverride.Options"/> or set
+        /// <see cref="GPUDeviceReturnOverride.Device"/> to skip the original call.
+        /// </summary>
         public event Func<GPUAdapterHook, GPUDeviceReturnOverride, Task> OnDeviceRequested = default!;
+        /// <summary>
+        /// Raised after a hooked adapter's <c>requestDevice</c> has a device (created or supplied by a handler),
+        /// before it is returned to the caller. Handlers run one at a time in subscription order and are awaited.
+        /// </summary>
         public event Func<GPUAdapterHook, GPUDeviceReturnOverride, Task> OnDeviceCreated = default!;
+        /// <summary>
+        /// Raised before the original <c>navigator.gpu.requestAdapter</c> is called (not raised when
+        /// <see cref="ForceShare"/> returns an existing adapter). Handlers run one at a time in subscription order
+        /// and are awaited; they may change <see cref="GPUAdapterReturnOverride.Options"/> or set
+        /// <see cref="GPUAdapterReturnOverride.Adapter"/>, which is then returned without being hooked and without
+        /// raising <see cref="OnAdapterCreated"/>.
+        /// </summary>
         public event Func<GPUAdapterReturnOverride, Task> OnAdapterRequested = default!;
+        /// <summary>
+        /// Raised after the original <c>requestAdapter</c> returns and the adapter has been wrapped in a
+        /// <see cref="GPUAdapterHook"/> and added to <see cref="GPUAdapterHooks"/>. Handlers run one at a time in
+        /// subscription order and are awaited.
+        /// </summary>
         public event Func<GPUAdapterHook, GPUAdapterReturnOverride, Task> OnAdapterCreated = default!;
+        /// <summary>
+        /// One hook per adapter created through the original <c>requestAdapter</c>, in creation order. A hook is
+        /// removed when it is disposed.
+        /// </summary>
         public List<GPUAdapterHook> GPUAdapterHooks { get; } = new List<GPUAdapterHook>();
         private SpawnJSRuntime _js;
         FuncCallback<SpawnJSObject?, Task<GPUAdapter>>? _requestAdapterHookCallback;
         Function? _requestAdapterOrig;
+        /// <summary>When true, logs intercepted requests and forced sharing to the browser console. Default false.</summary>
         public bool Verbose { get; set; } = false;
+        /// <summary>
+        /// Creates the service. In a browser with WebGPU, replaces <c>navigator.gpu.requestAdapter</c> with this
+        /// service's hook and keeps the original as <c>navigator.gpu.requestAdapterOrig</c>. Outside a browser,
+        /// or when <c>navigator.gpu</c> is missing, nothing is patched.
+        /// </summary>
+        /// <param name="js">The SpawnJS runtime.</param>
         public GpuShareService(SpawnJSRuntime js)
         {
             _js = js;
@@ -172,12 +239,31 @@ namespace SpawnDev.ILGPU.Services
     public class GPUAdapterHook : IDisposable
     {
         FuncCallback<SpawnJSObject?, Task<GPUDevice>>? _requestDeviceHookCallback;
+        /// <summary>The hooked adapter.</summary>
         public GPUAdapter Adapter { get; }
         Function? _requestDeviceOrig;
+        /// <summary>
+        /// Devices created through this adapter's original <c>requestDevice</c>, in creation order. Devices
+        /// supplied by an <see cref="OnDeviceRequested"/> handler are not added.
+        /// </summary>
         public List<GPUDevice> Devices { get; } = new List<GPUDevice>();
+        /// <summary>
+        /// Raised before the original <c>requestDevice</c> is called. Handlers run one at a time in subscription
+        /// order and are awaited; they may change <see cref="GPUDeviceReturnOverride.Options"/> or set
+        /// <see cref="GPUDeviceReturnOverride.Device"/> to skip the original call.
+        /// </summary>
         public event Func<GPUAdapterHook, GPUDeviceReturnOverride, Task> OnDeviceRequested = default!;
+        /// <summary>
+        /// Raised after <c>requestDevice</c> has a device (created or supplied by a handler), before it is returned
+        /// to the caller. Handlers run one at a time in subscription order and are awaited.
+        /// </summary>
         public event Func<GPUAdapterHook, GPUDeviceReturnOverride, Task> OnDeviceCreated = default!;
+        /// <summary>True once <see cref="Dispose"/> has run.</summary>
         public bool Disposed { get; private set; }
+        /// <summary>
+        /// Raised at the start of <see cref="Dispose"/>, before the original <c>requestDevice</c> is restored.
+        /// Exceptions thrown by handlers are swallowed.
+        /// </summary>
         public event Action<GPUAdapterHook> OnDisposing = default!;
         /// <summary>
         /// Creates a hook for a GPUAdapter to intercept requestDevice calls. This allows us to capture the GPUDevice created by ORT WebGPU and share it with ILGPU for zero-copy buffers.

@@ -954,7 +954,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         ///     ArrayView wrapper shape (NumFields ∈ {3,4,6} with Field[0] = View)
         ///
         /// Mirror of WGSL's IsBodyStruct check, generalized to also recognize
-        /// single-view body structs like `Tests23_OnlyShortStruct { ArrayView<short> S0 }`.
+        /// single-view body structs like `Tests23_OnlyShortStruct { ArrayView&lt;short&gt; S0 }`.
         /// </summary>
         private static bool IsBodyStruct(StructureType st)
         {
@@ -2350,7 +2350,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// access for body-struct fields (no <see cref="TryResolveBodyStructField"/>), so
         /// fn-call emission silently zeros. Inline single-block implementations at the
         /// kernel call site by binding callee parameters to the caller's variables -
-        /// same pattern as <see cref="WGSLKernelFunctionGenerator.GenerateCode(MethodCall)"/>.
+        /// same pattern as <see cref="global::SpawnDev.ILGPU.WebGPU.Backend.WGSLKernelFunctionGenerator.GenerateCode(MethodCall)"/>.
         /// </summary>
         public override void GenerateCode(MethodCall methodCall)
         {
@@ -4017,12 +4017,18 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
     #region Supporting Types
 
+    /// <summary>How a WebGL kernel parameter is passed to the shader.</summary>
     public enum KernelParamKind
     {
+        /// <summary>An ArrayView, read through a sampler texture.</summary>
         Buffer,
+        /// <summary>A scalar or struct value passed as a uniform.</summary>
         Scalar,
+        /// <summary>The stride uniform array of a 2D/3D view.</summary>
         Stride,
+        /// <summary>An emulated double passed as two uint uniforms (<c>_lo</c>, <c>_hi</c>).</summary>
         EmulatedF64,
+        /// <summary>An emulated long/ulong passed as two uint uniforms (<c>_lo</c>, <c>_hi</c>).</summary>
         EmulatedI64
     }
 
@@ -4067,15 +4073,29 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         public string ClrFieldName { get; set; } = "";
     }
 
+    /// <summary>
+    /// Describes how one WebGL kernel parameter is bound (sampler, uniform, stride uniform or lo/hi uint pair),
+    /// produced by the kernel code generator and read by WebGLAccelerator at dispatch time.
+    /// </summary>
     public readonly struct KernelParameterBinding
     {
+        /// <summary>The kernel parameter index.</summary>
         public int ParamIndex { get; }
+        /// <summary>The binding's sequential index among the kernel's bindings.</summary>
         public int BindingIndex { get; }
+        /// <summary>How the parameter is passed.</summary>
         public KernelParamKind Kind { get; }
+        /// <summary>The GLSL type of the uniform or of the buffer elements.</summary>
         public string GlslType { get; }
         /// <summary>For struct element buffers: number of flattened scalar fields per element. 0 for non-struct.</summary>
         public int StructFieldCount { get; }
 
+        /// <summary>Creates the binding description.</summary>
+        /// <param name="paramIndex">See <see cref="ParamIndex"/>.</param>
+        /// <param name="bindingIndex">See <see cref="BindingIndex"/>.</param>
+        /// <param name="kind">See <see cref="Kind"/>.</param>
+        /// <param name="glslType">See <see cref="GlslType"/>.</param>
+        /// <param name="structFieldCount">See <see cref="StructFieldCount"/>.</param>
         public KernelParameterBinding(int paramIndex, int bindingIndex, KernelParamKind kind, string glslType, int structFieldCount = 0)
         {
             ParamIndex = paramIndex;
@@ -4086,11 +4106,19 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         }
     }
 
+    /// <summary>
+    /// Describes one Transform Feedback output varying of a WebGL kernel: which kernel parameter (buffer) it writes
+    /// and how the GL worker maps captured per-vertex values back into that buffer.
+    /// </summary>
     public class OutputVaryingInfo
     {
+        /// <summary>The kernel parameter index of the output buffer (a synthetic index for body-struct fields).</summary>
         public int ParamIndex { get; }
+        /// <summary>The varying's position in the Transform Feedback varyings list.</summary>
         public int OutputIndex { get; }
+        /// <summary>The GLSL name of the <c>out</c> varying.</summary>
         public string VaryingName { get; }
+        /// <summary>The GLSL type of the varying.</summary>
         public string GlslType { get; }
         /// <summary>True if this varying is one half of an emulated 64-bit value (lo or hi).</summary>
         public bool IsEmulated { get; }
@@ -4117,6 +4145,17 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// <summary>For struct field varyings: the size in bytes of one struct element.</summary>
         public int StructByteSize { get; init; }
 
+        /// <summary>Creates the varying description.</summary>
+        /// <param name="paramIndex">See <see cref="ParamIndex"/>.</param>
+        /// <param name="outputIndex">See <see cref="OutputIndex"/>.</param>
+        /// <param name="varyingName">See <see cref="VaryingName"/>.</param>
+        /// <param name="glslType">See <see cref="GlslType"/>.</param>
+        /// <param name="isEmulated">See <see cref="IsEmulated"/>.</param>
+        /// <param name="emulatedSuffix">See <see cref="EmulatedSuffix"/>.</param>
+        /// <param name="fieldIndex">See <see cref="FieldIndex"/>.</param>
+        /// <param name="storeSlot">See <see cref="StoreSlot"/>.</param>
+        /// <param name="storeCount">See <see cref="StoreCount"/>.</param>
+        /// <param name="isAtomicVote">See <see cref="IsAtomicVote"/>.</param>
         public OutputVaryingInfo(int paramIndex, int outputIndex, string varyingName, string glslType,
             bool isEmulated = false, string? emulatedSuffix = null, int fieldIndex = -1,
             int storeSlot = -1, int storeCount = 1, bool isAtomicVote = false)

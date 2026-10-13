@@ -19,7 +19,16 @@ namespace SpawnDev.ILGPU.Crypto
     /// <summary>One 32-byte dataset element: 4 little-endian-conceptual 64-bit words.</summary>
     public readonly struct Element256
     {
+        /// <summary>
+        /// The four 64-bit words, <c>W0</c> first. When elements are summed as 256-bit integers
+        /// the carry runs from <c>W0</c> to <c>W3</c>, so <c>W0</c> is the least significant word.
+        /// </summary>
         public readonly ulong W0, W1, W2, W3;
+        /// <summary>Creates an element from its four 64-bit words.</summary>
+        /// <param name="w0">Word 0 (least significant in 256-bit sums).</param>
+        /// <param name="w1">Word 1.</param>
+        /// <param name="w2">Word 2.</param>
+        /// <param name="w3">Word 3 (most significant in 256-bit sums).</param>
         public Element256(ulong w0, ulong w1, ulong w2, ulong w3) { W0 = w0; W1 = w1; W2 = w2; W3 = w3; }
     }
 

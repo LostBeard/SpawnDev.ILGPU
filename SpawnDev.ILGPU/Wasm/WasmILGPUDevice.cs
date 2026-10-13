@@ -44,6 +44,11 @@ namespace SpawnDev.ILGPU.Wasm
         /// </summary>
         public int HardwareConcurrency { get; }
 
+        /// <summary>
+        /// Reads <c>navigator.hardwareConcurrency</c> from the browser. Returns 4 when it is not
+        /// reported or cannot be read (for example on desktop, where there is no JS runtime).
+        /// </summary>
+        /// <returns>The number of logical processors, or 4.</returns>
         public static int GetHardwareConcurrency()
         {
             try
@@ -57,6 +62,12 @@ namespace SpawnDev.ILGPU.Wasm
             }
         }
 
+        /// <summary>
+        /// Creates the Wasm device description: warp size <see cref="WasmBackend.WasmWarpSize"/>,
+        /// up to 256 threads per group (<c>MaxGroupSize</c> = (256, 1, 1)), one multiprocessor per
+        /// <see cref="HardwareConcurrency"/>, 64 KiB shared memory per group, and a 2 GiB reported
+        /// memory size.
+        /// </summary>
         public WasmILGPUDevice()
         {
             HardwareConcurrency = GetHardwareConcurrency();
@@ -80,6 +91,13 @@ namespace SpawnDev.ILGPU.Wasm
 
         #region Methods
 
+        /// <summary>
+        /// Always throws: the Wasm accelerator must be created asynchronously. Use
+        /// <see cref="CreateAcceleratorAsync(Context)"/>.
+        /// </summary>
+        /// <param name="context">The ILGPU context.</param>
+        /// <returns>Never returns.</returns>
+        /// <exception cref="NotSupportedException">Always.</exception>
         public override Accelerator CreateAccelerator(Context context)
         {
             // Wasm accelerator requires async creation (Worker init, module compilation).
@@ -88,11 +106,22 @@ namespace SpawnDev.ILGPU.Wasm
                 "Wasm accelerator requires async creation. Use CreateAcceleratorAsync() instead.");
         }
 
+        /// <summary>
+        /// Creates a <see cref="WasmAccelerator"/> with default <see cref="WasmBackendOptions"/>.
+        /// </summary>
+        /// <param name="context">The ILGPU context.</param>
+        /// <returns>The new accelerator.</returns>
         public override async Task<Accelerator> CreateAcceleratorAsync(Context context)
         {
             return await WasmAccelerator.Create(context);
         }
 
+        /// <summary>
+        /// Creates a <see cref="WasmAccelerator"/> with the given backend options.
+        /// </summary>
+        /// <param name="context">The ILGPU context.</param>
+        /// <param name="options">Backend options; default options are used when null.</param>
+        /// <returns>The new accelerator.</returns>
         public async Task<WasmAccelerator> CreateAcceleratorAsync(Context context, WasmBackendOptions? options)
         {
             return await WasmAccelerator.Create(context, options ?? new WasmBackendOptions());

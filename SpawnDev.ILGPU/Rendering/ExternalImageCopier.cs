@@ -49,6 +49,9 @@ namespace SpawnDev.ILGPU.Rendering
         private CanvasRenderingContext2D? _ctx;
         private bool _disposed;
 
+        /// <summary>Creates a copier for buffers owned by <paramref name="accelerator"/>.</summary>
+        /// <param name="accelerator">The accelerator (WebGL or Wasm) whose buffers receive the pixels.</param>
+        /// <exception cref="ArgumentNullException"><paramref name="accelerator"/> is null.</exception>
         public Canvas2DExternalImageCopier(Accelerator accelerator)
         {
             _accelerator = accelerator ?? throw new ArgumentNullException(nameof(accelerator));
@@ -98,6 +101,7 @@ namespace SpawnDev.ILGPU.Rendering
             return ctx.GetImageData(0, 0, width, height);
         }
 
+        /// <summary>Releases the reused <see cref="OffscreenCanvas"/> and its 2D context. Does not dispose the accelerator.</summary>
         public void Dispose()
         {
             if (_disposed) return;

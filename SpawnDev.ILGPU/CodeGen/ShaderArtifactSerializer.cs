@@ -167,15 +167,19 @@ public sealed class ShaderManifest
 }
 
 /// <summary>
-/// Serializes generated artifacts to/from the Layer 2 sidecar + manifest JSON, and maps the
-/// WebGPU codegen metadata across the JSON boundary. Pure, deterministic, JS-free - usable in
-/// the build-time worker AND the Blazor runtime loader.
+/// Source-generated (trim / AOT safe) JSON context for <see cref="ShaderArtifactMeta"/> and
+/// <see cref="ShaderManifest"/>, used by <see cref="ShaderArtifactSerializer"/>.
 /// </summary>
 [JsonSourceGenerationOptions(WriteIndented = true, DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull, IncludeFields = false)]
 [JsonSerializable(typeof(ShaderArtifactMeta))]
 [JsonSerializable(typeof(ShaderManifest))]
 internal partial class ShaderArtifactJsonContext : JsonSerializerContext { }
 
+/// <summary>
+/// Serializes generated artifacts to/from the Layer 2 sidecar + manifest JSON, and maps the
+/// WebGPU codegen metadata across the JSON boundary. Pure, deterministic, JS-free - usable in
+/// the build-time worker AND the Blazor runtime loader.
+/// </summary>
 public static class ShaderArtifactSerializer
 {
     /// <summary>The codegen version stamp baked into every artifact + manifest (= profile schema version).</summary>

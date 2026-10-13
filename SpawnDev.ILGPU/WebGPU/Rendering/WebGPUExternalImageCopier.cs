@@ -58,6 +58,9 @@ namespace SpawnDev.ILGPU.WebGPU.Rendering
         /// <summary>True once this copier has switched to the canvas fallback for video / VideoFrame sources.</summary>
         public bool FrameSourcesThroughCanvas => _frameSourcesThroughCanvas;
 
+        /// <summary>Creates a copier that writes into buffers of <paramref name="accelerator"/>.</summary>
+        /// <param name="accelerator">The WebGPU accelerator that owns the destination buffers.</param>
+        /// <exception cref="ArgumentNullException"><paramref name="accelerator"/> is null.</exception>
         public WebGPUExternalImageCopier(WebGPUAccelerator accelerator)
         {
             _accelerator = accelerator ?? throw new ArgumentNullException(nameof(accelerator));
@@ -215,6 +218,10 @@ namespace SpawnDev.ILGPU.WebGPU.Rendering
             _textureHeight = height;
         }
 
+        /// <summary>
+        /// Submits pending accelerator work (the compaction kernel may still reference the staging buffer), then
+        /// releases the staging buffer, texture and fallback canvas. Safe to call more than once.
+        /// </summary>
         public void Dispose()
         {
             if (_disposed) return;

@@ -224,7 +224,12 @@ namespace SpawnDev.ILGPU.WebGPU
             if (_isInitialized)
                 return;
 
-            var adapter = Device.Adapter;
+            // A GPUAdapter can create ONE device. The first accelerator on this WebGPUDevice uses the enumerated
+            // adapter; later ones get a fresh adapter for the same GPU, released when this method returns (the
+            // GPUDevice keeps what it needs). Before 2026-10-13 a second accelerator re-used the consumed adapter
+            // and every requestDevice below threw "adapter is consumed".
+            var (adapter, ownsAdapter) = await Device.TakeAdapterForDeviceAsync();
+            using var freshAdapterLease = ownsAdapter ? adapter : null;
             var requestedFeatures = Device.SupportedFeatures.ToList();
             // Test-only: when ForceEmulatedF16 is set, never request shader-f16 from the
             // adapter even if it supports it. This drops the device onto the emulation

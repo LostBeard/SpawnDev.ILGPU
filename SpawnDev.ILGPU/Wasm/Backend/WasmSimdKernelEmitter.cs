@@ -77,7 +77,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// elementwise class. Saves/clears/restores the generator's local+Code context so the
         /// already-generated scalar <c>kernel</c> is left byte-identical. Returns false (and emits
         /// nothing) on any shape outside the class — the caller then ships scalar-only.
-        /// MUST be called AFTER the scalar <see cref="Generate"/> has produced the scalar Code.
+        /// MUST be called AFTER the scalar <see cref="GenerateCode()"/> has produced the scalar Code.
         /// </summary>
         internal bool TryGenerateSimdKernel()
         {

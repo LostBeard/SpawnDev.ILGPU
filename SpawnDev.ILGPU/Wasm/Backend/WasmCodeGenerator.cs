@@ -32,9 +32,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// </summary>
         public class GeneratorArgs
         {
+            /// <summary>The owning Wasm backend.</summary>
             public WasmBackend Backend { get; }
+            /// <summary>The kernel entry point.</summary>
             public EntryPoint EntryPoint { get; }
+            /// <summary>The kernel's static shared memory allocations.</summary>
             public AllocaKindInformation SharedAllocations { get; }
+            /// <summary>The kernel's dynamic shared memory allocations.</summary>
             public AllocaKindInformation DynamicSharedAllocations { get; }
 
             /// <summary>
@@ -61,6 +65,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             /// Dynamic shared memory element size in bytes (populated by kernel generator).
             /// </summary>
             public int DynamicSharedElementSize { get; set; }
+            /// <summary>
+            /// Per-thread scratch bytes (fiber state spills, local allocations, helper regions),
+            /// rounded up to 8 bytes by <c>CreateKernel</c>.
+            /// </summary>
             public int ScratchPerThread { get; set; }
             /// <summary>
             /// Number of extra function imports beyond math (e.g., jsAtomicsWait).
@@ -119,6 +127,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             /// </summary>
             public int IrUserParamIndexOffset { get; set; }
 
+            /// <summary>
+            /// Creates the generator arguments for one kernel compilation.
+            /// </summary>
+            /// <param name="backend">The owning Wasm backend.</param>
+            /// <param name="entryPoint">The kernel entry point.</param>
+            /// <param name="sharedAllocations">The kernel's static shared memory allocations.</param>
+            /// <param name="dynamicSharedAllocations">The kernel's dynamic shared memory allocations.</param>
             public GeneratorArgs(
                 WasmBackend backend,
                 EntryPoint entryPoint,
@@ -134,8 +149,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         #region Fields
 
+        /// <summary>The generator arguments shared by all generators of the kernel.</summary>
         protected readonly GeneratorArgs _generatorArgs;
+        /// <summary>The IR method this generator emits.</summary>
         protected readonly Method Method;
+        /// <summary>The allocations of <see cref="Method"/>.</summary>
         protected readonly Allocas Allocas;
 
         /// <summary>
@@ -174,6 +192,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         #region Constructor
 
+        /// <summary>
+        /// Initializes the generator for one method.
+        /// </summary>
+        /// <param name="args">The generator arguments shared by all generators of the kernel.</param>
+        /// <param name="method">The method to generate.</param>
+        /// <param name="allocas">The method's allocations.</param>
         public WasmCodeGenerator(
             in GeneratorArgs args,
             Method method,
@@ -246,6 +270,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// <summary>The state-machine block index currently being emitted (kernel gen overrides).</summary>
         protected virtual int CurrentStateIndex => 0;
 
+        /// <summary>
+        /// Records that <paramref name="index"/> is used in the current state-machine block. A local
+        /// used in more than one block is marked as live across a yield (see <see cref="LocalNeedsSpill"/>).
+        /// </summary>
+        /// <param name="index">The Wasm local index.</param>
         protected void TouchLocal(uint index)
         {
             if (_localFirstState.TryGetValue(index, out var first))
@@ -362,7 +391,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         /// <summary>
         /// Gets the actual Wasm type of a local variable by its index.
-        /// Parameters (indices < _paramCount) are always i32.
+        /// Parameters (indices &lt; _paramCount) use the kernel generator's recorded parameter
+        /// types when available, otherwise i32.
         /// Declared locals are looked up from _locals.
         /// </summary>
         protected byte GetLocalType(uint localIndex)
@@ -443,12 +473,22 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         #region IBackendCodeGenerator<StringBuilder>
 
+        /// <summary>Writes nothing; Wasm modules have no text header.</summary>
+        /// <param name="builder">The kernel text builder.</param>
         public virtual void GenerateHeader(StringBuilder builder) { }
 
+        /// <summary>Generates the Wasm instruction stream for this function into <see cref="Code"/>.</summary>
         public abstract void GenerateCode();
 
+        /// <summary>Writes nothing; constants are emitted inline as instructions.</summary>
+        /// <param name="builder">The kernel text builder.</param>
         public virtual void GenerateConstants(StringBuilder builder) { }
 
+        /// <summary>
+        /// Appends a one-line comment with the function body size and local count to the text
+        /// builder. The binary body itself is assembled by <see cref="WasmBackend"/>.
+        /// </summary>
+        /// <param name="builder">The kernel text builder.</param>
         public virtual void Merge(StringBuilder builder)
         {
             builder.AppendLine($"// Wasm function body: {Code.Count} bytes, {_locals.Count} locals");
@@ -459,6 +499,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         #region IBackendCodeGenerator — all required method implementations
 
         // Arithmetic
+        /// <summary>
+        /// Emits a unary arithmetic operation inline with Wasm opcodes or short instruction sequences
+        /// (neg, not, abs, sqrt, floor, ceiling, popcnt, clz, ctz, NaN/Inf/finite checks) and the JS
+        /// <c>Math</c> imports (through f64) for transcendental functions.
+        /// </summary>
+        /// <param name="value">The unary arithmetic value.</param>
         public virtual void GenerateCode(UnaryArithmeticValue value)
         {
             var target = AllocateLocal(value, GetWasmType(value));
@@ -760,6 +806,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 Code.Add(WasmOpCodes.I32WrapI64);
         }
 
+        /// <summary>
+        /// Emits a binary arithmetic operation. Operands are coerced to the result width, integer
+        /// Min/Max use compare + <c>select</c>, Pow/Atan2/binary log call the JS <c>Math</c> imports
+        /// (through f64), and float remainder is computed as <c>x - trunc(x / y) * y</c>.
+        /// </summary>
+        /// <param name="value">The binary arithmetic value.</param>
         public virtual void GenerateCode(BinaryArithmeticValue value)
         {
             var target = AllocateLocal(value, GetWasmType(value));
@@ -982,6 +1034,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>
+        /// Emits <c>first * second + third</c> as a separate float multiply and add (not fused).
+        /// Every ternary kind is lowered this way.
+        /// </summary>
+        /// <param name="value">The ternary arithmetic value.</param>
         public virtual void GenerateCode(TernaryArithmeticValue value)
         {
             var target = AllocateLocal(value, GetWasmType(value));
@@ -999,6 +1056,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
         // Comparison
+        /// <summary>
+        /// Emits a comparison producing an i32 0/1. Operands are widened to a common type, unsigned
+        /// flags select the <c>_u</c> integer opcodes, and unordered float comparisons also return
+        /// true when either operand is NaN.
+        /// </summary>
+        /// <param name="value">The comparison.</param>
         public virtual void GenerateCode(CompareValue value)
         {
             var target = AllocateLocal(value, WasmOpCodes.I32);
@@ -1100,6 +1163,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
         // Conversions
+        /// <summary>
+        /// Emits a numeric conversion. Float-to-integer uses the saturating <c>trunc_sat</c> family
+        /// (NaN becomes 0, out-of-range values clamp, matching .NET), signedness follows the IR
+        /// convert flags, and narrowing to 8/16-bit integers sign-extends or masks the i32 result.
+        /// </summary>
+        /// <param name="value">The conversion.</param>
         public virtual void GenerateCode(ConvertValue value)
         {
             var target = AllocateLocal(value, GetWasmType(value));
@@ -1240,6 +1309,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
         // Casts
+        /// <summary>Converts an integer to an i32 pointer, wrapping an i64 source with <c>i32.wrap_i64</c>.</summary>
+        /// <param name="cast">The int-to-pointer cast.</param>
         public virtual void GenerateCode(IntAsPointerCast cast)
         {
             // Pointers in Wasm are always i32
@@ -1252,6 +1323,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>Converts an i32 pointer to an integer, sign-extending with <c>i64.extend_i32_s</c> for an i64 target.</summary>
+        /// <param name="cast">The pointer-to-int cast.</param>
         public virtual void GenerateCode(PointerAsIntCast cast)
         {
             // Source pointer is i32, target int may be i32 or i64
@@ -1264,6 +1337,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>Copies the pointer unchanged; pointers are untyped i32 addresses in linear memory.</summary>
+        /// <param name="cast">The pointer cast.</param>
         public virtual void GenerateCode(PointerCast cast)
         {
             var target = AllocateLocal(cast);
@@ -1271,6 +1346,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>Copies the pointer unchanged; all address spaces share the one linear memory.</summary>
+        /// <param name="value">The address space cast.</param>
         public virtual void GenerateCode(AddressSpaceCast value)
         {
             var target = AllocateLocal(value);
@@ -1278,6 +1355,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>Reinterprets float bits as an integer (<c>i32.reinterpret_f32</c> / <c>i64.reinterpret_f64</c>).</summary>
+        /// <param name="value">The float-as-int cast.</param>
         public virtual void GenerateCode(FloatAsIntCast value)
         {
             var target = AllocateLocal(value, GetWasmType(value));
@@ -1288,6 +1367,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>Reinterprets integer bits as a float (<c>f32.reinterpret_i32</c> / <c>f64.reinterpret_i64</c>).</summary>
+        /// <param name="value">The int-as-float cast.</param>
         public virtual void GenerateCode(IntAsFloatCast value)
         {
             var target = AllocateLocal(value, GetWasmType(value));
@@ -1299,6 +1380,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
         // Predicate
+        /// <summary>
+        /// Emits a <c>select</c> for <c>condition ? trueValue : falseValue</c>, first coercing both
+        /// branch values to the predicate's Wasm type when their widths differ.
+        /// </summary>
+        /// <param name="predicate">The predicate.</param>
         public virtual void GenerateCode(Predicate predicate)
         {
             var wasmType = GetWasmType(predicate);
@@ -1348,6 +1434,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
         // Constants & Values
+        /// <summary>
+        /// Stores a constant. Half, BFloat16, FP8 and FP4 constants are converted to their f32 value,
+        /// and QInt4 constants are stored sign-extended.
+        /// </summary>
+        /// <param name="value">The primitive constant.</param>
         public virtual void GenerateCode(PrimitiveValue value)
         {
             var target = AllocateLocal(value, GetWasmType(value));
@@ -1391,11 +1482,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>Emits nothing; string values are not used in compute kernels.</summary>
+        /// <param name="value">The string value.</param>
         public virtual void GenerateCode(StringValue value)
         {
             // Strings are not used in compute kernels — no-op
         }
 
+        /// <summary>Stores the zero value of the null value's Wasm type (i32, i64, f32 or f64).</summary>
+        /// <param name="value">The null value.</param>
         public virtual void GenerateCode(NullValue value)
         {
             var wasmType = GetWasmType(value);
@@ -1411,17 +1506,26 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>Emits nothing; parameters are bound to locals by the kernel function generator.</summary>
+        /// <param name="value">The parameter.</param>
         public virtual void GenerateCode(Parameter value)
         {
             // Parameters are handled by the kernel function generator
         }
 
+        /// <summary>Allocates the phi's local; the incoming values are assigned at the branch sites.</summary>
+        /// <param name="value">The phi value.</param>
         public virtual void GenerateCode(PhiValue value)
         {
             AllocateLocal(value, GetWasmType(value));
         }
 
         // Memory
+        /// <summary>
+        /// Base handler: copies the source local into the result local (no memory read). The kernel
+        /// generator overrides this with typed memory loads.
+        /// </summary>
+        /// <param name="value">The load.</param>
         public virtual void GenerateCode(Load value)
         {
             var target = AllocateLocal(value, GetWasmType(value));
@@ -1429,8 +1533,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>Base handler: emits nothing. The kernel generator overrides this with typed memory stores.</summary>
+        /// <param name="value">The store.</param>
         public virtual void GenerateCode(Store value) { }
 
+        /// <summary>
+        /// Base handler: sets the allocation address to 0. The kernel generator overrides this to
+        /// place local allocations in per-thread scratch and shared allocations in shared memory.
+        /// </summary>
+        /// <param name="value">The allocation.</param>
         public virtual void GenerateCode(Alloca value)
         {
             var target = AllocateLocal(value);
@@ -1438,8 +1549,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>Base handler: emits nothing. The kernel generator overrides this with an <c>atomic.fence</c>.</summary>
+        /// <param name="barrier">The memory barrier.</param>
         public virtual void GenerateCode(MemoryBarrier barrier) { }
 
+        /// <summary>
+        /// Computes an element address as <c>source + offset * elementSize</c> in i32 arithmetic.
+        /// The element size comes from the pointer's element type (4 bytes when unknown).
+        /// </summary>
+        /// <param name="value">The load-element-address value.</param>
         public virtual void GenerateCode(LoadElementAddress value)
         {
             var target = AllocateLocal(value);
@@ -1459,6 +1577,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>
+        /// Computes a field address as the source address plus the field's byte offset within the
+        /// structure. If the structure type cannot be resolved, the source address is used unchanged.
+        /// </summary>
+        /// <param name="value">The load-field-address value.</param>
         public virtual void GenerateCode(LoadFieldAddress value)
         {
             var target = AllocateLocal(value);
@@ -1488,6 +1611,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>Copies the source pointer unchanged; no alignment adjustment is emitted.</summary>
+        /// <param name="value">The align-to value.</param>
         public virtual void GenerateCode(AlignTo value)
         {
             var target = AllocateLocal(value);
@@ -1495,6 +1620,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>Copies the source pointer unchanged (an alignment hint only).</summary>
+        /// <param name="value">The as-aligned value.</param>
         public virtual void GenerateCode(AsAligned value)
         {
             var target = AllocateLocal(value);
@@ -1503,6 +1630,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
         // Structs/Fields
+        /// <summary>
+        /// Base handler: the structure's local receives its first field (or 0 when it has no
+        /// fields). The kernel generator overrides this with a full struct materialization.
+        /// </summary>
+        /// <param name="value">The structure value.</param>
         public virtual void GenerateCode(StructureValue value)
         {
             var target = AllocateLocal(value);
@@ -1513,6 +1645,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>
+        /// Base handler: copies the object value's local into the result local. The kernel
+        /// generator overrides this with real field access.
+        /// </summary>
+        /// <param name="value">The get-field value.</param>
         public virtual void GenerateCode(GetField value)
         {
             var target = AllocateLocal(value, GetWasmType(value));
@@ -1521,6 +1658,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>
+        /// Base handler: copies the new field value's local into the result local. The kernel
+        /// generator overrides this with real field updates.
+        /// </summary>
+        /// <param name="value">The set-field value.</param>
         public virtual void GenerateCode(SetField value)
         {
             var target = AllocateLocal(value, GetWasmType(value));
@@ -1529,22 +1671,44 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
         // Device Constants
+        /// <summary>Base handler: allocates a local only. The kernel generator overrides this to compute the value.</summary>
+        /// <param name="value">The grid index value.</param>
         public virtual void GenerateCode(GridIndexValue value) { AllocateLocal(value); }
+        /// <summary>Base handler: allocates a local only. The kernel generator overrides this to compute the value.</summary>
+        /// <param name="value">The group index value.</param>
         public virtual void GenerateCode(GroupIndexValue value) { AllocateLocal(value); }
+        /// <summary>Base handler: allocates a local only. The kernel generator overrides this to compute the value.</summary>
+        /// <param name="value">The grid dimension value.</param>
         public virtual void GenerateCode(GridDimensionValue value) { AllocateLocal(value); }
+        /// <summary>Base handler: allocates a local only. The kernel generator overrides this to compute the value.</summary>
+        /// <param name="value">The group dimension value.</param>
         public virtual void GenerateCode(GroupDimensionValue value) { AllocateLocal(value); }
+        /// <summary>
+        /// Base handler: stores 1. The kernel generator overrides this with
+        /// <see cref="WasmBackend.WasmWarpSize"/>.
+        /// </summary>
+        /// <param name="value">The warp size value.</param>
         public virtual void GenerateCode(WarpSizeValue value)
         {
             var target = AllocateLocal(value);
             WasmModuleBuilder.EmitI32Const(Code, 1); // Wasm: no warp
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
+        /// <summary>
+        /// Base handler: stores 0. The kernel generator overrides this with the emulated lane index.
+        /// </summary>
+        /// <param name="value">The lane index value.</param>
         public virtual void GenerateCode(LaneIdxValue value)
         {
             var target = AllocateLocal(value);
             WasmModuleBuilder.EmitI32Const(Code, 0); // Wasm: lane 0
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
+        /// <summary>
+        /// Base handler: stores 0. The kernel generator overrides this with the dispatched dynamic
+        /// shared memory length.
+        /// </summary>
+        /// <param name="value">The dynamic memory length value.</param>
         public virtual void GenerateCode(DynamicMemoryLengthValue value)
         {
             var target = AllocateLocal(value);
@@ -1580,26 +1744,49 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
         // Barriers & Atomics
+        /// <summary>Emits nothing; predicate barriers are not lowered by the Wasm code generators.</summary>
+        /// <param name="barrier">The predicate barrier.</param>
         public virtual void GenerateCode(PredicateBarrier barrier) { }
+        /// <summary>Base handler: emits nothing. The kernel generator handles barriers.</summary>
+        /// <param name="barrier">The barrier.</param>
         public virtual void GenerateCode(global::ILGPU.IR.Values.Barrier barrier) { }
+        /// <summary>Base handler: copies the broadcast variable into the result local (no cross-thread exchange).</summary>
+        /// <param name="broadcast">The broadcast value.</param>
         public virtual void GenerateCode(Broadcast broadcast)
         {
             var target = AllocateLocal(broadcast, GetWasmType(broadcast));
             EmitGetLocal(broadcast.Variable.Resolve());
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
+        /// <summary>
+        /// Base handler: copies the shuffled variable into the result local (no cross-lane exchange).
+        /// The kernel generator overrides this with a shared-memory exchange.
+        /// </summary>
+        /// <param name="shuffle">The warp shuffle.</param>
         public virtual void GenerateCode(WarpShuffle shuffle)
         {
             var target = AllocateLocal(shuffle, GetWasmType(shuffle));
             EmitGetLocal(shuffle.Variable.Resolve());
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
+        /// <summary>
+        /// Base handler: copies the shuffled variable into the result local (no cross-lane exchange).
+        /// The kernel generator overrides this with a shared-memory exchange.
+        /// </summary>
+        /// <param name="shuffle">The sub-warp shuffle.</param>
         public virtual void GenerateCode(SubWarpShuffle shuffle)
         {
             var target = AllocateLocal(shuffle, GetWasmType(shuffle));
             EmitGetLocal(shuffle.Variable.Resolve());
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
+        /// <summary>
+        /// Emits an atomic read-modify-write. Integer Add/And/Or/Xor/Exchange use the native
+        /// <c>atomic.rmw</c> instructions, integer Min/Max and all float operations use a
+        /// compare-exchange loop. The result is the value previously stored at the target.
+        /// </summary>
+        /// <param name="atomic">The atomic operation.</param>
+        /// <exception cref="NotSupportedException">The atomic kind is not supported for the value type.</exception>
         public virtual void GenerateCode(GenericAtomic atomic)
         {
             // Thread-safe atomic RMW using Wasm threads proposal
@@ -1807,6 +1994,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 
+        /// <summary>
+        /// Emits an atomic compare-exchange as <c>i32.atomic.rmw.cmpxchg</c> or
+        /// <c>i64.atomic.rmw.cmpxchg</c>; the result is the value previously stored at the target.
+        /// </summary>
+        /// <param name="atomicCAS">The atomic compare-exchange.</param>
         public virtual void GenerateCode(AtomicCAS atomicCAS)
         {
             // Thread-safe CAS using Wasm atomic cmpxchg
@@ -1828,7 +2020,11 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
         // Debug
+        /// <summary>Emits nothing; debug assertions are dropped on Wasm.</summary>
+        /// <param name="debug">The debug assert operation.</param>
         public virtual void GenerateCode(DebugAssertOperation debug) { }
+        /// <summary>Emits nothing; kernel output writes (printf-style) are dropped on Wasm.</summary>
+        /// <param name="writeToOutput">The write-to-output operation.</param>
         public virtual void GenerateCode(WriteToOutput writeToOutput) { }
 
         /// <summary>
@@ -1864,6 +2060,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
         // Misc
+        /// <summary>
+        /// Emits a call to an intrinsic or external method (or a native math wrapper) inline as
+        /// Wasm instructions or a JS <c>Math</c> import call. An unhandled non-intrinsic call with a
+        /// result stores the type's zero value; the kernel generator overrides this to call helpers.
+        /// </summary>
+        /// <param name="methodCall">The method call.</param>
         public virtual void GenerateCode(MethodCall methodCall)
         {
             var method = methodCall.Target;
@@ -2139,14 +2341,24 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
         // Control Flow
+        /// <summary>Base handler: emits <c>return</c>. The kernel generator overrides this.</summary>
+        /// <param name="returnTerminator">The return terminator.</param>
         public virtual void GenerateCode(ReturnTerminator returnTerminator)
         {
             Code.Add(WasmOpCodes.Return);
         }
 
+        /// <summary>Base handler: emits nothing. Branches are emitted by the kernel generator's state machine.</summary>
+        /// <param name="branch">The branch terminator.</param>
         public virtual void GenerateCode(UnconditionalBranch branch) { }
+        /// <summary>Base handler: emits nothing. Branches are emitted by the kernel generator's state machine.</summary>
+        /// <param name="branch">The branch terminator.</param>
         public virtual void GenerateCode(IfBranch branch) { }
+        /// <summary>Base handler: emits nothing. Branches are emitted by the kernel generator's state machine.</summary>
+        /// <param name="branch">The branch terminator.</param>
         public virtual void GenerateCode(SwitchBranch branch) { }
+        /// <summary>Emits nothing; inline language emission is not supported on Wasm.</summary>
+        /// <param name="emit">The language emit value.</param>
         public virtual void GenerateCode(LanguageEmitValue emit) { }
 
         #endregion

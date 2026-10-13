@@ -58,7 +58,7 @@ Every flag below is `bool`, defaults to `false` (no requirement), and can be set
 | `RequiresSharedMemory` | WebGL | `SharedMemory.Allocate` / `SharedMemory.GetDynamic` |
 | `RequiresBarriers` | WebGL | `Group.Barrier` |
 | `RequiresFloat16` | (none — every backend supports it) | Documentation that you use `Half`. Filter is a no-op. |
-| `RequiresFloat16Native` | WebGL, Wasm, **WebGPU** (always, see note), OpenCL without `cl_khr_fp16` | Performance-critical Half kernels where emulation overhead matters |
+| `RequiresFloat16Native` | WebGL, Wasm, WebGPU adapters without `shader-f16`, OpenCL without `cl_khr_fp16` | Performance-critical Half kernels where emulation overhead matters |
 | `RequiresBFloat16` | (none - every backend supports it, always emulated) | Documentation that you use `BFloat16`. Filter is a no-op. |
 | `RequiresFloat8E4M3` / `RequiresFloat8E5M2` | (none - every backend supports them, always emulated) | Documentation that you use FP8. Filter is a no-op. |
 | `RequiresFloat4E2M1` / `RequiresQInt4` / `RequiresQUInt4` | (none - every backend can LOAD them) | Documentation that you use the packed 4-bit types. Filter is a no-op for the type itself. |
@@ -69,10 +69,12 @@ Every flag below is `bool`, defaults to `false` (no requirement), and can be set
 | `RequiresInt64` | (none — every backend supports it) | Documentation. WebGPU/WebGL emulate via vec2&lt;u32&gt;. |
 | `RequiresInt64Native` | WebGPU, WebGL | Performance-critical i64/u64 kernels |
 | `RequiresInt64Atomics` | WebGL; OpenCL without `cl_khr_int64_base_atomics` | `Atomic.Add(ref long, ...)` and friends |
-| `RequiresSubGroups` | WebGL, Wasm, CPU; OpenCL without the subgroup extensions. WebGPU is accepted at selection (the adapter feature is checked when the kernel runs) | `Warp.Shuffle`, `Group.Broadcast`, etc. |
+| `RequiresSubGroups` | WebGL; WebGPU adapters without the `subgroups` feature; OpenCL without the subgroup extensions. Wasm (emulated warps) and CPU (simulated warps) pass | `Warp.Shuffle`, `Group.Broadcast`, etc. |
 | `RequiresScatterStores` | WebGL | In-kernel scatter (`out[computedIndex] = ...`) or >1 output element per thread that isn't the positional `v*K+slot` layout. WebGL TF is gather-only (one record per vertex at its own slot). |
 
-> **Notes on two selection filters.** `RequiresFloat16Native` rules out WebGPU even on adapters with `shader-f16`, because the feature can't be seen before the accelerator exists; pin a WebGPU device directly (`device.CreateAcceleratorAsync(context)`) and check `Capabilities.Float16Native` if you want native f16 there. `RequiresSubGroups` rules out Wasm and CPU, although both run `Warp.Shuffle` / `Group.Broadcast` correctly (Wasm through a `WarpSize` 8 shared-memory emulation); pin those devices directly if you want them.
+> **Warps and subgroups are the same thing:** "warp" is CUDA's name and "subgroup" is WebGPU / Vulkan / OpenCL's (AMD says "wavefront") - a small set of threads that exchange values directly. ILGPU's `Warp.*` API maps to WebGPU subgroups. `RequiresSubGroups` is a correctness gate: Wasm has no hardware warps and emulates them (`WarpSize` 8, shared-memory exchange), and the CPU accelerator simulates them; both give the same results, without hardware speed.
+>
+> **WebGPU features are read from the adapter** when devices are listed (`WebGPUILGPUDevice.AdapterSupportsShaderF16` / `AdapterSupportsSubgroups`); the accelerator requests both whenever the adapter has them, so selection matches what the accelerator gets (on master, after 5.3.6; before, WebGPU always failed `RequiresFloat16Native` and always passed `RequiresSubGroups`). `WebGPUBackend.ForceEmulatedF16` turns native f16 off for selection too. `WebGPUBackendOptions.ForceDisableSubgroups` is a per-accelerator option that selection cannot see.
 
 ## API Surface
 

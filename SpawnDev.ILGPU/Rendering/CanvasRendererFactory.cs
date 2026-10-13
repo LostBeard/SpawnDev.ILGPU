@@ -11,6 +11,12 @@ namespace SpawnDev.ILGPU.Rendering
     /// </summary>
     public static class CanvasRendererFactory
     {
+        /// <summary>
+        /// Returns a <see cref="WebGPUCanvasRenderer"/> for a WebGPU accelerator, a <see cref="WebGLCanvasRenderer"/> for a
+        /// WebGL accelerator, and a <see cref="CPUCanvasRenderer"/> for any other accelerator.
+        /// </summary>
+        /// <param name="accelerator">The accelerator whose buffers will be presented.</param>
+        /// <returns>A new renderer; the caller owns it and must dispose it.</returns>
         public static ICanvasRenderer Create(Accelerator accelerator) => accelerator switch
         {
             WebGPUAccelerator wgpu => new WebGPUCanvasRenderer(wgpu),

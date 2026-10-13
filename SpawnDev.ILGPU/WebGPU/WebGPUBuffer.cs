@@ -599,7 +599,7 @@ namespace SpawnDev.ILGPU.WebGPU
 
         /// <summary>
         /// The first <see cref="CreationSiteDepth"/> caller frames that are not the allocator machinery itself, innermost
-        /// first, joined by " < ". Async state-machine frames are reported by their source method name.
+        /// first, joined by " &lt; ". Async state-machine frames are reported by their source method name.
         /// </summary>
         [UnconditionalSuppressMessage("Trimming", "IL2026", Justification = global::ILGPU.Util.TrimmingAnnotations.DiagnosticStackFrame)]
         static string CreationSite()

@@ -29,13 +29,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
     [Flags]
     public enum WGSLDiagnostics
     {
+        /// <summary>No diagnostic output.</summary>
         None = 0,
+        /// <summary>Category for shared (workgroup) memory diagnostics.</summary>
         SharedMemory = 1 << 0,
+        /// <summary>Category for uniformity analysis diagnostics.</summary>
         Uniformity = 1 << 1,
+        /// <summary>Category for helper inlining diagnostics.</summary>
         Inlining = 1 << 2,
+        /// <summary>Category for binding / bind group diagnostics.</summary>
         Bindings = 1 << 3,
+        /// <summary>Category for dispatch diagnostics.</summary>
         Dispatch = 1 << 4,
+        /// <summary>Category for shader compilation diagnostics.</summary>
         Compilation = 1 << 5,
+        /// <summary>All categories.</summary>
         All = SharedMemory | Uniformity | Inlining | Bindings | Dispatch | Compilation,
     }
 
@@ -96,16 +104,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         #endregion
 
         /// <summary>
-        /// Controls whether verbose logging is enabled. Set to true to enable console output.
-        /// Setting this to true also sets <see cref="DiagnosticFlags"/> to <see cref="WGSLDiagnostics.All"/>.
-        /// </summary>
-        /// <summary>
         /// TEST SWITCH: pack every dispatch's scalars twice - the current packer and the legacy reference
         /// (WebGPUAccelerator.PackScalarsLegacy) - and throw on any byte difference. Off by default. Run the WebGPU
         /// test lanes with it on after touching scalar packing: every dispatch of every test becomes an equivalence check.
         /// </summary>
         public static bool VerifyScalarPacking { get; set; }
 
+        /// <summary>
+        /// Controls whether verbose logging is enabled. Set to true to enable console output.
+        /// Setting this to true also sets <see cref="DiagnosticFlags"/> to <see cref="WGSLDiagnostics.All"/>.
+        /// </summary>
         public static bool VerboseLogging
         {
             get => DiagnosticFlags != WGSLDiagnostics.None;
@@ -624,7 +632,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// <see cref="HasShaderF16"/> returns <c>false</c> regardless of the device's
         /// enabled feature set. Forces the WGSL f16 emulation codegen path even on
         /// adapters that expose native <c>shader-f16</c>. Pairs with
-        /// <see cref="WebGPUCapabilityContext.Float16Native"/> so consumers can tell
+        /// <see cref="global::SpawnDev.ILGPU.WebGPU.WebGPUCapabilityContext.Float16Native"/> so consumers can tell
         /// whether they're on the native or emulated path.
         /// Default: <c>false</c>.
         /// </summary>
@@ -652,7 +660,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         /// <summary>
         /// The device's warp/subgroup size (WebGPU = 32). Set by the accelerator after init to the
-        /// owning accelerator's <see cref="ILGPU.Runtime.Accelerator.WarpSize"/>, so the runtime
+        /// owning accelerator's <see cref="global::ILGPU.Runtime.Accelerator.WarpSize"/>, so the runtime
         /// shader-cache profile (<see cref="ProfileForThisBackend"/>) computes the SAME WarpSize as
         /// <see cref="CapabilityProfiles.FromAccelerator"/> at registration time - otherwise the
         /// lookup key (warp=1) never matches a registered/precompiled artifact's key (warp=32).
@@ -1404,6 +1412,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     ? new HashSet<(int, int)>(meta.I64SpinlockParamIndices) : null,
                 meta.CoalesceManifest.Count > 0 ? meta.CoalesceManifest : null);
 
+        /// <summary>
+        /// Compiles a kernel to WGSL, first checking the shader artifact cache (when enabled and the kernel has no
+        /// runtime-value specialization) and registering a newly compiled kernel's WGSL and metadata there.
+        /// </summary>
+        /// <param name="entryPoint">The kernel entry point.</param>
+        /// <param name="backendContext">The backend context.</param>
+        /// <param name="specialization">The kernel specialization.</param>
+        /// <returns>The compiled kernel.</returns>
         protected override CompiledKernel Compile(
             EntryPoint entryPoint,
             in BackendContext backendContext,

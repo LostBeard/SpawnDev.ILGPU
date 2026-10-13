@@ -252,6 +252,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         #endregion
 
+        /// <summary>Disposes the type map's reader/writer lock.</summary>
+        /// <param name="disposing">True when disposing managed resources.</param>
         protected override void Dispose(bool disposing)
         {
             readerWriterLock.Dispose();

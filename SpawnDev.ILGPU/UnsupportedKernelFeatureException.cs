@@ -26,6 +26,14 @@ public class UnsupportedKernelFeatureException : NotSupportedException
     /// <summary>Suggested remediation (which backend to switch to, or how to restructure).</summary>
     public string Remediation { get; }
 
+    /// <summary>
+    /// Creates the exception. The message is
+    /// "Kernel feature '<paramref name="feature"/>' is not supported on the <paramref name="backend"/> backend."
+    /// followed by <paramref name="remediation"/>.
+    /// </summary>
+    /// <param name="feature">The unsupported kernel feature (for example the intrinsic name).</param>
+    /// <param name="backend">The backend that rejected the feature.</param>
+    /// <param name="remediation">Suggested fix, appended to the message.</param>
     public UnsupportedKernelFeatureException(string feature, AcceleratorType backend, string remediation)
         : base($"Kernel feature '{feature}' is not supported on the {backend} backend. {remediation}")
     {

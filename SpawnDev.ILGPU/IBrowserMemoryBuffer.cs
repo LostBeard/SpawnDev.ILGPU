@@ -32,11 +32,6 @@ namespace SpawnDev.ILGPU
         /// </summary>
         public static long StrictHostCopyMaxBytes { get; set; } = -1;
 
-        /// <summary>
-        /// Throws if <see cref="StrictHostCopyMaxBytes"/> is enabled and <paramref name="byteLength"/>
-        /// exceeds it. Called from each browser backend's host→device <c>CopyFrom</c> CPU branch.
-        /// <paramref name="backend"/> names the backend in the message.
-        /// </summary>
         // ── ALWAYS-ON CENSUS OF BULK DATA CROSSING INTO .NET ────────────────────────────────────
         //
         // 🔴 THE GUARD ABOVE ONLY FIRES WHERE SOMEONE REMEMBERED TO ARM IT, and that is exactly one
@@ -70,6 +65,16 @@ namespace SpawnDev.ILGPU
             HostCopyCount = 0; HostCopyBytes = 0; LargestHostCopyBytes = 0;
         }
 
+        /// <summary>
+        /// Throws if <see cref="StrictHostCopyMaxBytes"/> is enabled and <paramref name="byteLength"/>
+        /// exceeds it. Called from each browser backend's host→device <c>CopyFrom</c> CPU branch.
+        /// <paramref name="backend"/> names the backend in the message. Always records the copy in the
+        /// host-copy census (<see cref="HostCopyCount"/>, <see cref="HostCopyBytes"/>,
+        /// <see cref="LargestHostCopyBytes"/>) before the threshold check, whether or not the guard is armed.
+        /// </summary>
+        /// <param name="byteLength">Size of the host-&gt;device copy in bytes.</param>
+        /// <param name="backend">Backend name used in the exception message.</param>
+        /// <exception cref="System.InvalidOperationException">The guard is armed and the copy exceeds it.</exception>
         public static void CheckHostCopy(long byteLength, string backend)
         {
             HostCopyCount++;

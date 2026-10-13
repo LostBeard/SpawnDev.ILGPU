@@ -48,8 +48,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         /// <summary>
         /// Emulated warp/subgroup size for the Wasm backend. Wasm has no hardware warps, so a "warp"
-        /// is an emulated lane group: <see cref="ILGPU.Warp.LaneIdx"/> = threadIdX % WasmWarpSize,
-        /// <see cref="ILGPU.Warp.WarpIdx"/> = threadIdX / WasmWarpSize, and Warp.Shuffle exchanges via
+        /// is an emulated lane group: <see cref="global::ILGPU.Warp.LaneIdx"/> = threadIdX % WasmWarpSize,
+        /// <see cref="global::ILGPU.Warp.WarpIdx"/> = threadIdX / WasmWarpSize, and Warp.Shuffle exchanges via
         /// shared memory + a barrier (see the WarpShuffle codegen). Mirrors the CPU backend's default
         /// warp size (8) so Wasm and CPU share identical warp structure (bit-identical warp reductions).
         /// SINGLE SOURCE OF TRUTH: WasmILGPUDevice.WarpSize and the WarpSize/LaneIdx codegen both use this.
@@ -254,11 +254,22 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         #region Constructor
 
+        /// <summary>
+        /// Creates a Wasm backend for the given context with default <see cref="WasmBackendOptions"/>.
+        /// </summary>
+        /// <param name="context">The ILGPU context the backend compiles for.</param>
         public WasmBackend(Context context)
             : this(context, new WasmBackendOptions())
         {
         }
 
+        /// <summary>
+        /// Creates a Wasm backend for the given context. Registers the Wasm intrinsics (math, scan,
+        /// exact float remainder) and adds a <c>LowerArrays</c> kernel transformer so kernel-local
+        /// <c>new T[N]</c> arrays are lowered to linear-memory allocations.
+        /// </summary>
+        /// <param name="context">The ILGPU context the backend compiles for.</param>
+        /// <param name="options">Backend options; a default instance is used when null.</param>
         public WasmBackend(Context context, WasmBackendOptions options)
             : base(
                   context,
@@ -308,8 +319,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         #region Properties
 
+        /// <summary>
+        /// The options this backend was created with.
+        /// </summary>
         public WasmBackendOptions Options { get; }
 
+        /// <summary>
+        /// The backend's argument mapper, typed as <see cref="WasmArgumentMapper"/>.
+        /// </summary>
         public new WasmArgumentMapper ArgumentMapper =>
             (WasmArgumentMapper)base.ArgumentMapper;
 
@@ -527,6 +544,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
         }
 
+        /// <summary>
+        /// Creates a plain <see cref="EntryPoint"/> using the backend context's shared memory specification.
+        /// </summary>
+        /// <param name="entry">The entry point description.</param>
+        /// <param name="backendContext">The backend context.</param>
+        /// <param name="specialization">The kernel specialization.</param>
+        /// <returns>The created entry point.</returns>
         protected override EntryPoint CreateEntryPoint(
             in EntryPointDescription entry,
             in BackendContext backendContext,
@@ -536,6 +560,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 backendContext.SharedMemorySpecification,
                 specialization);
 
+        /// <summary>
+        /// Creates the kernel text builder (a version header comment only; the module itself is binary)
+        /// and the <see cref="WasmCodeGenerator.GeneratorArgs"/> shared by this kernel's generators.
+        /// </summary>
+        /// <param name="entryPoint">The kernel entry point.</param>
+        /// <param name="backendContext">The backend context (source of the shared allocations).</param>
+        /// <param name="specialization">The kernel specialization.</param>
+        /// <param name="data">Receives the new generator arguments.</param>
+        /// <returns>The kernel text builder.</returns>
         protected override StringBuilder CreateKernelBuilder(
             EntryPoint entryPoint,
             in BackendContext backendContext,
@@ -559,6 +592,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             return builder;
         }
 
+        /// <summary>
+        /// Creates a <see cref="WasmFunctionGenerator"/> for a non-kernel method. Methods that have an
+        /// implementation are also registered in <see cref="WasmCodeGenerator.GeneratorArgs.HelperMethods"/>
+        /// so the kernel generator can emit them as helpers; intrinsic placeholders are not registered.
+        /// </summary>
+        /// <param name="method">The called method.</param>
+        /// <param name="allocas">The method's allocations.</param>
+        /// <param name="data">The generator arguments shared by all code generators of this kernel.</param>
+        /// <returns>The function code generator.</returns>
         protected override WasmCodeGenerator CreateFunctionCodeGenerator(
             Method method,
             Allocas allocas,
@@ -586,6 +628,16 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
         internal static readonly string[] BinaryMathFuncs = { "pow", "atan2" };
 
+        /// <summary>
+        /// Creates the <see cref="WasmKernelFunctionGenerator"/> for the kernel method, assigns the
+        /// fixed math import indices, reserves the extra <c>env.notify</c> import slot, and records
+        /// the generator for <c>CreateKernel</c>.
+        /// </summary>
+        /// <param name="sharedAllocations">The kernel's shared memory allocations.</param>
+        /// <param name="method">The kernel method.</param>
+        /// <param name="allocas">The kernel method's allocations.</param>
+        /// <param name="data">The generator arguments shared by all code generators of this kernel.</param>
+        /// <returns>The kernel code generator.</returns>
         protected override WasmCodeGenerator CreateKernelCodeGenerator(
             in AllocaKindInformation sharedAllocations,
             Method method,
@@ -697,6 +749,18 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             return total;
         }
 
+        /// <summary>
+        /// Assembles the final WebAssembly module for a kernel: imports the shared linear memory
+        /// (max = <see cref="WasmBackendOptions.MaxLinearMemoryPages"/>), the JS <c>Math</c> functions
+        /// and the <c>env.notify</c> shim, adds the exported <c>kernel</c> function and any helper
+        /// functions, a phase dispatcher when the kernel has barriers, and an exported
+        /// <c>kernel_simd</c> variant when SIMD is effective and the kernel qualifies.
+        /// </summary>
+        /// <param name="entryPoint">The kernel entry point.</param>
+        /// <param name="kernelInfo">Optional kernel information (not used by this backend).</param>
+        /// <param name="builder">The text builder from <c>CreateKernelBuilder</c> (holds only a header comment).</param>
+        /// <param name="data">The generator arguments shared by all code generators of this kernel.</param>
+        /// <returns>A <see cref="WasmCompiledKernel"/> holding the module binary and dispatch metadata.</returns>
         protected override CompiledKernel CreateKernel(
             EntryPoint entryPoint,
             CompiledKernel.KernelInfo? kernelInfo,
@@ -1962,13 +2026,34 @@ namespace SpawnDev.ILGPU.Wasm.Backend
     /// </summary>
     public class WasmArgumentMapper : ArgumentMapper
     {
+        /// <summary>
+        /// Creates a Wasm argument mapper for the given context.
+        /// </summary>
+        /// <param name="context">The ILGPU context.</param>
         public WasmArgumentMapper(Context context) : base(context) { }
 
+        /// <summary>
+        /// Returns <paramref name="viewType"/> unchanged; views are not remapped to a different type on Wasm.
+        /// </summary>
+        /// <param name="viewType">The view type.</param>
+        /// <param name="elementType">The view's element type (unused).</param>
+        /// <returns><paramref name="viewType"/>.</returns>
         protected override Type MapViewType(Type viewType, Type elementType)
         {
             return viewType;
         }
 
+        /// <summary>
+        /// Emits nothing. Wasm view arguments are marshalled by the accelerator's dispatch path, not
+        /// through this mapper.
+        /// </summary>
+        /// <typeparam name="TILEmitter">The IL emitter type.</typeparam>
+        /// <typeparam name="TSource">The source value type.</typeparam>
+        /// <typeparam name="TTarget">The target value type.</typeparam>
+        /// <param name="emitter">The IL emitter (unused).</param>
+        /// <param name="viewType">The view type (unused).</param>
+        /// <param name="source">The source value (unused).</param>
+        /// <param name="target">The target value (unused).</param>
         protected override void MapViewInstance<TILEmitter, TSource, TTarget>(
             in TILEmitter emitter,
             Type viewType,
@@ -1993,6 +2078,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// </summary>
         public bool WasmSimd { get; }
 
+        /// <summary>
+        /// Creates the Wasm capability context: <c>Float16</c> is reported as supported (emulated
+        /// through f32), and <see cref="WasmSimd"/> captures <see cref="WasmBackend.EffectiveWasmSimd"/>.
+        /// </summary>
         public WasmCapabilityContext() : base()
         {
             // Half (Float16) is emulated via f32 promotion in the Wasm codegen.

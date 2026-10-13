@@ -64,11 +64,20 @@ fn fs_main(@builtin(position) pos : vec4<f32>) -> @location(0) vec4<f32> {
 }
 ";
 
+        /// <summary>Creates a renderer that presents buffers of <paramref name="accelerator"/>.</summary>
+        /// <param name="accelerator">The WebGPU accelerator that owns the buffers.</param>
+        /// <exception cref="ArgumentNullException"><paramref name="accelerator"/> is null.</exception>
         public WebGPUCanvasRenderer(WebGPUAccelerator accelerator)
         {
             _accelerator = accelerator ?? throw new ArgumentNullException(nameof(accelerator));
         }
 
+        /// <inheritdoc/>
+        /// <remarks>
+        /// Draws through an internal off-DOM WebGPU canvas and copies it onto the given canvas's 2D context, then
+        /// builds the render pipeline. Releases resources from any previously attached canvas.
+        /// </remarks>
+        /// <exception cref="InvalidOperationException">A WebGPU canvas context could not be created.</exception>
         public void AttachCanvas(HTMLCanvasElement canvas)
         {
             DisposeGpuResources();
@@ -157,9 +166,21 @@ fn fs_main(@builtin(position) pos : vec4<f32>) -> @location(0) vec4<f32> {
             });
         }
 
+        /// <inheritdoc/>
+        /// <remarks>
+        /// Flushes pending dispatches, then draws the buffer on the GPU with no CPU readback and completes
+        /// synchronously. Does nothing if no canvas is attached.
+        /// </remarks>
+        /// <exception cref="InvalidOperationException">The buffer is not a WebGPU buffer.</exception>
         public Task PresentAsync(MemoryBuffer2D<uint, Stride2D.DenseX> buffer)
             => PresentBufferAsync(((IArrayView)buffer).Buffer, (uint)buffer.Extent.X, (uint)buffer.Extent.Y);
 
+        /// <inheritdoc/>
+        /// <remarks>
+        /// Flushes pending dispatches, then draws the buffer on the GPU with no CPU readback and completes
+        /// synchronously. Does nothing if no canvas is attached.
+        /// </remarks>
+        /// <exception cref="InvalidOperationException">The buffer is not a WebGPU buffer.</exception>
         public Task PresentAsync(MemoryBuffer2D<int, Stride2D.DenseX> buffer)
             => PresentBufferAsync(((IArrayView)buffer).Buffer, (uint)buffer.Extent.X, (uint)buffer.Extent.Y);
 
@@ -254,6 +275,7 @@ fn fs_main(@builtin(position) pos : vec4<f32>) -> @location(0) vec4<f32> {
             _lastWidth = 0; _lastHeight = 0;
         }
 
+        /// <summary>Releases the pipeline, buffers and canvas contexts. Safe to call more than once.</summary>
         public void Dispose()
         {
             if (_disposed) return;

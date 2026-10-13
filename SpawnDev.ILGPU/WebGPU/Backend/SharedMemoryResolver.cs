@@ -45,6 +45,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// <summary>The size of one element in bytes.</summary>
         public int ElementSize { get; }
 
+        /// <summary>Creates the override description.</summary>
+        /// <param name="constantName">See <see cref="ConstantName"/>.</param>
+        /// <param name="variableName">See <see cref="VariableName"/>.</param>
+        /// <param name="allocaIndex">See <see cref="AllocaIndex"/>.</param>
+        /// <param name="elementSize">See <see cref="ElementSize"/>.</param>
         public DynamicSharedOverrideInfo(string constantName, string variableName, int allocaIndex, int elementSize)
         {
             ConstantName = constantName;
@@ -179,9 +184,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// Uses a two-pass matching strategy to handle object identity mismatches.
         /// </summary>
         /// <param name="alloca">The Alloca IR value to resolve.</param>
-        /// <param name="registeredNames">
-        /// Set of variable names already registered in valueVariables for OTHER alloca instances.
-        /// Used to skip entries that are already claimed by a different Alloca.
+        /// <param name="isNameClaimedByOther">
+        /// Called with a candidate variable name and <paramref name="alloca"/>; returns true when that name is
+        /// already claimed by a different Alloca, so the entry is skipped.
         /// </param>
         /// <param name="varName">The resolved WGSL variable name, if found.</param>
         /// <returns>True if the alloca was resolved to a shared memory variable.</returns>

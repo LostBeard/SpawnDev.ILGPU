@@ -21,6 +21,23 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   - Tests: `DevicePreference_RanksCudaThenDiscreteThenIntegratedThenCpu` (desktop, real device list, integrated
     detection checked independently) and `DevicePreference_Browser_WebGPUThenWebGLThenWasmThenCPU` (red-checked
     against the bucket ranking).
+- **Capability selection follows what the device can really do.**
+  - `RequiresFloat16Native` now accepts a WebGPU device whose adapter offers `shader-f16`. It used to reject WebGPU
+    always, so in the browser a kernel asking for native f16 fell through to ILGPU's CPU accelerator on the UI thread.
+  - `RequiresSubGroups` is a correctness gate: Wasm (emulated warps, `WarpSize` 8) and CPU (simulated warps) now
+    pass - both run `Warp.*` / `Group.Broadcast` correctly. WebGPU now requires the adapter's `subgroups` feature
+    (it used to pass unconditionally and fail at dispatch).
+  - New `WebGPUILGPUDevice.AdapterSupportsShaderF16` / `AdapterSupportsSubgroups`: the adapter's features, known at
+    enumeration (the accelerator requests both whenever the adapter has them). `ForceEmulatedF16` is honored.
+- **A second WebGPU accelerator on the same device threw "adapter is consumed".** A `GPUAdapter` creates one device;
+  the second `CreateAcceleratorAsync` on the same `WebGPUILGPUDevice` re-used it and every `requestDevice` fallback
+  threw. Later accelerators now request a fresh adapter for the same GPU (same power preference; a different GPU
+  throws a clear error asking for a new `Context`).
+- Tests: `AcceleratorRequirements_Browser_SubgroupsAndNativeF16FollowTheDevice` (WebGPU lane: selection vs a fresh
+  accelerator's real features, ForceEmulatedF16, Wasm/CPU/WebGL subgroup gates, two accelerators on one device, native
+  f16 selects WebGPU) and `Satisfies_SubGroups_PassesOnCpuAndCuda` (desktop, plus a real CPU `Warp.Shuffle`).
+  Red-checked each: old f16 gate -> "Satisfies(RequiresFloat16Native)=False but the accelerator got shader-f16=True";
+  Wasm rejected -> "Wasm Satisfies(RequiresSubGroups)=False"; adapter re-use -> "adapter is consumed".
 - **Memory reclaim no longer throws and swallows on the browser backends** (fork change). `ReclaimDeviceMemory` and
   `AllocateWithReclaim` "flushed" with `accelerator.Synchronize()` inside a catch-all; on WebGPU / WebGL / Wasm that
   throws `NotSupportedException`, so every reclaim threw, swallowed, and submitted nothing. They now `Flush()` on the

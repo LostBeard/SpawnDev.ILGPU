@@ -197,6 +197,37 @@ namespace SpawnDev.ILGPU.WebGPU
         /// </summary>
         public WebGPUDevice NativeDevice => nativeDevice;
 
+        /// <summary>
+        /// True when this device's adapter offers <c>shader-f16</c> (native f16 in WGSL). The accelerator requests the
+        /// feature whenever the adapter has it, so this is known before an accelerator exists; device selection
+        /// (<see cref="AcceleratorRequirements.RequiresFloat16Native"/>) reads it. For a device wrapping an external
+        /// <see cref="GPUDevice"/> it is whether that device was created with the feature.
+        /// </summary>
+        public bool AdapterSupportsShaderF16 => HasAdapterFeature("shader-f16");
+
+        /// <summary>
+        /// True when this device's adapter offers <c>subgroups</c> (hardware <c>Warp.*</c> / <c>Group.Broadcast</c>).
+        /// Requested by the accelerator whenever the adapter has it, so device selection
+        /// (<see cref="AcceleratorRequirements.RequiresSubGroups"/>) reads it before an accelerator exists.
+        /// <c>WebGPUBackendOptions.ForceDisableSubgroups</c> is per accelerator and not visible here.
+        /// </summary>
+        public bool AdapterSupportsSubgroups => HasAdapterFeature("subgroups");
+
+        private bool HasAdapterFeature(string feature)
+        {
+            if (nativeDevice is not null)
+                return nativeDevice.SupportedFeatures.Contains(feature);
+            try
+            {
+                using var features = ExternalGPUDevice?.Features;
+                return features?.Has(feature) ?? false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
         #endregion
 
         #region Methods
