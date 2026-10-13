@@ -711,6 +711,9 @@ namespace SpawnDev.ILGPU.Wasm
         }
 
         /// <inheritdoc/>
+        public override bool SupportsBoxedLaunch => true;
+
+        /// <inheritdoc/>
         protected override WasmKernel CreateKernel(WasmCompiledKernel compiledKernel, MethodInfo launcher)
         {
             return new WasmKernel(this, compiledKernel, launcher);
@@ -4210,6 +4213,10 @@ namespace SpawnDev.ILGPU.Wasm
         /// The compiled kernel, typed as <see cref="WasmCompiledKernel"/>.
         /// </summary>
         public new WasmCompiledKernel CompiledKernel => (WasmCompiledKernel)base.CompiledKernel;
+
+        /// <inheritdoc/>
+        public override void LaunchBoxed(AcceleratorStream stream, object dimension, object[] args) =>
+            WasmAccelerator.RunKernel(this, stream, dimension, args);
 
         /// <summary>No-op; the kernel holds no native resources (the module bytes are managed).</summary>
         /// <param name="disposing">True when called from <c>Dispose</c>.</param>

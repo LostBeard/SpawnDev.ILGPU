@@ -355,6 +355,16 @@ namespace ILGPU.Runtime
             .AsNotNull();
 
         /// <summary>
+        /// Launches this kernel with boxed arguments, without going through <see cref="Launcher"/>. Only valid when
+        /// the accelerator's <see cref="Accelerator.SupportsBoxedLaunch"/> is true.
+        /// </summary>
+        /// <param name="stream">The accelerator stream.</param>
+        /// <param name="dimension">The boxed launch dimension (a <see cref="KernelConfig"/> or an index).</param>
+        /// <param name="args">The boxed kernel arguments.</param>
+        public virtual void LaunchBoxed(AcceleratorStream stream, object dimension, object[] args) =>
+            throw new NotSupportedException();
+
+        /// <summary>
         /// Invokes the associated launcher via reflection.
         /// </summary>
         /// <typeparam name="T">The index type T.</typeparam>

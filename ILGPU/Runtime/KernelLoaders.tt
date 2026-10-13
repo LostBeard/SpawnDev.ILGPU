@@ -115,6 +115,12 @@ namespace ILGPU.Runtime
             out KernelInfo? kernelInfo)
             <#= delegateParams.TypeRestrictions #>
         {
+            // Browser backends: launch the kernel with boxed arguments and never create the launcher delegate,
+            // which Mono AOT cannot always create (see Accelerator.SupportsBoxedLaunch).
+            ArgumentNullException.ThrowIfNull(action);
+            if (accelerator.LoadBoxedLaunchKernel(action.Method, default, out kernelInfo) is { } boxedKernel)
+                return (KernelConfig config, <#= delegateParams.DefaultStreamLambdaParams #>) =>
+                    boxedKernel.LaunchBoxed(accelerator.DefaultStream, config, new object[] { <#= delegateParams.DefaultStreamArgs #> });
             var baseKernel = accelerator.LoadKernel<<#= delegateParams.TypeParams #>>(action, out kernelInfo);
             return (KernelConfig config, <#= delegateParams.DefaultStreamLambdaParams #>) =>
                 baseKernel(accelerator.DefaultStream, config, <#= delegateParams.DefaultStreamArgs #>);
@@ -205,6 +211,12 @@ namespace ILGPU.Runtime
             out KernelInfo? kernelInfo)
             <#= delegateParams.TypeRestrictions #>
         {
+            // Browser backends: launch the kernel with boxed arguments and never create the launcher delegate,
+            // which Mono AOT cannot always create (see Accelerator.SupportsBoxedLaunch).
+            ArgumentNullException.ThrowIfNull(action);
+            if (accelerator.LoadBoxedLaunchKernel(action.Method, specialization, out kernelInfo) is { } boxedKernel)
+                return (KernelConfig config, <#= delegateParams.DefaultStreamLambdaParams #>) =>
+                    boxedKernel.LaunchBoxed(accelerator.DefaultStream, config, new object[] { <#= delegateParams.DefaultStreamArgs #> });
             var baseKernel = accelerator.LoadKernel<<#= delegateParams.TypeParams #>>(
                 action,
                 specialization,
@@ -321,6 +333,12 @@ namespace ILGPU.Runtime
             where TIndex : struct, IIndex
             <#= delegateParams.TypeRestrictions #>
         {
+            // Browser backends: launch the kernel with boxed arguments and never create the launcher delegate,
+            // which Mono AOT cannot always create (see Accelerator.SupportsBoxedLaunch).
+            ArgumentNullException.ThrowIfNull(action);
+            if (accelerator.LoadBoxedLaunchImplicitlyGroupedKernel(action.Method, customGroupSize, out kernelInfo) is { } boxedKernel)
+                return (TIndex index, <#= delegateParams.DefaultStreamLambdaParams #>) =>
+                    boxedKernel.LaunchBoxed(accelerator.DefaultStream, index, new object[] { <#= delegateParams.DefaultStreamArgs #> });
             var baseKernel = accelerator.LoadImplicitlyGroupedKernel<TIndex, <#= delegateParams.TypeParams #>>(
                 action,
                 customGroupSize,
@@ -397,6 +415,12 @@ namespace ILGPU.Runtime
             if (DelegateSpecializationRouter.TryRoute<TIndex, <#= delegateParams.TypeParams #>>(
                     accelerator, action, out var dsResult))
                 return dsResult!;
+            // Browser backends: launch the kernel with boxed arguments and never create the launcher delegate,
+            // which Mono AOT cannot always create (see Accelerator.SupportsBoxedLaunch).
+            ArgumentNullException.ThrowIfNull(action);
+            if (accelerator.LoadBoxedLaunchAutoGroupedKernel(action.Method, out _) is { } boxedKernel)
+                return (TIndex index, <#= delegateParams.DefaultStreamLambdaParams #>) =>
+                    boxedKernel.LaunchBoxed(accelerator.DefaultStream, index, new object[] { <#= delegateParams.DefaultStreamArgs #> });
             var baseKernel = accelerator.LoadAutoGroupedKernel<TIndex, <#= delegateParams.TypeParams #>>(action);
             return (TIndex index, <#= delegateParams.DefaultStreamLambdaParams #>) =>
                 baseKernel(accelerator.DefaultStream, index, <#= delegateParams.DefaultStreamArgs #>);
@@ -418,6 +442,12 @@ namespace ILGPU.Runtime
             where TIndex : struct, IIndex
             <#= delegateParams.TypeRestrictions #>
         {
+            // Browser backends: launch the kernel with boxed arguments and never create the launcher delegate,
+            // which Mono AOT cannot always create (see Accelerator.SupportsBoxedLaunch).
+            ArgumentNullException.ThrowIfNull(action);
+            if (accelerator.LoadBoxedLaunchAutoGroupedKernel(action.Method, out kernelInfo) is { } boxedKernel)
+                return (TIndex index, <#= delegateParams.DefaultStreamLambdaParams #>) =>
+                    boxedKernel.LaunchBoxed(accelerator.DefaultStream, index, new object[] { <#= delegateParams.DefaultStreamArgs #> });
             var baseKernel = accelerator.LoadAutoGroupedKernel<TIndex, <#= delegateParams.TypeParams #>>(
                 action,
                 out kernelInfo);

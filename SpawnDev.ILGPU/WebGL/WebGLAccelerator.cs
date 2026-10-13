@@ -298,6 +298,9 @@ namespace SpawnDev.ILGPU.WebGL
         }
 
         /// <inheritdoc/>
+        public override bool SupportsBoxedLaunch => true;
+
+        /// <inheritdoc/>
         protected override WebGLKernel CreateKernel(WebGLCompiledKernel compiledKernel, MethodInfo launcher)
         {
             LastGeneratedGLSL = compiledKernel.GLSLSource;
@@ -1765,6 +1768,10 @@ namespace SpawnDev.ILGPU.WebGL
         /// Gets the WebGL-specific compiled kernel.
         /// </summary>
         public new WebGLCompiledKernel CompiledKernel => (WebGLCompiledKernel)base.CompiledKernel;
+
+        /// <inheritdoc/>
+        public override void LaunchBoxed(AcceleratorStream stream, object dimension, object[] args) =>
+            WebGLAccelerator.RunKernel(this, stream, dimension, args);
 
         /// <inheritdoc/>
         protected override void DisposeAcceleratorObject(bool disposing) { }

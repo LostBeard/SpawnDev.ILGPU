@@ -336,6 +336,94 @@ namespace ILGPU.Runtime
 
         #endregion
 
+        #region Boxed Launch
+
+        /// <summary>
+        /// True when this accelerator's kernels implement <see cref="Kernel.LaunchBoxed"/>, so the stream loaders can
+        /// launch them without creating a launcher delegate.
+        /// </summary>
+        /// <remarks>
+        /// The browser backends set this: their launcher (a DynamicMethod) only boxes its arguments and forwards them.
+        /// Under Blazor WebAssembly AOT that launcher is interpreted, and binding a delegate to an interpreted method
+        /// with more than 8 parameters needs a wrapper the AOT compiler built for that exact signature. It builds one
+        /// only when compiled code invokes that delegate type, so for most kernels it does not exist, and CREATING the
+        /// delegate kills the .NET runtime (2026-10-13: Mono assertion at interp.c:3420 for a stream kernel with 6
+        /// parameters, on WebGPU, WebGL and Wasm alike).
+        /// </remarks>
+        public virtual bool SupportsBoxedLaunch => false;
+
+        /// <summary>
+        /// Loads the given explicitly grouped kernel for <see cref="Kernel.LaunchBoxed"/>, without creating a launcher
+        /// delegate. Returns null when <see cref="SupportsBoxedLaunch"/> is false or the kernel has specialized
+        /// parameters; load it the usual way then.
+        /// </summary>
+        /// <param name="method">The method to compile into a kernel.</param>
+        /// <param name="specialization">The kernel specialization.</param>
+        /// <param name="kernelInfo">Detailed kernel information.</param>
+        /// <returns>The loaded kernel, or null.</returns>
+        public Kernel? LoadBoxedLaunchKernel(
+            MethodInfo method,
+            KernelSpecialization specialization,
+            out KernelInfo? kernelInfo) =>
+            LoadBoxedLaunchKernel(
+                EntryPointDescription.FromExplicitlyGroupedKernel(method),
+                specialization,
+                new DefaultKernelLoader(),
+                out kernelInfo);
+
+        /// <summary>
+        /// Loads the given implicitly grouped kernel with a custom group size for <see cref="Kernel.LaunchBoxed"/>,
+        /// without creating a launcher delegate. Returns null when <see cref="SupportsBoxedLaunch"/> is false or the
+        /// kernel has specialized parameters.
+        /// </summary>
+        /// <param name="method">The method to compile into a kernel.</param>
+        /// <param name="customGroupSize">The custom group size to use.</param>
+        /// <param name="kernelInfo">Detailed kernel information.</param>
+        /// <returns>The loaded kernel, or null.</returns>
+        public Kernel? LoadBoxedLaunchImplicitlyGroupedKernel(
+            MethodInfo method,
+            int customGroupSize,
+            out KernelInfo? kernelInfo) =>
+            LoadBoxedLaunchKernel(
+                EntryPointDescription.FromImplicitlyGroupedKernel(method),
+                new KernelSpecialization(customGroupSize, null),
+                new GroupedKernelLoader(customGroupSize),
+                out kernelInfo);
+
+        /// <summary>
+        /// Loads the given implicitly grouped kernel with an automatic group size for <see cref="Kernel.LaunchBoxed"/>,
+        /// without creating a launcher delegate. Returns null when <see cref="SupportsBoxedLaunch"/> is false or the
+        /// kernel has specialized parameters.
+        /// </summary>
+        /// <param name="method">The method to compile into a kernel.</param>
+        /// <param name="kernelInfo">Detailed kernel information.</param>
+        /// <returns>The loaded kernel, or null.</returns>
+        public Kernel? LoadBoxedLaunchAutoGroupedKernel(
+            MethodInfo method,
+            out KernelInfo? kernelInfo) =>
+            LoadBoxedLaunchKernel(
+                EntryPointDescription.FromImplicitlyGroupedKernel(method),
+                KernelSpecialization.Empty,
+                new AutoKernelLoader(),
+                out kernelInfo);
+
+        private Kernel? LoadBoxedLaunchKernel<TKernelLoader>(
+            in EntryPointDescription entry,
+            in KernelSpecialization specialization,
+            in TKernelLoader kernelLoader,
+            out KernelInfo? kernelInfo)
+            where TKernelLoader : struct, IKernelLoader
+        {
+            if (!SupportsBoxedLaunch || entry.HasSpecializedParameters)
+            {
+                kernelInfo = null;
+                return null;
+            }
+            return LoadGenericKernel(entry, specialization, kernelLoader, out kernelInfo);
+        }
+
+        #endregion
+
         #region Kernel Loading
 
         /// <summary>

@@ -891,6 +891,9 @@ namespace SpawnDev.ILGPU.WebGPU
         }
 
         /// <inheritdoc/>
+        public override bool SupportsBoxedLaunch => true;
+
+        /// <inheritdoc/>
         protected override WebGPUKernel CreateKernel(WebGPUCompiledKernel compiledKernel, MethodInfo launcher)
         {
             return new WebGPUKernel(this, compiledKernel, launcher);
@@ -3758,6 +3761,10 @@ namespace SpawnDev.ILGPU.WebGPU
         /// Gets the WebGPU-specific compiled kernel.
         /// </summary>
         public new WebGPUCompiledKernel CompiledKernel => (WebGPUCompiledKernel)base.CompiledKernel;
+
+        /// <inheritdoc/>
+        public override void LaunchBoxed(AcceleratorStream stream, object dimension, object[] args) =>
+            WebGPUAccelerator.RunKernel(this, stream, dimension, args);
 
         /// <inheritdoc/>
         protected override void DisposeAcceleratorObject(bool disposing) { }
