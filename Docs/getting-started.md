@@ -76,7 +76,21 @@ Trimming and Blazor WebAssembly AOT both work. If you AOT compile, keep the IL:
   with the IL kept, the frontend reads kernels as usual, and Mono's AOT runtime keeps its interpreter fallback for
   ILGPU's dynamically generated launchers. Verified end to end in a production app (Anaglyphohol: WebGPU kernels +
   ILGPU.ML inference), where AOT halved the per-frame host cost (DAv3 at 168x98: 43.8 -> 21.7 ms). Costs: a much
-  larger `dotnet.native.wasm` (~55 MB with ILGPU.ML) and a long AOT build (over an hour, single core, for ILGPU.ML).
+  larger `dotnet.native.wasm` (~55 MB with ILGPU.ML) and a long AOT build (over an hour, single core, for ILGPU.ML;
+  see the next point for a fast build).
+- **Faster AOT builds while you iterate: `-p:WasmDedup=false`.** By default (`WasmDedup=true`) the AOT compiler
+  gathers the generic instantiations of every assembly into ONE module (`aot-instances.dll`) and compiles it on
+  one core. ILGPU and ILGPU.ML are generic-heavy, so that single step is nearly the whole build. With
+  `WasmDedup=false` each assembly compiles its own instantiations, in parallel. Measured on Anaglyphohol (ILGPU +
+  ILGPU.ML, `TrimMode=full`, clean build): **65-80 min -> 4.5-5.3 min**, no measurable runtime difference (DAv3
+  frame 14.8-15.4 ms vs 15.3 ms), but `dotnet.native.wasm` is **+53% larger** (+18.7 MB, symbols stripped), because
+  instantiations used by several assemblies are compiled once per assembly. Use it for the build-and-test loop
+  when you need to test under AOT, then publish the shipped build with the default if download size matters:
+
+  ```bash
+  dotnet publish -c Release -p:WasmDedup=false   # iteration: minutes, bigger download
+  dotnet publish -c Release                       # release: the default (WasmDedup=true), smaller, slow build
+  ```
 - **Desktop NativeAOT (`PublishAot`) is NOT supported**: ILGPU emits kernel launchers with Reflection.Emit, which
   NativeAOT cannot run. The AOT analyzer stays on in these libraries, so those sites remain visible (IL3050).
 
