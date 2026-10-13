@@ -1,6 +1,28 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## Unreleased (master) - pick the discrete GPU on hybrid machines (PR #9)
+
+- **Hybrid GPU laptops picked the wrong device.** On desktop, `CreatePreferredAccelerator(Async)` took the first
+  non-CPU device and `Context.GetPreferredDevice` sorted by memory only. Integrated GPUs and OpenCL CPU runtimes report
+  system RAM, so an Intel HD 620 + NVIDIA 940MX laptop got the integrated GPU or Intel's OpenCL CPU runtime instead of
+  the 940MX. On an RTX 4070 PC, `GetPreferredDevice(false)` picked the OpenCL RTX 4070 over CUDA (a memory tie).
+  - New `DevicePreference.OrderByPreference(devices)` / `context.GetBestDevice()` rank CUDA > discrete OpenCL GPU >
+    integrated OpenCL GPU (`CL_DEVICE_HOST_UNIFIED_MEMORY`, Intel vendor as the fallback) > other OpenCL >
+    WebGPU > WebGL > Wasm > other > CPU; memory size only breaks ties. `CreatePreferredAccelerator(requirements)`,
+    the desktop path of `CreatePreferredAcceleratorAsync` and the WPF demos use it. The fork's
+    `Context.GetPreferredDevice` is unchanged (stays close to upstream).
+  - Browser: the first cut put WebGPU, WebGL and Wasm in one bucket sorted by memory, and Wasm (2 GB) outranked
+    WebGPU in the sync `CreatePreferredAccelerator(requirements)`. They now have explicit ranks.
+  - WebGPU: `WebGPUDevice.GetDevicesAsync` lists a distinct high-performance adapter FIRST, compares adapters on
+    vendor + architecture + device + description (Chrome leaves `info.device` empty, so two GPUs compared equal), and
+    keeps a high-performance adapter when the default request returns null. Chrome on Windows currently ignores
+    `powerPreference` (crbug.com/369219127), so there is no change in Chrome today.
+  - Tests: `DevicePreference_RanksCudaThenDiscreteThenIntegratedThenCpu` (desktop, real device list, integrated
+    detection checked independently) and `DevicePreference_Browser_WebGPUThenWebGLThenWasmThenCPU` (red-checked
+    against the bucket ranking).
+- PR #8 (WebGPU canvas present via a compute pass for an Intel HD 620 driver bug) was closed unmerged: the fix for
+  that machine is a newer driver, not a slower path in the library.
 ## 5.3.6 (forks 2.3.11) - 2026-10-12 - reclaim idle GPU memory before the driver spills
 
 - **A process running several models ran out of VRAM without ever failing an allocation** (Vertex: a chat model,
