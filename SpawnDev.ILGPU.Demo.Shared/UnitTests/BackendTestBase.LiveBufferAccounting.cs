@@ -53,11 +53,25 @@ public abstract partial class BackendTestBase
     /// test's own async lambda, reported as its source method name, not MoveNext or a compiler type), and a disposed
     /// buffer must leave the site table. A leak hunt reads this list, so a wrong or stale attribution sends it the wrong way.
     /// </summary>
+    /// <summary>
+    /// True when a stack walk sees this method's own frame. Under Blazor WebAssembly AOT it does not (2026-10-13: both
+    /// creation-site tests got "(unknown)" there and passed in the interpreted build), so the sites cannot be named.
+    /// </summary>
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    static bool ManagedStackFramesVisible()
+    {
+        foreach (var f in new System.Diagnostics.StackTrace(false).GetFrames())
+            if (f.GetMethod()?.Name == nameof(ManagedStackFramesVisible)) return true;
+        return false;
+    }
+
     [TestMethod]
     public async Task WebGPU_LiveBufferAccounting_NamesCreationSite() => await RunTest(async accelerator =>
     {
         if (accelerator is not WebGPUAccelerator)
             throw new UnsupportedTestException("WebGPU-only accounting.");
+        if (!ManagedStackFramesVisible())
+            throw new UnsupportedTestException("Creation sites come from managed stack frames, and this build does not expose them (Blazor WebAssembly AOT).");
 
         const int N = 12345;   // odd size so this buffer's bucket is unambiguous
         bool was = WebGPUBufferAccounting.CaptureCreationSites;
@@ -101,6 +115,8 @@ public abstract partial class BackendTestBase
     {
         if (accelerator is not WebGPUAccelerator)
             throw new UnsupportedTestException("WebGPU-only accounting.");
+        if (!ManagedStackFramesVisible())
+            throw new UnsupportedTestException("Creation sites come from managed stack frames, and this build does not expose them (Blazor WebAssembly AOT).");
 
         bool was = WebGPUBufferAccounting.CaptureCreationSites;
         WebGPUBufferAccounting.CaptureCreationSites = true;

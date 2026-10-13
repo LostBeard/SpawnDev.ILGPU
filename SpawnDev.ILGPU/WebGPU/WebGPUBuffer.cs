@@ -572,6 +572,10 @@ namespace SpawnDev.ILGPU.WebGPU
         /// Record WHO allocated each buffer from now on: the first stack frame outside SpawnDev.ILGPU / ILGPU /
         /// System (see <see cref="TopCreationSites"/>). Costs a stack walk per allocation - diagnostics only.
         /// </summary>
+        /// <remarks>
+        /// Needs managed stack frames. A Blazor WebAssembly AOT build does not expose the frames of its compiled code,
+        /// so sites there come out as "(unknown)"; use an interpreted (non-AOT) build to find who allocated.
+        /// </remarks>
         public static bool CaptureCreationSites { get; set; }
 
         internal static void Track(string label, long bytes, bool staging)
