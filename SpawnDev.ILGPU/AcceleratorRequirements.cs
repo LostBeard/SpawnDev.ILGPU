@@ -245,8 +245,9 @@ public static class AcceleratorRequirementsExtensions
     }
 
     /// <summary>
-    /// Create an accelerator on the first compatible device (preferring non-CPU when
-    /// multiple match, mirroring <see cref="Context.GetPreferredDevice"/> behavior).
+    /// Create an accelerator on the best compatible device, ranked by
+    /// <see cref="DevicePreference.OrderByPreference"/> (CUDA, then discrete OpenCL GPUs,
+    /// then integrated OpenCL GPUs, then other OpenCL devices, then CPU).
     /// Throws <see cref="NotSupportedException"/> when no backend satisfies the
     /// requirements - the caller's kernel genuinely can't run on this host.
     /// </summary>
@@ -262,9 +263,7 @@ public static class AcceleratorRequirementsExtensions
                 $"No compatible accelerator found for requirements: {requirements.Describe()}. " +
                 $"Available devices: {string.Join(", ", context.Devices.Select(d => d.AcceleratorType))}.");
         }
-        // Prefer non-CPU when a GPU backend is compatible, else fall back to CPU.
-        var preferred = compatible.FirstOrDefault(d => d.AcceleratorType != AcceleratorType.CPU)
-                        ?? compatible[0];
+        var preferred = compatible.OrderByPreference()[0];
         return preferred.CreateAccelerator(context);
     }
 

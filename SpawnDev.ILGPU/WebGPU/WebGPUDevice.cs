@@ -60,11 +60,6 @@ namespace SpawnDev.ILGPU.WebGPU
 
                 // Request the default adapter
                 var adapter = await gpu.RequestAdapter();
-                if (adapter != null)
-                {
-                    var device = new WebGPUDevice(adapter, 0);
-                    devices.Add(device);
-                }
 
                 // Try requesting a high-performance adapter
                 var highPerfOptions = new GPURequestAdapterOptions
@@ -79,15 +74,26 @@ namespace SpawnDev.ILGPU.WebGPU
                 using (var highPerfInfo = highPerfAdapter?.Info)
                 using (var baseInfo = adapter?.Info)
                 {
-                    if (highPerfAdapter != null &&
-                        adapter != null &&
-                        highPerfInfo?.Device != baseInfo?.Device)
-                    {
-                        var device = new WebGPUDevice(highPerfAdapter, devices.Count);
-                        devices.Add(device);
-                        adoptedHighPerf = true;
-                    }
+                    // Compare every identifying field, not just .Device - Chrome leaves .Device empty, which
+                    // made two different GPUs compare equal ("" == "").
+                    // A null default adapter with a non-null high-performance one keeps the high-performance one
+                    // rather than enumerating nothing.
+                    adoptedHighPerf = highPerfAdapter != null &&
+                        (adapter == null ||
+                        (highPerfInfo?.Vendor, highPerfInfo?.Architecture, highPerfInfo?.Device, highPerfInfo?.Description)
+                            != (baseInfo?.Vendor, baseInfo?.Architecture, baseInfo?.Device, baseInfo?.Description));
                 }
+
+                // A distinct high-performance adapter goes FIRST, so devices[0] - what callers and
+                // CreatePreferredAcceleratorAsync pick - is the discrete GPU on a hybrid machine.
+                // ⚠️ Chrome on Windows currently ignores powerPreference and runs every page on ONE
+                // adapter (crbug.com/369219127; MEASURED 2026-10-01 on an Intel HD 620 + NVIDIA 940MX
+                // laptop: both requests returned the Intel), so this only takes effect in browsers that
+                // honor it. The user-side switch there is Windows Graphics settings or Chrome's
+                // --force_high_performance_gpu launch flag.
+                if (adoptedHighPerf) devices.Add(new WebGPUDevice(highPerfAdapter!, devices.Count));
+                if (adapter != null) devices.Add(new WebGPUDevice(adapter, devices.Count));
+
                 // On a single-GPU machine the high-performance request resolves to the SAME physical
                 // device, so we don't adopt it - but it is still a second GPUAdapter handle that
                 // nothing else owns. Release it, or every enumeration leaks one.
