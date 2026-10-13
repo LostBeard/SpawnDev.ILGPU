@@ -227,8 +227,15 @@ namespace PlaywrightMultiTest
                     // (ILGPU compiles kernels from the KEPT IL; WasmDedup=false compiles the generic instances per assembly in
                     // parallel - minutes, not an hour). Found the RadixSortPairs AOT crash class of bug (2026-10-02).
                     var extraPublishArgs = Environment.GetEnvironmentVariable("PMT_PUBLISH_ARGS");
+                    // An AOT publish of the Demo takes ~9 min here even with WasmDedup=false (105 assemblies, and the
+                    // re-publish is not incremental), so the 5 min default killed it (2026-10-13). AOT gets 30 min;
+                    // PMT_PUBLISH_TIMEOUT_SEC overrides either default.
+                    var isAotPublish = extraPublishArgs?.Contains("RunAOTCompilation=true", StringComparison.OrdinalIgnoreCase) == true;
+                    var publishTimeoutMs = int.TryParse(Environment.GetEnvironmentVariable("PMT_PUBLISH_TIMEOUT_SEC"), out var publishTimeoutSec) && publishTimeoutSec > 0
+                        ? publishTimeoutSec * 1000
+                        : isAotPublish ? 1_800_000 : 300_000;
                     LogStatus($"Publishing {project.Name}...{(string.IsNullOrWhiteSpace(extraPublishArgs) ? "" : $" [PMT_PUBLISH_ARGS {extraPublishArgs}]")}");
-                    var pubResult = await RunDotnetAsync($"publish \"{project.CsprojPath}\" -c Release -p:BuildInParallel=false -maxcpucount:1 {extraPublishArgs}", project.Directory).ConfigureAwait(false);
+                    var pubResult = await RunDotnetAsync($"publish \"{project.CsprojPath}\" -c Release -p:BuildInParallel=false -maxcpucount:1 {extraPublishArgs}", project.Directory, publishTimeoutMs).ConfigureAwait(false);
                     LogStatus($"Publish {project.Name}: exit={pubResult}");
                     if (pubResult != 0 || !File.Exists(indexPath))
                     {
