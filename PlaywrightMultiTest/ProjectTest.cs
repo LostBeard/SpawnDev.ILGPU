@@ -13,6 +13,9 @@ public class ProjectTest
     public string? TestPageUrl { get; }
     public TestResult Result { get; set; }
     public string? ResultMessage { get; set; }
+    /// <summary>True when the last browser run left its row without any result: the page's .NET runtime is presumed dead
+    /// (e.g. a Mono assertion), so the lane recycles the page before the next test.</summary>
+    public bool PageRuntimeDead { get; set; }
     public Func<IPage, Task> TestFunc { get; set; }
     public ProjectTest(TestableProject testableProject, string name)
     {
@@ -47,6 +50,13 @@ public class ProjectTest
     {
         TestFunc = (page) => RunTest(page);
     }
+
+    /// <summary>
+    /// True for a console error that means the page's .NET runtime has exited (a Mono assertion or abort).
+    /// </summary>
+    private static bool IsRuntimeDeathMessage(string text) =>
+        text.Contains("[MONO] * Assertion", StringComparison.Ordinal)
+        || text.Contains(".NET runtime already exited", StringComparison.Ordinal);
 
     /// <summary>
     /// Checks if the Blazor error UI (#blazor-error-ui) is visible on the page.
@@ -109,7 +119,7 @@ public class ProjectTest
             void OnConsole(object? sender, IConsoleMessage msg)
             {
                 if (msg.Type == "error")
-                    consoleErrors.Add(msg.Text);
+                    lock (consoleErrors) consoleErrors.Add(msg.Text);
                 else if (msg.Type == "warning")
                     consoleWarnings.Add(msg.Text);
                 else if (captureLogs && msg.Text != null
@@ -133,10 +143,13 @@ public class ProjectTest
             // click the button to start the process for this row (button will be disabled)
             await runButton.ClickAsync();
 
-            // wait for test to finish (button will become enabled again)
+            // wait for test to finish (button will become enabled again). A dead .NET runtime never re-enables it, so
+            // stop as soon as the console says the runtime died instead of waiting out the 10-minute timeout.
+            var runtimeDied = false;
             await page.WaitForConditionAsync(async () =>
             {
-                return await runButton.IsEnabledAsync();
+                lock (consoleErrors) runtimeDied = consoleErrors.Any(IsRuntimeDeathMessage);
+                return runtimeDied || await runButton.IsEnabledAsync();
             });
 
             // Stop capturing console
@@ -155,6 +168,11 @@ public class ProjectTest
 
             //  check for error  class
             var unsupported = await row.EvaluateAsync<bool>("el => el.classList.contains('test-unsupported')");
+
+            // A pass needs POSITIVE evidence. When the .NET runtime in the page dies (a Mono assertion under AOT,
+            // 2026-10-13), Run clicks do nothing and the row never gets a result class - this used to be read as
+            // Success, so every later test on the page "passed" without running.
+            var succeeded = await row.EvaluateAsync<bool>("el => el.classList.contains('test-success')");
 
             // Log console errors/warnings/matched logs to stderr for diagnostics
             if (consoleErrors.Count > 0 || consoleWarnings.Count > 0 || consoleLogs.Count > 0)
@@ -192,6 +210,13 @@ public class ProjectTest
                     stateMessage = "Failed";
                 }
                 throw new Exception(stateMessage);
+            }
+            else if (!succeeded || runtimeDied)
+            {
+                Result = TestResult.Error;
+                PageRuntimeDead = true;
+                var consoleHint = consoleErrors.Count > 0 ? $" Console: {consoleErrors[0]}" : "";
+                throw new Exception($"Test row shows no result (not success, error or unsupported) - the test did not run or the page's .NET runtime is dead.{consoleHint}");
             }
             else
             {

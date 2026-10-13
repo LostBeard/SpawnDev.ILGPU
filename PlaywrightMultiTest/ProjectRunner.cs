@@ -1301,8 +1301,26 @@ namespace PlaywrightMultiTest
 
         private async Task RunLaneSequentialAsync(List<ProjectTest> tests, TestableBlazorWasm blazor)
         {
+            // Hard cap per browser test. A page whose JS thread is wedged never answers a Playwright evaluate (no timeout of
+            // its own), so without this one hung test stalls the whole run forever (2026-10-13: an AOT run sat 90 minutes in
+            // IsBlazorErrorVisible after a Mono assertion). Above the 10-minute wait for the Run button so slow tests still finish.
+            var hardTimeout = TimeSpan.FromSeconds(int.TryParse(Environment.GetEnvironmentVariable("PMT_BROWSER_TEST_TIMEOUT_SEC"), out var sec) && sec > 0 ? sec : 720);
             foreach (var t in tests)
-                await ExecuteAndCaptureAsync(t, blazor.Page).ConfigureAwait(false);
+            {
+                var run = ExecuteAndCaptureAsync(t, blazor.Page);
+                if (await Task.WhenAny(run, Task.Delay(hardTimeout)).ConfigureAwait(false) != run)
+                {
+                    _outcomes[t.Name] = new ScheduledOutcome("Fail", $"Test {t.Name} failed with error: no response from the page after {hardTimeout.TotalSeconds:0}s (page hung)", hardTimeout.TotalMilliseconds);
+                    t.PageRuntimeDead = true;
+                }
+                // A test that left no result killed the page's runtime (2026-10-13: a Mono AOT assertion). Without a
+                // fresh page every later test in the lane fails too, so one crash would hide the rest of the run.
+                if (t.PageRuntimeDead)
+                {
+                    LogStatus($"{t.Name} left no result (page runtime dead) - recycling the page");
+                    await RecyclePageAsync(blazor).ConfigureAwait(false);
+                }
+            }
         }
 
         /// <summary>
@@ -1336,7 +1354,8 @@ namespace PlaywrightMultiTest
                 await newPage.GotoAsync(testPageUrl).ConfigureAwait(false);
                 await newPage.WaitForSelectorAsync("table.unit-test-ready", new() { Timeout = 30000 }).ConfigureAwait(false);
                 blazor.Page = newPage;
-                try { await oldPage.CloseAsync().ConfigureAwait(false); } catch { }
+                // Bounded: closing a page whose JS thread is wedged can hang too.
+                try { await oldPage.CloseAsync().WaitAsync(TimeSpan.FromSeconds(15)).ConfigureAwait(false); } catch { }
             }
             catch (Exception ex)
             {
