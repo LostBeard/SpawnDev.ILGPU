@@ -160,6 +160,15 @@ No longer a limitation, with one condition for AOT and one exclusion:
   dotnet publish -c Release -p:WasmDedup=false   # iteration: minutes, bigger download
   dotnet publish -c Release                       # release: the default (WasmDedup=true), smaller, slow build
   ```
+- **Kernels with many parameters under AOT: fixed after 5.3.6.** Up to 5.3.6, loading a stream kernel with 6 or
+  more parameters (`LoadStreamKernel`, `LoadAutoGroupedStreamKernel`, `LoadImplicitlyGroupedStreamKernel`) could kill
+  the .NET runtime under AOT (`[MONO] * Assertion at ... interp.c:3420`; every later call then does nothing). The
+  launcher ILGPU generates at runtime is interpreted under AOT, and Mono can bind a delegate to an interpreted
+  method with more than 8 parameters only through a wrapper built ahead of time for that exact signature. The
+  browser backends now launch stream kernels without that delegate. The explicit-stream loaders (`LoadKernel`,
+  `LoadAutoGroupedKernel`, `LoadImplicitlyGroupedKernel`) still return the launcher delegate itself; they work
+  when your own compiled code calls that delegate, which also makes the AOT compiler build its wrapper. Prefer the
+  stream loaders for kernels with 6+ parameters in AOT builds.
 - **Desktop NativeAOT (`PublishAot`) is NOT supported**: ILGPU emits kernel launchers with Reflection.Emit, which
   NativeAOT cannot run. The AOT analyzer stays on in these libraries, so those sites remain visible (IL3050).
 
