@@ -3127,7 +3127,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // below would make `GroupExtensions.ExclusiveScan(...)` return 0 for every thread -
             // exactly the "silent zeros that users trust as correct" failure the atomic/barrier paths
             // above refuse. Throw a typed, actionable error instead. (Host-level CreateScan /
-            // CreateReduce DO work on WebGL - they orchestrate multiple dispatches with the draw-call
+            // CreateReduction DO work on WebGL - they orchestrate multiple dispatches with the draw-call
             // boundary as the barrier and global ping-pong buffers - so consumers should use those.)
             var unmappedName = methodCall.Target.Name ?? string.Empty;
             if (unmappedName.Contains("Scan") || unmappedName.Contains("Reduce"))
@@ -3137,7 +3137,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     backend: global::ILGPU.Runtime.AcceleratorType.WebGL,
                     remediation: "WebGL2 Transform-Feedback vertex shaders have no shared workgroup " +
                         "memory or barriers, so in-kernel group/warp scan & reduce cannot run. Use the " +
-                        "host-level accelerator.CreateScan(...) / CreateReduce(...) (multi-dispatch, " +
+                        "host-level accelerator.CreateScan(...) / CreateReduction(...) / Reduce(...) (multi-dispatch, " +
                         "WebGL-supported), or declare RequiresSharedMemory = true on " +
                         "AcceleratorRequirements to filter WebGL at selection time.");
             }

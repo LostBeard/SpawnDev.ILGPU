@@ -510,12 +510,12 @@ namespace ILGPU.Runtime
         }
 
         /// <summary>
-        /// Unguarded device-to-device buffer copy for use by the async copy path AFTER it has
-        /// drained the producing kernel (browser backends) - bypasses the
-        /// <see cref="RequiresAsyncDeviceCopy"/> guard on <see cref="CopyFromBuffer"/>. Public so the
-        /// <c>CopyFromAsync</c> extension (a different assembly) can reach it post-drain; NEVER call
-        /// it directly from synchronous consumer code - that re-introduces the unordered race the
-        /// guard exists to stop. Use <c>CopyFromAsync</c>/<c>CopyToHostAsync</c> instead.
+        /// Immediate device-to-device copy for the async copy path AFTER it has drained the producing
+        /// kernel (browser backends): calls <see cref="CopyFromBufferCore"/> directly, skipping the
+        /// ordering that <see cref="CopyFromBufferOrdered"/> adds on Wasm (which enqueues the copy behind
+        /// pending dispatches). Public so the <c>CopyFromAsync</c> extension (a different assembly) can
+        /// reach it post-drain. Do not call it from synchronous code: on Wasm it would copy before a
+        /// pending producer ran. Synchronous code uses <c>CopyFrom</c>, which is ordered on every backend.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public void CopyFromBufferAfterDrain(
@@ -530,8 +530,8 @@ namespace ILGPU.Runtime
         /// <summary>
         /// The actual device-to-device copy. Override in derived classes (e.g., Wasm) to handle
         /// device-to-device copies where both buffers use non-native memory (SharedArrayBuffer).
-        /// Reached only via the guarded <see cref="CopyFromBuffer"/> (desktop) or the post-drain
-        /// <see cref="CopyFromBufferAfterDrain"/> (browser async path).
+        /// Reached via <see cref="CopyFromBufferOrdered"/> (the sync path; Wasm defers it behind pending
+        /// dispatches) or the post-drain <see cref="CopyFromBufferAfterDrain"/> (browser async path).
         /// </summary>
         /// <param name="stream">The used accelerator stream.</param>
         /// <param name="sourceBuffer">The source memory buffer.</param>

@@ -145,9 +145,35 @@ namespace ILGPU.Runtime
         }
 
         /// <summary>
+        /// Submits pending work before a holder frees buffers. The desktop backends wait for it
+        /// (<see cref="Accelerator.Synchronize"/>). The browser backends cannot block-wait - their
+        /// <see cref="Accelerator.Synchronize"/> THROWS - so they only submit (<see cref="Accelerator.Flush"/>);
+        /// on WebGPU a buffer's Dispose also submits any pending batch before destroying it.
+        /// </summary>
+        /// <remarks>
+        /// This used to call Synchronize() on every backend inside a catch-all, which on WebGPU / WebGL / Wasm
+        /// threw and swallowed a NotSupportedException on every reclaim and never submitted anything.
+        /// </remarks>
+        private static void SubmitPendingBeforeReclaim(Accelerator accelerator)
+        {
+            switch (accelerator.AcceleratorType)
+            {
+                case AcceleratorType.WebGPU:
+                case AcceleratorType.WebGL:
+                case AcceleratorType.Wasm:
+                    accelerator.Flush();
+                    break;
+                default:
+                    accelerator.Synchronize();
+                    break;
+            }
+        }
+
+        /// <summary>
         /// Asks the registered holders to free at least <paramref name="bytesWanted"/>, least recently used
-        /// first, and returns the bytes actually freed. Pending work is flushed first so a buffer about to be
-        /// freed is not still referenced by an un-submitted dispatch (browser command-encoder semantics).
+        /// first, and returns the bytes actually freed. Pending work is submitted first (and waited for on the
+        /// desktop backends) so a buffer about to be freed is not still referenced by an un-submitted dispatch
+        /// (browser command-encoder semantics).
         /// </summary>
         public static long ReclaimDeviceMemory(this Accelerator accelerator, long bytesWanted)
         {
@@ -170,7 +196,7 @@ namespace ILGPU.Runtime
             _reclaiming = true;
             try
             {
-                try { accelerator!.Synchronize(); } catch { /* best-effort flush, as in AllocateWithReclaim */ }
+                try { SubmitPendingBeforeReclaim(accelerator!); } catch { /* best-effort, as in AllocateWithReclaim */ }
                 foreach (var holder in holders)
                 {
                     if (freed >= bytesWanted)
@@ -251,9 +277,9 @@ namespace ILGPU.Runtime
         /// Runs <paramref name="allocate"/>; if it throws (a device out-of-memory surfaces as a
         /// backend-specific exception - <c>CudaException</c>, an OpenCL error, a WebGPU/JS device
         /// error - NOT a single .NET <see cref="OutOfMemoryException"/>, which is why this catches
-        /// broadly), it flushes pending GPU work via <see cref="Accelerator.Synchronize"/> (so a
+        /// broadly), it submits pending GPU work - and waits for it on the desktop backends (so a
         /// buffer that <paramref name="reclaim"/> is about to dispose is not still referenced by an
-        /// in-flight dispatch under WebGPU/WebGL command-encoder semantics), invokes
+        /// un-submitted dispatch under WebGPU/WebGL command-encoder semantics), invokes
         /// <paramref name="reclaim"/> to free reclaimable device memory, and retries ONCE. If the
         /// retry still fails it throws, surfacing how much was reclaimed and the caller's diagnostic
         /// context (with the original failure as the inner exception).
@@ -265,8 +291,8 @@ namespace ILGPU.Runtime
         /// callback, so a pool composes this in without surrendering its own size-bucketing, naming,
         /// or per-dtype tracking. Lifted from the SpawnDev.ILGPU.ML <c>BufferPool.Rent</c> pattern.
         ///
-        /// The <see cref="Accelerator.Synchronize"/> flush is best-effort (browser backends flush
-        /// rather than block); a reclaim that only frees already-Returned buffers - the intended use -
+        /// The submit is best-effort (the browser backends cannot block-wait, so they submit with
+        /// <see cref="Accelerator.Flush"/> instead); a reclaim that only frees already-Returned buffers - the intended use -
         /// is safe regardless, since no pending dispatch references them.
         /// </remarks>
         /// <typeparam name="T">The allocation result type (e.g. a <c>MemoryBuffer1D&lt;T, TStride&gt;</c>).</typeparam>
@@ -297,9 +323,9 @@ namespace ILGPU.Runtime
             }
             catch
             {
-                // Flush pending GPU work first, so a buffer reclaim() is about to dispose is not still
-                // referenced by an in-flight dispatch (WebGPU/WebGL command-encoder semantics).
-                try { accelerator.Synchronize(); } catch { /* best-effort flush */ }
+                // Submit pending GPU work first, so a buffer reclaim() is about to dispose is not still
+                // referenced by an un-submitted dispatch (WebGPU/WebGL command-encoder semantics).
+                try { SubmitPendingBeforeReclaim(accelerator); } catch { /* best-effort */ }
 
                 long reclaimed = reclaim();
 

@@ -155,18 +155,13 @@ public sealed class AcceleratorRequirements
     ///     (~48-53 bit mantissa, vec2&lt;f32&gt;) is REJECTED because it diverges from
     ///     IEEE 754 53-bit semantics.
     ///
-    /// <para>v1 shipping behavior (4.9.2-rc.23): this flag filters at backend-selection
-    /// time. WebGPU / WebGL are accepted only when the backend was registered with
-    /// <c>F64Emulation = Ozaki</c> (via <c>WebGPUBackendOptions</c> /
-    /// <c>WebGLBackendOptions</c> at <c>Context.Create</c> time). If the backend is in
-    /// Dekker or Disabled mode, the device is filtered out under this flag.</para>
-    ///
-    /// <para>v2 (planned): a settable <c>F64Mode</c> property on
-    /// <c>WebGPUAccelerator</c> / <c>WebGLAccelerator</c> will let
-    /// <see cref="AcceleratorRequirementsExtensions.CreatePreferredAccelerator"/> promote
-    /// a Dekker-registered backend to Ozaki on demand. v3 extends the same shape across
-    /// the P2P wire (peer reports supported modes, dispatch carries requested mode). See
-    /// <c>Plans/accelerator-requirements-mode-flags.md</c>.</para>
+    /// <para>Selection accepts every backend except an OpenCL device without fp64. When
+    /// <c>CreatePreferredAcceleratorAsync(requirements)</c> picks WebGPU or WebGL, it creates the
+    /// accelerator with <c>F64Emulation = Ozaki</c>. The synchronous
+    /// <see cref="AcceleratorRequirementsExtensions.CreatePreferredAccelerator"/> does not configure the
+    /// browser backends. An existing <c>WebGPUAccelerator</c> / <c>WebGLAccelerator</c> can switch with its
+    /// <c>F64Mode</c> property (affects kernels compiled afterwards). P2P dispatch carries the requested
+    /// mode in <c>KernelDispatchRequest.F64Mode</c>.</para>
     ///
     /// <para>This is a CORRECTNESS CONTRACT, not a preference. A consumer that sets this
     /// flag and dispatches to a Dekker backend gets silently-wrong numbers. Setting the
@@ -359,8 +354,8 @@ public static class AcceleratorRequirementsExtensions
     // Every backend can LOAD FP4 (Float4E2M1) - always emulated, TRUE packed 4-bit storage (2 nibbles/
     // byte, [PackedBits(4)], v4.14.0+), f32-register compute, portable conversion on every backend incl.
     // CUDA. Always true for the type itself. NOTE: this gates the type, not the packed STORE - in-kernel
-    // packed stores are fail-loud on CPU + WebGL (no atomics / managed nibble write); there is no
-    // RequiresPacked4Store flag yet, callers rely on the fail-loud throw (tracked follow-up).
+    // packed stores are fail-loud on CPU + WebGL (no atomics / managed nibble write); RequiresPacked4Store
+    // (HasPacked4Store) is the selection gate for those.
     private static bool HasFloat4(Device device) => true;
 
     private static bool HasFloat16Native(Device device)

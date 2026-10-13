@@ -1329,10 +1329,10 @@ namespace SpawnDev.ILGPU.WebGL
                 "`await SynchronizeAsync()` — browser backends are async-only at the GPU boundary.");
 
         /// <summary>
-        /// WebGL is async-only at the GPU boundary: the sync device-to-device copy path throws so
-        /// the contract is uniform across the browser backends (use `await CopyFromAsync(...)`); the
-        /// async path orders the copy after its producer. See
-        /// <see cref="Accelerator.RequiresAsyncDeviceCopy"/>.
+        /// True: on WebGL a device-to-device copy is DEFERRED - ordered after the kernels that produce the
+        /// source, but not finished when the sync <c>CopyFrom</c>/<c>CopyTo</c> returns (the single browser thread
+        /// cannot block). Sync device copies are correct here; <c>await CopyFromAsync(...)</c> is only an eager
+        /// completion. See <see cref="Accelerator.RequiresAsyncDeviceCopy"/>.
         /// </summary>
         public override bool RequiresAsyncDeviceCopy => true;
 

@@ -115,5 +115,65 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 if (got[i] != i * 2.0f)
                     throw new Exception($"buffer round-trip mismatch at [{i}]: expected {i * 2.0f}, got {got[i]}");
         });
+
+        /// <summary>
+        /// The submit before a reclaim must not go through the throwing sync Synchronize() on the browser
+        /// backends. Until 2026-10-13 both reclaim paths called accelerator.Synchronize() inside a catch-all:
+        /// on WebGPU / WebGL / Wasm that threw (and swallowed) a NotSupportedException on every reclaim and
+        /// submitted nothing. Counts first-chance exceptions from Synchronize across both paths - the
+        /// registered-holder path (ReclaimDeviceMemory) and the allocate-fail-retry path (AllocateWithReclaim) -
+        /// with a kernel dispatch pending, and checks the holder ran and the pending kernel's result is intact.
+        /// </summary>
+        [TestMethod]
+        public async Task MemoryPressure_ReclaimSubmitsWithoutSwallowedSyncThrowTest() => await RunTest(async accelerator =>
+        {
+            const int n = 1024;
+            using var buf = accelerator.Allocate1D<int>(n);
+            var fill = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(
+                (i, v) => v[i] = i * 3 + 1);
+            fill((Index1D)n, buf.View);   // left pending on purpose: the reclaim must submit around it
+
+            int syncThrows = 0;
+            void OnFirstChance(object? s, System.Runtime.ExceptionServices.FirstChanceExceptionEventArgs e)
+            {
+                if (e.Exception is NotSupportedException && e.Exception.Message.Contains("Synchronize()"))
+                    syncThrows++;
+            }
+            var holder = new CountingReclaimer();
+            accelerator.RegisterReclaimer(holder);
+            AppDomain.CurrentDomain.FirstChanceException += OnFirstChance;
+            try
+            {
+                long freed = accelerator.ReclaimDeviceMemory(1024);
+                int allocCalls = 0;
+                int result = accelerator.AllocateWithReclaim(
+                    () => { if (++allocCalls == 1) throw new InvalidOperationException("simulated device OOM"); return 5; },
+                    () => 0L);
+                if (freed != 1024 || holder.Calls != 1)
+                    throw new Exception($"ReclaimDeviceMemory freed {freed} bytes with {holder.Calls} holder call(s); expected 1024 and 1");
+                if (result != 5 || allocCalls != 2)
+                    throw new Exception($"AllocateWithReclaim returned {result} after {allocCalls} allocate call(s); expected 5 after 2");
+            }
+            finally
+            {
+                AppDomain.CurrentDomain.FirstChanceException -= OnFirstChance;
+                accelerator.UnregisterReclaimer(holder);
+            }
+            if (syncThrows != 0)
+                throw new Exception($"the reclaim paths threw and swallowed {syncThrows} NotSupportedException(s) from Synchronize() - they must submit with Flush() on the browser backends");
+
+            var got = await buf.CopyToHostAsync<int>();
+            for (int i = 0; i < n; i++)
+                if (got[i] != i * 3 + 1)
+                    throw new Exception($"pending kernel result wrong at [{i}]: expected {i * 3 + 1}, got {got[i]}");
+        });
+
+        private sealed class CountingReclaimer : IDeviceMemoryReclaimer
+        {
+            public int Calls;
+            public long ReclaimableBytes => 1 << 20;
+            public long LastUsedTimestamp => 0;
+            public long Reclaim(long bytesWanted) { Calls++; return bytesWanted; }
+        }
     }
 }

@@ -3889,10 +3889,10 @@ namespace SpawnDev.ILGPU.Wasm
                 "`await SynchronizeAsync()` — browser backends are async-only at the GPU boundary.");
 
         /// <summary>
-        /// Wasm is async-only at the GPU boundary: a sync device-to-device buffer copy isn't ordered
-        /// against a producing kernel on the worker pool (it would read stale data), so the sync
-        /// device-copy path throws — use `await CopyFromAsync(...)` (drains first). See
-        /// <see cref="Accelerator.RequiresAsyncDeviceCopy"/>.
+        /// True: on Wasm a device-to-device copy is DEFERRED - ordered after the kernels that produce the
+        /// source, but not finished when the sync <c>CopyFrom</c>/<c>CopyTo</c> returns (the single browser thread
+        /// cannot block). Sync device copies are correct here; <c>await CopyFromAsync(...)</c> is only an eager
+        /// completion. See <see cref="Accelerator.RequiresAsyncDeviceCopy"/>.
         /// </summary>
         public override bool RequiresAsyncDeviceCopy => true;
 

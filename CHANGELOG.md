@@ -21,6 +21,15 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   - Tests: `DevicePreference_RanksCudaThenDiscreteThenIntegratedThenCpu` (desktop, real device list, integrated
     detection checked independently) and `DevicePreference_Browser_WebGPUThenWebGLThenWasmThenCPU` (red-checked
     against the bucket ranking).
+- **Memory reclaim no longer throws and swallows on the browser backends** (fork change). `ReclaimDeviceMemory` and
+  `AllocateWithReclaim` "flushed" with `accelerator.Synchronize()` inside a catch-all; on WebGPU / WebGL / Wasm that
+  throws `NotSupportedException`, so every reclaim threw, swallowed, and submitted nothing. They now `Flush()` on the
+  browser backends and still `Synchronize()` on desktop. Test `MemoryPressure_ReclaimSubmitsWithoutSwallowedSyncThrowTest`
+  (all lanes) counts first-chance throws; red-checked with the old call (2 swallowed throws on WebGPU, WebGL, Wasm).
+- XML docs corrected: the browser accelerators' `RequiresAsyncDeviceCopy` (sync device copies are ordered, they do
+  not throw), `MemoryBuffer.CopyFromBufferAfterDrain`, `RequiresFloat64Strict`, the desktop order in
+  `CreatePreferredAcceleratorAsync(requirements)`. The WebGL in-kernel scan/reduce error now names
+  `CreateReduction` / `Reduce` (there is no `CreateReduce`).
 - PR #8 (WebGPU canvas present via a compute pass for an Intel HD 620 driver bug) was closed unmerged: the fix for
   that machine is a newer driver, not a slower path in the library.
 ## 5.3.6 (forks 2.3.11) - 2026-10-12 - reclaim idle GPU memory before the driver spills

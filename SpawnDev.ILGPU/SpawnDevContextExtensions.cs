@@ -108,7 +108,7 @@ namespace SpawnDev.ILGPU
         /// <summary>
         /// Creates the preferred accelerator that satisfies the given requirements.
         /// Same priority order as the no-arg overload (WebGPU &gt; WebGL &gt; Wasm &gt; CPU on
-        /// browser, Cuda &gt; OpenCL &gt; CPU on desktop), restricted to devices that pass
+        /// browser, <see cref="DevicePreference.OrderByPreference"/> on desktop), restricted to devices that pass
         /// <see cref="AcceleratorRequirements"/> filtering.
         ///
         /// When <see cref="AcceleratorRequirements.RequiresFloat64Strict"/> is set and a
