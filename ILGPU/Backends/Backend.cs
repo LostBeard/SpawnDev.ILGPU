@@ -740,6 +740,15 @@ namespace ILGPU.Backends
                 // If we already have an internal compiler exception, re-throw it.
                 throw;
             }
+            catch (NotSupportedException)
+            {
+                // A deliberate "this kernel cannot run on this backend" (SpawnDev's
+                // UnsupportedKernelFeatureException derives from NotSupportedException) is not a
+                // compiler fault: let the caller catch its own type. Until 2026-10-13 it was wrapped
+                // in InternalCompilerException, so the documented
+                // catch (UnsupportedKernelFeatureException) never fired.
+                throw;
+            }
             catch (Exception e)
             {
                 // Wrap generic exceptions.

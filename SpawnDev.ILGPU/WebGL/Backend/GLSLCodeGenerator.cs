@@ -3534,11 +3534,21 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine("// memoryBarrier not supported in WebGL2 TF shaders");
         }
 
-        /// <summary>Predicate barriers do not exist in WebGL2 vertex shaders; emits only a comment.</summary>
+        /// <summary>
+        /// Always throws: <c>Group.BarrierPopCount</c> / <c>BarrierAnd</c> / <c>BarrierOr</c> combine a value across
+        /// the group, which needs shared memory and a barrier - WebGL2 vertex shaders have neither. (Until 2026-10-13
+        /// this emitted a comment, and the kernel silently read an unset result.)
+        /// </summary>
         /// <param name="value">The IR value.</param>
+        /// <exception cref="SpawnDev.ILGPU.UnsupportedKernelFeatureException">Always.</exception>
         public virtual void GenerateCode(PredicateBarrier value)
         {
-            AppendLine("// predicateBarrier not supported in WebGL2 TF shaders");
+            throw new SpawnDev.ILGPU.UnsupportedKernelFeatureException(
+                feature: $"Group.Barrier{value.Kind}",
+                backend: global::ILGPU.Runtime.AcceleratorType.WebGL,
+                remediation: "WebGL2 vertex shaders have no shared memory or barriers, so a group-wide predicate " +
+                    "barrier cannot run. Use WebGPU, Wasm, or a desktop backend. Consumers can declare " +
+                    "RequiresBarriers = true on AcceleratorRequirements to filter WebGL at selection time.");
         }
 
         // Warp Operations — not supported

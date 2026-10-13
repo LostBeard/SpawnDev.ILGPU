@@ -524,6 +524,14 @@ namespace ILGPU.Runtime.CPU
             private volatile BitArray activitySet = new BitArray(1024);
 
             /// <summary>
+            /// Threads of the current group that have not finished. This is the barrier participant count.
+            /// (activitySet.Count is the BIT ARRAY LENGTH - at least 1024 - not the number of set bits; returning
+            /// it made every group report 1024 participants, so Group.BarrierAnd was false for any group smaller
+            /// than 1024 threads. Fixed 2026-10-13, test PredicateBarrier_PopCountAndOr_MatchesReferenceTest.)
+            /// </summary>
+            private int activeThreadCount;
+
+            /// <summary>
             /// The internal index of the currently active thread.
             /// </summary>
             private volatile int activeThreadIndex;
@@ -625,8 +633,9 @@ namespace ILGPU.Runtime.CPU
                         Monitor.Wait(threadLocks[threadIndex]);
                 }
 
-                // We have become active... continue processing
-                return activitySet.Count;
+                // We have become active... continue processing. The participant count is the group's
+                // unfinished threads (no consumer reads the warp-barrier result).
+                return Volatile.Read(ref activeThreadCount);
             }
 
             #endregion
@@ -644,6 +653,7 @@ namespace ILGPU.Runtime.CPU
 
                 // Mark all threads as active and activate the first one
                 activitySet.SetAll(true);
+                Volatile.Write(ref activeThreadCount, groupSize);
                 activeThreadIndex = 0;
             }
 
@@ -675,6 +685,7 @@ namespace ILGPU.Runtime.CPU
                     activitySet.Set(
                         CPURuntimeThreadContext.Current.LinearGroupIndex,
                         false);
+                    Interlocked.Decrement(ref activeThreadCount);
                 }
             }
 

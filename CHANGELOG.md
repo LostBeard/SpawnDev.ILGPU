@@ -21,6 +21,25 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   - Tests: `DevicePreference_RanksCudaThenDiscreteThenIntegratedThenCpu` (desktop, real device list, integrated
     detection checked independently) and `DevicePreference_Browser_WebGPUThenWebGLThenWasmThenCPU` (red-checked
     against the bucket ranking).
+- **`Group.BarrierPopCount` / `BarrierAnd` / `BarrierOr` were wrong on 4 of 7 backends** (nothing in the suite called
+  them). Wasm emitted nothing (no barrier, unset result); WebGPU emitted only `workgroupBarrier()` and never computed
+  the result; WebGL emitted a comment (silent unset result); the CPU accelerator's sequential processor returned
+  `BitArray.Count` - the bit-array LENGTH (at least 1024), not the active-thread count - as the participant count,
+  so `BarrierAnd` was false for every group smaller than 1024 threads (fork change).
+  - WebGPU: a workgroup atomic counter (reset by invocation 0, `atomicAdd` from counted invocations) and a
+    `workgroupUniformLoad` of the total, so the result is uniform and can control later barriers
+    (`while (Group.BarrierOr(changed))`).
+  - Wasm: one shared-memory counter per site, verified reset, `i32.atomic.rmw.add`, an RMW(+0) read, three barriers
+    (counted in all four barrier scans of the phase state machine).
+  - WebGL: throws `UnsupportedKernelFeatureException` (no shared memory or barriers).
+  - CPU: the sequential processor keeps a live active-thread count.
+  - Test `PredicateBarrier_PopCountAndOr_MatchesReferenceTest` (4 groups x 64: all true, all false, every third, last
+    lane only; plus a second barrier to catch a counter carried over). Before: failed on WebGPU, WebGPU-no-subgroups,
+    Wasm, CPU and WebGL (accepted the kernel); CUDA and OpenCL passed. After: 6 pass, WebGL a typed rejection.
+- **`UnsupportedKernelFeatureException` can be caught by its own type** (fork change). `Backend.Compile` wrapped every
+  non-`InternalCompilerException` in `InternalCompilerException`, so the documented
+  `catch (UnsupportedKernelFeatureException)` never fired (callers had to search the inner-exception chain).
+  `NotSupportedException` and its subclasses now pass through.
 - **Capability selection follows what the device can really do.**
   - `RequiresFloat16Native` now accepts a WebGPU device whose adapter offers `shader-f16`. It used to reject WebGPU
     always, so in the browser a kernel asking for native f16 fell through to ILGPU's CPU accelerator on the UI thread.

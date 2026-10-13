@@ -3964,11 +3964,36 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             AppendLine("workgroupBarrier();");
         }
 
-        /// <summary>Emits <c>workgroupBarrier();</c> (the predicate is not evaluated).</summary>
+        /// <summary>
+        /// <c>Group.BarrierPopCount</c> / <c>BarrierAnd</c> / <c>BarrierOr</c>: a barrier that also combines a predicate
+        /// across the workgroup. Barrier (earlier readers are done), invocation 0 resets <c>_pred_barrier_count</c>,
+        /// barrier, counted invocations <c>atomicAdd</c> 1 (PopCount / Or count true predicates, And counts false ones),
+        /// barrier, invocation 0 copies the total to <c>_pred_barrier_result</c>, and every invocation reads it with
+        /// <c>workgroupUniformLoad</c> - so the result is uniform and may control later barriers (the usual
+        /// <c>while (Group.BarrierOr(changed))</c> loop). Until 2026-10-13 this emitted only <c>workgroupBarrier();</c>
+        /// and the result was never computed.
+        /// </summary>
         /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(PredicateBarrier value)
         {
+            var target = Load(value);
+            var predicate = Load(value.Predicate);
+            Declare(target);
             AppendLine("workgroupBarrier();");
+            AppendLine("if (local_index == 0u) { atomicStore(&_pred_barrier_count, 0u); }");
+            AppendLine("workgroupBarrier();");
+            AppendLine(value.Kind == PredicateBarrierKind.And
+                ? $"if (!({predicate})) {{ atomicAdd(&_pred_barrier_count, 1u); }}"
+                : $"if ({predicate}) {{ atomicAdd(&_pred_barrier_count, 1u); }}");
+            AppendLine("workgroupBarrier();");
+            AppendLine("if (local_index == 0u) { _pred_barrier_result = atomicLoad(&_pred_barrier_count); }");
+            var total = $"workgroupUniformLoad(&_pred_barrier_result)";
+            AppendLine(value.Kind switch
+            {
+                PredicateBarrierKind.PopCount => $"{target} = i32({total});",
+                PredicateBarrierKind.And => $"{target} = {total} == 0u;",
+                _ => $"{target} = {total} != 0u;",
+            });
         }
 
         // Warp Operations

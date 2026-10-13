@@ -87,6 +87,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private List<DynamicSharedOverrideInfo> _dynamicSharedOverrides = new List<DynamicSharedOverrideInfo>();
         private bool _usesBroadcast = false;
         private string _broadcastType = "i32"; // WGSL type for _broadcast_temp (set by ScanForSubgroupAndBroadcastUsage)
+        private bool _usesPredicateBarrier; // _pred_barrier_count / _pred_barrier_result needed (set by ScanForSubgroupAndBroadcastUsage)
         private bool _usesSubgroups = false;
         private bool _usesBarriers = false;
         // Set to true by GenerateGroupAllReduce so the module-scope atomic<i32> workgroup var is emitted.
@@ -2801,6 +2802,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     UsesBroadcast = _usesBroadcast,
                     BroadcastType = _broadcastType,
+                    UsesPredicateBarrier = _usesPredicateBarrier,
                     UsesWarpShuffleEmulation = UsesWarpShuffleEmulation,
                     UsesSubgroupsWithoutHardwareSupport = _usesSubgroups && !Backend.HasSubgroups,
                     UsesGroupReduce = _usesGroupReduce
@@ -2833,6 +2835,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private void ScanForSubgroupAndBroadcastUsage()
         {
             _usesBroadcast = false;
+            _usesPredicateBarrier = false;
             _usesSubgroups = false;
             _usesBarriers = false;
 
@@ -2871,8 +2874,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             case global::ILGPU.IR.Values.WarpSizeValue:
                                 _usesSubgroups = true;
                                 break;
-                            case global::ILGPU.IR.Values.Barrier:
                             case global::ILGPU.IR.Values.PredicateBarrier:
+                                _usesPredicateBarrier = true;
+                                _usesBarriers = true;
+                                break;
+                            case global::ILGPU.IR.Values.Barrier:
                             case global::ILGPU.IR.Values.MemoryBarrier:
                                 _usesBarriers = true;
                                 break;

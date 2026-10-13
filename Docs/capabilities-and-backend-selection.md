@@ -151,6 +151,8 @@ catch (UnsupportedKernelFeatureException ex)
 }
 ```
 
+> On master after 5.3.6 the exception reaches you as itself. In 5.3.6 and older, kernel compilation wrapped it in `ILGPU.InternalCompilerException`, so match it in the `InnerException` chain there.
+
 Properties:
 - `Feature` — what was unsupported (e.g. `"Generic atomic on byte sub-word view"`).
 - `Backend` — the `AcceleratorType` that rejected it.

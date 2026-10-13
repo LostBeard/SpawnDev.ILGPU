@@ -1155,6 +1155,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         count += 2;
                     else if (value is global::ILGPU.IR.Values.ShuffleOperation)
                         count += 2; // Warp.Shuffle emulation = publish + reuse-guard barriers
+                    else if (value is PredicateBarrier)
+                        count += 3; // reset + count + read-guard barriers
                     else if (value is global::ILGPU.IR.Values.MethodCall call)
                     {
                         // Recursively count barriers in registered sub-helpers only.
@@ -1196,7 +1198,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             {
                 foreach (var entry in blocks.First())
                 {
-                    if (entry.Value is global::ILGPU.IR.Values.Barrier || entry.Value is global::ILGPU.IR.Values.Broadcast || entry.Value is global::ILGPU.IR.Values.ShuffleOperation)
+                    if (entry.Value is global::ILGPU.IR.Values.Barrier || entry.Value is global::ILGPU.IR.Values.Broadcast || entry.Value is global::ILGPU.IR.Values.ShuffleOperation || entry.Value is PredicateBarrier)
                     { singleBlockHasBarriers = true; break; }
                     if (entry.Value is MethodCall mc)
                     {
@@ -1312,6 +1314,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         directBarriers += 2; // before + after barriers
                     else if (entry.Value is global::ILGPU.IR.Values.ShuffleOperation)
                         directBarriers += 2; // publish + reuse-guard barriers
+                    else if (entry.Value is PredicateBarrier)
+                        directBarriers += 3; // reset + count + read-guard barriers
                     else if (!_isHelperFunction && entry.Value is MethodCall mc1)
                     {
                         if (_generatorArgs.HelperBarrierCounts.TryGetValue(mc1.Target, out int hbc1) && hbc1 > 0)
@@ -1371,6 +1375,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     if (entry.Value is global::ILGPU.IR.Values.Barrier) count += 1;
                     else if (entry.Value is global::ILGPU.IR.Values.Broadcast) count += 2;
                     else if (entry.Value is global::ILGPU.IR.Values.ShuffleOperation) count += 2;
+                    else if (entry.Value is PredicateBarrier) count += 3;
                     else if (!_isHelperFunction && entry.Value is global::ILGPU.IR.Values.Store st2
                         && st2.Value.Resolve().Type is StructureType
                         && st2.Target.Resolve().Type is AddressSpaceType ast2
@@ -5222,6 +5227,75 @@ EmitSaveAllLocals();
 
             _broadcastCounter++;
             if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Broadcast] Broadcast #{_broadcastCounter - 1}: slot offset={broadcastSlotOffset}, barriers={barrier1},{barrier2}");
+        }
+
+        /// <summary>
+        /// <c>Group.BarrierPopCount</c> / <c>BarrierAnd</c> / <c>BarrierOr</c>: a barrier that also combines a predicate
+        /// across the group, through one shared-memory counter per site. Thread 0 resets it, barrier, each counted thread
+        /// adds 1 (PopCount / Or count true predicates, And counts false ones), barrier, every thread reads it with an
+        /// RMW(+0) (a plain load can be satisfied before the last add lands - see <see cref="EmitVerifiedAtomicStore"/>),
+        /// barrier (so the next reset at this site cannot overtake a slow reader). Three barriers, counted as 3 in the
+        /// barrier scans. Until 2026-10-13 the base class emitted nothing here: no barrier and an unset result.
+        /// </summary>
+        /// <param name="predicateBarrier">The predicate barrier.</param>
+        public override void GenerateCode(PredicateBarrier predicateBarrier)
+        {
+            var target = AllocateLocal(predicateBarrier, GetWasmType(predicateBarrier));
+            var predicate = predicateBarrier.Predicate.Resolve();
+            int slotOffset = _sharedMemorySize;
+            _sharedMemorySize += 4;
+            _hasBarriers = true;
+
+            void EmitSlotAddress()
+            {
+                WasmModuleBuilder.EmitLocalGet(Code, _sharedMemBaseLocal);
+                if (slotOffset > 0)
+                {
+                    WasmModuleBuilder.EmitI32Const(Code, slotOffset);
+                    Code.Add(WasmOpCodes.I32Add);
+                }
+            }
+
+            // 1. Thread 0 resets the counter.
+            WasmModuleBuilder.EmitLocalGet(Code, _threadIdXLocal);
+            Code.Add(WasmOpCodes.I32Eqz);
+            Code.Add(WasmOpCodes.If);
+            Code.Add(WasmOpCodes.Void);
+            EmitSlotAddress();
+            WasmModuleBuilder.EmitI32Const(Code, 0);
+            EmitVerifiedAtomicStore(32);
+            Code.Add(WasmOpCodes.End);
+            EmitBarrier(_barrierCounter++);
+
+            // 2. Counted threads add 1: true predicates for PopCount / Or, false ones for And.
+            EmitGetLocal(predicate);
+            if (predicateBarrier.Kind == PredicateBarrierKind.And)
+                Code.Add(WasmOpCodes.I32Eqz);
+            Code.Add(WasmOpCodes.If);
+            Code.Add(WasmOpCodes.Void);
+            EmitSlotAddress();
+            WasmModuleBuilder.EmitI32Const(Code, 1);
+            WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicRmwAdd, 2, 0);
+            Code.Add(WasmOpCodes.Drop);
+            Code.Add(WasmOpCodes.End);
+            EmitBarrier(_barrierCounter++);
+
+            // 3. Every thread reads the total with a truthful RMW(+0).
+            EmitSlotAddress();
+            WasmModuleBuilder.EmitI32Const(Code, 0);
+            WasmModuleBuilder.EmitAtomicRmw(Code, WasmOpCodes.I32AtomicRmwAdd, 2, 0);
+            switch (predicateBarrier.Kind)
+            {
+                case PredicateBarrierKind.And:
+                    Code.Add(WasmOpCodes.I32Eqz);          // no false predicate
+                    break;
+                case PredicateBarrierKind.Or:
+                    WasmModuleBuilder.EmitI32Const(Code, 0);
+                    Code.Add(WasmOpCodes.I32Ne);           // at least one true predicate
+                    break;
+            }
+            WasmModuleBuilder.EmitLocalSet(Code, target);
+            EmitBarrier(_barrierCounter++);
         }
 
         // Real Warp.Shuffle / SubWarpShuffle emulation (Wasm has no hardware warps). Mirrors the

@@ -68,6 +68,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// <summary>Whether a broadcast temp variable is needed.</summary>
         public bool UsesBroadcast;
 
+        /// <summary>Whether the predicate-barrier counter and result (<c>Group.BarrierPopCount</c> / <c>And</c> / <c>Or</c>) are needed.</summary>
+        public bool UsesPredicateBarrier;
+
         /// <summary>WGSL type for broadcast temp (e.g., "i32", "f32").</summary>
         public string BroadcastType;
 
@@ -416,6 +419,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 builder.AppendLine();
                 builder.AppendLine("// Workgroup broadcast shared memory");
                 builder.AppendLine($"var<workgroup> _broadcast_temp : {config.BroadcastType};");
+            }
+
+            if (config.UsesPredicateBarrier)
+            {
+                builder.AppendLine();
+                builder.AppendLine("// Predicate barrier (Group.BarrierPopCount / BarrierAnd / BarrierOr): counter + uniform result");
+                builder.AppendLine("var<workgroup> _pred_barrier_count : atomic<u32>;");
+                builder.AppendLine("var<workgroup> _pred_barrier_result : u32;");
             }
 
             if (config.UsesSubgroupsWithoutHardwareSupport || config.UsesWarpShuffleEmulation)
