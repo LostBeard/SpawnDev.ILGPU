@@ -24,13 +24,16 @@ var requirements = new AcceleratorRequirements
 };
 
 // Pick the best compatible backend, or throw if none fit:
-using var context = Context.CreateDefault();  // or your own context setup
-using var accelerator = context.CreatePreferredAccelerator(requirements);
+using var context = await Context.CreateAsync(builder => builder.AllAcceleratorsAsync());
+using var accelerator = await context.CreatePreferredAcceleratorAsync(requirements);
+
+// Desktop-only code can use the synchronous form:
+// using var accelerator = context.CreatePreferredAccelerator(requirements);
 
 // Use accelerator as normal — it's guaranteed to be a backend that satisfies all flags.
 ```
 
-If no backend on this host satisfies the requirements, `CreatePreferredAccelerator` throws `NotSupportedException` with a message naming which requirements aren't met.
+If no backend on this host satisfies the requirements, `CreatePreferredAcceleratorAsync` / `CreatePreferredAccelerator` throw `NotSupportedException` with a message naming which requirements aren't met.
 
 ## When to use this
 
@@ -55,27 +58,52 @@ Every flag below is `bool`, defaults to `false` (no requirement), and can be set
 | `RequiresSharedMemory` | WebGL | `SharedMemory.Allocate` / `SharedMemory.GetDynamic` |
 | `RequiresBarriers` | WebGL | `Group.Barrier` |
 | `RequiresFloat16` | (none — every backend supports it) | Documentation that you use `Half`. Filter is a no-op. |
-| `RequiresFloat16Native` | WebGL, Wasm; WebGPU without `shader-f16`; OpenCL without `cl_khr_fp16` | Performance-critical Half kernels where emulation overhead matters |
+| `RequiresFloat16Native` | WebGL, Wasm, **WebGPU** (always, see note), OpenCL without `cl_khr_fp16` | Performance-critical Half kernels where emulation overhead matters |
+| `RequiresBFloat16` | (none - every backend supports it, always emulated) | Documentation that you use `BFloat16`. Filter is a no-op. |
+| `RequiresFloat8E4M3` / `RequiresFloat8E5M2` | (none - every backend supports them, always emulated) | Documentation that you use FP8. Filter is a no-op. |
+| `RequiresFloat4E2M1` / `RequiresQInt4` / `RequiresQUInt4` | (none - every backend can LOAD them) | Documentation that you use the packed 4-bit types. Filter is a no-op for the type itself. |
+| `RequiresPacked4Store` | WebGL, CPU | Your kernel STORES into a packed 4-bit view (`Float4E2M1` / `QInt4` / `QUInt4`) or radix-sorts one. A nibble store is an atomic RMW of its 32-bit word: WebGL has no atomics, and the CPU backend's managed indexer cannot address a sub-byte element. Both fail loud at compile time; this flag filters them at selection instead. |
 | `RequiresFloat64` | (none — every backend supports it) | Documentation that you use `double`. Filter is a no-op. |
 | `RequiresFloat64Native` | WebGPU, WebGL (emulate via Dekker) | Numerics where exact IEEE 754 matters or Dekker overhead is unacceptable |
 | `RequiresFloat64Strict` | (none — every backend can satisfy it) | Strict IEEE 754 f64 semantics. Native-f64 backends always satisfy; WebGPU/WebGL are auto-configured to Ozaki by `CreatePreferredAcceleratorAsync`. See "Strict IEEE 754 f64" section below. |
 | `RequiresInt64` | (none — every backend supports it) | Documentation. WebGPU/WebGL emulate via vec2&lt;u32&gt;. |
 | `RequiresInt64Native` | WebGPU, WebGL | Performance-critical i64/u64 kernels |
 | `RequiresInt64Atomics` | WebGL; OpenCL without `cl_khr_int64_base_atomics` | `Atomic.Add(ref long, ...)` and friends |
-| `RequiresSubGroups` | WebGL, Wasm, CPU; WebGPU without subgroups feature; OpenCL without subgroup ext | `Warp.Shuffle`, `Group.Broadcast`, etc. |
+| `RequiresSubGroups` | WebGL, Wasm, CPU; OpenCL without the subgroup extensions. WebGPU is accepted at selection (the adapter feature is checked when the kernel runs) | `Warp.Shuffle`, `Group.Broadcast`, etc. |
 | `RequiresScatterStores` | WebGL | In-kernel scatter (`out[computedIndex] = ...`) or >1 output element per thread that isn't the positional `v*K+slot` layout. WebGL TF is gather-only (one record per vertex at its own slot). |
+
+> **Notes on two selection filters.** `RequiresFloat16Native` rules out WebGPU even on adapters with `shader-f16`, because the feature can't be seen before the accelerator exists; pin a WebGPU device directly (`device.CreateAcceleratorAsync(context)`) and check `Capabilities.Float16Native` if you want native f16 there. `RequiresSubGroups` rules out Wasm and CPU, although both run `Warp.Shuffle` / `Group.Broadcast` correctly (Wasm through a `WarpSize` 8 shared-memory emulation); pin those devices directly if you want them.
 
 ## API Surface
 
-Three extension methods on `Context` / `Device` carry the requirements through ILGPU's existing accelerator-selection paths.
+Three extension methods on `Context` / `Device` carry the requirements through ILGPU's existing accelerator-selection paths, plus the device ranking they use.
 
-### `CreatePreferredAccelerator(requirements)`
+### `CreatePreferredAcceleratorAsync(requirements)` / `CreatePreferredAccelerator(requirements)`
 
 ```csharp
-using var accelerator = context.CreatePreferredAccelerator(requirements);
+using var accelerator = await context.CreatePreferredAcceleratorAsync(requirements);   // browser + desktop
+using var accelerator = context.CreatePreferredAccelerator(requirements);              // desktop
 ```
 
-Picks the first compatible device, prefers non-CPU when a GPU backend matches (mirrors `Context.GetPreferredDevice`), throws `NotSupportedException` if no device on the host satisfies all flags. The exception message names the unmet requirements and the available devices, so error reports come with diagnostic context built in.
+Filters the context's devices by the requirements, then picks the best one: **WebGPU > WebGL > Wasm** in the browser, and on desktop the [device ranking](#device-ranking-devicepreference) below (CUDA > discrete OpenCL GPU > integrated OpenCL GPU > other OpenCL > CPU). Throws `NotSupportedException` if no device on the host satisfies all flags; the message names the unmet requirements and the available devices, so error reports come with diagnostic context built in.
+
+Use the **async** form in the browser: the WebGPU and Wasm accelerators can only be created asynchronously, so the synchronous form throws `NotSupportedException` when one of them is the pick.
+
+### Device ranking: `DevicePreference`
+
+```csharp
+using SpawnDev.ILGPU;
+
+Device best = context.GetBestDevice();                                  // best device on the context
+IReadOnlyList<Device> ranked = context.Devices.OrderByPreference();     // all devices, best first
+using var accelerator = best.CreateAccelerator(context);                // desktop
+```
+
+Ranks devices by **kind**, best first: CUDA, then discrete OpenCL GPUs, then integrated OpenCL GPUs (detected with `CL_DEVICE_HOST_UNIFIED_MEMORY`, Intel vendor as the fallback), then other OpenCL devices (CPU runtimes, accelerators), then WebGPU, WebGL, Wasm, then anything else, then CPU. Memory size only breaks ties between devices of the same rank, then the original order.
+
+Use it instead of ILGPU's `Context.GetPreferredDevice(preferCPU: false)`, which sorts by `MemorySize` alone. Integrated GPUs and OpenCL CPU runtimes report system RAM as device memory, so on an Intel HD 620 + NVIDIA 940MX laptop `GetPreferredDevice(false)` picked Intel's OpenCL **CPU** runtime (8 GB) over the 940MX (2 GB), and on an RTX 4070 PC it picked the OpenCL view of the card over CUDA. `GetBestDevice()` picks CUDA in both cases. (The fork leaves `GetPreferredDevice` unchanged to stay close to upstream ILGPU.)
+
+In the browser, `WebGPUDevice.GetDevicesAsync()` lists a distinct high-performance adapter first. Chrome on Windows currently returns the same adapter for every `powerPreference` ([crbug.com/369219127](https://crbug.com/369219127)); users can switch the browser's GPU in Windows Graphics settings or with Chrome's `--force_high_performance_gpu` flag.
 
 ### `EnumerateCompatibleDevices(requirements)`
 
@@ -87,7 +115,7 @@ foreach (var device in compatible)
 }
 ```
 
-Returns `IReadOnlyList<Device>` of every compatible device in context-native order. Never throws — useful when you want to score / rank candidates yourself or display options to the user.
+Returns `IReadOnlyList<Device>` of every compatible device in context-native order. Never throws - useful when you want to score / rank candidates yourself (`.OrderByPreference()` gives the library's ranking) or display options to the user.
 
 ### `device.Satisfies(requirements)`
 
@@ -190,7 +218,7 @@ catch (UnsupportedKernelFeatureException ex)
 | `RequiresFloat64Native` | Rules out WebGPU + WebGL because they don't have hardware f64. Routes to CPU / CUDA / OpenCL / Wasm only. | Nothing — picks a backend that already has the feature. |
 | `RequiresFloat64Strict` | Rules out nothing. Every backend can produce IEEE 754 f64 — natively on CPU/CUDA/OpenCL/Wasm, via Ozaki emulation on WebGPU/WebGL. | Sets `F64Emulation = Ozaki` on browser-backend accelerators when `CreatePreferredAcceleratorAsync` picks one. |
 
-Use `Float64Strict` when you care about the **mathematical semantics** (full 53-bit IEEE 754) and the runtime should pick the right path; use `Float64Native` when you specifically want **hardware f64** for performance and are willing to skip browser backends entirely.
+Use `Float64Strict` when you care about the **mathematical semantics** (full 53-bit IEEE 754) and the runtime should pick the right path; use `Float64Native` when you specifically want **hardware f64** for performance and are willing to skip WebGPU and WebGL (Wasm has native f64 and stays eligible).
 
 ### Async-only entry point
 
@@ -208,7 +236,7 @@ using var accelerator = await context.CreatePreferredAcceleratorAsync(
     new AcceleratorRequirements { RequiresFloat64Strict = true });
 ```
 
-The synchronous `CreatePreferredAccelerator(requirements)` keeps working for desktop hosts but does not configure browser backends — use the async overload for cross-platform code.
+The synchronous `CreatePreferredAccelerator(requirements)` keeps working for desktop hosts but does not configure browser backends - use the async overload for cross-platform code.
 
 ### Runtime mode flips
 
@@ -227,7 +255,7 @@ accelerator.F64Mode = F64EmulationMode.Ozaki;
 accelerator.F64Mode = F64EmulationMode.Dekker;
 ```
 
-The flip affects subsequent kernel compiles. Cached compiled kernels retain the mode they were compiled under — clear the kernel cache if you need everything to recompile under the new mode.
+The flip affects subsequent kernel compiles. Cached compiled kernels retain the mode they were compiled under - call `ClearShaderCache()` (WebGPU) if you need everything to recompile under the new mode.
 
 ### P2P swarms
 

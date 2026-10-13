@@ -100,11 +100,15 @@ dotnet run --project SpawnDev.ILGPU.Demo          # Browser tests via Blazor WAS
 PlaywrightMultiTest is the only way to run tests when it's in the solution (it is). It publishes the Blazor WASM app, starts the HTTPS server with the right COI headers, launches Chromium, runs browser + desktop tests in the right order, and writes a results JSON.
 
 ```bash
-# Full suite (desktop + browser, ~8-10 min)
+# Full suite (desktop + browser)
 dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj
 
-# Filter to a specific area
-dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj --filter "FullyQualifiedName~AcceleratorRequirements"
+# Scope to a specific area: PMT_FILTER = comma-separated substrings of the test name, class or method.
+# (dotnet test --filter only narrows what NUnit REPORTS; the scheduler still runs everything.)
+PMT_FILTER=AcceleratorRequirements dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj
+
+# Scope by backend: PMT_LANES matches test CLASS names (WebGPUTests, WasmTests, CudaTests, ...)
+PMT_LANES=WebGPUTests PMT_FILTER=Scan dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj
 ```
 
 See the project's CLAUDE.md files for more detailed conventions per directory.

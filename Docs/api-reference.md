@@ -21,10 +21,18 @@ using SpawnDev.ILGPU;
 | `builder.WebGPU()` | `Task` | Enables WebGPU backend only (async probe — `await` it) |
 | `builder.WebGL()` | `Task` | Enables WebGL backend only (async probe — `await` it) |
 | `builder.Wasm()` | `Builder` | Enables Wasm backend only (synchronous — chainable) |
-| `context.CreatePreferredAcceleratorAsync()` | `Task<Accelerator>` | Creates the best available accelerator (browser: WebGPU > WebGL > Wasm; desktop: CUDA > OpenCL > CPU) |
+| `context.CreatePreferredAcceleratorAsync()` | `Task<Accelerator>` | Creates the best available accelerator (browser: WebGPU > WebGL > Wasm; desktop: CUDA > discrete OpenCL GPU > integrated OpenCL GPU > other OpenCL > CPU) |
+| `context.CreatePreferredAcceleratorAsync(requirements)` | `Task<Accelerator>` | Same, restricted to devices that satisfy an `AcceleratorRequirements`; configures Ozaki f64 on WebGPU/WebGL for `RequiresFloat64Strict`. Throws `NotSupportedException` when nothing fits |
+| `context.CreatePreferredAccelerator(requirements)` | `Accelerator` | Synchronous form (desktop; throws in the browser when WebGPU or Wasm is the pick, as those are async-only to create) |
+| `context.EnumerateCompatibleDevices(requirements)` | `IReadOnlyList<Device>` | Every device that satisfies the requirements, context order |
+| `device.Satisfies(requirements)` | `bool` | Per-device requirement check |
+| `context.GetBestDevice()` | `Device` | Best device per `DevicePreference` (CUDA > discrete OpenCL GPU > integrated OpenCL GPU > other OpenCL > WebGPU > WebGL > Wasm > CPU) |
+| `devices.OrderByPreference()` | `IReadOnlyList<Device>` | The same ranking applied to any device list, best first; memory size only breaks ties |
 | `accelerator.SynchronizeAsync()` | `Task` | Async wait for all GPU work to complete |
+| `accelerator.Flush()` | `void` | Submit pending work without waiting (sync-safe on every backend) |
 | `buffer.CopyToHostAsync<T>()` | `Task<T[]>` | Copies buffer data to a new array (works with all backends) |
-| `view.CopyFromAsync(source)` | `Task` | Backend-agnostic async mirror of sync `CopyFrom` (on `ArrayView<T>`, `ArrayView1D<T,TStride>`, `MemoryBuffer1D<T,TStride>`). Drains pending Wasm worker dispatches before the copy so GPU→GPU copies after an unawaited kernel dispatch don't read `SharedArrayBuffer` mid-write; no-op drain on WebGPU/WebGL/CUDA/OpenCL/CPU |
+| `view.CopyFromAsync(source)` | `Task` | Async mirror of sync `CopyFrom` (on `ArrayView<T>`, `ArrayView1D<T,TStride>`, `MemoryBuffer1D<T,TStride>`). Optional eager completion: sync `CopyFrom` is already ordered after the producing kernel on every backend |
+| `view.CopyFromStreamAsync(stream, chunkSizeInBytes?)` / `view.CopyToStreamAsync(stream, chunkSizeInBytes?)` | `Task` | Bounded-chunk streaming between a `Stream` and a GPU buffer; zero-copy JS<->GPU on the browser when the stream is an `IJSReadStream` / `IJSWriteStream` |
 | `context.GetWebGPUDevices()` | `Context.DeviceCollection<WebGPUILGPUDevice>` | Lists registered WebGPU devices |
 | `context.GetWebGLDevices()` | `Context.DeviceCollection<WebGLILGPUDevice>` | Lists registered WebGL devices |
 
@@ -42,14 +50,37 @@ GPU-friendly 4×4 matrix struct. Auto-transposes from .NET's row-major `Matrix4x
 
 ### IBrowserMemoryBuffer
 
-Interface implemented by GPU-backed memory buffers for browser interop.
+Interface implemented by the WebGPU, WebGL and Wasm memory buffers for JS interop without the .NET heap. Get it with `(IBrowserMemoryBuffer)((IArrayView)buffer.View).Buffer`.
 
 ```csharp
 public interface IBrowserMemoryBuffer
 {
     Task<Uint8Array> CopyToHostUint8ArrayAsync(long sourceByteOffset = 0, long? copyBytes = null);
+    void CopyFromJS(TypedArray source, long targetByteOffset = 0);
+    void CopyFromJS(ArrayBuffer source, long targetByteOffset = 0);
 }
 ```
+
+### BrowserBufferPolicy
+
+Static policy and census for host->device copies on the browser backends.
+
+| Member | Description |
+|--------|-------------|
+| `StrictHostCopyMaxBytes` | `-1` (default) = off. Otherwise a `CopyFromCPU` larger than this many bytes on any browser backend throws, naming the size (bulk data must stream JS-side) |
+| `HostCopyCount` / `HostCopyBytes` / `LargestHostCopyBytes` | Census of host->device copies that came from the .NET heap since the last reset |
+| `ResetHostCopyCensus()` | Resets the census |
+
+### DevicePreference
+
+| Member | Description |
+|--------|-------------|
+| `OrderByPreference(this IEnumerable<Device>)` | Devices best first: CUDA, discrete OpenCL GPU, integrated OpenCL GPU (`CL_DEVICE_HOST_UNIFIED_MEMORY`), other OpenCL, WebGPU, WebGL, Wasm, other, CPU. Memory size breaks ties |
+| `GetBestDevice(this Context)` | The first device of that ranking. Use instead of ILGPU's `GetPreferredDevice` (memory-only sort) |
+
+### AcceleratorRequirements / UnsupportedKernelFeatureException
+
+Declarative capability gating and the compile-time exception that backs it. Full guide: [Capabilities & Backend Selection](capabilities-and-backend-selection.md).
 
 ---
 
@@ -107,6 +138,23 @@ public interface ICanvasRenderer : IDisposable
 |--------|-------------|
 | `AttachCanvas(canvas)` | Attaches (or re-attaches) the renderer to a canvas element. Disposes any previous context. |
 | `PresentAsync(buffer)` | Presents a 2D packed-uint or packed-int RGBA pixel buffer to the canvas. |
+
+### IExternalImageCopier / ExternalImageCopier
+
+```csharp
+public interface IExternalImageCopier : IDisposable
+{
+    void CopyToBuffer(GPUCopyExternalImageSource source, int width, int height,
+                      ArrayView1D<int, Stride1D.Dense> destination);
+}
+
+public static class ExternalImageCopier
+{
+    public static IExternalImageCopier Create(Accelerator accelerator);
+}
+```
+
+Copies a `<video>`, `<img>`, canvas, `OffscreenCanvas`, `ImageBitmap`, `VideoFrame` or `ImageData` into a buffer as packed RGBA8 (the layout `ICanvasRenderer` presents). `Create` returns `WebGPUExternalImageCopier` (GPU only: `copyExternalImageToTexture` + `copyTextureToBuffer`) on WebGPU, else `Canvas2DExternalImageCopier` (2D canvas + `CopyFromJS`). See [Image and Video Input](canvas-rendering.md#image-and-video-input-iexternalimagecopier).
 
 ### CanvasRendererFactory
 
@@ -171,6 +219,8 @@ The main WebGPU accelerator — extends ILGPU's `KernelAccelerator`.
 | `CreateAsync(context, device)` | `Task<WebGPUAccelerator>` | Creates accelerator with default options |
 | `CreateAsync(context, device, options)` | `Task<WebGPUAccelerator>` | Creates accelerator with custom options |
 | `CreateFromExternalDevice(context, gpuDevice, options?)` | `WebGPUAccelerator` | Creates from an external `GPUDevice` (device sharing) |
+| `FlushPendingCommands()` | `void` | Submits the pending batch (dispatches, copies, clears, small uploads). Call it before submitting your own work on the same queue |
+| `F64Mode` | `F64EmulationMode` | Get/set the f64 emulation mode for subsequent kernel compiles |
 | `NativeAccelerator` | `WebGPUNativeAccelerator` | Low-level WebGPU access |
 | `Backend` | `WebGPUBackend` | The WGSL transpiler backend |
 | `EnabledFeatures` | `HashSet<string>` | Detected WebGPU features (e.g., `subgroups`, `shader-f16`) |
@@ -190,7 +240,7 @@ Typed GPU memory buffer with staging buffer caching for efficient readback.
 | `Length` | `long` | Number of elements |
 | `ElementSize` | `int` | Size of each element in bytes |
 | `LengthInBytes` | `long` | Total buffer size |
-| `CopyFromHost(T[])` | `void` | Upload data from CPU to GPU |
+| `CopyFromHost(T[], targetOffset)` | `void` | Upload data from CPU to GPU (submits pending dispatches first) |
 | `CopyToHostAsync()` | `Task<T[]>` | Download data — allocates new array |
 | `CopyToHostAsync(T[], offset, count)` | `Task<long>` | Download into pre-allocated array (zero-alloc) |
 | `CopyToHostUint8ArrayAsync(offset, bytes)` | `Task<Uint8Array>` | Download as JS Uint8Array |
@@ -207,6 +257,8 @@ Represents a WebGPU device available in the browser.
 | `CreateAcceleratorAsync()` | `Task<WebGPUNativeAccelerator>` | Create a low-level native accelerator from this JS-wrapper device. (For the ILGPU `WebGPUAccelerator`, use `WebGPUILGPUDevice.CreateAcceleratorAsync(context)` — the type `context.GetWebGPUDevices()` returns.) |
 | `PrintInfo(TextWriter)` | `void` | Print device information to the given writer, e.g. `PrintInfo(Console.Out)` |
 
+`GetDevicesAsync()` lists a distinct high-performance adapter first (devices are compared on vendor, architecture, device and description), then the default adapter.
+
 ### WebGPUNativeAccelerator
 
 Low-level WebGPU operations — for advanced users who need direct GPU API access.
@@ -216,10 +268,12 @@ Low-level WebGPU operations — for advanced users who need direct GPU API acces
 | `NativeDevice` | `GPUDevice?` | The underlying WebGPU device |
 | `Queue` | `GPUQueue?` | The device's command queue |
 | `EnabledFeatures` | `HashSet<string>` | Detected features |
-| `FlushPendingCommands` | `Action?` | Callback to flush batched commands |
+| `HasShaderF16` / `HasSubgroups` / `HasTimestampQuery` | `bool` | Feature checks |
+| `MaxStorageBuffersPerShaderStage` | `int` | The device limit (Chrome: 10) |
+| `IsDeviceLost` / `DeviceLost` | `bool` / `event Action<string, string>` | Device-loss state and notification |
 | `CreateFromExternalDevice(gpuDevice)` | `WebGPUNativeAccelerator` | Wrap an external device |
-| `GetOrCreateComputeShader(source, entry, overrides?)` | `WebGPUComputeShader` | Compile/cache WGSL shader |
-| `Dispatch(shader, bindGroup, dims)` | `void` | Dispatch a compute shader |
+| `GetOrCreateComputeShader(wgslSource, entryPoint = "main", overrideConstants?, label?)` | `WebGPUComputeShader` | Compile/cache a WGSL shader |
+| `Dispatch(shader, workgroupCountX, workgroupCountY = 1, workgroupCountZ = 1)` | `void` | Dispatch a compute shader on its own command encoder |
 
 ---
 
@@ -232,9 +286,12 @@ WGSL transpiler backend.
 | Member | Type | Description |
 |--------|------|-------------|
 | `VerboseLogging` | `static bool` | Enable/disable debug output |
+| `EnableDispatchBatching` | `static bool` | Record plain dispatches, copies, clears and small uploads and submit them with one JS crossing per submit (default `true`) |
+| `BatchSinglePass` / `BatchScalarArena` / `BatchBindGroupReuse` | `static bool` | Batching refinements (all default `true`): consecutive dispatches share one compute pass; per-dispatch scalars go into two per-stream arenas written once per submit; bind groups are cached by layout and entries. `BatchBindGroupCounters` reports hits/misses |
 | `EnableReflectionCaching` | `static bool` | Enable reflection metadata caching |
-| `EnableBufferPooling` | `static bool` | Enable scalar buffer pooling |
+| `EnableBufferPooling` | `static bool` | Pool scalar parameter buffers on the unbatched path |
 | `EnableShaderCaching` | `static bool` | Cache compiled shaders across dispatches (default `true`) |
+| `ForceEmulatedF16` | `static bool` | Use the emulated f16 path even when the adapter has `shader-f16` (testing) |
 | `MaxCachedShaders` | `static int` | Cap on retained compiled shaders per accelerator. **`0` (default) = unlimited**; a positive value enables LRU eviction (a hit refreshes recency). Unlimited suits a fixed kernel set; cap it if you generate kernels dynamically. See [Memory & Buffers](memory-and-buffers.md#compiled-shader-cache--eviction-webgpu) |
 | `LastGeneratedWGSL` | `static string?` | WGSL source of the most recently compiled kernel (set on every `LoadKernel` call) |
 
@@ -276,14 +333,15 @@ WebGL2 accelerator — all GL calls are offloaded to a dedicated Web Worker.
 | `LastGeneratedGLSL` | `static string?` | GLSL ES 3.0 source of the most recently compiled kernel (set on every `LoadKernel` call) |
 | `BlitAndDrawAsync(memBuf, w, h, draw)` | `Task` | Blits a WebGL buffer to an `ImageBitmap` and calls `draw` synchronously in the worker callback before resolving |
 
-### WebGLDevice
+### WebGLDevice / WebGLILGPUDevice
 
-Represents a WebGL2 device.
+`WebGLDevice` is the JS-side WebGL2 device; `WebGLILGPUDevice` is the ILGPU device `context.GetWebGLDevices()` returns.
 
 | Member | Type | Description |
 |--------|------|-------------|
-| `GetDevicesAsync()` | `Task<List<WebGLDevice>>` | Detect available WebGL2 devices |
-| `CreateAccelerator(context, options?)` | `WebGLAccelerator` | Create a WebGL accelerator |
+| `WebGLDevice.GetDevicesAsync()` | `Task<ImmutableArray<WebGLDevice>>` | Detect available WebGL2 devices |
+| `WebGLILGPUDevice.CreateAccelerator(context, options)` | `WebGLAccelerator` | Create a WebGL accelerator (synchronous creation works on WebGL) |
+| `WebGLILGPUDevice.CreateAcceleratorAsync(context)` | `Task<Accelerator>` | Async form, for code shared with the other browser backends |
 
 ---
 
@@ -301,8 +359,9 @@ GLSL ES 3.0 transpiler backend.
 
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
-| `EnableF64Emulation` | `bool` | `true` | Emulate `double` precision |
-| `EnableI64Emulation` | `bool` | `true` | Emulate `long`/`ulong` |
+| `F64Emulation` | `F64EmulationMode` | `Dekker` | How to emulate `double`: `Dekker`, `Ozaki` or `Disabled` (as on WebGPU) |
+
+(`long`/`ulong` are always emulated on WebGL; there is no toggle.)
 
 ---
 
@@ -314,7 +373,11 @@ WebAssembly accelerator — compiles kernels to native Wasm and dispatches acros
 
 | Member | Type | Description |
 |--------|------|-------------|
-| `SynchronizeAsync()` | `Task` | Async wait for all workers (via extension method) |
+| `SynchronizeAsync()` | `Task` | Async wait for all workers |
+| `SupportsSimd` | `bool` | True when kernels run their SIMD128 (`v128`) variant |
+| `EnablePipelinedDispatch` | `static bool` | Pipeline small barrier-free dispatches (default `true`) |
+| `NonBarrierMinItemsPerWorker` | `static int` | Items per worker for barrier-free dispatches (default 65536) |
+| `SharedWorkerPoolSize` / `TotalKernelsCompiled` | `static int` | Diagnostics for the persistent worker pool |
 
 ### WasmILGPUDevice
 
@@ -343,16 +406,59 @@ Wasm compilation backend.
 | Member | Type | Description |
 |--------|------|-------------|
 | `VerboseLogging` | `static bool` | Enable/disable debug output |
+| `ForceScalar` / `ForceSimd` | `static bool` | Force the scalar or the SIMD128 kernel path (testing; default both `false`) |
+| `RuntimeSupportsWasmSimd` | `static bool` | Whether the running engine accepts `v128` |
+| `ModuleCacheFlushThreshold` | `static int` | Kernels compiled before persistent workers drop old modules (default 256, 0 = never) |
 
 ### WasmBackendOptions
 
+Passed to `WasmILGPUDevice.CreateAcceleratorAsync(context, options)`.
+
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
-| `MaxWorkers` | `int?` | `null` (auto) | Maximum Web Workers for dispatch |
+| `WorkerCount` | `int` | `max(2, hardwareConcurrency - 2)` | Web Workers for dispatch. A non-default count gets a private worker pool |
+| `EnableYieldEscape` | `bool?` | `null` (auto) | Let spinning barrier workers yield to JS under CPU oversubscription |
+| `MaxLinearMemoryPages` | `int` | `16384` (1 GiB) | Maximum size of the shared linear memory, in 64 KiB pages |
 
 ---
 
-## ILGPU.Runtime.Cuda — NVIDIA CUDA Libraries
+## ILGPU.Runtime - Device Memory Budget (5.3.6+)
+
+| Member | Description |
+|--------|-------------|
+| `IDeviceMemoryReclaimer` | A holder of reclaimable device memory: `ReclaimableBytes`, `LastUsedTimestamp` (a `Stopwatch` timestamp), `Reclaim(bytesWanted)` returning the bytes freed |
+| `accelerator.RegisterReclaimer(r)` / `UnregisterReclaimer(r)` | Register (held weakly) / remove a holder. Once anything is registered, allocations check free memory first |
+| `accelerator.ReclaimDeviceMemory(bytes)` | Ask the holders to free at least `bytes`, least recently used first; returns the bytes freed |
+| `accelerator.DeviceMemoryHeadroomBytes` | Free memory to keep in reserve; `null` = `MemoryPressure.DefaultHeadroomBytes` (512 MiB) capped at 5% of the device |
+| `accelerator.TryGetFreeMemory(out long)` | Free device memory, on backends that can report it (CUDA) |
+| `MemoryPressure.FreeMemoryCacheDuration` | How long a free-memory measurement is trusted (250 ms) |
+| `MemoryPressure.ProactiveReclaimCount` / `ProactiveReclaimedBytes` | Diagnostics |
+| `accelerator.AllocateWithReclaim(allocate, reclaim, describeState?)` | Try, reclaim through your callback on failure, retry once |
+
+Guide: [Device Memory Budget](memory-and-buffers.md#device-memory-budget-reclaiming-idle-memory).
+
+## SpawnDev.ILGPU - Shader Artifacts
+
+| Member | Description |
+|--------|-------------|
+| `ShaderCompiler.Generate(kernel, profile)` | Generate a kernel's WGSL/GLSL/Wasm for a `CapabilityProfile` with no device |
+| `ShaderArtifactSerializer.ExportCache()` | The WebGPU shaders this session compiled or imported, as compact JSON (runtime-emitted kernels left out) |
+| `ShaderArtifactSerializer.ImportCache(json)` | Register an export from the SAME library build; returns the count registered (0 for another build) |
+| `ShaderArtifactSerializer.IsExportable(kernelId)` | Whether a kernel's identity is stable across sessions |
+| `ShaderArtifactCache.Hits` / `Misses` / `IrSkippedHits` / `Count` / `Enabled` | Runtime cache counters and kill switch |
+| `ShaderArtifactManifestLoader.Configure(url, fetch)` / `TryWarmAsync` / `WarmAllAsync` | Load build-time precompiled artifacts |
+
+Guide: [Precompiled Shaders](precompiled-shaders.md).
+
+## SpawnDev.ILGPU.WebGPU - Diagnostics
+
+| Member | Description |
+|--------|-------------|
+| `WebGPUBufferAccounting.LiveStorageBytes` / `LiveStagingBytes` / `LiveBufferCount` | What the library currently holds on the device |
+| `WebGPUBufferAccounting.LargestLiveBuffers(n)` | Largest live buffers by label |
+| `WebGPUBufferAccounting.CaptureCreationSites` / `TopCreationSites(n)` | Record who allocated each buffer (stack walk per allocation) and group live buffers by site |
+
+## ILGPU.Runtime.Cuda - NVIDIA CUDA Libraries
 
 CUDA-only libraries for hardware-accelerated image processing, random numbers, linear algebra, FFT, and device monitoring. Require an NVIDIA GPU.
 

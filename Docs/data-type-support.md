@@ -275,7 +275,7 @@ var got = await ((IContiguousArrayView)buf.View.BaseView).AsRawArrayView().CopyT
 
 **Radix-sort** (keys + key/value pairs, ascending + descending) works for all three 4-bit types on **CUDA / OpenCL / WebGPU / Wasm** (the packed scatter needs the store path, so CPU + WebGL are gated, like the store). `RadixSortOperations.{Float4E2M1,QInt4,QUInt4}` provide the key transforms; the FP4 key is the E2M1 bit pattern with the float sign-flip, the int keys are the nibble with the signed/unsigned bias.
 
-**Capability flag.** `AcceleratorRequirements.RequiresFloat4E2M1` gates selection to backends that support the FP4 type. There is **no** `RequiresQInt4`/`RequiresQUInt4` and **no** packed-store capability flag yet - a kernel that *stores* a packed-4-bit view on CPU/WebGL relies on the fail-loud throw, not a selection-time gate (tracked follow-up).
+**Capability flags.** `RequiresFloat4E2M1`, `RequiresQInt4` and `RequiresQUInt4` document that a kernel uses the type; every backend can LOAD it, so they never rule a backend out. `RequiresPacked4Store` is the real gate: it filters CPU and WebGL at selection time for a kernel that STORES into a packed 4-bit view or radix-sorts one (both backends would otherwise fail loud at kernel compile time).
 
 ### All low-precision conversions are validated against the authoritative references
 
@@ -285,7 +285,7 @@ gate, which pins each backend's on-device convert to hardcoded numpy/ml_dtypes v
 
 | Type | Reference | float→type rounding |
 |------|-----------|---------------------|
-| **Half** | `numpy.float16` (IEEE binary16) | round-to-nearest-even incl. subnormals + overflow→Inf (was truncating + flushing subnormals before 4.14.0) |
+| **Half** | `numpy.float16` (IEEE binary16) | round-to-nearest-even incl. subnormals + overflow→Inf (was truncating + flushing subnormals before 4.14.0). The other direction, Half→float, is exact for all 65536 patterns on all 6 backends; before 5.3.2 the emulated decoders (Wasm, WebGL, WebGPU without `shader-f16`) flushed the 2046 subnormal patterns to ±0 |
 | **BFloat16** | `ml_dtypes.bfloat16` | round-to-nearest-even (NaN-preserving) |
 | **Float8E4M3** | PyTorch/JAX/ml_dtypes `float8_e4m3fn` | RNE; overflow→NaN (fn, default) |
 | **Float8E5M2** | `float8_e5m2` | RNE; overflow→±Inf |
@@ -338,10 +338,13 @@ Latest full cross-backend sweep (the entire suite, all 6 backends / 7 lanes): **
 - `BackendTestBase.GenericPrecision.cs` (FP8 + FP4 convert/relu), `BackendTestBase.FromRawBits.cs` (`RawBitsToFloat`/`FromRawBits`)
 
 ### How to Run
+
+`PMT_FILTER` scopes the run (comma-separated substrings of the test name, class or method). `dotnet test --filter` only narrows what NUnit reports; the scheduler still runs everything.
+
 ```bash
 # Packed 4-bit (load/store/radix/convert)
-dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj --filter "FullyQualifiedName~PackedFloat4|FullyQualifiedName~PackedQInt4|FullyQualifiedName~PackedQUInt4|FullyQualifiedName~Radix|FullyQualifiedName~Float4E2M1|FullyQualifiedName~RawBitsToFloat"
+PMT_FILTER=PackedFloat4,PackedQInt4,PackedQUInt4,Radix,Float4E2M1,RawBitsToFloat dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj
 
 # Sub-word + Half + BFloat16
-dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj --filter "FullyQualifiedName~Int8|FullyQualifiedName~Int16|FullyQualifiedName~Float16|FullyQualifiedName~Half_|FullyQualifiedName~BFloat16"
+PMT_FILTER=Int8,Int16,Float16,Half_,BFloat16 dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj
 ```

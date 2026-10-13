@@ -7,8 +7,9 @@ The system has three layers, each independently useful:
 | Layer | What | Status |
 |-------|------|--------|
 | **1 - Offline codegen** | Generate a kernel's WGSL/GLSL/Wasm for a capability profile with NO device, on any host OS. Powers cross-backend debugging. | **Shipped** |
-| **3 - Runtime cache** | At kernel-load time, use a ready artifact for the active device profile instead of transpiling; fall back to runtime generation on a miss. | **Shipped (WebGPU)** |
-| **2 - Build-time precompile** | A `.targets` (gated by `<SpawnDevPrecompileShaders>`) spawns a worker that reflects the built assembly, runs Layer 1 per `[PrecompiledKernel]` (kernel x profile), and writes `wwwroot/_shaders/{manifest.json + sidecars}` the runtime loader consumes. | **Mechanism complete + build-cycle verified**; nupkg tool-shipping is the remaining deployment wiring (see [Layer 2 - Packaging](#packaging-shipping-the-build-tool)). |
+| **3 - Runtime cache** | At kernel-load time, use a ready artifact for the active device profile instead of transpiling; fall back to runtime generation on a miss. A hit skips ILGPU's IR construction too (5.3.2+). | **Shipped (WebGPU)** |
+| **2 - Build-time precompile** | A `.targets` (gated by `<SpawnDevPrecompileShaders>`) spawns a worker that reflects the built assembly, runs Layer 1 per `[PrecompiledKernel]` (kernel x profile), and writes `wwwroot/_shaders/{manifest.json + sidecars}` the runtime loader consumes. | **Shipped** - the precompiler worker is bundled in the package `tools/` folder (see [Layer 2 - Packaging](#packaging-shipping-the-build-tool)). |
+| **Session export / import** | Save the shaders one session compiled (`ShaderArtifactSerializer.ExportCache()`) and register them in the next (`ImportCache(json)`), for apps that compile the same kernels every start. | **Shipped (WebGPU, 5.3.2+)** - see [Persisting a session's shaders](#persisting-a-sessions-shaders) |
 
 > The whole pipeline is verified end-to-end with no device/browser: `dotnet run --project SpawnDev.ILGPU.DemoConsole -- precompile-e2e` (build-time precompile -> emit -> runtime load -> cache hit), and a real `dotnet build` of a consumer with `<SpawnDevPrecompileShaders>true</...>` emits the artifacts via the `.targets`.
 
@@ -57,7 +58,7 @@ static void MyKernel(Index1D i, ArrayView<float> data) { /* ... */ }
 </PropertyGroup>
 ```
 
-When the flag is on, the build emits the precompiled artifacts (see [Layer 2](#layer-2--build-time-precompilation)); at startup the runtime registers them so the first load of `MyKernel` is a cache hit instead of a transpile. When the flag is off, behavior is exactly today's (runtime transpile) - precompilation is never a hidden default.
+When the flag is on, the build emits the precompiled artifacts (see [Layer 2](#layer-2---build-time-precompilation)); at startup the runtime registers them so the first load of `MyKernel` is a cache hit instead of a transpile. When the flag is off, behavior is exactly today's (runtime transpile) - precompilation is never a hidden default.
 
 ---
 
@@ -128,14 +129,17 @@ At kernel-load time the accelerator computes a cache key of `(stable kernel iden
 - **Hit:** rebuild the compiled kernel from the cached shader + its `CodegenMetadata` (the dispatch info - scalar packing, binding count, i64-spinlock indices, coalesce manifest, dynamic-shared overrides - that is NOT recoverable from the shader text), skipping the transpiler.
 - **Miss:** run the normal codegen and warm-register the result, so later loads in the same session hit even without build-time precompilation.
 
+**Early hits (5.3.2+).** `WebGPUBackend` checks the cache BEFORE ILGPU builds the kernel's IR, so a hit skips IR construction, the IR transformations and the WGSL generation (an earlier hook ran after the IR and skipped only the WGSL). It needs the entry point's shared-memory specification, which the metadata records (`SharedMemoryStaticSize` / `SharedMemoryHasDynamic`); an older artifact without it falls back to a late hit. MEASURED (Anaglyphohol cold start, Blazor AOT): compiling 119 depth-model kernels took ~770 ms, ~400 ms of it IR work that ran even on a hit.
+
 ```csharp
-ShaderArtifactCache.Hits;     // counters
+ShaderArtifactCache.Hits;          // counters
 ShaderArtifactCache.Misses;
-ShaderArtifactCache.Count;    // registered artifacts
+ShaderArtifactCache.IrSkippedHits; // early hits (also counted in Hits)
+ShaderArtifactCache.Count;         // registered artifacts
 ShaderArtifactCache.Enabled = false;  // kill switch: force pure runtime generation (A/B, debugging)
 ```
 
-Kernel identity is the method's full signature (declaring type + name + parameter types) - stable across builds, identical between the build-time task and the runtime, and never `Object.GetHashCode()` (a non-unique heuristic - see the kernelId-collision lesson in `Wasm/CLAUDE.md`).
+Kernel identity is the method's full signature (declaring type + name + parameter types) - stable across builds, identical between the build-time task and the runtime, and never `Object.GetHashCode()` (a non-unique heuristic - see the kernelId-collision lesson in `Wasm/CLAUDE.md`). `DelegateSpecialization` kernels are emitted into a dynamic assembly named by a stable hash of the kernel's and its targets' signatures (5.3.2+), so they have a stable identity too. Other runtime-emitted kernels (a new dynamic assembly each session) never hit across sessions.
 
 > Currently implemented for the **WebGPU** backend. The Wasm artifact is self-contained bytes (dispatch-parameter-independent); a Wasm load-hook is a follow-up.
 
@@ -195,11 +199,11 @@ This mirrors the established `SpawnDev.BlazorJS.WebWorkers` pattern (a build-tim
 Nothing fetches at startup automatically. The consumer opts in by configuring the loader with the manifest URL and a fetch delegate, then warms kernels on demand:
 
 ```csharp
-// Once, when wiring GPU work. A SpawnDev.BlazorJS.WebWorkers worker that runs no kernels
-// never calls this, so it never touches the network.
+// Once, when wiring GPU work. A web worker that runs no kernels never calls this,
+// so it never touches the network.
 ShaderArtifactManifestLoader.Configure(
     "_shaders/manifest.json",
-    async url => await http.GetByteArrayAsync(url));   // BlazorJS fetch in-browser / HttpClient on desktop
+    async url => await http.GetByteArrayAsync(url));   // HttpClient (in the browser it uses fetch)
 
 // Lazy, per-kernel, right before a kernel is loaded (fetches just that one artifact):
 await ShaderArtifactManifestLoader.TryWarmAsync(myKernelMethodInfo, profile);
@@ -209,7 +213,7 @@ await ShaderArtifactManifestLoader.TryWarmAsync(myKernelMethodInfo, profile);
 await ShaderArtifactManifestLoader.WarmAllAsync(profile);
 ```
 
-Not configuring it = pure runtime transpile (today's behavior). `fetch` is a `Func<string,Task<byte[]>>`, so the library core takes no `SpawnDev.BlazorJS` dependency and the loader is unit-testable with an in-memory fetch.
+Not configuring it = pure runtime transpile (today's behavior). `fetch` is a `Func<string,Task<byte[]>>`, so the loader takes no HTTP dependency and is unit-testable with an in-memory fetch.
 
 ### Packaging: shipping the build tool
 
@@ -220,7 +224,31 @@ The `.targets` is auto-imported from the package `build/` folder and is gated OF
 <SpawnDevPrecompilerToolPath>$(RepoRoot)\SpawnDev.ILGPU.Precompiler\bin\$(Configuration)\net10.0\SpawnDev.ILGPU.Precompiler.dll</SpawnDevPrecompilerToolPath>
 ```
 
-The remaining deployment wiring is bundling the `SpawnDev.ILGPU.Precompiler` tool (+ its dependency closure) into the package `tools/` folder so a NuGet consumer gets it with no override. (Options: bundle in `tools/`, ship a sibling build-tool package, or a `dotnet` tool - a packaging-design choice; the mechanism above is independent of it.)
+The published package bundles the `SpawnDev.ILGPU.Precompiler` worker and its dependency closure in `tools/`, so a NuGet consumer that sets `<SpawnDevPrecompileShaders>true</SpawnDevPrecompileShaders>` needs no override. A repo build packs it only with `-p:PackPrecompilerTool=true` (off by default to keep everyday packs fast); without the tool, the `.targets` fails with an error pointing at `<SpawnDevPrecompilerToolPath>`.
+
+---
+
+## Persisting a session's shaders
+
+For an app that compiles the same kernels on every start (a browser extension's content script runs once per page; an ML app loads the same model every session), the shaders one session compiled can be saved and handed to the next. No build step involved - it captures whatever this session actually compiled, on this device.
+
+```csharp
+using SpawnDev.ILGPU;
+
+// End of a session (or after warm-up): the WebGPU shaders compiled or imported so far, as compact JSON.
+string json = ShaderArtifactSerializer.ExportCache();
+await SaveSomewhereAsync(json);   // OPFS, IndexedDB, extension storage, ...
+
+// Next session, BEFORE loading kernels:
+int registered = ShaderArtifactSerializer.ImportCache(await LoadAsync());
+// Matching kernels now load as early hits (no IR, no WGSL generation).
+```
+
+- An export records `ShaderArtifactSerializer.LibraryVersion` (this build's informational version). An import from any other build registers nothing (returns 0): the generator or the dispatch metadata may have changed, and a stale artifact is never trusted.
+- Entries are keyed by device profile; an entry for a different profile than the active device simply never matches, and the runtime transpiler stays the fallback.
+- Kernels whose identity changes every session are left out (`ShaderArtifactSerializer.IsExportable(kernelId)` tells which identities export: static kernels and `DelegateSpecialization` kernels).
+- MEASURED: the store for two depth models (131 kernels) is about 3 MB of WGSL.
+- The raw form is `ShaderArtifactCache.Snapshot()` / `ShaderArtifactCache.Register(kernelId, profileKey, specKey, artifact)`.
 
 ---
 

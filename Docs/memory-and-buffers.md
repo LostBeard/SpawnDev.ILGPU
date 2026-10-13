@@ -87,7 +87,7 @@ When data originates in JavaScript — fetched from a `WebSocket`, decoded by a 
 
 ```csharp
 using SpawnDev.ILGPU;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS.JSObjects;
 
 // Get the IBrowserMemoryBuffer for any GPU buffer
 var browserBuffer = (IBrowserMemoryBuffer)((IArrayView)buffer.View).Buffer;
@@ -105,9 +105,9 @@ browserBuffer.CopyFromJS(jsData, targetByteOffset: 1024);
 ```
 
 **Per-backend behavior:**
-- **WebGPU** — calls `queue.WriteBuffer` directly on the JS-side typed array. Zero copy through .NET, no managed allocation.
-- **WebGL** — copies the JS bytes into the buffer's backing array and sets `NeedsUpload = true`; the data is uploaded to the GPU on the next dispatch (not immediately, by design — WebGL has no async write queue).
-- **Wasm** — pure JS→JS copy within the SharedArrayBuffer that backs Wasm linear memory. Worker threads see the new bytes immediately.
+- **WebGPU** - submits any pending dispatches first, then calls `queue.writeBuffer` directly on the JS-side typed array, so the write lands after the kernels queued before it. Zero copy through .NET, no managed allocation.
+- **WebGL** - copies the JS bytes into the buffer's backing array. A buffer the GL worker already holds gets exactly the written range posted to the worker, in order with the dispatches; a buffer the worker has not seen yet is uploaded in full before its first dispatch.
+- **Wasm** - JS to JS copy into the SharedArrayBuffer that backs the buffer. While dispatches are pending, the write is queued in the work stream so it applies after them.
 
 **When to use it:**
 - Streaming pipelines where JS produces data (audio decode, video frames, network bytes)
@@ -131,10 +131,10 @@ await buf.View.SubView(offset, count).CopyFromStreamAsync(sourceStream);       /
 ```
 
 - **All 6 backends.** On CUDA / OpenCL / CPU it `await`s `Stream.ReadExactlyAsync` into a pooled buffer and copies each chunk (a model streaming off disk / network never blocks a thread). Correct on the browser backends too via the managed hop.
-- **Browser zero-copy fast path.** If the source `Stream` implements `SpawnDev.BlazorJS.Toolbox.IJSReadStream`, the browser backends read each chunk as a JS `Uint8Array` and upload it via `CopyFromJS` — the bytes go **JS → GPU without ever entering the .NET/WASM managed heap**. (WebGPU requires 4-byte-aligned transfers, which fp32 and even-count `Half` always satisfy; an odd-count `Half` upload falls back to the padded managed path.)
+- **Browser zero-copy fast path.** If the source `Stream` implements `SpawnDev.SpawnJS.Toolbox.IJSReadStream`, the browser backends read each chunk as a JS `Uint8Array` and upload it via `CopyFromJS` - the bytes go **JS → GPU without ever entering the .NET/WASM managed heap**. (WebGPU requires 4-byte-aligned transfers, which fp32 and even-count `Half` always satisfy; an odd-count `Half` upload falls back to the padded managed path.)
 - **Exact length.** A stream that ends before `view.Length * sizeof(T)` bytes throws `EndOfStreamException` — a truncated asset surfaces instead of silently zero-padding the tail.
 
-**`IJSReadStream`** (in `SpawnDev.BlazorJS.Toolbox`) is the primitive that enables the fast path — a `Stream` whose data can be read *while it stays in JS*:
+**`IJSReadStream`** (in `SpawnDev.SpawnJS.Toolbox`) is the primitive that enables the fast path - a `Stream` whose data can be read *while it stays in JS*:
 
 | Member | Meaning |
 |--------|---------|
@@ -144,19 +144,20 @@ await buf.View.SubView(offset, count).CopyFromStreamAsync(sourceStream);       /
 
 Implemented by **`BlobStream`** (`Blob` / `File`, `CanReadSync = false`) and **`ArrayBufferStream`** (`ArrayBuffer`, `CanReadSync = true`). Any `Stream` that implements it gets the zero-copy upload automatically.
 
-## Copying Between GPU Buffers (GPU→GPU)
+## Copying Between GPU Buffers (GPU->GPU)
 
-Use `CopyFrom` to copy data between GPU buffers. This works on **all six backends** — it's a native GPU operation with no CPU involvement:
+Use `CopyFrom` (or `CopyTo`) to copy data between GPU buffers. This works on **all six backends** - it's a native device operation with no CPU involvement - and it is **ordered after the kernels that produced the source** on every backend, so it needs no `SynchronizeAsync()` first:
 
 ```csharp
 using var source = accelerator.Allocate1D(new float[] { 1, 2, 3, 4, 5 });
 using var dest = accelerator.Allocate1D<float>(5);
 
-// Copy GPU→GPU (fast, native, works everywhere)
+// Copy GPU->GPU (fast, native, works everywhere)
 dest.CopyFrom(source);
+source.CopyTo(dest);   // same copy from the source side (5.3.4+ on WebGPU and Wasm)
 ```
 
-On WebGPU this maps to `CopyBufferToBuffer`. On CUDA/OpenCL it's a device-to-device memcpy. On Wasm it copies within the SharedArrayBuffer. No shader compilation, no kernel dispatch.
+On WebGPU this maps to `copyBufferToBuffer` (recorded in the pending batch). On WebGL the GL worker copies between its resident buffers. On Wasm the copy is queued in the serialized work stream behind the producing kernel. On CUDA/OpenCL it's a device-to-device memcpy. No shader compilation, no kernel dispatch.
 
 ### Cross-Backend Buffer Operations Reference
 
@@ -164,17 +165,17 @@ Not all copy operations work the same way on every backend. This table shows wha
 
 | Operation | Method | CPU / CUDA / OpenCL | WebGPU | WebGL | Wasm |
 |-----------|--------|--------------------:|-------:|------:|-----:|
-| **GPU→GPU** | `CopyFrom` | Sync | `CopyBufferToBuffer` | TF readback | SharedArrayBuffer |
-| **CPU→GPU** | `CopyFromCPU` / `Allocate1D(data)` | Sync | `queue.WriteBuffer` | `texImage2D` | SharedArrayBuffer |
-| **JS→GPU** | `IBrowserMemoryBuffer.CopyFromJS` | N/A | `queue.WriteBuffer` | Backing-array copy + `NeedsUpload` | JS→JS within SharedArrayBuffer |
-| **GPU→CPU (async)** | `CopyToHostAsync` | Sync fallback | `mapAsync(Read)` | Readback | SharedArrayBuffer |
-| **GPU→CPU (sync)** | `CopyTo` / `CopyToCPU` / `GetAsArray1D` | Sync | **THROWS** | **THROWS** | **THROWS** |
+| **GPU->GPU** | `CopyFrom` / `CopyTo` (device target) | Sync | `copyBufferToBuffer` (batched) | Worker-side buffer copy | Queued copy within the SharedArrayBuffer |
+| **CPU->GPU** | `CopyFromCPU` / `Allocate1D(data)` | Sync | Up to 64 KiB: recorded in the pending batch as an ordered upload; larger: `queue.writeBuffer` straight from the WASM heap | JS-side copy into the backing array, range posted to the GL worker | JS-side copy into the SharedArrayBuffer (queued behind pending dispatches) |
+| **JS->GPU** | `IBrowserMemoryBuffer.CopyFromJS` | N/A | `queue.writeBuffer` after submitting pending work | Backing-array copy, range posted to the GL worker | JS->JS into the SharedArrayBuffer |
+| **GPU->CPU (async)** | `CopyToHostAsync` | Sync fallback | `mapAsync(Read)` | Readback | SharedArrayBuffer |
+| **GPU->CPU (sync)** | `CopyToCPU` / `GetAsArray1D` / `CopyTo` (host target) | Sync | **THROWS** | **THROWS** | **THROWS** |
 | **Stream→GPU (chunked)** | `ArrayView.CopyFromStreamAsync` | `ReadExactlyAsync` + copy | `IJSReadStream`→`CopyFromJS` | `IJSReadStream`→backing copy | `IJSReadStream`→JS copy |
 | **GPU→Stream (chunked)** | `ArrayView.CopyToStreamAsync` | readback + `WriteAsync` | `IJSWriteStream`→`WriteUint8ArrayAsync` | `IJSWriteStream`→`WriteUint8ArrayAsync` | `IJSWriteStream`→`WriteUint8ArrayAsync` |
 
 **Key rules:**
-- **GPU→GPU copies: always use `CopyFrom`.** It's fast, native, and works on all backends.
-- **GPU→CPU reads: always use `CopyToHostAsync`.** The sync methods (`CopyTo`, `CopyToCPU`, `GetAsArray1D`) throw `NotSupportedException` on browser backends (WebGPU, WebGL, Wasm) because they require async GPU readback (`mapAsync`).
+- **GPU->GPU copies: use `CopyFrom` / `CopyTo`.** They're fast, native, ordered, and work on all backends.
+- **GPU->CPU reads: always use `CopyToHostAsync`.** The sync readbacks (`CopyToCPU`, `GetAsArray1D`, `CopyTo` into host memory) throw `NotSupportedException` on browser backends (WebGPU, WebGL, Wasm) because they require async GPU readback (`mapAsync`).
 - **Never replace `CopyFrom` with a kernel dispatch** (e.g., a Scale-by-1 kernel). `CopyFrom` is a hardware copy command — it's faster, simpler, and doesn't require shader compilation. Using a kernel dispatch for GPU→GPU copies can cause initialization errors on WebGPU when the accelerator isn't fully ready.
 
 ## Reading Data from the GPU
@@ -333,9 +334,9 @@ await buf.View.SubView(offset, count).CopyToStreamAsync(ms);       // just a sub
 ```
 
 - **All 6 backends.** The base path does an async GPU→CPU readback of each chunk (`CopyToRawAsync`) and writes it to the target `Stream` — correct everywhere via the managed hop.
-- **Browser zero-copy fast path.** If the target `Stream` implements `SpawnDev.BlazorJS.Toolbox.IJSWriteStream`, the browser backends read each chunk back as a JS `Uint8Array` (`CopyToHostUint8ArrayAsync`) and write it via `WriteUint8ArrayAsync` — the bytes go **GPU → JS → stream without ever entering the .NET/WASM managed heap**.
+- **Browser zero-copy fast path.** If the target `Stream` implements `SpawnDev.SpawnJS.Toolbox.IJSWriteStream`, the browser backends read each chunk back as a JS `Uint8Array` (`CopyToHostUint8ArrayAsync`) and write it via `WriteUint8ArrayAsync` - the bytes go **GPU → JS → stream without ever entering the .NET/WASM managed heap**.
 
-**`IJSWriteStream`** (in `SpawnDev.BlazorJS.Toolbox`) is the write-side sibling of `IJSReadStream`:
+**`IJSWriteStream`** (in `SpawnDev.SpawnJS.Toolbox`) is the write-side sibling of `IJSReadStream`:
 
 | Member | Meaning |
 |--------|---------|
@@ -348,8 +349,8 @@ Implemented by **`FileSystemHandleWritableStream`** (OPFS / disk, `CanWriteSync 
 **Saving a GPU buffer to an OPFS file — the full pattern:**
 
 ```csharp
-using SpawnDev.BlazorJS.JSObjects;
-using SpawnDev.BlazorJS.Toolbox;
+using SpawnDev.SpawnJS.JSObjects;
+using SpawnDev.SpawnJS.Toolbox;
 
 using var storage = JS.Get<StorageManager>("navigator.storage");
 using var root = await storage.GetDirectory();
@@ -363,7 +364,7 @@ await using var writable = await fileHandle.GetWritableStream();
 await packedBuf.View.CopyToStreamAsync(writable);
 ```
 
-> `CopyToStreamAsync` requires **SpawnDev.BlazorJS 3.5.14+** for `IJSWriteStream` and the `FileSystemHandleWritableStream` async commit (`DisposeAsync` / `CloseAsync`).
+> Since 5.3.0 these stream types come from SpawnDev.SpawnJS (`SpawnDev.SpawnJS.Toolbox`), which SpawnDev.ILGPU depends on. Older releases used the same types from SpawnDev.BlazorJS 3.5.14+.
 
 ## Buffer Lifecycle
 
@@ -405,6 +406,51 @@ await nativeBuffer.CopyToHostAsync(cachedResult, 0, pixelCount);
 
 The `WebGPUBuffer<T>` internally maintains a cached staging buffer for readback operations. The first call creates it; subsequent calls reuse it (as long as the size doesn't increase).
 
+## Device Memory Budget: Reclaiming Idle Memory
+
+A process that keeps several models or caches on one GPU often holds a lot of memory it is not using right now: buffer pools full of returned buffers. 5.3.6 lets any allocation on an accelerator make room by asking those holders to give memory back, least recently used first.
+
+Why before, and not after, an allocation fails: on Windows the NVIDIA driver's default "CUDA sysmem fallback" does not fail a `cuMemAlloc` that does not fit. It places the memory in system RAM, and every kernel touching it then runs over PCIe. MEASURED (a chat model, Whisper, Kokoro and a sentence encoder in one process on a 12 GB RTX 4070): 14.7 GB of live buffers, 7.3 GB of it idle in buffer pools, 1.4 GB spilled to system RAM, and a one-sentence reply took 5.5 minutes. A reclaim that waits for an allocation to throw never ran.
+
+```csharp
+using ILGPU.Runtime;
+
+// A holder of memory it can give back (e.g. a pool's returned, not-live buffers).
+sealed class MyPool : IDeviceMemoryReclaimer
+{
+    public long ReclaimableBytes => /* bytes Reclaim could free now */ 0;
+    public long LastUsedTimestamp => _lastUse;   // a Stopwatch.GetTimestamp() value
+    public long Reclaim(long bytesWanted)
+    {
+        // Called from whichever thread is allocating. Never block on the owner and never
+        // allocate device memory here: Monitor.TryEnter on the owner's lock, return 0 if busy.
+        return /* bytes actually freed */ 0;
+    }
+    long _lastUse;
+}
+
+accelerator.RegisterReclaimer(pool);              // held weakly; registering twice is a no-op
+accelerator.DeviceMemoryHeadroomBytes = 1L << 30;  // optional; default 512 MiB capped at 5% of the device
+long freed = accelerator.ReclaimDeviceMemory(256L << 20);   // explicit reclaim, LRU first
+accelerator.UnregisterReclaimer(pool);
+```
+
+How it works, once anything is registered:
+- Every `Accelerator.AllocateRaw` (all `Allocate1D/2D/3D` calls) first checks free device memory with `accelerator.TryGetFreeMemory(out long free)` (CUDA: `cuMemGetInfo`; other backends report no figure and skip this step). The measurement is trusted for `MemoryPressure.FreeMemoryCacheDuration` (250 ms), with allocations made since subtracted, so the driver is not queried on every allocation.
+- If the allocation would leave less than the headroom free, the registered holders are asked to reclaim, least recently used first.
+- An allocation that still throws gets the same reclaim and one retry.
+- Reclaim stands down while a CUDA stream on the accelerator is capturing a graph (freeing memory during a global-mode capture invalidates it).
+- With nothing registered, the check costs one null test.
+
+Diagnostics: `MemoryPressure.ProactiveReclaimCount` / `ProactiveReclaimedBytes`. SpawnDev.ILGPU.ML 5.3.7+ registers every `BufferPool`, so ML models in one process share one budget without any code in the app.
+
+`MemoryPressure.AllocateWithReclaim(accelerator, allocate, reclaim, describeState)` is the older single-holder helper (4.9.15+): it tries `allocate`, and only when that throws, calls your `reclaim` callback and retries once. Prefer registering a reclaimer: it also runs before the driver spills, and it can free other holders' memory.
+
+## Allocation Diagnostics
+
+- **`WebGPUBufferAccounting`** (WebGPU): a process-wide registry of every owned storage buffer and cached readback staging buffer - `LiveStorageBytes`, `LiveStagingBytes`, `LiveBufferCount`, `LargestLiveBuffers(n)` by label. Set `CaptureCreationSites = true` to record who allocated each new buffer (a stack walk per allocation, diagnostics only) and group live buffers by site with `TopCreationSites(n)`. `nvidia-smi` only shows the GPU process's pooled high-water mark; this is what the library actually holds. Note that a buffer that has been read back keeps a staging buffer of its size for its lifetime.
+- **`BrowserBufferPolicy`** (all browser backends): counts every host->device copy that came from the .NET heap - `HostCopyCount`, `HostCopyBytes`, `LargestHostCopyBytes`, `ResetHostCopyCensus()` - so a path that should be zero-copy can assert it pulled nothing through .NET. `StrictHostCopyMaxBytes` (default -1, off) makes any larger `CopyFromCPU` throw, naming the size; wrap a model-load window in it to catch weights that regressed onto the .NET path.
+
 ## Compiled-Shader Cache & Eviction (WebGPU)
 
 Buffers are not the only GPU memory an accelerator holds. The WebGPU backend caches every kernel it
@@ -420,9 +466,10 @@ Each distinct kernel retains three GPU objects plus its source:
 | `GPUBindGroupLayout` | binding layout |
 | the WGSL source string | held as the cache key, one .NET string per entry |
 
-**"Distinct" means distinct (WGSL, override-constants).** The same C# kernel dispatched at a different
-auto-grouped size produces different WGSL (the dispatch size is baked into the range check), so it is a
-separate entry.
+**"Distinct" means distinct (WGSL, override-constants).** Since 5.2.18 the launch size of an auto-grouped
+kernel is a per-dispatch scalar, not part of the shader, so one compiled pipeline serves every dispatch size of a
+kernel. New entries come from new kernels: lambda specializations, `DelegateSpecialization` targets, generic
+instantiations, ML work specialized per tensor shape.
 
 ### When the default is fine, and when it is not
 
@@ -475,8 +522,8 @@ disposed pipeline.
 If you build a cache of your own that stores `WebGPUComputeShader` references, it must do the same — a
 stale reference surfaces as an opaque WebGPU error far from its cause.
 
-> **Other backends:** this cache is WebGPU-only. `CachedShaderCount` reports `0` and `ClearShaderCache()`
-> is a no-op elsewhere, so the calls are safe to leave in cross-backend code.
+> **Other backends:** this cache, `CachedShaderCount` and `ClearShaderCache()` are WebGPU-only (members of
+> `WebGPUAccelerator`), so guard them with a type check as in the example above.
 
 ## Memory Tips
 
@@ -484,6 +531,6 @@ stale reference surfaces as an opaque WebGPU error far from its cause.
 2. **Reuse buffers** — allocate once, use many times, dispose at cleanup
 3. **Avoid per-frame allocation** — pre-allocate host arrays and use the `CopyToHostAsync(destination)` overload
 4. **Use `IBrowserMemoryBuffer`** for Canvas rendering — it skips the .NET array entirely when possible
-5. **Buffer pooling is automatic** — the WebGPU backend pools scalar parameter buffers internally
+5. **Scalar uploads are pooled automatically** - under dispatch batching the WebGPU backend packs per-dispatch scalars into two per-stream arena buffers, written once per submit (`WebGPUBackend.BatchScalarArena`)
 6. **Cap the shader cache if you generate kernels dynamically** — set `WebGPUBackend.MaxCachedShaders`; the
    default is unlimited, which only suits a fixed kernel set (see [Compiled-Shader Cache & Eviction](#compiled-shader-cache--eviction-webgpu))

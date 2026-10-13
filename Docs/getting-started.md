@@ -10,7 +10,7 @@ SpawnDev.ILGPU extends [ILGPU](https://github.com/m4rs-mt/ILGPU) — a high-perf
 
 **For browser (Blazor WebAssembly):**
 - Blazor WebAssembly project
-- A modern browser (Chrome 113+ for WebGPU, any modern browser for WebGL/Wasm)
+- A modern browser. WebGPU: Chrome/Edge 113+, Firefox 141+ (Windows; macOS on Apple Silicon from 145), Safari 26+. WebGL and Wasm: any modern browser
 
 **For desktop (Console, WPF, ASP.NET):**
 - Any .NET 10 project
@@ -22,27 +22,33 @@ SpawnDev.ILGPU extends [ILGPU](https://github.com/m4rs-mt/ILGPU) — a high-perf
 dotnet add package SpawnDev.ILGPU
 ```
 
-This installs SpawnDev.ILGPU along with the bundled ILGPU compiler and [SpawnDev.BlazorJS](https://github.com/LostBeard/SpawnDev.BlazorJS) for browser interop.
+This installs SpawnDev.ILGPU along with the bundled ILGPU compiler (the `SpawnDev.ILGPU.Fork` and `SpawnDev.ILGPU.Algorithms.Fork` packages) and [SpawnDev.SpawnJS](https://github.com/LostBeard/SpawnDev.SpawnJS) for browser interop.
 
 ## Configure Program.cs
 
-SpawnDev.ILGPU requires SpawnDev.BlazorJS to be initialized. This replaces the standard `RunAsync()` call:
+The browser backends need the SpawnJS runtime. Register it and start the app with `SpawnJSRunAsync()` (from the Blazor host package) instead of `RunAsync()`:
+
+```bash
+dotnet add package SpawnDev.SpawnJS.Blazor
+```
 
 ```csharp
-using SpawnDev.BlazorJS;
+using SpawnDev.SpawnJS;
 
 var builder = WebAssemblyHostBuilder.CreateDefault(args);
 builder.RootComponents.Add<App>("#app");
 builder.RootComponents.Add<HeadOutlet>("head::after");
 
-// Add BlazorJS services (required for browser interop)
-builder.Services.AddBlazorJSRuntime();
+// Add the SpawnJS runtime (required for browser interop)
+builder.Services.AddSpawnJSRuntime();
 
-// Use BlazorJSRunAsync instead of RunAsync
-await builder.Build().BlazorJSRunAsync();
+// Starts SpawnJS background services, then the Blazor host
+await builder.Build().SpawnJSRunAsync();
 ```
 
-> **Desktop apps** do not require SpawnDev.BlazorJS. Use `SpawnDev.ILGPU` directly — no special initialization needed.
+> **Desktop apps** need no SpawnJS setup. Use `SpawnDev.ILGPU` directly - no special initialization needed.
+
+> **Upgrading from SpawnDev.ILGPU 5.2 or older?** 5.3.0 moved from SpawnDev.BlazorJS to SpawnDev.SpawnJS 3: `AddBlazorJSRuntime()` / `BlazorJSRunAsync()` become `AddSpawnJSRuntime()` / `SpawnJSRunAsync()`, and the JS object wrappers (`HTMLCanvasElement`, `Uint8Array`, `GPUDevice`, ...) move from `SpawnDev.BlazorJS.JSObjects` to `SpawnDev.SpawnJS.JSObjects`. Delete `bin` and `obj` after upgrading; an incremental build can keep the old assembly.
 
 ## Publishing Configuration
 
@@ -102,7 +108,7 @@ Here's a complete example that adds two arrays on the GPU:
         using var context = await Context.CreateAsync(builder => builder.AllAcceleratorsAsync());
 
         // 2. Create the best available accelerator
-        // Browser: WebGPU > WebGL > Wasm | Desktop: CUDA > OpenCL > CPU
+        // Browser: WebGPU > WebGL > Wasm | Desktop: CUDA > discrete OpenCL GPU > integrated > CPU
         using var accelerator = await context.CreatePreferredAcceleratorAsync();
 
         // 3. Allocate GPU buffers
@@ -158,7 +164,7 @@ using var context = await Context.CreateAsync(builder => builder.AllAccelerators
 using var accelerator = await context.CreatePreferredAcceleratorAsync();
 ```
 
-This picks the best available backend: **WebGPU → WebGL → Wasm** in the browser, or **CUDA → OpenCL → CPU** on desktop. You can also target a specific backend — see [Backends](backends.md).
+This picks the best available backend: **WebGPU -> WebGL -> Wasm** in the browser, or **CUDA -> discrete OpenCL GPU -> integrated OpenCL GPU -> other OpenCL devices -> CPU** on desktop. Devices are ranked by kind, not by reported memory (integrated GPUs report system RAM), so a hybrid laptop gets its discrete GPU. You can also target a specific backend - see [Backends](backends.md) - or declare what your kernel needs - see [Capabilities & Backend Selection](capabilities-and-backend-selection.md).
 
 ### The Kernel
 
@@ -173,7 +179,7 @@ A kernel is a `static void` method. The first parameter is always an **index typ
 
 Key rules:
 - Kernels must be `static` methods
-- Only **value types** are allowed (no classes, no `string`, no reference types)
+- Only **value types** are allowed (no classes, no `string`, no reference types). Scalar parameters (`int`, `float`, `bool`, `long`, ...) and structs of them are fine
 - No `throw` statements — see [Limitations](limitations.md)
 - No `ref` or `out` parameters
 - Use `ArrayView<T>` to access GPU memory (like a `Span<T>` for the GPU)

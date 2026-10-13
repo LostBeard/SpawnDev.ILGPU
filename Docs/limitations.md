@@ -8,13 +8,14 @@ SpawnDev.ILGPU runs ILGPU across both Blazor WebAssembly and desktop environment
 
 Blazor WebAssembly runs on a single thread. Blocking that thread prevents JavaScript promises from resolving, causing a permanent deadlock.
 
-### ❌ Will Deadlock
+### ❌ Will Deadlock or Throw
 
 ```csharp
-buffer.GetAsArray1D();               // DEADLOCKS — calls synchronous readback internally
-var result = task.Result;            // DEADLOCKS — blocks on async result
+var result = task.Result;            // DEADLOCKS - blocks on async result
 task.Wait();                         // DEADLOCKS
 task.GetAwaiter().GetResult();       // DEADLOCKS
+buffer.GetAsArray1D();               // THROWS NotSupportedException on WebGPU/WebGL/Wasm (sync readback)
+accelerator.Synchronize();           // THROWS NotSupportedException on WebGPU/WebGL/Wasm (sync wait)
 ```
 
 ### ✅ Correct Async Pattern
@@ -189,28 +190,32 @@ Not all ILGPU features work on all backends:
 | Group.Broadcast | ✅ | ❌ | ✅ | ✅ | ✅¹ | ✅ |
 | Atomics | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
 | In-kernel scatter / multi-store per thread⁶ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ |
-| Warp/Subgroup ops | ✅² | ❌ | ❌ | ✅ | ✅¹ | ✅ |
+| Warp/Subgroup ops | ✅² | ❌ | ✅⁷ | ✅ | ✅¹ | ✅ |
 | f64 emulation | ✅ | ✅ | N/A (native) | N/A (native) | N/A (native) | N/A (native) |
 | i64 emulation | ✅ | ✅ | N/A (native) | N/A (native) | N/A (native) | N/A (native) |
-| ILGPU Algorithms | ✅⁴ | ❌³ | ⚠️⁵ | ✅ | ✅ | ✅ |
+| ILGPU Algorithms | ✅⁴ | ⚠️³ | ✅⁵ | ✅ | ✅ | ✅ |
 
 ¹ Requires device subgroup support. OpenCL shuffle needs `cl_intel_subgroups` (Intel) or `cl_khr_subgroup_shuffle` + `cl_khr_subgroup_shuffle_relative` (NVIDIA/AMD). Dynamically detected.  
-² Requires `subgroups` WebGPU extension  
-³ Most algorithms require shared memory or atomics  
-⁴ WebGPU: RadixSort, Scan, Reduce, Histogram fully supported and tested
-⁵ Wasm: RadixSort, Scan, Reduce, Histogram fully supported with fiber-based phase dispatch and pure spin barriers at full `hardwareConcurrency` (v4.6.0). 249 pass / 0 fail / 3 skip.  
+² Requires the adapter's `subgroups` feature  
+³ Host-level only: `CreateRadixSort` / `CreateRadixSortPairs` (all key types), `CreateScan` and `CreateReduction` / `Reduce` run as shared-memory-free multi-pass dispatches. In-kernel group/warp algorithms and Histogram need shared memory or atomics and throw `UnsupportedKernelFeatureException`  
+⁴ WebGPU: RadixSort, Scan, Reduce, Histogram fully supported and tested  
+⁵ Wasm: RadixSort, Scan, Reduce, Histogram fully supported with fiber-based phase dispatch and spin barriers across the worker pool  
+⁷ Emulated: `WarpSize` 8, shuffles through a shared-memory exchange (no hardware warps); results match the CPU backend  
 ⁶ WebGL Transform-Feedback captures one output record per vertex at the thread's own slot (gather-only). A kernel writing a computed/arbitrary output index, or >1 element of one buffer per thread that isn't the consecutive `v*K+slot` layout, can't run in-kernel on WebGL. Declare `AcceleratorRequirements.RequiresScatterStores = true` to filter WebGL at selection time. (WebGL still scatters at the host/algorithm layer — e.g. RadixSort via render-to-texture.) A compile-time fail-loud guard for this is a tracked open item (`Plans/webgl-multistore-fail-loud-guard-plan-2026-06-13.md`).
 
 ## Browser Compatibility
 
 | Browser | WebGPU | WebGL | Wasm |
 |---------|--------|-------|------|
-| Chrome 113+ | ✅ | ✅ | ✅ |
-| Edge 113+ | ✅ | ✅ | ✅ |
-| Firefox 128+ | ✅ (Nightly) | ✅ | ✅ |
-| Safari 18+ | 🧪 Experimental | ✅ | ✅ |
-| Mobile Chrome | ✅ (Android) | ✅ | ✅ |
-| Mobile Safari | ❌ | ✅ | ✅ |
+| Chrome / Edge 113+ (desktop) | ✅ | ✅ | ✅ |
+| Chrome 121+ (Android) | ✅ | ✅ | ✅ |
+| Firefox 141+ | ✅ Windows; macOS on Apple Silicon from 145; Linux / Android not yet | ✅ | ✅ |
+| Safari 26+ (macOS, iOS, iPadOS) | ✅ | ✅ | ✅ |
+| Older browsers | ❌ | ✅ | ✅ |
+
+WebGPU support changes quickly; the [gpuweb implementation status](https://github.com/gpuweb/gpuweb/wiki/Implementation-Status) page is the current reference. `CreatePreferredAcceleratorAsync()` falls back to WebGL (then Wasm) wherever WebGPU is missing.
+
+Firefox's `copyExternalImageToTexture` refuses video sources; `IExternalImageCopier` detects that and goes through a canvas (see [Canvas Rendering & Image Input](canvas-rendering.md#image-and-video-input-iexternalimagecopier)).
 
 ## Namespace Collision
 
@@ -223,6 +228,10 @@ using global::ILGPU.Runtime; // Original ILGPU runtime
 ```
 
 This is a known issue preserved for backward compatibility.
+
+## WebGPU Binding Limit
+
+WebGPU allows a limited number of storage buffers per shader stage (`maxStorageBuffersPerShaderStage`; the spec minimum is 8, and 10 is common). The WebGPU device is created with the adapter's maximum, and `accelerator.MaxStorageBufferBindings` reports it. Every `ArrayView` kernel parameter uses one storage buffer and the packed scalar parameters use one more, so a kernel can take at most `MaxStorageBufferBindings - 1` views (9 on a 10-binding adapter). Past the limit, dispatch throws `InvalidOperationException` naming the counts. Combine related arrays into one `ArrayView<MyStruct>` to stay under it.
 
 ## Maximum Parameter Count
 

@@ -14,7 +14,7 @@ During a capture pass, every kernel dispatch the accelerator encodes is *also* r
 
 The dispatches still execute normally during capture. The plan additionally takes ownership of the per-dispatch `_scalar_params` buffers (they would otherwise return to the scalar pool and be overwritten by later dispatches) and the coalesced param buffers (they would otherwise be destroyed at flush).
 
-`ReplayAsync()` re-encodes the whole plan with a **single .NET->JS interop crossing**: a JS loop (`wwwroot/webgpuDispatchPlan.js`) writes one command encoder with one compute pass per dispatch (preserving WebGPU's inter-pass ordering guarantees) and submits one command buffer. This removes the per-dispatch interop cost, which is the dominant term of a graph-executor forward on WebGPU, the same way `cuGraphLaunch` removes per-kernel launch prep on CUDA.
+`ReplayAsync()` re-encodes the whole plan with a **single .NET->JS interop crossing**: a JS loop (`wwwroot/webgpuDispatchPlan.js`) encodes one compute pass per dispatch (preserving WebGPU's inter-pass ordering guarantees) and submits the result, splitting it into a new command buffer every `WebGPUBackend.MaxReplayPassesPerSubmit` passes (default 512). This removes the per-dispatch interop cost, which is the dominant term of a graph-executor forward on WebGPU, the same way `cuGraphLaunch` removes per-kernel launch prep on CUDA.
 
 ## Basic API
 
@@ -44,7 +44,7 @@ plan.Dispose();   // returns retained scalar buffers to the pool, destroys retai
 
 `ReplayAsync()` returns the number of dispatches encoded. The submit is fire-and-forget (queue-ordered after any prior `writeBuffer` input uploads); `await accelerator.SynchronizeAsync()` to wait for GPU completion before reading results. Calling `ReplayAsync()` on a plan that is still recording throws `InvalidOperationException`.
 
-Internally, `ReplayAsync()` first calls `FlushPendingCommands()`. A caller that refreshes the captured input buffers via a *kernel dispatch* (for example a video pipeline's per-frame preprocess into the stable input) has that dispatch sitting in the accelerator's pending encoder; the plan's own submit is a separate JS-side command buffer, so without the flush the pending work would land *after* the replay and the replay would read the previous frame's data. `writeBuffer` uploads (`CopyFromCPU`) were always safe because they are queue-ordered, not encoder-batched.
+Internally, `ReplayAsync()` first calls `FlushPendingCommands()`. A caller that refreshes the captured input buffers via a *kernel dispatch* (for example a video pipeline's per-frame preprocess into the stable input) has that dispatch sitting in the accelerator's pending encoder; the plan's own submit is a separate JS-side command buffer, so without the flush the pending work would land *after* the replay and the replay would read the previous frame's data. The same flush covers uploads: since 5.2.25 a small `CopyFromCPU` (up to 64 KiB) is also recorded in the pending batch rather than written immediately, and the flush submits it ahead of the replay.
 
 ## Parameterized replay (patch surface)
 

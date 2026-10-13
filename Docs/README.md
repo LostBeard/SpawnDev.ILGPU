@@ -11,17 +11,22 @@ Comprehensive documentation for SpawnDev.ILGPU — run ILGPU C# kernels on WebGP
 
 ### Core Concepts
 - **[Backends](backends.md)** — WebGPU, WebGL, Wasm (browser) and Cuda, OpenCL, CPU (desktop): setup, capabilities, and auto-selection
-- **[Capabilities & Backend Selection](capabilities-and-backend-selection.md)** — `AcceleratorRequirements` declarative gating, `UnsupportedKernelFeatureException`, choosing the right backend for a given kernel
+- **[Capabilities & Backend Selection](capabilities-and-backend-selection.md)** - `AcceleratorRequirements` declarative gating, device ranking (`GetBestDevice` / `DevicePreference`, discrete GPU first on hybrid machines), `UnsupportedKernelFeatureException`
+- **[Async API](async.md)** - The sync/async contract: which operations wait or read back (async-only in the browser) and which are fire-and-forget
 - **[Writing Kernels](kernels.md)** — Kernel fundamentals, index types, loading, launching, math functions, and kernel rules
-- **[Memory & Buffers](memory-and-buffers.md)** — Allocation, data transfer, async readback, buffer lifecycle, and the WebGPU compiled-shader cache (retention, `MaxCachedShaders` LRU cap, `ClearShaderCache()`)
+- **[Memory & Buffers](memory-and-buffers.md)** - Allocation, data transfer, streaming, async readback, buffer lifecycle, the device memory budget (`IDeviceMemoryReclaimer`), allocation diagnostics, and the WebGPU compiled-shader cache (`MaxCachedShaders` LRU cap, `ClearShaderCache()`)
+- **[Canvas Rendering & Image Input](canvas-rendering.md)** - `ICanvasRenderer` (GPU buffer -> canvas) and `IExternalImageCopier` (video / image -> GPU buffer)
 
 ### Advanced
-- **[Advanced Patterns](advanced-patterns.md)** — ILGPU Algorithms (RadixSort, Scan, Reduce), GPU device sharing, external buffers, rendering pipelines, canvas blitting
+- **[Advanced Patterns](advanced-patterns.md)** - GPU intrinsics, ILGPU Algorithms (RadixSort, Scan, Reduce), GPU device sharing, external buffers, render loops
+- **[Precompiled Shaders](precompiled-shaders.md)** - Offline codegen, build-time precompilation, the runtime shader cache, and session shader export/import
 - **[WebGPU Dispatch-Plan Capture / Replay](dispatch-plan-capture-replay.md)** - Record a fixed WebGPU dispatch sequence once and replay it with a single interop crossing (the browser twin of CUDA graph capture); parameterized replay for a moving loop variable, timing helpers, and the validity contract
 - **[Wasm SIMD128 (v128)](wasm-simd.md)** — Automatic WebAssembly SIMD vectorization of the Wasm backend: how `kernel_simd` is generated and selected, what vectorizes, cross-mode determinism, and the `ForceScalar`/`ForceSimd` knobs
 - **[Generic-Math f16 Kernels](generic-math-f16.md)** — One generic kernel over the numeric/weight type (`float` or `Half`): `INumber<Half>` operators + `NumericConvert.ToFloat32` for fp32 accumulation
 - **[CUDA Libraries](cuda-libraries.md)** — NVIDIA-specific libraries: nvJPEG (image encode/decode), cuRand (random numbers), cuBLAS (linear algebra), cuFFT (FFT), NVML (device monitoring)
-- **[Limitations & Constraints](limitations.md)** — Blazor WASM restrictions, unsupported features, precision, and browser compatibility
+- **[Limitations & Constraints](limitations.md)** - Blazor WASM restrictions, unsupported features, precision, and browser compatibility
+- **[QR Codes](qr-codes.md)** - GPU-accelerated QR code encoder, decoder and renderer
+- **[P2P Compute](p2p-compute.md)** - The P2P backend in development (on hold; not published)
 
 ### Reference
 - **[API Reference](api-reference.md)** — Public classes, methods, and extension methods organized by namespace
@@ -43,7 +48,7 @@ Comprehensive documentation for SpawnDev.ILGPU — run ILGPU C# kernels on WebGP
 | **ILGPU Documentation** | [ILGPU Docs](https://github.com/m4rs-mt/ILGPU/tree/master/Docs) |
 | **ILGPU Samples** | [ILGPU Samples](https://github.com/m4rs-mt/ILGPU/tree/master/Samples) |
 | **ILGPU NuGet** | [ILGPU on NuGet](https://www.nuget.org/packages/ILGPU) |
-| **SpawnDev.BlazorJS** | [LostBeard/SpawnDev.BlazorJS](https://github.com/LostBeard/SpawnDev.BlazorJS) |
+| **SpawnDev.SpawnJS** | [LostBeard/SpawnDev.SpawnJS](https://github.com/LostBeard/SpawnDev.SpawnJS) (browser interop since 5.3.0; replaces SpawnDev.BlazorJS) |
 
 ## Acknowledgments
 
@@ -53,4 +58,4 @@ We are deeply grateful for their work in creating such a powerful and well-desig
 
 ILGPU is licensed under the [University of Illinois/NCSA Open Source License](https://github.com/m4rs-mt/ILGPU/blob/master/LICENSE.txt).
 
-> **Cross-platform note:** SpawnDev.ILGPU bundles the full ILGPU library, so it works in both **Blazor WebAssembly** and **desktop/server** environments. The `AllAcceleratorsAsync()` method registers native backends (Cuda, OpenCL, CPU) alongside browser backends, and the async extension methods (`SynchronizeAsync`, `CopyToHostAsync`) gracefully fall back to synchronous ILGPU calls for native accelerators. This means you can target both browser and desktop from a single codebase without swapping libraries.
+> **Cross-platform note:** SpawnDev.ILGPU bundles the full ILGPU library, so it works in both **Blazor WebAssembly** and **desktop/server** environments. The `AllAcceleratorsAsync()` method registers the native backends (Cuda, OpenCL, CPU) on desktop and the browser backends (WebGPU, WebGL, Wasm) in Blazor WebAssembly, and the async extension methods (`SynchronizeAsync`, `CopyToHostAsync`) gracefully fall back to synchronous ILGPU calls for native accelerators. This means you can target both browser and desktop from a single codebase without swapping libraries.

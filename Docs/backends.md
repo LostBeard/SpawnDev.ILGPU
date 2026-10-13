@@ -17,8 +17,9 @@ SpawnDev.ILGPU supports multiple backends for running ILGPU kernels. In the brow
 | **Dynamic Shared Memory** | ✅ | ❌ | ✅ |
 | **Atomics** | ✅ | ❌ | ✅ |
 | **ILGPU Algorithms** | ✅ RadixSort, Scan, Reduce, Histogram | ⚠️ Host RadixSort (all key types incl. Half) + Scan + Reduce (multi-dispatch); no in-kernel group ops | ✅ RadixSort, Scan, Reduce, Histogram |
+| **Subgroups (`Warp.*`)** | ✅ with the `subgroups` adapter feature | ❌ | ✅ Emulated (`WarpSize` 8) |
 | **64-bit (f64/i64)** | ✅ Emulated | ✅ Emulated | ✅ Native |
-| **Browser support** | Chrome/Edge 113+ | All modern browsers | All modern browsers |
+| **Browser support** | Chrome/Edge 113+, Firefox 141+ (Windows), Safari 26+ | All modern browsers | All modern browsers |
 
 ### Desktop/Server Backends
 
@@ -31,8 +32,8 @@ SpawnDev.ILGPU supports multiple backends for running ILGPU kernels. In the brow
 | **64-bit** | ✅ Native | ✅ Native | ✅ Native |
 | **Requirement** | NVIDIA GPU + driver | OpenCL 2.0+ or 3.0 GPU | None |
 
-**Auto-selection priority (browser):** WebGPU → WebGL → Wasm
-**Auto-selection priority (desktop):** Cuda → OpenCL → CPU
+**Auto-selection priority (browser):** WebGPU -> WebGL -> Wasm
+**Auto-selection priority (desktop):** Cuda -> discrete OpenCL GPU -> integrated OpenCL GPU -> other OpenCL devices -> CPU. Devices are ranked by kind, not reported memory (integrated GPUs and OpenCL CPU runtimes report system RAM), so a hybrid laptop gets its discrete GPU. See [Device ranking](capabilities-and-backend-selection.md#device-ranking-devicepreference).
 
 > **CUDA extras:** The CUDA backend also provides access to NVIDIA-specific libraries: nvJPEG (image encode/decode), cuRand (random numbers), cuBLAS (linear algebra), cuFFT (FFT), and NVML (device monitoring). See [CUDA Libraries](cuda-libraries.md).
 
@@ -58,7 +59,7 @@ var results = await bufC.CopyToHostAsync<float>();   // The only GPU→CPU data 
 ```
 
 `AllAcceleratorsAsync()` automatically detects the environment:
-- **Browser:** Registers WebGPU, WebGL, and Wasm
+- **Browser:** Registers WebGPU, WebGL, and Wasm (plus ILGPU's CPU accelerator, the last-resort fallback; in the browser it runs on the single UI thread)
 - **Desktop:** Registers Cuda, OpenCL, and CPU (browser backends are skipped)
 
 `CreatePreferredAcceleratorAsync()` picks the best available backend on either platform.
@@ -70,10 +71,14 @@ var results = await bufC.CopyToHostAsync<float>();   // The only GPU→CPU data 
 If you're certain your code will **never** run in a browser, you can use ILGPU's standard synchronous API:
 
 ```csharp
-// Desktop only — the synchronous Synchronize()/GetAsArray1D() below THROW NotSupportedException in Blazor WASM
+// Desktop only - the synchronous Synchronize()/GetAsArray1D() below THROW NotSupportedException in Blazor WASM
+using SpawnDev.ILGPU;   // GetBestDevice
+
 using var context = Context.Create(builder => builder.AllAccelerators());
-using var accelerator = context.GetPreferredDevice(preferCPU: false)
+using var accelerator = context.GetBestDevice()   // CUDA > discrete GPU > integrated GPU > CPU
     .CreateAccelerator(context);
+// (ILGPU's context.GetPreferredDevice(preferCPU: false) sorts by memory only and can pick an
+//  integrated GPU or Intel's OpenCL CPU runtime over a discrete GPU.)
 
 // ... load kernel, dispatch ...
 
@@ -94,8 +99,9 @@ using var accelerator = context.CreatePreferredAccelerator(
         RequiresAtomics = true,        // rules out WebGL
         RequiresFloat64Native = true,  // rules out WebGPU + WebGL
     });
-// On desktop: CUDA > OpenCL > CPU
-// On browser with the above combo: only Wasm survives
+// On desktop: CUDA > discrete OpenCL GPU > integrated OpenCL GPU > other OpenCL > CPU
+// On browser with the above combo: only Wasm survives (use CreatePreferredAcceleratorAsync
+// in the browser - the Wasm and WebGPU accelerators can only be created asynchronously)
 // Throws NotSupportedException with a diagnostic message if nothing matches
 ```
 
@@ -149,7 +155,9 @@ using var accelerator = await devices[0].CreateAcceleratorAsync(context, options
 - **Barriers** — `Group.Barrier()` maps to `workgroupBarrier()`
 - **Atomics** — `Atomic.Add`, `Atomic.Min`, `Atomic.Max`, `Atomic.CompareExchange`
 - **ILGPU Algorithms** — RadixSort, Scan, Reduce, Histogram, and other algorithm extensions are fully supported and tested (including large-scale sorts up to 4M+ elements). Use `CreateRadixSortPairs<TKey, TValue>()`, `CreateScan()`, `CreateReduce()`, etc. the same way as on desktop backends
-- **Subgroups** — `Group.Broadcast`, `Warp.Shuffle` (when the `subgroups` extension is available)
+- **Subgroups** - `Group.Broadcast`, `Warp.Shuffle` / `ShuffleXor` / `ShuffleUp` / `ShuffleDown` (when the adapter exposes the `subgroups` feature; `WebGPUBackendOptions.ForceDisableSubgroups` turns them off)
+- **Dispatch batching** - plain dispatches, GPU copies, clears and uploads up to 64 KiB are recorded and submitted with one .NET to JS crossing per submit (`WebGPUBackend.EnableDispatchBatching`, default on). If you also submit your own WebGPU work on the same device, call `accelerator.FlushPendingCommands()` first, or your submit runs before ILGPU's pending work
+- **Dispatch-plan capture / replay** - record a fixed dispatch sequence once and replay it with one interop crossing ([guide](dispatch-plan-capture-replay.md))
 - **Auto-detected extensions** — probes adapter for `shader-f16`, `subgroups`, `timestamp-query`, etc.
 - **Device loss detection** — monitors `device.lost` promise; `IsDeviceLost` property and `DeviceLost` event fire on unexpected GPU device loss (driver crash, GPU reset, VRAM exhaustion). Subsequent dispatch/synchronize calls throw `InvalidOperationException` with a clear message
 
@@ -172,13 +180,13 @@ await accelerator.SynchronizeAsync();
 
 ### Important: Buffer Copy Behavior
 
-Synchronous GPU→CPU copy methods (`CopyTo`, `CopyToCPU`, `GetAsArray1D`) throw `NotSupportedException` on WebGPU because GPU readback requires an async `mapAsync` call. Use `CopyToHostAsync` instead.
+Synchronous GPU->CPU copies (`CopyToCPU`, `GetAsArray1D`, and `CopyTo` into host memory) throw `NotSupportedException` on WebGPU because GPU readback requires an async `mapAsync` call. Use `CopyToHostAsync` instead.
 
-GPU→GPU copies via `CopyFrom` work perfectly — they use the native `CopyBufferToBuffer` command. See [Memory & Buffers](memory-and-buffers.md#cross-backend-buffer-operations-reference) for the full compatibility table.
+GPU->GPU copies work in both directions - `dst.CopyFrom(src)` and (5.3.4+) `src.CopyTo(dst)` - and use the native `CopyBufferToBuffer` command, ordered after the kernels that produced the source. See [Memory & Buffers](memory-and-buffers.md#cross-backend-buffer-operations-reference) for the full compatibility table.
 
 ### Browser Support
 
-Chrome/Edge 113+, Firefox Nightly (with `dom.webgpu.enabled`).
+Chrome/Edge 113+ (desktop), Chrome 121+ (Android), Firefox 141+ (Windows; macOS on Apple Silicon from 145), Safari 26+. Status changes quickly; see the [gpuweb implementation status](https://github.com/gpuweb/gpuweb/wiki/Implementation-Status).
 
 ## WebGL Backend
 
@@ -227,7 +235,8 @@ Buffers persist as **GPU-resident textures** in the worker. Kernel dispatch send
 - **No shared memory** — GLSL ES 3.0 vertex shaders don't support workgroup memory
 - **No atomics** — not available in the vertex shader stage  
 - **No barriers** — no workgroup synchronization
-- **No sync GPU→CPU** — `CopyTo`/`CopyToCPU`/`GetAsArray1D` throw `NotSupportedException`. Use `CopyToHostAsync`. GPU→GPU `CopyFrom` works.
+- **No sync GPU->CPU** - `CopyToCPU`/`GetAsArray1D` (and `CopyTo` into host memory) throw `NotSupportedException`. Use `CopyToHostAsync`. GPU->GPU `CopyFrom` / `CopyTo` work.
+- **One output record per thread** - Transform Feedback captures one record per vertex at the thread's own slot. A kernel that writes a computed output index (scatter) or several elements of one buffer per thread outside the positional `v*K+slot` layout cannot run on WebGL; declare `RequiresScatterStores = true` to filter WebGL at selection time
 - **No in-kernel group/warp ops** - `Group.ExclusiveScan`/`InclusiveScan`/`AllReduce`/`Reduce` and the `Warp` equivalents need shared memory + barriers, which the vertex-shader model lacks. Calling them in a kernel throws `UnsupportedKernelFeatureException` at compile time (rather than silently returning 0). Use the host-level algorithms below instead, or declare `RequiresSharedMemory = true` on `AcceleratorRequirements` to filter WebGL at selection time.
 
 ### ILGPU Algorithms
@@ -236,7 +245,7 @@ Despite having no shared memory, atomics, or barriers, WebGL supports the **host
 
 - **`RadixSort`** - `CreateRadixSort` / `CreateRadixSortPairs`, all key types (`int`/`uint`/`float`/`long`/`double`/`Half`), keys-only and pairs, ascending/descending, power-of-two and arbitrary counts, up to 4M elements. Uses a render-to-texture GPGPU scatter (1-bit stable split per pass); `Half` keys sort via an unpacked-f32 working representation since the whole-texel scatter can't move a sub-texel `Half`.
 - **`CreateScan`** - Hillis-Steele multi-pass scan (log2(N) element-wise passes, ping-pong buffers).
-- **`CreateReduce`** - multi-pass pairwise reduction.
+- **`CreateReduction`** (and the `Reduce` / `ReduceAsync` extensions built on it) - multi-pass pairwise reduction.
 
 These are used the same way as on desktop backends. (The in-kernel `GroupExtensions` group/warp scan & reduce above are a *different*, unsupported API - those throw.)
 
@@ -272,14 +281,17 @@ if (devices.Count > 0)
 - **Shared memory** — uses `SharedArrayBuffer` for zero-copy data sharing
 - **Group.Barrier()** — full workgroup barrier synchronization across Web Workers
 - **Dynamic shared memory** — runtime-sized workgroup memory via `SharedMemory.GetDynamic()`
-- **Group.Broadcast** — intra-group value sharing
+- **Group.Broadcast** - intra-group value sharing
+- **Subgroups (emulated)** - `Warp.Shuffle` / `ShuffleXor` / `ShuffleUp` / `ShuffleDown` with `Warp.WarpSize = 8`, lowered to a shared-memory exchange (there are no hardware warps), verified against the CPU backend
+- **Pipelined dispatch** - a barrier-free dispatch of at most `WasmAccelerator.NonBarrierMinItemsPerWorker` items (65536) goes to a pipeline worker without waiting for the dispatches ahead of it, so the host prepares dispatch N+1 while the worker runs dispatch N; results are identical to the serialized path (`WasmAccelerator.EnablePipelinedDispatch`, default on). Larger flat grids split across workers, one per 65536 items
+- **Persistent workers** - the worker pool and the shared linear memory are created once per tab and reused across accelerators, so compiled modules stay warm
 - **Atomics** — supported via `SharedArrayBuffer`
 - **ILGPU Algorithms** — RadixSort, Scan, Reduce, and Histogram are fully supported with full `hardwareConcurrency` multi-worker barrier synchronization. The Wasm backend uses fiber-based phase dispatch with pure spin barriers, per-thread scratch memory, and an in-Wasm phase dispatcher that eliminates JS-Wasm boundary crossings between phases
 - **SIMD128 (v128) auto-vectorization** *(4.15.0+)* — per-lane kernels are automatically vectorized to WebAssembly SIMD128 and selected at runtime when the engine supports it, with a byte-identical scalar fallback. Covers the full numeric tier (f32/i32/f64/i64) across elementwise code, loops, divergent control flow (diamonds, masked stores, chained/nested selects, divergent loops), gather/scatter, and the full f32/f64 math surface. Additive and bit-exact to the scalar path. See **[Wasm SIMD128](wasm-simd.md)**.
 
 ### Limitations
 
-- **No sync GPU→CPU** — `CopyTo`/`CopyToCPU`/`GetAsArray1D` throw `NotSupportedException`. Use `CopyToHostAsync`. GPU→GPU `CopyFrom` works.
+- **No sync GPU->CPU** - `CopyToCPU`/`GetAsArray1D` (and `CopyTo` into host memory) throw `NotSupportedException`. Use `CopyToHostAsync`. GPU->GPU `CopyFrom` / `CopyTo` work and are queued behind the kernels that produce the source.
 
 ### SharedArrayBuffer Requirement
 
@@ -322,7 +334,7 @@ foreach (var device in context)
 
 ### CPU (Desktop)
 
-Multi-threaded CPU accelerator using `Parallel.For`. Useful as a reference or for machines without GPU drivers. Full ILGPU feature support (shared memory, barriers, atomics). Not available in the browser — use the Wasm backend for off-main-thread compute in Blazor.
+Multi-threaded CPU accelerator: runs kernels as .NET code on ILGPU's own worker threads, one simulated multiprocessor per thread. Kernels without barriers or warp operations run each group's lanes in a plain loop. Useful as a reference or for machines without GPU drivers. Full ILGPU feature support (shared memory, barriers, atomics). Not available in the browser - use the Wasm backend for off-main-thread compute in Blazor.
 
 ```csharp
 using ILGPU;
@@ -332,7 +344,7 @@ using var context = Context.Create(b => b.CPU());
 using var accelerator = context.CreateCPUAccelerator(0);
 ```
 
-> **Note:** Cuda, OpenCL, and CPU are not available in Blazor WebAssembly — they are skipped silently when registering via `AllAcceleratorsAsync()` in the browser.
+> **Note:** Cuda and OpenCL are not available in Blazor WebAssembly - `AllAcceleratorsAsync()` skips them in the browser. Use the Wasm backend for off-main-thread CPU compute in Blazor.
 
 ## 64-bit Emulation
 

@@ -108,7 +108,7 @@ These rules apply to all kernel code — they come from ILGPU's design and the c
 | Value types only | No classes, no `string`, no reference types |
 | No `throw` | No backend supports exception handling in kernels |
 | No recursion | GPU hardware doesn't support call stacks |
-| No dynamic allocation | No `new` inside kernels (except fixed-size structs) |
+| No heap allocation | No `new` of classes or strings inside kernels. Structs are fine, and so is a device-local array with a compile-time-constant length (`var acc = new float[16];`), indexed by constants or runtime values, on all 6 backends (4.16.0+) |
 
 > **`ref` / `out` parameters are supported in helper methods** called from a kernel — see "Helper Methods and Inlining" below. They are NOT supported on the kernel's own top-level signature (the entry point itself).
 
@@ -168,7 +168,7 @@ public sealed class Vp9Idct16x16Kernel
 | Large helper (> ~200 IL), ≥ 8 call sites | **Yes** | Inlining produces giant straight-line shader code. |
 | Helper does butterfly arithmetic / DCT / FFT-style stages | **Likely yes** | These are typically dense and called many times; even if they fit at small scale, scale with kernel size. |
 | Helper uses `Group.Barrier()`, `LocalMemory`, atomics | **No** | WGSL barrier-uniformity requires barriers to be at the same textual depth for all threads — only safe under inlining. |
-| Helper takes `ArrayView<T>` parameters | **No** (currently) | View-as-fn-param marshaling is not yet supported in fn-def emission; the helper would compile but the view would not pass correctly. Inline it instead. |
+| Helper takes `ArrayView<T>` / `LocalMemory` view parameters | **No effect on WebGPU/WebGL** | Correct on every backend, but the WGSL/GLSL function emitters cannot pass an address, so on WebGPU and WebGL such a call is always inlined at IR level (`InlineAddressParameterCalls`, 5.2.18+), `[NoInlining]` or not. The attribute still applies on Wasm, CUDA, OpenCL and CPU. |
 
 ### What the codegen does on each backend
 
@@ -190,10 +190,13 @@ The fn-definition codegen path (4.9.2-rc.18+) supports:
 - Struct value types (lowered field-by-field)
 - Multiple call sites (each gets its own scratch slot for ref/out params)
 
-Not yet supported on `[NoInlining]` helpers (use default inlining instead):
+Kept inline on WebGPU/WebGL even when marked `[NoInlining]` (correct, but no shader-size benefit there):
 
-- `ArrayView<T>` parameters (view-to-fn-param marshaling deferred)
-- `LocalMemory<T>` access from inside the helper (use a scratch parameter instead)
+- `ArrayView<T>` / `LocalMemory` view parameters (always inlined at IR level, 5.2.18+)
+
+Not supported inside `[NoInlining]` helpers (use default inlining instead):
+
+- `LocalMemory<T>` allocation inside the helper (pass a scratch view in instead)
 - Barrier / shared-memory access from inside the helper
 
 ### Why the IR Inliner respects `[MethodImpl(NoInlining)]`
@@ -327,7 +330,7 @@ static void GroupedKernel(ArrayView<int> data, ArrayView<int> output)
 
 ### Scalar Parameters
 
-Scalars (`int`, `float`, `double`, etc.) are passed by value:
+Scalars (`int`, `uint`, `long`, `ulong`, `float`, `double`, `bool`, `Half`, ...) are passed by value. `bool` scalar parameters work on all 6 backends since 5.3.1. On WebGPU all scalar parameters of a dispatch are packed into one small buffer, so they do not count against the storage-buffer binding limit:
 
 ```csharp
 static void ScalarKernel(Index1D index, ArrayView<float> data, float multiplier, int offset)
@@ -448,6 +451,7 @@ ILGPU maps standard .NET math to GPU-native operations:
 | `Math.Max(a, b)` | `max(a, b)` | ✅ All backends |
 | `MathF.FusedMultiplyAdd` | `fma(a, b, c)` | ✅ All backends |
 | `MathF.Atan2(y, x)` | `atan2(y, x)` | ✅ All backends |
+| `x % y` (`float` / `double`) | exact remainder | ✅ All backends. Bit-exact to .NET (IEEE fmod: the truncated remainder, no rounding) since 5.3.1; WebGPU, WebGL, Wasm and CUDA route it to `FloatRemainder.Rem`, a shift-subtract division on integer operations. (Emulated f64 on WebGPU/WebGL keeps its own `f64_rem`.) |
 
 ### Previously Unsupported Functions (Now Auto-Redirected)
 
@@ -456,7 +460,7 @@ These .NET methods contain internal `throw` statements, but all browser backends
 | C# | Status | Notes |
 |----|:------:|----------|
 | `Math.Clamp(val, min, max)` | ✅ Auto-redirected | Replaced with `Min(Max(val, min), max)` |
-| `Math.Round(x)` | ✅ Auto-redirected | Throw-free wrapper |
+| `Math.Round(x)` | ✅ Auto-redirected | Throw-free wrapper; rounds half to even like .NET (`MathF.Round(2.5f)` = 2) |
 | `Math.Truncate(x)` | ✅ Auto-redirected | Throw-free wrapper |
 | `Math.Sign(x)` | ✅ Auto-redirected | Throw-free wrapper |
 | `MathF.FusedMultiplyAdd` | ✅ Auto-redirected | Throw-free wrapper |

@@ -121,7 +121,7 @@ precisions; ILGPU compiles `Linear<Half>` to identical code to a hand-written ha
 - **Backends.** Everything here is verified on all six backends. On WebGPU/WebGL/Wasm, Half is stored
   packed and f16 arithmetic is emulated in fp32 (lossless); `ToFloat32` is the same widen either way.
   See [Data Type Support](data-type-support.md) for the per-type matrix.
-- **Algorithm kernels.** The **host-level** `accelerator.CreateRadixSort`/`CreateRadixSortPairs`/`CreateScan`/`CreateReduce`
+- **Algorithm kernels.** The **host-level** `accelerator.CreateRadixSort`/`CreateRadixSortPairs`/`CreateScan`/`CreateReduction`
   DO run on WebGL (shared-memory-free multi-dispatch - the draw-call boundary acts as the barrier). Only the
   **in-kernel** group/warp ops (`Group.Scan`/`Group.Reduce`/`Warp.*`) require shared memory + barriers and so
   throw on WebGL. Either way that is unrelated to generic math (a plain elementwise generic kernel runs on WebGL fine).

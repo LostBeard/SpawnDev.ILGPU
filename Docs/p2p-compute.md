@@ -1,5 +1,7 @@
 # P2P Distributed GPU Compute
 
+> **Status: in development, on hold.** The P2P backend has not been published to NuGet and its tests are switched off in the demo while the six core backends take priority. This page describes the design and the in-repo API ([SpawnDev.ILGPU.P2P](../SpawnDev.ILGPU.P2P)); reference the project directly to try it.
+
 **AcceleratorType.P2P** — the 7th ILGPU backend. Distributes GPU kernels across connected devices via WebRTC. Create a compute swarm, share a link or QR code, and anyone can contribute GPU power — from any device with a browser.
 
 ## Overview
@@ -19,7 +21,7 @@ The same C# kernel code runs on 1 GPU or 100 GPUs — transparently.
 
 ```bash
 dotnet add package SpawnDev.ILGPU
-dotnet add package SpawnDev.ILGPU.P2P
+# SpawnDev.ILGPU.P2P is not on NuGet yet: add a ProjectReference to SpawnDev.ILGPU.P2P/SpawnDev.ILGPU.P2P.csproj
 ```
 
 ## Quick Start
@@ -27,7 +29,7 @@ dotnet add package SpawnDev.ILGPU.P2P
 ### Create a Swarm (Coordinator)
 
 ```csharp
-using SpawnDev.BlazorJS.Cryptography;
+using SpawnDev.SpawnJS.Cryptography;
 using SpawnDev.ILGPU.P2P;
 using SpawnDev.WebTorrent;
 
@@ -173,7 +175,7 @@ The [Compute Swarm demo](https://lostbeard.github.io/SpawnDev.ILGPU/compute) dem
 
 ```csharp
 // Program.cs — register platform crypto and WebTorrent
-builder.Services.AddBlazorJSRuntime();
+builder.Services.AddSpawnJSRuntime();
 builder.Services.AddPlatformCrypto();
 builder.Services.AddSingleton<WebTorrentClient>();
 

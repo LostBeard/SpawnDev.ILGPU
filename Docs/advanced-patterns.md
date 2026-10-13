@@ -71,15 +71,16 @@ Warp (subgroup) operations allow threads within a warp to communicate directly w
 
 | Intrinsic | Description | WebGPU | WebGL | Wasm | CUDA | OpenCL | CPU |
 |-----------|-------------|--------|-------|------|------|--------|-----|
-| `Warp.WarpSize` | Number of threads in a warp | ✅² | ❌ | ✅ | ✅ | ✅¹ | ✅ |
-| `Warp.LaneIdx` | Thread index within warp | ✅² | ❌ | ✅ | ✅ | ✅¹ | ✅ |
-| `Warp.Shuffle(value, srcLane)` | Read value from another lane | ✅² | ❌ | ✅ | ✅ | ✅¹ | ✅ |
-| `Warp.ShuffleDown(value, delta)` | Read from lane + delta | ✅² | ❌ | ✅ | ✅ | ✅¹ | ✅ |
-| `Warp.ShuffleUp(value, delta)` | Read from lane - delta | ✅² | ❌ | ✅ | ✅ | ✅¹ | ✅ |
-| `Warp.ShuffleXor(value, mask)` | Read from lane XOR mask | ✅² | ❌ | ✅ | ✅ | ✅¹ | ✅ |
+| `Warp.WarpSize` | Number of threads in a warp | ✅² | ❌ | ✅³ | ✅ | ✅¹ | ✅ |
+| `Warp.LaneIdx` | Thread index within warp | ✅² | ❌ | ✅³ | ✅ | ✅¹ | ✅ |
+| `Warp.Shuffle(value, srcLane)` | Read value from another lane | ✅² | ❌ | ✅³ | ✅ | ✅¹ | ✅ |
+| `Warp.ShuffleDown(value, delta)` | Read from lane + delta | ✅² | ❌ | ✅³ | ✅ | ✅¹ | ✅ |
+| `Warp.ShuffleUp(value, delta)` | Read from lane - delta | ✅² | ❌ | ✅³ | ✅ | ✅¹ | ✅ |
+| `Warp.ShuffleXor(value, mask)` | Read from lane XOR mask | ✅² | ❌ | ✅³ | ✅ | ✅¹ | ✅ |
 
 ¹ Requires device subgroup support. For OpenCL: base subgroups need `cl_khr_subgroups` or `cl_intel_subgroups`; Warp.Shuffle additionally needs `cl_intel_subgroups` (Intel) or `cl_khr_subgroup_shuffle` + `cl_khr_subgroup_shuffle_relative` (NVIDIA/AMD). Dynamically detected.  
-² Requires `subgroups` WebGPU extension (Chrome 128+).
+² Requires the adapter's `subgroups` feature (requested automatically when present; `WebGPUBackendOptions.ForceDisableSubgroups` turns it off). The shuffle kind is honored: `ShuffleXor` / `ShuffleUp` / `ShuffleDown` emit `subgroupShuffleXor` / `Up` / `Down`.  
+³ Emulated: Wasm has no hardware warps. `WarpSize` is 8 and shuffles go through a per-lane shared-memory exchange; results match the CPU backend.
 
 ```csharp
 static void WarpReduceExample(ArrayView<float> data, ArrayView<float> output)
@@ -156,17 +157,31 @@ radixSort(stream, keys.View, values.View, tempBuf.View);
 await accelerator.SynchronizeAsync();
 ```
 
-### Reduce & Scan (WebGPU, Wasm)
+### Reduce & Scan (all backends)
 
-Reduce and inclusive/exclusive scan work on WebGPU and Wasm:
+Reduce and inclusive/exclusive scan run on every backend (on WebGL through host-level multi-pass emulation):
 
 ```csharp
-var reduce = accelerator.CreateReduce<int, Stride1D.Dense, AddInt32>();
-var result = await reduce(stream, input.View);
-await accelerator.SynchronizeAsync();
+using ILGPU.Algorithms;
+using ILGPU.Algorithms.ScanReduceOperations;
 
-var scan = accelerator.CreateScan<int, Stride1D.Dense, Stride1D.Dense, AddInt32>(ScanKind.Inclusive);
-scan(stream, input.View, output.View, tempView);
+var stream = accelerator.DefaultStream;
+
+// Reduce to a host value - async, because it ends in a readback (the sync scalar Reduce
+// throws on the browser backends).
+int sum = await accelerator.ReduceAsync<int, AddInt32>(stream, input.View);
+
+// Reduce into a device buffer - fire-and-forget, stays on the device.
+accelerator.Reduce<int, AddInt32>(stream, input.View, output.View);   // output: 1 element
+
+// Or keep a reusable reduction delegate
+var reduction = accelerator.CreateReduction<int, Stride1D.Dense, AddInt32>();
+reduction(stream, input.View, output.View);
+
+var scan = accelerator.CreateScan<int, Stride1D.Dense, Stride1D.Dense, AddInt32>(ScanKind.Exclusive);
+using var temp = accelerator.Allocate1D<int>(
+    accelerator.ComputeScanTempStorageSize<int>(input.Length));
+scan(stream, input.View, scanned.View, temp.View);
 ```
 
 ### Backend Support
@@ -178,7 +193,7 @@ scan(stream, input.View, output.View, tempView);
 | Reduce | ✅ | ✅ host† | ✅ |
 | Histogram | ✅ | ❌ | ✅ |
 
-**† Host-level only on WebGL.** The host-level builders `accelerator.CreateRadixSort`/`CreateRadixSortPairs`/`CreateScan`/`CreateReduce` DO run on WebGL — they use shared-memory-free multi-dispatch, where the draw-call boundary acts as the barrier (RadixSort via render-to-texture scatter). What WebGL cannot do is the **in-kernel** group/warp ops (`Group.Scan`/`Group.Reduce`/`Warp.*`): those need shared memory + barriers and throw `UnsupportedKernelFeatureException` at kernel-compile time.
+**† Host-level only on WebGL.** The host-level builders `accelerator.CreateRadixSort`/`CreateRadixSortPairs`/`CreateScan`/`CreateReduction` (and `Reduce`/`ReduceAsync`) DO run on WebGL - they use shared-memory-free multi-dispatch, where the draw-call boundary acts as the barrier (RadixSort via render-to-texture scatter). What WebGL cannot do is the **in-kernel** group/warp ops (`Group.Scan`/`Group.Reduce`/`Warp.*`): those need shared memory + barriers and throw `UnsupportedKernelFeatureException` at kernel-compile time.
 
 ## GPUDevice Sharing
 
@@ -188,7 +203,7 @@ Share a `GPUDevice` between SpawnDev.ILGPU and another WebGPU library (e.g., ONN
 
 ```csharp
 using SpawnDev.ILGPU.WebGPU;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS.JSObjects;
 
 // Get device from another library (e.g., ONNX Runtime Web)
 GPUDevice externalDevice = GetORTWebGPUDevice();
@@ -217,13 +232,15 @@ GPUQueue queue = nativeAccelerator.Queue;
 using var renderPipeline = device.CreateRenderPipeline(new GPURenderPipelineDescriptor { ... });
 ```
 
+> **Flush before your own submit.** ILGPU records dispatches, GPU copies, clears and small uploads (up to 64 KiB) in a pending batch and submits them together. If you submit your own work on the same `GPUQueue` (`queue.Submit`, `queue.WriteBuffer`, ...) that reads or writes buffers ILGPU just touched, call `accelerator.FlushPendingCommands()` first, or your work runs before ILGPU's. Work submitted only through ILGPU is always ordered.
+
 ## External GPU Buffers
 
 Wrap an externally-managed `GPUBuffer` as an ILGPU `MemoryBuffer` for zero-copy kernel execution:
 
 ```csharp
 using SpawnDev.ILGPU.WebGPU.Backend;
-using SpawnDev.BlazorJS.JSObjects;
+using SpawnDev.SpawnJS.JSObjects;
 
 // A GPUBuffer created by another library
 GPUBuffer externalBuffer = GetExternalGPUBuffer();
@@ -260,8 +277,8 @@ using SpawnDev.ILGPU.Rendering;
 // Create once alongside the accelerator
 ICanvasRenderer _renderer = CanvasRendererFactory.Create(_accelerator);
 
-// Attach to the canvas (once, or when the element changes)
-using var canvas = new HTMLCanvasElement(_canvasRef);
+// Attach to the canvas (once, or when the element changes); JS is the injected SpawnJSRuntime
+using var canvas = JS.Call<string, HTMLCanvasElement>("document.getElementById", "myCanvas");
 _renderer.AttachCanvas(canvas);
 
 // Each frame: dispatch → sync → present
@@ -399,7 +416,7 @@ Both properties are `static` and updated on every kernel load, so they always ho
 ### Device Information
 
 ```csharp
-// Print device info
+// Print device info (any ILGPU device)
 var devices = context.GetWebGPUDevices();
 devices[0].PrintInformation(Console.Out);
 
@@ -434,9 +451,8 @@ accelerator.Reduce<float, AddFloat>(
     input.View,
     output.View);
 
-await accelerator.SynchronizeAsync();
-var result = await output.CopyToHostAsync<float>();
+var result = await output.CopyToHostAsync<float>();   // drains first
 // result[0] == 15
 ```
 
-> **Note:** Not all algorithms work with all backends. Algorithms using shared memory or atomics require WebGPU, Wasm, CUDA, OpenCL, or CPU — they do not work on WebGL. See [Backends](backends.md) for the full compatibility matrix.
+> **Note:** On WebGL, only the host-level algorithms run (RadixSort, Scan, Reduce via multi-pass emulation); in-kernel group/warp algorithms and Histogram need shared memory or atomics. See [Backends](backends.md) for the full compatibility matrix.
