@@ -14,6 +14,13 @@
 // IS the graph recorder, and WebGPU guarantees ordering with implicit synchronization between
 // passes/copies on the same queue.
 (() => {
+    // Bind-group cache generation size (per device). Two generations: a lookup that misses the current one but hits the
+    // previous one promotes the group; when the current generation passes this size it becomes the previous one and the
+    // old previous one is dropped. So a group used at least once per generation is never dropped, while groups of a
+    // shape no longer in use age out. MEASURED 2026-10-02 (Anaglyphohol DAv3 video): one input shape is ~2.8k distinct
+    // groups, but the adaptive depth level cycles through many shapes (55k groups in all) - a single map cleared at a
+    // cap kept dropping the hot shape (20% hits); with generations the hot shapes stay.
+    const BG_GEN_MAX = 8192;
     const api = {
         // JS-side timing of the most recent replay() call on this page: encodeMs = the re-encode
         // loop (createCommandEncoder .. last op), submitMs = enc.finish() + queue.submit(). GPU
@@ -23,6 +30,14 @@
         last: { ops: 0, encodeMs: 0, submitMs: 0 },
         // Per-device staging buffer for submitBatch's ordered host uploads (tag 4). Grows, never shrinks.
         _staging: new WeakMap(),
+        // Per-device bind-group cache for submitBatch (api.bindGroupReuse): key = layout id + every entry's
+        // (binding, buffer id, offset, size) -> GPUBindGroup, in two generations of up to BG_GEN_MAX (see there), so a
+        // workload whose buffers churn costs a bounded amount of memory. bgHits/bgMisses are cumulative counters.
+        _bindGroups: new WeakMap(),
+        bgHits: 0,
+        bgMisses: 0,
+        bgDrops: 0,      // generations started (first use per device, then one per rotation)
+        bgLastKey: '',   // the most recent miss's key (diagnostic)
         // ── Interop cost probes ─────────────────────────────────────────────────────────────────
         // These do NOTHING on purpose. device.createBindGroup measured 1.14 ms per call in a Kokoro
         // pass (2,117 ms of 2,128 ms of the whole bind-group phase), and "1.14 ms" has three possible
@@ -33,7 +48,40 @@
         // descriptor brackets the first two; whatever the real call costs beyond that is Dawn's.
         // noopDescriptor touches .entries.length so the marshalled object cannot be optimised away.
         noop(x) { return x | 0; },
+        // WebGPUBackend.BatchSinglePass -> submitBatch (see there). Set from C# when the switch changes.
+        setSinglePass(v) { api.singlePass = !!v; return 0; },
+        // WebGPUBackend.BatchBindGroupReuse -> submitBatch's bind-group cache. Turning it off drops every cached group.
+        setBindGroupReuse(v) { api.bindGroupReuse = !!v; if (!api.bindGroupReuse) api._bindGroups = new WeakMap(); return 0; },
+        // DIAGNOSTIC ABLATION (WebGPUBackend.DiagSubmitAblation; results are garbage while set): 2 = skip createBindGroup
+        // + the dispatch encode, 3 = return without doing anything. (A "skip only the scalar writes" mode ran every
+        // kernel on stale loop bounds and HUNG the GPU - DXGI_ERROR_DEVICE_HUNG; 2 vs 3 measures the writes safely.)
+        setAblation(v) { api.ablation = v | 0; return 0; },
         noopDescriptor(desc) { return desc && desc.entries ? desc.entries.length : 0; },
+
+        // The SpawnJS instance whose wasm heap submitHeader reads (C# passes SpawnJSRuntime.DotnetInstance.Id once).
+        // getHeap() returns the CURRENT heap buffer - it re-fetches it after memory growth detached the old one.
+        setHeapSource(dotnetId) { api._heapInst = globalThis.SpawnJSInterop.getInstace(dotnetId); return 0; },
+        // The batch submit's entry from WebGPUStream.SubmitBatch: ONE number crosses - the heap address of a pinned
+        // Float64 header - and everything else is read from the wasm heap here:
+        //   [0] device id  [1] records addr  [2] record count  [3] data addr  [4] data byte length
+        //   [5] maxPassesPerSubmit  [6] upload bytes  [7..10] arenaR id, bytes, arenaW id, bytes
+        //   [11] single pass (0/1)  [12] ablation  [13] bind-group reuse (0/1)
+        // The records and data arrays are pinned C# arrays (never moved), so views over the heap at their
+        // addresses ARE the arrays - nothing is copied and no HeapView object is created per submit.
+        submitHeader(hdrAddr) {
+            const heap = api._heapInst.getHeap();
+            const h = new Float64Array(heap, hdrAddr, 14);
+            api.singlePass = h[11] !== 0;
+            api.ablation = h[12] | 0;
+            const reuse = h[13] !== 0;
+            if (reuse !== (api.bindGroupReuse !== false)) api.setBindGroupReuse(reuse);
+            const device = globalThis.SpawnJSInterop.spawnJSObjects[h[0]];
+            if (!device) throw new Error(`ilgpuWebGPUPlan.submitHeader: device (SpawnJS id ${h[0]}) is not held`);
+            const n = h[2];
+            const rec = new Float64Array(heap, h[1], n);
+            const data = new Uint8Array(heap, h[3], h[4]);
+            return api.submitBatch(device, rec, n, data, h[5], h[6], h[7], h[8], h[9], h[10]);
+        },
 
         // Rewrite the dstOffset (slot [i*7+4]) of copy entries in place - the patch surface for
         // parameterized replay (e.g. a KV-cache append whose destination row advances per decode
@@ -66,9 +114,23 @@
         // must land exactly where it sits in the batch: `data` is written ONCE into a persistent staging
         // buffer and each upload is a copyBufferToBuffer in record order. Reusing the staging buffer across
         // batches is safe because queue.writeBuffer executes after all previously submitted work.
-        // Command buffers are split every maxPassesPerSubmit passes (see replay() for why).
+        // Command buffers are split every maxPassesPerSubmit dispatches (see replay() for why).
+        // SCALAR ARENAS (WebGPUBackend.BatchScalarArena): the batch's per-dispatch scalars are 256-byte slots of two
+        // arena buffers (arenaRId: read-only bindings, arenaWId: read_write struct scalars; 0 = unused). Their used
+        // prefixes are the LAST arenaRBytes + arenaWBytes bytes of `data` and are written FIRST, before any command
+        // buffer of this batch is submitted - every slot is used once per batch, so one write per arena is exact.
+        // BIND-GROUP REUSE (api.bindGroupReuse): a bind group is immutable and SpawnJS hold ids are never reused, so
+        // two dispatch records with equal layout + entries can share one; with the arenas the keys repeat every frame.
+        // ONE COMPUTE PASS FOR A RUN OF DISPATCHES (api.singlePass, set from WebGPUBackend.BatchSinglePass - default
+        // true): consecutive dispatch records share an open pass; it is ended before an encoder-level command (copy,
+        // clear, upload) and at every submit, and setPipeline is skipped when the pipeline repeats. Ordering is the
+        // spec's, not ours: every dispatch in a compute pass is its OWN usage scope, so a storage write by one dispatch
+        // is visible to the next exactly as across passes - the implementation inserts the barrier. What a pass per
+        // dispatch added was a beginComputePass/end pair (and a fresh pass state) for each of ~800 dispatches a frame.
         // Returns the number of records processed.
-        submitBatch(device, rec, n, data, maxPassesPerSubmit, uploadBytes) {
+        submitBatch(device, rec, n, data, maxPassesPerSubmit, uploadBytes, arenaRId, arenaRBytes, arenaWId, arenaWBytes) {
+            const ablation = api.ablation | 0;
+            if (ablation === 3) return 0;
             const objs = globalThis.SpawnJSInterop.spawnJSObjects;
             const obj = (id, what, at) => {
                 const o = objs[id];
@@ -90,29 +152,67 @@
                 }
                 queue.writeBuffer(staging, 0, data, 0, uploadBytes);
             }
+            const arenaOff = data.length - (arenaRBytes | 0) - (arenaWBytes | 0);
+            if (arenaRBytes > 0) queue.writeBuffer(obj(arenaRId, 'scalar arena', -1), 0, data, arenaOff, arenaRBytes);
+            if (arenaWBytes > 0) queue.writeBuffer(obj(arenaWId, 'scalar arena (read_write)', -1), 0, data, arenaOff + arenaRBytes, arenaWBytes);
+            let bgCache = null;
+            if (api.bindGroupReuse !== false) {
+                bgCache = api._bindGroups.get(device);
+                if (!bgCache) { bgCache = { cur: new Map(), prev: new Map() }; api._bindGroups.set(device, bgCache); api.bgDrops++; }
+                else if (bgCache.cur.size > BG_GEN_MAX) { bgCache.prev = bgCache.cur; bgCache.cur = new Map(); api.bgDrops++; }
+            }
+            const single = api.singlePass !== false;
             let enc = null, passes = 0, ops = 0;
+            let pass = null, passPipeline = null;
+            const endPass = () => { if (pass !== null) { pass.end(); pass = null; passPipeline = null; } };
             for (let i = 0; i < n; ops++) {
                 const tag = rec[i];
-                if (tag === 0) {
+                if (tag === 0 && ablation === 2) {
+                    i += 7 + 4 * rec[i + 3];
+                } else if (tag === 0) {
                     const ne = rec[i + 3];
-                    const entries = new Array(ne);
-                    let j = i + 7;
-                    for (let e = 0; e < ne; e++, j += 4)
-                        entries[e] = { binding: rec[j], resource: { buffer: obj(rec[j + 1], 'buffer', i), offset: rec[j + 2], size: rec[j + 3] } };
-                    const bindGroup = device.createBindGroup({ layout: obj(rec[i + 2], 'bind group layout', i), entries });
+                    const j0 = i + 7, jEnd = j0 + 4 * ne;
+                    let bindGroup, key;
+                    if (bgCache !== null) {
+                        key = '' + rec[i + 2];
+                        for (let j = j0; j < jEnd; j++) key += ',' + rec[j];
+                        bindGroup = bgCache.cur.get(key);
+                        if (bindGroup === undefined) {
+                            bindGroup = bgCache.prev.get(key);
+                            if (bindGroup !== undefined) bgCache.cur.set(key, bindGroup);
+                        }
+                    }
+                    if (bindGroup === undefined) {
+                        const entries = new Array(ne);
+                        for (let e = 0, j = j0; e < ne; e++, j += 4)
+                            entries[e] = { binding: rec[j], resource: { buffer: obj(rec[j + 1], 'buffer', i), offset: rec[j + 2], size: rec[j + 3] } };
+                        bindGroup = device.createBindGroup({ layout: obj(rec[i + 2], 'bind group layout', i), entries });
+                        if (bgCache !== null) { bgCache.cur.set(key, bindGroup); api.bgMisses++; api.bgLastKey = key; }
+                    } else api.bgHits++;
+                    const j = jEnd;
                     if (enc === null) enc = device.createCommandEncoder();
-                    const pass = enc.beginComputePass();
-                    pass.setPipeline(obj(rec[i + 1], 'pipeline', i));
-                    pass.setBindGroup(0, bindGroup);
-                    pass.dispatchWorkgroups(rec[i + 4], rec[i + 5], rec[i + 6]);
-                    pass.end();
+                    const pipeline = obj(rec[i + 1], 'pipeline', i);
+                    if (single) {
+                        if (pass === null) pass = enc.beginComputePass();
+                        if (pipeline !== passPipeline) { pass.setPipeline(pipeline); passPipeline = pipeline; }
+                        pass.setBindGroup(0, bindGroup);
+                        pass.dispatchWorkgroups(rec[i + 4], rec[i + 5], rec[i + 6]);
+                    } else {
+                        const p1 = enc.beginComputePass();
+                        p1.setPipeline(pipeline);
+                        p1.setBindGroup(0, bindGroup);
+                        p1.dispatchWorkgroups(rec[i + 4], rec[i + 5], rec[i + 6]);
+                        p1.end();
+                    }
                     i = j;
-                    if (++passes >= cap) { queue.submit([enc.finish()]); enc = null; passes = 0; }
+                    if (++passes >= cap) { endPass(); queue.submit([enc.finish()]); enc = null; passes = 0; }
                 } else if (tag === 1) {
+                    endPass();
                     if (enc === null) enc = device.createCommandEncoder();
                     enc.copyBufferToBuffer(obj(rec[i + 1], 'copy source', i), rec[i + 2], obj(rec[i + 3], 'copy destination', i), rec[i + 4], rec[i + 5]);
                     i += 6;
                 } else if (tag === 2) {
+                    endPass();
                     if (enc === null) enc = device.createCommandEncoder();
                     enc.clearBuffer(obj(rec[i + 1], 'clear target', i), rec[i + 2], rec[i + 3]);
                     i += 4;
@@ -120,6 +220,7 @@
                     queue.writeBuffer(obj(rec[i + 1], 'write target', i), rec[i + 2], data, rec[i + 3], rec[i + 4]);
                     i += 5;
                 } else if (tag === 4) {
+                    endPass();
                     if (enc === null) enc = device.createCommandEncoder();
                     enc.copyBufferToBuffer(staging, rec[i + 3], obj(rec[i + 1], 'upload target', i), rec[i + 2], rec[i + 4]);
                     i += 5;
@@ -127,6 +228,7 @@
                     throw new Error(`ilgpuWebGPUPlan.submitBatch: bad record tag ${tag} at ${i}`);
                 }
             }
+            endPass();
             if (enc !== null) queue.submit([enc.finish()]);
             return ops;
         },
@@ -282,7 +384,7 @@
     // Register - but never downgrade. A second copy of this module (another URL, an old cached file) must not
     // replace a newer one already in use: the library looks up ilgpuWebGPUPlan.submitBatch on every flush.
     // Bump HELPER_VERSION whenever the api's surface changes.
-    const HELPER_VERSION = 2;   // 2: submitBatch (plain-dispatch record batches, ordered uploads)
+    const HELPER_VERSION = 5;   // 2: submitBatch (plain-dispatch record batches, ordered uploads); 3: single-pass runs, setSinglePass; 4: scalar arenas, bind-group reuse; 5: submitHeader (pinned heap header)
     api.version = HELPER_VERSION;
     const existing = globalThis.ilgpuWebGPUPlan;
     if (!existing || !(existing.version >= HELPER_VERSION)) globalThis.ilgpuWebGPUPlan = api;
