@@ -1,7 +1,34 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## Unreleased (master) - pick the discrete GPU on hybrid machines (PR #9)
+## 5.3.7 (forks 2.3.12) - 2026-10-13 - wide kernels under Blazor WASM AOT; discrete GPU on hybrid machines (PR #9)
+
+- **Blazor WebAssembly AOT: loading a kernel with 6 or more parameters killed the .NET runtime** (fork change). Under
+  AOT, `LoadStreamKernel`, `LoadAutoGroupedStreamKernel` and `LoadImplicitlyGroupedStreamKernel` on WebGPU, WebGL and
+  Wasm hit a Mono assertion (`interp.c:3420`, "couldn't compile wrapper") and every later call did nothing. Found by
+  `FusedFFN_TiledLinearGELU_Correct` on an AOT run of the suite.
+  - Cause: the browser backends' launcher is a `DynamicMethod` taking `(Kernel, AcceleratorStream, index, params...)`,
+    so it runs in Mono's interpreter. Creating a delegate to an interpreted method with more than 8 parameters needs an
+    entry wrapper the AOT compiler builds only for signatures that compiled code invokes. Whether a shape crashed
+    depended on what else the app happened to call, and the crash came at delegate CREATION: a load-only test died too.
+  - Fix: new `Accelerator.SupportsBoxedLaunch` (true on the browser backends), `LoadBoxedLaunchKernel` /
+    `LoadBoxedLaunchImplicitlyGroupedKernel` / `LoadBoxedLaunchAutoGroupedKernel` and `Kernel.LaunchBoxed`. The stream
+    loaders (`KernelLoaders.tt`) use them to launch with boxed arguments and never create the launcher delegate. The
+    launcher already boxed its arguments for `RunKernel`, so the work per launch is the same. CUDA, OpenCL and CPU are
+    unchanged.
+  - Still on the old path: the explicit-stream loaders (`LoadKernel`, `LoadAutoGroupedKernel`,
+    `LoadImplicitlyGroupedKernel`) return the launcher delegate itself, so a 6+ parameter kernel loaded that way under
+    AOT works only if compiled code invokes that delegate type (yours does, when you call it). Specialized kernels
+    (`SpecializedValue<T>`) also keep the delegate path. For wide kernels under AOT, prefer the stream loaders.
+  - Tests: `KernelArity_1` - `KernelArity_11` (5 to 12 parameters, every loader shape, one never-invoked signature).
+    Red-checked under AOT: without the fix the 6, 9 and 12 parameter stream kernels and the unused signature crashed
+    on WebGPU and Wasm. With it, the full AOT run of the browser lanes passed (2729 passed, 0 failed).
+  - The buffer creation-site tests (`NamesCreationSite`, `NamesGenericCreationSite`) report Unsupported under AOT,
+    where `StackTrace` does not expose AOT-compiled frames (sites read "(unknown)"); they still run interpreted.
+- **PlaywrightMultiTest (test runner)**: a test passes only when its row reports success. Before, a page whose .NET
+  runtime had died marked every later test passed (that is how the crash above first ran green). A dead runtime is
+  now detected from the console, the test fails, and the page is recycled; each browser test has a hard cap
+  (`PMT_BROWSER_TEST_TIMEOUT_SEC`, default 720) so a wedged page cannot stall the run.
 
 - **Hybrid GPU laptops picked the wrong device.** On desktop, `CreatePreferredAccelerator(Async)` took the first
   non-CPU device and `Context.GetPreferredDevice` sorted by memory only. Integrated GPUs and OpenCL CPU runtimes report
