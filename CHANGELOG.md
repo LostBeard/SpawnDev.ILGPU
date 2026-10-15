@@ -1,7 +1,7 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.3.8-local.1 (forks 2.3.12) - 2026-10-15 - QR decoder: it read the wrong text, and could not read large codes
+## 5.3.8-local.2 (forks 2.3.12) - 2026-10-15 - QR decoder: it read the wrong text, could not read large codes, rotated codes or codes seen at an angle
 
 Found by reading a code off a robot camera (Lenticulous): the decoder returned a confident wrong answer
 (`LNT1:c31d3c46` came back as `lnd12c21d3c66` plus junk). Measured before the fix with a harness that encodes a code,
@@ -34,12 +34,32 @@ wrongly, and the decoder almost never reported failure; a clean version 5 code n
   `QR_Decode_SurvivesBlurAndLowResolution`, `QR_Decode_GPU_MatchesCpu`. Red-checked against the original decoder: all five
   fail on all 7 backends (35 of 51 in the scoped run); with the fix 51 of 51 pass (CPU, CUDA, OpenCL, WebGPU, WebGPU without
   subgroups, WebGL, Wasm). The two older round-trip tests pass on the broken decoder too, which is why none of this was caught.
-- **Still open, not fixed:** the decoder fails on any rotation (3 degrees misses the top-left finder, 10 degrees finds none)
-  and has no perspective correction (affine sampling from the three finder centres, no alignment pattern); it is robust to
-  blur, 3 px modules, dark frames and brightness gradients. `Decode`/`DecodeAsync` take a managed RGBA `byte[]` and
-  `DecodeAsync` copies the binary image and the grayscale image back to the host: there is no overload for a JS typed
-  array or a GPU buffer. Plan: finder cross-check (vertical, horizontal, diagonal) and homography sampling using the
-  alignment pattern, then a GPU-resident finder search and the typed-array overload.
+- **Rotation and perspective** (local.2; new `QR/QRLocator.cs`). The decoder located the code with a single row scan and
+  sampled it through an affine map of the three finder centres: it failed on ANY rotation (3 degrees missed the top-left
+  finder, 10 degrees found none) and could not read a code seen at an angle. Now:
+  - Finders are found by scanning rows for 1:1:3:1:1 and confirming each hit along the vertical, horizontal and diagonal
+    through its centre (the ratio holds along any line through the centre, so this is rotation-invariant); the size
+    cross-check allows a 3x foreshortening instead of 40%, which is what blocked tilted codes.
+  - The module size is measured along each leg (top-left to top-right, top-left to bottom-left) at both end finders, by walking
+    out through dark core, light ring and dark ring, so a rotated or squeezed code gives the right version.
+  - Modules are sampled through a projective transform (homography). It is tried first on the plain parallelogram through the
+    three finders (exact for a flat code seen face-on or rotated, no search), and, if Reed-Solomon fails, again anchored on the
+    alignment pattern, which is searched near where the finders predict it and accepted only if the whole 5x5 pattern matches.
+  - The flat-block cut-off in the binariser follows the image's own noise: the lower-quartile block range x1.5, capped at half of
+    the 95th-percentile (code) contrast and never below 24. A noisy flat block used to span more than the fixed 24, was
+    thresholded at its own mean, and speckled the background.
+  - Measured (harness, level H, 40 payloads per row): rotation 3, 8, 15, 30, 45, 60, 90, 135, 180, 270 degrees: 40/40 each
+    (was 0/40); yaw tilt 15 to 55 degrees: 40/40 for versions 2 and 5; pitch 40: 40/40; yaw 35 + pitch 20 + roll 12: 40/40;
+    a camera-like view (6.5 px modules, yaw 30, roll 8, blur): 40/40, with sensor noise sigma 20: 38/40 (was 6/40); dark
+    scene (levels 2-30) and low contrast (90-160): 40/40. Clean sweep still 2400/2400. In none of these did the decoder
+    return wrong text.
+  - **Tests**: `QR_Decode_ReadsRotatedCodes`, `QR_Decode_ReadsPerspectiveViews`, `QR_Decode_ReadsCameraLikeViews`. Red-checked: all
+    three fail on all 7 backends against the previous decoder (21 failures); the full QR decode set passes 72 of 72.
+- **Limits, measured and not fixed:** a version 1 code has no alignment pattern, so strong perspective on a version 1 code does
+  not read (rotation does); a tilt of 65 degrees yaw or 60 degrees pitch does not read; blur plus heavy noise together can still
+  fail. `Decode`/`DecodeAsync` take a managed RGBA `byte[]` and `DecodeAsync` copies the binary image and the grayscale image
+  back to the host: there is no overload for a JS typed array or a GPU buffer, and the finder search is CPU. Plan: a
+  GPU-resident finder search and the typed-array / buffer overload.
 
 ## 5.3.7 (forks 2.3.12) - 2026-10-13 - wide kernels under Blazor WASM AOT; discrete GPU on hybrid machines (PR #9)
 

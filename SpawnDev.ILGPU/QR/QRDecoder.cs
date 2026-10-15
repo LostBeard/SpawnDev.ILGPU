@@ -161,42 +161,57 @@ public static class QRDecoder
     private static string? DecodeFromBinaryData(bool[] binary, int width, int height)
     {
 
-        // 3. Find finder patterns
-        var finders = FindFinderPatterns(binary, width, height);
+        // 3. Find finder patterns (rotation-invariant: a 1:1:3:1:1 run ratio holds along any line through the centre)
+        var finders = QRLocator.FindFinders(binary, width, height);
         if (finders.Count < 3) return null;
 
-        // 4. Identify the three finder patterns (top-left, top-right, bottom-left)
-        var (tl, tr, bl) = IdentifyFinderTriangle(finders);
-        if (tl == null) return null;
-
-        // 5. Estimate module size and version
-        double moduleSize = EstimateModuleSize(tl, tr, bl);
-        if (moduleSize < 1) return null;
-
-        // The finder centres are (qrSize - 7) modules apart and the module size is only measured, so the estimate is a few
-        // percent off either way. Round to the NEAREST version (truncating, as this once did, always errs low and loses
-        // a version on any small underestimate), then also try the neighbours: a wrong version fails Reed-Solomon, which
-        // now verifies its own result, so a wrong guess costs time and never produces a wrong answer.
-        int estimatedModules = (int)Math.Round(Distance(tl, tr) / moduleSize) + 7;
-        int estimatedVersion = (int)Math.Round((estimatedModules - 17) / 4.0);
-        foreach (int version in new[] { estimatedVersion, estimatedVersion - 1, estimatedVersion + 1 })
+        // 4. Try the most plausible finder triples, each ordered top-left, top-right, bottom-left
+        foreach (var (tl, tr, bl) in QRLocator.RankTriples(finders))
         {
-            if (version < 1 || version > 40) continue;
-            var text = DecodeAtVersion(binary, width, height, tl, tr, bl, version);
-            if (text != null) return text;
+            // 5. Estimate module size and version. The finder centres are (size - 7) modules apart and the module size is
+            // only measured, so the estimate is a few percent off either way. Round to the NEAREST version (truncating, as
+            // this once did, always errs low and loses a version on any small underestimate), then also try the
+            // neighbours: a wrong version fails Reed-Solomon, which verifies its own result, so a wrong guess costs time and
+            // never produces a wrong answer.
+            var (alongTop, alongLeft) = QRLocator.MeasureModuleSizes(binary, width, height, tl, tr, bl);
+            double moduleSize = (alongTop + alongLeft) / 2.0;
+            if (moduleSize < 1) continue;
+            // Each leg is divided by the module size measured along that leg, so a code squeezed along one axis still counts right.
+            double legs = (QRLocator.Distance(tl, tr) / alongTop + QRLocator.Distance(tl, bl) / alongLeft) / 2.0;
+            int estimatedModules = (int)Math.Round(legs) + 7;
+            int estimatedVersion = (int)Math.Round((estimatedModules - 17) / 4.0);
+            foreach (int version in new[] { estimatedVersion, estimatedVersion - 1, estimatedVersion + 1 })
+            {
+                if (version < 1 || version > 40) continue;
+                var text = DecodeAtVersion(binary, width, height, tl, tr, bl, moduleSize, version);
+                if (text != null) return text;
+            }
         }
         return null;
     }
 
-    /// <summary>Sample, unmask, correct and decode the code assuming it is the given version.</summary>
+    /// <summary>
+    /// Sample, unmask, correct and decode the code assuming it is the given version. Tried first on the plain parallelogram
+    /// through the three finder centres (exact for a flat code seen face-on or rotated, and it needs no search); if that fails
+    /// Reed-Solomon, again with the alignment pattern as the fourth point, which corrects for perspective. Reed-Solomon
+    /// verifies each attempt, so a wrong sampling can only fail, never return wrong text.
+    /// </summary>
     private static string? DecodeAtVersion(bool[] binary, int width, int height,
-        FinderPattern tl, FinderPattern tr, FinderPattern bl, int version)
+        FinderPattern tl, FinderPattern tr, FinderPattern bl, double moduleSize, int version)
+    {
+        // 6. Sample the grid
+        var modules = QRLocator.Sample(binary, width, height, tl, tr, bl, moduleSize, version, useAlignment: false);
+        var text = modules == null ? null : DecodeModules(modules, version);
+        if (text != null || version < 2) return text;
+
+        modules = QRLocator.Sample(binary, width, height, tl, tr, bl, moduleSize, version, useAlignment: true);
+        return modules == null ? null : DecodeModules(modules, version);
+    }
+
+    /// <summary>Format info, unmask, extract, correct and decode a sampled module grid.</summary>
+    private static string? DecodeModules(bool[,] modules, int version)
     {
         int qrSize = QRTables.ModuleCount(version);
-
-        // 6. Sample the grid
-        var modules = SampleGrid(binary, width, height, tl, tr, bl, qrSize);
-        if (modules == null) return null;
 
         // 7. Read format info to determine EC level and mask
         var (ecLevel, maskPattern) = ReadFormatInfo(modules, qrSize);
@@ -262,6 +277,7 @@ public static class QRDecoder
 
         var thresholds = BlockThresholds(BlackPoints(stats, blocksX, blocksY), blocksX, blocksY);
         var binary = new bool[width * height];
+        // (BlackPoints derives its flat-block cut-off from the image's own noise level; see NoiseAwareDynamicRange.)
         for (int y = 0; y < height; y++)
         {
             for (int x = 0; x < width; x++)
@@ -277,6 +293,7 @@ public static class QRDecoder
     /// </summary>
     internal static int[] BlackPoints(int[] stats, int blocksX, int blocksY)
     {
+        int dynamicRange = NoiseAwareDynamicRange(stats, blocksX * blocksY);
         var blackPoints = new int[blocksX * blocksY];
         for (int by = 0; by < blocksY; by++)
         {
@@ -285,7 +302,7 @@ public static class QRDecoder
                 int s = (by * blocksX + bx) * BlockStatsStride;
                 int sum = stats[s], min = stats[s + 1], max = stats[s + 2], count = stats[s + 3];
                 int average;
-                if (max - min > MinDynamicRange)
+                if (max - min > dynamicRange)
                 {
                     average = sum / count;
                 }
@@ -304,6 +321,26 @@ public static class QRDecoder
             }
         }
         return blackPoints;
+    }
+
+    /// <summary>
+    /// The min-max range below which a block counts as flat. A fixed 24 is right for a clean frame, but in a noisy one every
+    /// flat block spans far more than that (about five standard deviations), so each would be thresholded at its own mean and
+    /// the background would speckle. Most of a frame is flat (the code is a small part of it), so the MEDIAN block range is the
+    /// image's noise floor (taken at the lower quartile, so a code that fills the frame, whose blocks nearly all hold edges, is
+    /// not mistaken for noise): a block must clear 1.5x that to count as holding an edge. The cut-off is capped at half of the
+    /// image's own strong-edge range (the 95th percentile) so a low-contrast code is not discarded, and is never below the fixed
+    /// minimum.
+    /// </summary>
+    internal static int NoiseAwareDynamicRange(int[] stats, int blockCount)
+    {
+        var ranges = new int[blockCount];
+        for (int i = 0; i < blockCount; i++)
+            ranges[i] = stats[i * BlockStatsStride + 2] - stats[i * BlockStatsStride + 1];
+        System.Array.Sort(ranges);
+        int noiseFloor = ranges[blockCount / 4];
+        int contrast = ranges[blockCount * 95 / 100];
+        return Math.Max(MinDynamicRange, Math.Min(noiseFloor + noiseFloor / 2, contrast / 2));
     }
 
     /// <summary>The threshold for each block: the mean black point of the 5x5 blocks centred on it (clamped at the edges).</summary>
@@ -333,295 +370,6 @@ public static class QRDecoder
             }
         }
         return thresholds;
-    }
-
-    #endregion
-
-    #region Finder Pattern Detection
-
-    /// <param name="Hits">How many scan rows reported this pattern. A real finder is hit on several rows; a few data modules that
-    /// merely look like one are hit once.</param>
-    private record FinderPattern(double X, double Y, double ModuleSize, int Hits = 1);
-
-    private static List<FinderPattern> FindFinderPatterns(bool[] binary, int width, int height)
-    {
-        var candidates = new List<FinderPattern>();
-
-        // Scan rows for 1:1:3:1:1 dark:light:dark:light:dark ratio
-        for (int y = 0; y < height; y++)
-        {
-            int[] counts = new int[5];
-            int state = 0;
-
-            for (int x = 0; x < width; x++)
-            {
-                bool dark = binary[y * width + x];
-
-                if (dark)
-                {
-                    if (state == 1 || state == 3) // was in light zone
-                    {
-                        state++;
-                    }
-                    counts[state]++;
-                }
-                else
-                {
-                    if (state == 0 || state == 2) // was in dark zone
-                    {
-                        state++;
-                    }
-                    else if (state == 4)
-                    {
-                        // Check ratio
-                        if (IsFinderRatio(counts))
-                        {
-                            int totalWidth = counts[0] + counts[1] + counts[2] + counts[3] + counts[4];
-                            double centerX = x - totalWidth / 2.0;
-                            double modSize = totalWidth / 7.0;
-
-                            // Verify vertically
-                            if (VerifyFinderVertical(binary, width, height, (int)centerX, y, modSize))
-                            {
-                                candidates.Add(new FinderPattern(centerX, y, modSize));
-                            }
-                        }
-
-                        // Shift pattern
-                        counts[0] = counts[2];
-                        counts[1] = counts[3];
-                        counts[2] = counts[4];
-                        counts[3] = 1;
-                        counts[4] = 0;
-                        state = 3;
-                        continue;
-                    }
-                    counts[state]++;
-                }
-            }
-        }
-
-        // Merge nearby candidates
-        return MergeCandidates(candidates);
-    }
-
-    private static bool IsFinderRatio(int[] counts)
-    {
-        int total = counts[0] + counts[1] + counts[2] + counts[3] + counts[4];
-        if (total < 7) return false;
-
-        double unit = total / 7.0;
-        double tolerance = unit * 0.7;
-
-        return Math.Abs(counts[0] - unit) < tolerance
-            && Math.Abs(counts[1] - unit) < tolerance
-            && Math.Abs(counts[2] - 3 * unit) < tolerance
-            && Math.Abs(counts[3] - unit) < tolerance
-            && Math.Abs(counts[4] - unit) < tolerance;
-    }
-
-    private static bool VerifyFinderVertical(bool[] binary, int width, int height, int cx, int cy, double modSize)
-    {
-        int[] counts = new int[5];
-        int expectedHalf = (int)(modSize * 3.5);
-        int startY = Math.Max(0, cy - expectedHalf);
-        int endY = Math.Min(height - 1, cy + expectedHalf);
-
-        int state = 0;
-        for (int y = startY; y <= endY && state < 5; y++)
-        {
-            bool dark = binary[y * width + cx];
-            bool expectedDark = state == 0 || state == 2 || state == 4;
-
-            if (dark == expectedDark)
-            {
-                counts[state]++;
-            }
-            else
-            {
-                state++;
-                if (state < 5) counts[state] = 1;
-            }
-        }
-
-        return state >= 4 && IsFinderRatio(counts);
-    }
-
-    private static List<FinderPattern> MergeCandidates(List<FinderPattern> candidates)
-    {
-        var merged = new List<FinderPattern>();
-        var used = new bool[candidates.Count];
-
-        for (int i = 0; i < candidates.Count; i++)
-        {
-            if (used[i]) continue;
-
-            double sumX = candidates[i].X, sumY = candidates[i].Y, sumMod = candidates[i].ModuleSize;
-            int count = 1;
-
-            for (int j = i + 1; j < candidates.Count; j++)
-            {
-                if (used[j]) continue;
-                double dist = Distance(candidates[i], candidates[j]);
-                // The same finder is reported on several neighbouring rows with the same module size. A data pattern that
-                // only looks like a finder sits close by with a DIFFERENT size; averaging it in drags the real centre off.
-                double sizeRatio = Math.Max(candidates[i].ModuleSize, candidates[j].ModuleSize)
-                    / Math.Min(candidates[i].ModuleSize, candidates[j].ModuleSize);
-                if (dist < candidates[i].ModuleSize * 5 && sizeRatio < 1.25)
-                {
-                    sumX += candidates[j].X;
-                    sumY += candidates[j].Y;
-                    sumMod += candidates[j].ModuleSize;
-                    count++;
-                    used[j] = true;
-                }
-            }
-
-            merged.Add(new FinderPattern(sumX / count, sumY / count, sumMod / count, count));
-        }
-
-        // With more than three candidates, the ones seen on a single row are the look-alikes: drop them when three
-        // better-supported candidates remain.
-        if (merged.Count > 3)
-        {
-            var supported = merged.Where(f => f.Hits >= 2).ToList();
-            if (supported.Count >= 3) return supported;
-        }
-
-        return merged;
-    }
-
-    private static double Distance(FinderPattern a, FinderPattern b)
-        => Math.Sqrt((a.X - b.X) * (a.X - b.X) + (a.Y - b.Y) * (a.Y - b.Y));
-
-    #endregion
-
-    #region Finder Triangle Identification
-
-    private static (FinderPattern? tl, FinderPattern? tr, FinderPattern? bl) IdentifyFinderTriangle(
-        List<FinderPattern> finders)
-    {
-        if (finders.Count < 3) return (null, null, null);
-
-        // Find the 3 that form the best right-angle triangle
-        // The top-left finder is at the right angle
-        FinderPattern? bestTL = null, bestTR = null, bestBL = null;
-        double bestScore = double.MaxValue;
-
-        for (int i = 0; i < finders.Count; i++)
-        {
-            for (int j = i + 1; j < finders.Count; j++)
-            {
-                for (int k = j + 1; k < finders.Count; k++)
-                {
-                    var pts = new[] { finders[i], finders[j], finders[k] };
-
-                    // Try each as the right-angle vertex
-                    for (int v = 0; v < 3; v++)
-                    {
-                        var a = pts[v];
-                        var b = pts[(v + 1) % 3];
-                        var c = pts[(v + 2) % 3];
-
-                        // Check right angle at a
-                        double abx = b.X - a.X, aby = b.Y - a.Y;
-                        double acx = c.X - a.X, acy = c.Y - a.Y;
-                        double dot = abx * acx + aby * acy;
-                        double lenAB = Math.Sqrt(abx * abx + aby * aby);
-                        double lenAC = Math.Sqrt(acx * acx + acy * acy);
-                        double rightAngle = Math.Abs(dot) / (lenAB * lenAC + 0.001);
-                        // A QR code is square and its three finders are the same size, so the true triple has equal legs and
-                        // equal module sizes; a look-alike pattern in the data usually breaks one of the two.
-                        double legs = Math.Abs(lenAB - lenAC) / (Math.Max(lenAB, lenAC) + 0.001);
-                        double smallest = Math.Min(a.ModuleSize, Math.Min(b.ModuleSize, c.ModuleSize));
-                        double largest = Math.Max(a.ModuleSize, Math.Max(b.ModuleSize, c.ModuleSize));
-                        double sizes = (largest - smallest) / (largest + 0.001);
-                        double score = rightAngle + legs + sizes;
-
-                        if (score < bestScore)
-                        {
-                            bestScore = score;
-                            bestTL = a;
-
-                            // Determine which is TR and which is BL
-                            // TR is more to the right, BL is more downward
-                            double crossProduct = abx * acy - aby * acx;
-                            if (crossProduct > 0)
-                            {
-                                bestTR = b;
-                                bestBL = c;
-                            }
-                            else
-                            {
-                                bestTR = c;
-                                bestBL = b;
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        return (bestTL, bestTR, bestBL);
-    }
-
-    #endregion
-
-    #region Grid Sampling
-
-    private static double EstimateModuleSize(FinderPattern tl, FinderPattern tr, FinderPattern bl)
-    {
-        // Distance between finder centers spans (qrSize - 7) modules.
-        // We don't know qrSize yet, but we can estimate module size from the
-        // finder patterns' own ModuleSize property (detected during scanning).
-        return (tl.ModuleSize + tr.ModuleSize + bl.ModuleSize) / 3.0;
-    }
-
-    private static bool[,]? SampleGrid(bool[] binary, int width, int height,
-        FinderPattern tl, FinderPattern tr, FinderPattern bl, int qrSize)
-    {
-        var modules = new bool[qrSize, qrSize];
-
-        // Finder pattern centers are at module (3.5, 3.5) from each corner.
-        // We need to map from module coords to image coords.
-        // The three finder centers define a coordinate system:
-        //   tl = module (3.5, 3.5)
-        //   tr = module (qrSize - 3.5, 3.5)
-        //   bl = module (3.5, qrSize - 3.5)
-
-        // Module span between tl and tr: (qrSize - 7) modules
-        double span = qrSize - 7.0;
-
-        // Unit vectors in image space per module
-        double uxX = (tr.X - tl.X) / span; // x component of rightward unit
-        double uxY = (tr.Y - tl.Y) / span;
-        double uyX = (bl.X - tl.X) / span; // x component of downward unit
-        double uyY = (bl.Y - tl.Y) / span;
-
-        // Origin in image space: tl is at module (3.5, 3.5)
-        // So module (0, 0) maps to tl - 3.5 * ux - 3.5 * uy
-        double originX = tl.X - 3.5 * uxX - 3.5 * uyX;
-        double originY = tl.Y - 3.5 * uxY - 3.5 * uyY;
-
-        for (int r = 0; r < qrSize; r++)
-        {
-            for (int c = 0; c < qrSize; c++)
-            {
-                // Map module center (c + 0.5, r + 0.5) to image coordinates
-                double mc = c + 0.5;
-                double mr = r + 0.5;
-                double x = originX + mc * uxX + mr * uyX;
-                double y = originY + mc * uxY + mr * uyY;
-
-                int ix = (int)Math.Round(x);
-                int iy = (int)Math.Round(y);
-
-                if (ix >= 0 && ix < width && iy >= 0 && iy < height)
-                    modules[r, c] = binary[iy * width + ix];
-            }
-        }
-
-        return modules;
     }
 
     #endregion

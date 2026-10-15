@@ -501,6 +501,222 @@ public abstract partial class BackendTestBase
         Console.WriteLine("[QR] GPU decode matches CPU decode, clean and damaged ✓");
     });
 
+    // ═══════════════════════════════════════════════════════════
+    //  QR Code - geometry: rotation and perspective (found 2026-10-15)
+    //
+    //  The decoder once located the code with a row scan that failed on ANY rotation (3 degrees missed the top-left finder, 10
+    //  degrees found none) and sampled modules through an affine map of the three finder centres, so a code seen at an angle
+    //  could not read. Now the finders are cross-checked along three directions (rotation-invariant), the module size is
+    //  measured along each leg, and the modules are sampled through a projective transform anchored on the alignment pattern.
+    //  Limits, measured: version 1 has no alignment pattern, so strong perspective on a version 1 code does not read; tilts
+    //  past about 60 degrees do not read.
+    // ═══════════════════════════════════════════════════════════
+
+    static string[] QRIds(int count, string suffix = "")
+        => Enumerable.Range(0, count).Select(i => "LNT1:" + Convert.ToHexString(BitConverter.GetBytes(0x9E3779B1u * (uint)(i + 1))).ToLowerInvariant() + suffix).ToArray();
+
+    static double[] QRToGray(byte[] px, int w, int h)
+    {
+        var g = new double[w * h];
+        for (int i = 0; i < g.Length; i++) g[i] = (px[i * 4] * 77 + px[i * 4 + 1] * 150 + px[i * 4 + 2] * 29) / 256.0;
+        return g;
+    }
+
+    static byte[] QRToRgba(double[] g)
+    {
+        var o = new byte[g.Length * 4];
+        for (int i = 0; i < g.Length; i++)
+        {
+            byte v = (byte)Math.Clamp((int)Math.Round(g[i]), 0, 255);
+            o[i * 4] = o[i * 4 + 1] = o[i * 4 + 2] = v;
+            o[i * 4 + 3] = 255;
+        }
+        return o;
+    }
+
+    /// <summary>The homography taking four source points to four destination points (Gaussian elimination, 8 unknowns).</summary>
+    static double[] QRHomography((double x, double y)[] s, (double x, double y)[] d)
+    {
+        var a = new double[8, 9];
+        for (int i = 0; i < 4; i++)
+        {
+            a[2 * i, 0] = s[i].x; a[2 * i, 1] = s[i].y; a[2 * i, 2] = 1; a[2 * i, 6] = -s[i].x * d[i].x; a[2 * i, 7] = -s[i].y * d[i].x; a[2 * i, 8] = d[i].x;
+            a[2 * i + 1, 3] = s[i].x; a[2 * i + 1, 4] = s[i].y; a[2 * i + 1, 5] = 1; a[2 * i + 1, 6] = -s[i].x * d[i].y; a[2 * i + 1, 7] = -s[i].y * d[i].y; a[2 * i + 1, 8] = d[i].y;
+        }
+        for (int c = 0; c < 8; c++)
+        {
+            int p = c;
+            for (int r = c + 1; r < 8; r++) if (Math.Abs(a[r, c]) > Math.Abs(a[p, c])) p = r;
+            for (int k = 0; k < 9; k++) (a[c, k], a[p, k]) = (a[p, k], a[c, k]);
+            for (int r = 0; r < 8; r++)
+            {
+                if (r == c) continue;
+                double f = a[r, c] / a[c, c];
+                for (int k = c; k < 9; k++) a[r, k] -= f * a[c, k];
+            }
+        }
+        var h = new double[9];
+        for (int i = 0; i < 8; i++) h[i] = a[i, 8] / a[i, i];
+        h[8] = 1;
+        return h;
+    }
+
+    /// <summary>
+    /// A flat code photographed from an angle: rotated by <paramref name="yawDeg"/> about its vertical axis and
+    /// <paramref name="pitchDeg"/> about its horizontal axis, seen by a pinhole camera <paramref name="distance"/> code-sides
+    /// away, then rolled in the image plane. Light background where the code does not reach.
+    /// </summary>
+    static double[] QRView(double[] g, int w, int h, double yawDeg, double pitchDeg, double rollDeg, double distance = 3.0)
+    {
+        var corners = new[] { (-0.5, -0.5), (0.5, -0.5), (0.5, 0.5), (-0.5, 0.5) };
+        double yaw = yawDeg * Math.PI / 180, pitch = pitchDeg * Math.PI / 180, roll = rollDeg * Math.PI / 180;
+        var dst = new (double x, double y)[4];
+        for (int i = 0; i < 4; i++)
+        {
+            double x = corners[i].Item1, y = corners[i].Item2;
+            double x1 = x * Math.Cos(yaw), z1 = -x * Math.Sin(yaw);
+            double y2 = y * Math.Cos(pitch) - z1 * Math.Sin(pitch), z2 = y * Math.Sin(pitch) + z1 * Math.Cos(pitch);
+            double u = x1 * distance / (distance + z2), v = y2 * distance / (distance + z2);
+            double ur = u * Math.Cos(roll) - v * Math.Sin(roll), vr = u * Math.Sin(roll) + v * Math.Cos(roll);
+            dst[i] = (w / 2.0 + ur * w * 0.55, h / 2.0 + vr * h * 0.55);
+        }
+        var src = new (double x, double y)[] { (0, 0), (w, 0), (w, h), (0, h) };
+        var hm = QRHomography(dst, src); // view pixel -> code pixel
+        var o = new double[w * h];
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+            {
+                double den = hm[6] * x + hm[7] * y + hm[8];
+                double sx = (hm[0] * x + hm[1] * y + hm[2]) / den, sy = (hm[3] * x + hm[4] * y + hm[5]) / den;
+                if (sx < 0 || sy < 0 || sx >= w - 1 || sy >= h - 1) { o[y * w + x] = 255; continue; }
+                int x0 = (int)sx, y0 = (int)sy;
+                double fx = sx - x0, fy = sy - y0;
+                o[y * w + x] = g[y0 * w + x0] * (1 - fx) * (1 - fy) + g[y0 * w + x0 + 1] * fx * (1 - fy)
+                    + g[(y0 + 1) * w + x0] * (1 - fx) * fy + g[(y0 + 1) * w + x0 + 1] * fx * fy;
+            }
+        return o;
+    }
+
+    static double[] QRBoxBlur(double[] g, int w, int h, int radius)
+    {
+        if (radius == 0) return g;
+        var t = new double[g.Length];
+        var o = new double[g.Length];
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+            {
+                double s = 0;
+                for (int d = -radius; d <= radius; d++) s += g[y * w + Math.Clamp(x + d, 0, w - 1)];
+                t[y * w + x] = s / (2 * radius + 1);
+            }
+        for (int y = 0; y < h; y++)
+            for (int x = 0; x < w; x++)
+            {
+                double s = 0;
+                for (int d = -radius; d <= radius; d++) s += t[Math.Clamp(y + d, 0, h - 1) * w + x];
+                o[y * w + x] = s / (2 * radius + 1);
+            }
+        return o;
+    }
+
+    static double[] QRDownsample(double[] g, int w, int h, int factor, out int nw, out int nh)
+    {
+        nw = w / factor; nh = h / factor;
+        var o = new double[nw * nh];
+        for (int y = 0; y < nh; y++)
+            for (int x = 0; x < nw; x++)
+            {
+                double s = 0;
+                for (int dy = 0; dy < factor; dy++) for (int dx = 0; dx < factor; dx++) s += g[(y * factor + dy) * w + x * factor + dx];
+                o[y * nw + x] = s / (factor * factor);
+            }
+        return o;
+    }
+
+    /// <summary>Decodes each payload after <paramref name="degrade"/>; returns how many read exactly and fails if any read WRONG.</summary>
+    static int QRCountExact(string[] payloads, int moduleSize, Func<double[], int, int, Random, (double[] g, int w, int h)> degrade, string what)
+    {
+        int exact = 0;
+        var rng = new Random(77);
+        foreach (var text in payloads)
+        {
+            var (px, w, h) = QRCode.Generate(text, ecLevel: ECLevel.H, moduleSize: moduleSize, quietZone: 8);
+            var (g, nw, nh) = degrade(QRToGray(px, w, h), w, h, rng);
+            var decoded = QRCode.Decode(QRToRgba(g), nw, nh);
+            if (decoded == text) exact++;
+            else if (decoded != null) throw new Exception($"{what}: '{text}' decoded as WRONG text '{decoded}'");
+        }
+        return exact;
+    }
+
+    [TestMethod]
+    public Task QR_Decode_ReadsRotatedCodes()
+    {
+        var ids = QRIds(12);
+        foreach (double angle in new[] { 3.0, 8.0, 15.0, 30.0, 45.0, 60.0, 90.0, 135.0, 180.0, 270.0 })
+        {
+            int exact = QRCountExact(ids, 10, (g, w, h, r) => (QRView(g, w, h, 0, 0, angle, 1e6), w, h), $"rotated {angle}");
+            if (exact != ids.Length) throw new Exception($"rotated {angle} degrees (version 2): {exact}/{ids.Length} read");
+        }
+        // Version 1 (no alignment pattern) and version 5 (several Reed-Solomon blocks).
+        var v1 = Enumerable.Range(0, 12).Select(i => "LN" + (char)('a' + i % 26) + (char)('a' + (i * 3) % 26)).ToArray();
+        var v5 = QRIds(12, "-multi-block-payload-0123456789");
+        if (QRCountExact(v1, 10, (g, w, h, r) => (QRView(g, w, h, 0, 0, 17, 1e6), w, h), "rotated v1") != v1.Length) throw new Exception("rotated 17 degrees (version 1) not all read");
+        if (QRCountExact(v5, 10, (g, w, h, r) => (QRView(g, w, h, 0, 0, 17, 1e6), w, h), "rotated v5") != v5.Length) throw new Exception("rotated 17 degrees (version 5) not all read");
+        Console.WriteLine("[QR] Rotation 3-270 degrees, versions 1, 2 and 5: all read exactly ✓");
+        return Task.CompletedTask;
+    }
+
+    [TestMethod]
+    public Task QR_Decode_ReadsPerspectiveViews()
+    {
+        var ids = QRIds(12);
+        var v5 = QRIds(12, "-multi-block-payload-0123456789");
+        foreach (double yaw in new[] { 15.0, 30.0, 45.0, 55.0 })
+        {
+            int exact = QRCountExact(ids, 10, (g, w, h, r) => (QRView(g, w, h, yaw, 0, 0), w, h), $"yaw {yaw}");
+            if (exact != ids.Length) throw new Exception($"yaw tilt {yaw} degrees (version 2): {exact}/{ids.Length} read");
+        }
+        foreach (double yaw in new[] { 30.0, 55.0 })
+        {
+            int exact = QRCountExact(v5, 10, (g, w, h, r) => (QRView(g, w, h, yaw, 0, 0), w, h), $"yaw {yaw} v5");
+            if (exact != v5.Length) throw new Exception($"yaw tilt {yaw} degrees (version 5): {exact}/{v5.Length} read");
+        }
+        int pitch = QRCountExact(ids, 10, (g, w, h, r) => (QRView(g, w, h, 0, 40, 0), w, h), "pitch 40");
+        if (pitch != ids.Length) throw new Exception($"pitch tilt 40 degrees: {pitch}/{ids.Length} read");
+        int mixed = QRCountExact(ids, 10, (g, w, h, r) => (QRView(g, w, h, 35, 20, 12), w, h), "mixed");
+        if (mixed != ids.Length) throw new Exception($"yaw 35 + pitch 20 + roll 12: {mixed}/{ids.Length} read");
+        Console.WriteLine("[QR] Perspective: yaw to 55, pitch 40, mixed tilt and roll; versions 2 and 5 all read exactly ✓");
+        return Task.CompletedTask;
+    }
+
+    [TestMethod]
+    public Task QR_Decode_ReadsCameraLikeViews()
+    {
+        var ids = QRIds(20);
+        // About 6 camera pixels per module, tilted 30 degrees and rolled 8, blurred, then with sensor noise added.
+        Func<double[], int, int, Random, double, (double[] g, int w, int h)> camera = (g, w, h, rng, noise) =>
+        {
+            var view = QRBoxBlur(QRView(g, w, h, 30, 0, 8), w, h, 2);
+            var small = QRDownsample(view, w, h, 2, out int nw, out int nh);
+            if (noise > 0)
+                for (int i = 0; i < small.Length; i++) small[i] += noise * (rng.NextDouble() + rng.NextDouble() + rng.NextDouble() - 1.5) * 1.55;
+            return (small, nw, nh);
+        };
+        int clean = QRCountExact(ids, 13, (g, w, h, r) => camera(g, w, h, r, 0), "camera clean");
+        if (clean != ids.Length) throw new Exception($"camera-like view (6.5 px modules, yaw 30, roll 8, blur): {clean}/{ids.Length} read");
+        int noisy = QRCountExact(ids, 13, (g, w, h, r) => camera(g, w, h, r, 20), "camera noisy");
+        if (noisy < 17)
+            throw new Exception($"camera-like view with sensor noise (sigma 20): only {noisy}/{ids.Length} read, expected at least 17");
+        // Dark scene (the robot camera's frame is mostly black with the screen in it) and low contrast.
+        int dark = QRCountExact(ids, 10, (g, w, h, r) => { var v = QRView(g, w, h, 30, 0, 8); for (int i = 0; i < v.Length; i++) v[i] = 2 + v[i] * 28 / 255; return (v, w, h); }, "dark");
+        if (dark != ids.Length) throw new Exception($"dark scene (levels 2..30), yaw 30: {dark}/{ids.Length} read");
+        int low = QRCountExact(ids, 10, (g, w, h, r) => { var v = QRView(g, w, h, 0, 0, 8, 1e6); for (int i = 0; i < v.Length; i++) v[i] = 90 + v[i] * 70 / 255; return (v, w, h); }, "low contrast");
+        if (low != ids.Length) throw new Exception($"low contrast (levels 90..160), roll 8: {low}/{ids.Length} read");
+        Console.WriteLine($"[QR] Camera-like: clean {clean}/{ids.Length}, noisy {noisy}/{ids.Length}, dark {dark}/{ids.Length}, low contrast {low}/{ids.Length}; never wrong text ✓");
+        return Task.CompletedTask;
+    }
+
     [TestMethod]
     public Task QR_Encode_LongURL()
     {
