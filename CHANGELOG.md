@@ -1,6 +1,46 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.3.8-local.1 (forks 2.3.12) - 2026-10-15 - QR decoder: it read the wrong text, and could not read large codes
+
+Found by reading a code off a robot camera (Lenticulous): the decoder returned a confident wrong answer
+(`LNT1:c31d3c46` came back as `lnd12c21d3c66` plus junk). Measured before the fix with a harness that encodes a code,
+inverts K random data modules and decodes: ONE inverted module decoded wrongly 31% of the time, ten inverted modules 87%
+wrongly, and the decoder almost never reported failure; a clean version 5 code never decoded at all. Only the wrapper
+(`SpawnDev.ILGPU`) changes; the forks are untouched.
+
+- **Reed-Solomon correction was wrong beyond a single error, and failures were returned as data** (`QRDecoder`). The
+  syndromes were evaluated on the reversed polynomial, the error values came from the first syndromes only ("for
+  simplicity", not Forney), and `DeinterleaveAndCorrect` kept the damaged bytes of an uncorrectable block "best effort".
+  Now Berlekamp-Massey, Chien search and Forney, the repaired block is checked by recomputing its syndromes, and a block
+  that cannot be repaired fails the decode (null) instead of producing text.
+- **Binarisation took a local mean from 9 sample points** (CPU `Binarize` and the GPU `BinarizeKernel`). Inside any dark
+  region all nine samples were dark, the threshold went to -5, and the dark core of a finder pattern turned light, so a
+  large code had no finder patterns. Now block-based adaptive thresholding: a black point per 8x8 block (mean for blocks
+  with contrast, half the level or the neighbours' average for flat blocks), then the average of the 5x5 blocks around each
+  pixel. The GPU path gathers block statistics on the device, runs the sequential black-point step on the host over those
+  statistics only, and thresholds every pixel on the device; CPU and GPU agree exactly.
+- **Finder detection merged look-alikes into the real finder and rounded the version down.** A few data modules that
+  resemble a finder pattern were averaged into the real finder and moved its centre; the version came from a truncating
+  division, which errs low on any small underestimate. Now only candidates of similar module size merge, candidates seen
+  on a single row are dropped when three better-supported ones remain, the triple is scored on square legs and equal sizes
+  as well as the right angle, and the nearest version is tried first, then its neighbours (safe: a wrong version fails the
+  Reed-Solomon check).
+- Clean decode, payload lengths 1-150 at all four levels, 3 px and 6 px modules, two alphabets: 2400 of 2400 exact. Before:
+  36 to 59 of 150 per level. Damaged codes within the code's capacity decode exactly (single block and multi-block);
+  beyond it the decoder returns null, never wrong text (0 of 600 in the harness).
+- **Tests** (`BackendTestBase.QRTests.cs`, every backend): `QR_Decode_CorrectsModuleErrors`,
+  `QR_Decode_BeyondCapacityNeverReturnsWrongText`, `QR_Decode_EveryPayloadLengthAtEveryECLevel`,
+  `QR_Decode_SurvivesBlurAndLowResolution`, `QR_Decode_GPU_MatchesCpu`. Red-checked against the original decoder: all five
+  fail on all 7 backends (35 of 51 in the scoped run); with the fix 51 of 51 pass (CPU, CUDA, OpenCL, WebGPU, WebGPU without
+  subgroups, WebGL, Wasm). The two older round-trip tests pass on the broken decoder too, which is why none of this was caught.
+- **Still open, not fixed:** the decoder fails on any rotation (3 degrees misses the top-left finder, 10 degrees finds none)
+  and has no perspective correction (affine sampling from the three finder centres, no alignment pattern); it is robust to
+  blur, 3 px modules, dark frames and brightness gradients. `Decode`/`DecodeAsync` take a managed RGBA `byte[]` and
+  `DecodeAsync` copies the binary image and the grayscale image back to the host: there is no overload for a JS typed
+  array or a GPU buffer. Plan: finder cross-check (vertical, horizontal, diagonal) and homography sampling using the
+  alignment pattern, then a GPU-resident finder search and the typed-array overload.
+
 ## 5.3.7 (forks 2.3.12) - 2026-10-13 - wide kernels under Blazor WASM AOT; discrete GPU on hybrid machines (PR #9)
 
 - **Blazor WebAssembly AOT: loading a kernel with 6 or more parameters killed the .NET runtime** (fork change). Under

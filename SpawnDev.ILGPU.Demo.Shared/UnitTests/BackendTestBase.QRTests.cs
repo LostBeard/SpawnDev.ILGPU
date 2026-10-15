@@ -330,6 +330,177 @@ public abstract partial class BackendTestBase
         return Task.CompletedTask;
     }
 
+    // ═══════════════════════════════════════════════════════════
+    //  QR Code - decoder correctness (found 2026-10-15, reading a code off a robot camera)
+    //
+    //  The decoder once (1) corrected more than one byte error wrongly and returned the damaged bytes as text, (2) binarised
+    //  with a local mean taken from 9 sample points, which turned the dark core of a finder pattern light so large codes had
+    //  no finder patterns at all, and (3) merged look-alike patterns from the data into the real finders. Measured before the
+    //  fix: ONE flipped module decoded wrongly 31% of the time, ten flipped modules 87% wrong with no failure reported, and a
+    //  clean version 5 code never decoded. These tests fail on that code.
+    // ═══════════════════════════════════════════════════════════
+
+    static string QRPayload(int length, int alphabet = 7)
+        => new string(Enumerable.Range(0, length).Select(i => (char)('a' + (i * alphabet + 3) % 26)).ToArray());
+
+    /// <summary>Inverts <paramref name="count"/> random data-area modules of a rendered code, never a finder, timing or alignment pattern.</summary>
+    static byte[] QRFlipModules(byte[] pixels, int width, int moduleCount, int moduleSize, int quietZone, int count, Random rng)
+    {
+        bool InFunctionPattern(int r, int c) =>
+            (r <= 8 && c <= 8) || (r <= 8 && c >= moduleCount - 8) || (r >= moduleCount - 8 && c <= 8)
+            || r == 6 || c == 6
+            || (moduleCount >= 25 && moduleCount < 45 && r >= moduleCount - 9 && r <= moduleCount - 5 && c >= moduleCount - 9 && c <= moduleCount - 5);
+        var candidates = new List<(int r, int c)>();
+        for (int r = 0; r < moduleCount; r++)
+            for (int c = 0; c < moduleCount; c++)
+                if (!InFunctionPattern(r, c)) candidates.Add((r, c));
+        var copy = (byte[])pixels.Clone();
+        foreach (var index in Enumerable.Range(0, candidates.Count).OrderBy(_ => rng.Next()).Take(count))
+        {
+            var (r, c) = candidates[index];
+            for (int y = 0; y < moduleSize; y++)
+                for (int x = 0; x < moduleSize; x++)
+                {
+                    int px = ((r + quietZone) * moduleSize + y) * width + (c + quietZone) * moduleSize + x;
+                    for (int ch = 0; ch < 3; ch++) copy[px * 4 + ch] = (byte)(255 - copy[px * 4 + ch]);
+                }
+        }
+        return copy;
+    }
+
+    [TestMethod]
+    public Task QR_Decode_CorrectsModuleErrors()
+    {
+        // One Reed-Solomon block (version 2, level H repairs 11 byte errors) and several interleaved blocks (version 5).
+        foreach (var text in new[] { "LNT1:c31d3c46", "LNT1:c31d3c46-multi-block-payload-0123456789" })
+        {
+            var (pixels, w, _) = QRCode.Generate(text, ecLevel: ECLevel.H, moduleSize: 6, quietZone: 4);
+            int n = QRCode.GetModuleCount(text, ECLevel.H);
+            var rng = new Random(20261015);
+            foreach (int flips in new[] { 1, 2, 4, 8, 10 })
+            {
+                for (int trial = 0; trial < 40; trial++)
+                {
+                    var damaged = QRFlipModules(pixels, w, n, 6, 4, flips, rng);
+                    var decoded = QRCode.Decode(damaged, w, w);
+                    if (decoded != text)
+                        throw new Exception($"{flips} flipped modules, '{text}': decoded {(decoded == null ? "null" : $"'{decoded}'")}, expected the text (trial {trial})");
+                }
+            }
+        }
+        Console.WriteLine("[QR] Reed-Solomon: 1-10 flipped modules decode exactly, single and multi-block ✓");
+        return Task.CompletedTask;
+    }
+
+    [TestMethod]
+    public Task QR_Decode_BeyondCapacityNeverReturnsWrongText()
+    {
+        // Far past what the code can repair the decoder must say so (null), never hand back damaged bytes as text.
+        const string text = "LNT1:c31d3c46";
+        var (pixels, w, _) = QRCode.Generate(text, ecLevel: ECLevel.H, moduleSize: 6, quietZone: 4);
+        int n = QRCode.GetModuleCount(text, ECLevel.H);
+        var rng = new Random(7);
+        int nulls = 0;
+        for (int trial = 0; trial < 200; trial++)
+        {
+            var decoded = QRCode.Decode(QRFlipModules(pixels, w, n, 6, 4, 60, rng), w, w);
+            if (decoded == null) nulls++;
+            else if (decoded != text)
+                throw new Exception($"60 flipped modules decoded as wrong text '{decoded}' (trial {trial})");
+        }
+        if (nulls < 190)
+            throw new Exception($"Expected the decoder to report failure for nearly all 60-module damage, got {nulls}/200 nulls");
+        Console.WriteLine($"[QR] Beyond capacity: {nulls}/200 reported failure, 0 wrong texts ✓");
+        return Task.CompletedTask;
+    }
+
+    [TestMethod]
+    public Task QR_Decode_EveryPayloadLengthAtEveryECLevel()
+    {
+        // Clean codes of every length 1..120 at all four levels, two module sizes: versions 1 to about 8, single and multi-block.
+        int checkedCount = 0;
+        foreach (int moduleSize in new[] { 3, 6 })
+            foreach (var ec in new[] { ECLevel.L, ECLevel.M, ECLevel.Q, ECLevel.H })
+                for (int length = 1; length <= 120; length++)
+                {
+                    var text = QRPayload(length);
+                    var (pixels, w, h) = QRCode.Generate(text, ecLevel: ec, moduleSize: moduleSize, quietZone: 4);
+                    var decoded = QRCode.Decode(pixels, w, h);
+                    if (decoded != text)
+                        throw new Exception($"clean code, level {ec}, {length} chars, {moduleSize}px modules, version {(QRCode.GetModuleCount(text, ec) - 17) / 4}: decoded {(decoded == null ? "null" : $"'{decoded}'")}");
+                    checkedCount++;
+                }
+        Console.WriteLine($"[QR] Clean decode: all {checkedCount} payload/level/size combinations exact ✓");
+        return Task.CompletedTask;
+    }
+
+    [TestMethod]
+    public Task QR_Decode_SurvivesBlurAndLowResolution()
+    {
+        // What a camera does: lose resolution and blur. 12px modules reduced 4x (3px per module) and box-blurred.
+        var ids = Enumerable.Range(0, 30).Select(i => "LNT1:" + Convert.ToHexString(BitConverter.GetBytes(0x9E3779B1u * (uint)(i + 1))).ToLowerInvariant()).ToArray();
+        foreach (var text in ids)
+        {
+            var (pixels, w, h) = QRCode.Generate(text, ecLevel: ECLevel.H, moduleSize: 12, quietZone: 4);
+            // Box blur radius 3, then 4x down-sample.
+            var gray = new double[w * h];
+            for (int i = 0; i < gray.Length; i++) gray[i] = pixels[i * 4];
+            var blurred = new double[gray.Length];
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                {
+                    double sum = 0; int count = 0;
+                    for (int dy = -3; dy <= 3; dy++)
+                        for (int dx = -3; dx <= 3; dx++)
+                        {
+                            int sx = Math.Clamp(x + dx, 0, w - 1), sy = Math.Clamp(y + dy, 0, h - 1);
+                            sum += gray[sy * w + sx]; count++;
+                        }
+                    blurred[y * w + x] = sum / count;
+                }
+            int nw = w / 4, nh = h / 4;
+            var small = new byte[nw * nh * 4];
+            for (int y = 0; y < nh; y++)
+                for (int x = 0; x < nw; x++)
+                {
+                    double sum = 0;
+                    for (int dy = 0; dy < 4; dy++) for (int dx = 0; dx < 4; dx++) sum += blurred[(y * 4 + dy) * w + x * 4 + dx];
+                    byte v = (byte)Math.Round(sum / 16);
+                    int o = (y * nw + x) * 4;
+                    small[o] = small[o + 1] = small[o + 2] = v; small[o + 3] = 255;
+                }
+            var decoded = QRCode.Decode(small, nw, nh);
+            if (decoded != text)
+                throw new Exception($"blurred 3px-module code '{text}' decoded as {(decoded == null ? "null" : $"'{decoded}'")}");
+        }
+        Console.WriteLine($"[QR] Blur + 3px modules: {ids.Length}/{ids.Length} exact ✓");
+        return Task.CompletedTask;
+    }
+
+    [TestMethod]
+    public async Task QR_Decode_GPU_MatchesCpu() => await RunTest(async accelerator =>
+    {
+        // The GPU path binarises with kernels; it must read exactly what the CPU path reads, damaged codes included.
+        var rng = new Random(11);
+        // Payloads kept at or below version 5 so the module-flipping helper's function-pattern skip list is complete.
+        foreach (var text in new[] { "LNT1:c31d3c46", QRPayload(30), QRPayload(40, 13) })
+        {
+            var (pixels, w, h) = QRCode.Generate(text, ecLevel: ECLevel.H, moduleSize: 5, quietZone: 4);
+            int n = QRCode.GetModuleCount(text, ECLevel.H);
+            foreach (int flips in new[] { 0, 3, 8 })
+            {
+                var image = flips == 0 ? pixels : QRFlipModules(pixels, w, n, 5, 4, flips, rng);
+                var cpu = QRCode.Decode(image, w, h);
+                var gpu = await QRCode.DecodeAsync(accelerator, image, w, h);
+                if (cpu != gpu)
+                    throw new Exception($"'{text}' with {flips} flipped modules: CPU decoded {(cpu ?? "null")}, GPU decoded {(gpu ?? "null")}");
+                if (flips < 4 && gpu != text)
+                    throw new Exception($"'{text}' with {flips} flipped modules was not read back exactly: {(gpu ?? "null")}");
+            }
+        }
+        Console.WriteLine("[QR] GPU decode matches CPU decode, clean and damaged ✓");
+    });
+
     [TestMethod]
     public Task QR_Encode_LongURL()
     {

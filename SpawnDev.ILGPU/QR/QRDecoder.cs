@@ -45,11 +45,24 @@ public static class QRDecoder
         grayscaleKernel(totalPixels, packedBuf.View, grayBuf.View);
         await accelerator.SynchronizeAsync();
 
-        // 2. GPU: adaptive binarization
+        // 2. GPU: block-based adaptive binarization, the same scheme as the CPU path (Binarize). Per 8x8 block the GPU
+        // gathers sum / min / max; the black points depend on the blocks above and to the left, so that sequential step runs
+        // on the host over the block statistics only (4 ints per 64 pixels, not an image); the GPU then thresholds every pixel.
+        int blocksX = (width + BlockSize - 1) >> BlockPower;
+        int blocksY = (height + BlockSize - 1) >> BlockPower;
+        using var statsBuf = accelerator.Allocate1D<int>(blocksX * blocksY * BlockStatsStride);
+        var statsKernel = accelerator.LoadAutoGroupedStreamKernel<
+            Index1D, ArrayView<byte>, ArrayView<int>, int, int, int>(BlockStatsKernel);
+        statsKernel(blocksX * blocksY, grayBuf.View, statsBuf.View, width, height, blocksX);
+        await accelerator.SynchronizeAsync();
+        var stats = await statsBuf.CopyToHostAsync<int>();
+        var thresholds = BlockThresholds(BlackPoints(stats, blocksX, blocksY), blocksX, blocksY);
+
+        using var thresholdBuf = accelerator.Allocate1D(thresholds);
         using var binaryBuf = accelerator.Allocate1D<int>(totalPixels);
         var binarizeKernel = accelerator.LoadAutoGroupedStreamKernel<
-            Index1D, ArrayView<byte>, ArrayView<int>, int, int>(BinarizeKernel);
-        binarizeKernel(totalPixels, grayBuf.View, binaryBuf.View, width, height);
+            Index1D, ArrayView<byte>, ArrayView<int>, ArrayView<int>, int, int>(BinarizeKernel);
+        binarizeKernel(totalPixels, grayBuf.View, thresholdBuf.View, binaryBuf.View, width, blocksX);
         await accelerator.SynchronizeAsync();
 
         var binaryInts = await binaryBuf.CopyToHostAsync<int>();
@@ -65,34 +78,38 @@ public static class QRDecoder
         return DecodeFromBinary(binary, gray, width, height);
     }
 
-    /// <summary>GPU kernel: adaptive binarization. Each pixel compared to local average.</summary>
-    static void BinarizeKernel(Index1D idx, ArrayView<byte> gray, ArrayView<int> binary, int width, int height)
+    /// <summary>GPU kernel: sum, min, max and pixel count of one 8x8 block (one thread per block).</summary>
+    static void BlockStatsKernel(Index1D blockIndex, ArrayView<byte> gray, ArrayView<int> stats, int width, int height, int blocksX)
+    {
+        int bx = blockIndex % blocksX;
+        int by = blockIndex / blocksX;
+        int x0 = bx * BlockSize, y0 = by * BlockSize;
+        int x1 = x0 + BlockSize < width ? x0 + BlockSize : width;
+        int y1 = y0 + BlockSize < height ? y0 + BlockSize : height;
+        int sum = 0, min = 255, max = 0;
+        for (int y = y0; y < y1; y++)
+        {
+            for (int x = x0; x < x1; x++)
+            {
+                int v = gray[y * width + x];
+                sum += v;
+                if (v < min) min = v;
+                if (v > max) max = v;
+            }
+        }
+        int s = blockIndex * BlockStatsStride;
+        stats[s] = sum;
+        stats[s + 1] = min;
+        stats[s + 2] = max;
+        stats[s + 3] = (x1 - x0) * (y1 - y0);
+    }
+
+    /// <summary>GPU kernel: dark when at or below the threshold of the pixel's block.</summary>
+    static void BinarizeKernel(Index1D idx, ArrayView<byte> gray, ArrayView<int> thresholds, ArrayView<int> binary, int width, int blocksX)
     {
         int x = idx % width;
         int y = idx / width;
-        int blockSize = width > height ? width / 8 : height / 8;
-        if (blockSize < 8) blockSize = 8;
-        int halfBlock = blockSize / 2;
-
-        // Sample 9 points around the pixel for local average
-        int sum = 0;
-        int count = 0;
-        for (int dy = -halfBlock; dy <= halfBlock; dy += halfBlock)
-        {
-            for (int dx = -halfBlock; dx <= halfBlock; dx += halfBlock)
-            {
-                int sx = x + dx;
-                int sy = y + dy;
-                if (sx >= 0 && sx < width && sy >= 0 && sy < height)
-                {
-                    sum += gray[sy * width + sx];
-                    count++;
-                }
-            }
-        }
-
-        int threshold = sum / count - 5;
-        binary[idx] = gray[idx] < threshold ? 1 : 0;
+        binary[idx] = gray[idx] <= thresholds[(y >> BlockPower) * blocksX + (x >> BlockPower)] ? 1 : 0;
     }
 
     /// <summary>GPU kernel: RGBA packed int → grayscale byte.</summary>
@@ -156,11 +173,25 @@ public static class QRDecoder
         double moduleSize = EstimateModuleSize(tl, tr, bl);
         if (moduleSize < 1) return null;
 
+        // The finder centres are (qrSize - 7) modules apart and the module size is only measured, so the estimate is a few
+        // percent off either way. Round to the NEAREST version (truncating, as this once did, always errs low and loses
+        // a version on any small underestimate), then also try the neighbours: a wrong version fails Reed-Solomon, which
+        // now verifies its own result, so a wrong guess costs time and never produces a wrong answer.
         int estimatedModules = (int)Math.Round(Distance(tl, tr) / moduleSize) + 7;
-        int version = (estimatedModules - 17) / 4;
-        if (version < 1) version = 1;
-        if (version > 40) return null;
+        int estimatedVersion = (int)Math.Round((estimatedModules - 17) / 4.0);
+        foreach (int version in new[] { estimatedVersion, estimatedVersion - 1, estimatedVersion + 1 })
+        {
+            if (version < 1 || version > 40) continue;
+            var text = DecodeAtVersion(binary, width, height, tl, tr, bl, version);
+            if (text != null) return text;
+        }
+        return null;
+    }
 
+    /// <summary>Sample, unmask, correct and decode the code assuming it is the given version.</summary>
+    private static string? DecodeAtVersion(bool[] binary, int width, int height,
+        FinderPattern tl, FinderPattern tr, FinderPattern bl, int version)
+    {
         int qrSize = QRTables.ModuleCount(version);
 
         // 6. Sample the grid
@@ -188,49 +219,129 @@ public static class QRDecoder
 
     #region Binarization
 
+    // Block-based adaptive binarisation (the hybrid scheme ZXing uses): per 8x8 block a "black point", then each pixel is
+    // compared with the average black point of the 5x5 blocks around it. This replaces a local mean taken from only 9
+    // sample points, which fell below zero inside any dark region (all nine samples dark, threshold -5) and turned the
+    // dark core of a finder pattern light, so large codes had no finder patterns at all.
+    internal const int BlockPower = 3;
+    internal const int BlockSize = 1 << BlockPower;
+    /// <summary>A block flatter than this holds no code edge: it is background or solid, not data.</summary>
+    internal const int MinDynamicRange = 24;
+    /// <summary>Ints per block in the statistics array: sum, min, max, pixel count.</summary>
+    internal const int BlockStatsStride = 4;
+
     private static bool[] Binarize(byte[] gray, int width, int height)
     {
-        var binary = new bool[width * height];
-        int blockSize = Math.Max(width, height) / 8;
-        if (blockSize < 8) blockSize = 8;
-
-        for (int y = 0; y < height; y++)
+        int blocksX = (width + BlockSize - 1) >> BlockPower;
+        int blocksY = (height + BlockSize - 1) >> BlockPower;
+        var stats = new int[blocksX * blocksY * BlockStatsStride];
+        for (int by = 0; by < blocksY; by++)
         {
-            for (int x = 0; x < width; x++)
+            for (int bx = 0; bx < blocksX; bx++)
             {
-                // Local mean in a block around (x, y)
-                int x0 = Math.Max(0, x - blockSize / 2);
-                int y0 = Math.Max(0, y - blockSize / 2);
-                int x1 = Math.Min(width - 1, x + blockSize / 2);
-                int y1 = Math.Min(height - 1, y + blockSize / 2);
-
-                long sum = 0;
-                int count = 0;
-                // Sample corners + center for speed
-                int[] sampleXs = { x0, x1, (x0 + x1) / 2 };
-                int[] sampleYs = { y0, y1, (y0 + y1) / 2 };
-                foreach (int sy in sampleYs)
+                int x0 = bx << BlockPower, y0 = by << BlockPower;
+                int x1 = Math.Min(width, x0 + BlockSize), y1 = Math.Min(height, y0 + BlockSize);
+                int sum = 0, min = 255, max = 0;
+                for (int y = y0; y < y1; y++)
                 {
-                    foreach (int sx in sampleXs)
+                    for (int x = x0; x < x1; x++)
                     {
-                        sum += gray[sy * width + sx];
-                        count++;
+                        int v = gray[y * width + x];
+                        sum += v;
+                        if (v < min) min = v;
+                        if (v > max) max = v;
                     }
                 }
-                int threshold = (int)(sum / count) - 5; // slight bias toward dark
-
-                binary[y * width + x] = gray[y * width + x] < threshold;
+                int s = (by * blocksX + bx) * BlockStatsStride;
+                stats[s] = sum;
+                stats[s + 1] = min;
+                stats[s + 2] = max;
+                stats[s + 3] = (x1 - x0) * (y1 - y0);
             }
         }
 
+        var thresholds = BlockThresholds(BlackPoints(stats, blocksX, blocksY), blocksX, blocksY);
+        var binary = new bool[width * height];
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+                binary[y * width + x] = gray[y * width + x] <= thresholds[(y >> BlockPower) * blocksX + (x >> BlockPower)];
+        }
         return binary;
+    }
+
+    /// <summary>
+    /// One black point per block from its statistics. A block with real contrast uses its mean; a flat block uses half its
+    /// level, or - when it is darker than the blocks above and to the left - their average, so a solid dark area inside
+    /// the code (the core of a finder pattern) is still read as dark.
+    /// </summary>
+    internal static int[] BlackPoints(int[] stats, int blocksX, int blocksY)
+    {
+        var blackPoints = new int[blocksX * blocksY];
+        for (int by = 0; by < blocksY; by++)
+        {
+            for (int bx = 0; bx < blocksX; bx++)
+            {
+                int s = (by * blocksX + bx) * BlockStatsStride;
+                int sum = stats[s], min = stats[s + 1], max = stats[s + 2], count = stats[s + 3];
+                int average;
+                if (max - min > MinDynamicRange)
+                {
+                    average = sum / count;
+                }
+                else
+                {
+                    average = min / 2;
+                    if (by > 0 && bx > 0)
+                    {
+                        int neighbors = (blackPoints[(by - 1) * blocksX + bx]
+                            + 2 * blackPoints[by * blocksX + bx - 1]
+                            + blackPoints[(by - 1) * blocksX + bx - 1]) / 4;
+                        if (min < neighbors) average = neighbors;
+                    }
+                }
+                blackPoints[by * blocksX + bx] = average;
+            }
+        }
+        return blackPoints;
+    }
+
+    /// <summary>The threshold for each block: the mean black point of the 5x5 blocks centred on it (clamped at the edges).</summary>
+    internal static int[] BlockThresholds(int[] blackPoints, int blocksX, int blocksY)
+    {
+        var thresholds = new int[blocksX * blocksY];
+        for (int by = 0; by < blocksY; by++)
+        {
+            int cy = Math.Max(2, Math.Min(by, blocksY - 3));
+            for (int bx = 0; bx < blocksX; bx++)
+            {
+                int cx = Math.Max(2, Math.Min(bx, blocksX - 3));
+                int sum = 0, count = 0;
+                for (int dy = -2; dy <= 2; dy++)
+                {
+                    int y = cy + dy;
+                    if (y < 0 || y >= blocksY) continue;
+                    for (int dx = -2; dx <= 2; dx++)
+                    {
+                        int x = cx + dx;
+                        if (x < 0 || x >= blocksX) continue;
+                        sum += blackPoints[y * blocksX + x];
+                        count++;
+                    }
+                }
+                thresholds[by * blocksX + bx] = sum / count;
+            }
+        }
+        return thresholds;
     }
 
     #endregion
 
     #region Finder Pattern Detection
 
-    private record FinderPattern(double X, double Y, double ModuleSize);
+    /// <param name="Hits">How many scan rows reported this pattern. A real finder is hit on several rows; a few data modules that
+    /// merely look like one are hit once.</param>
+    private record FinderPattern(double X, double Y, double ModuleSize, int Hits = 1);
 
     private static List<FinderPattern> FindFinderPatterns(bool[] binary, int width, int height)
     {
@@ -352,7 +463,11 @@ public static class QRDecoder
             {
                 if (used[j]) continue;
                 double dist = Distance(candidates[i], candidates[j]);
-                if (dist < candidates[i].ModuleSize * 5)
+                // The same finder is reported on several neighbouring rows with the same module size. A data pattern that
+                // only looks like a finder sits close by with a DIFFERENT size; averaging it in drags the real centre off.
+                double sizeRatio = Math.Max(candidates[i].ModuleSize, candidates[j].ModuleSize)
+                    / Math.Min(candidates[i].ModuleSize, candidates[j].ModuleSize);
+                if (dist < candidates[i].ModuleSize * 5 && sizeRatio < 1.25)
                 {
                     sumX += candidates[j].X;
                     sumY += candidates[j].Y;
@@ -362,7 +477,15 @@ public static class QRDecoder
                 }
             }
 
-            merged.Add(new FinderPattern(sumX / count, sumY / count, sumMod / count));
+            merged.Add(new FinderPattern(sumX / count, sumY / count, sumMod / count, count));
+        }
+
+        // With more than three candidates, the ones seen on a single row are the look-alikes: drop them when three
+        // better-supported candidates remain.
+        if (merged.Count > 3)
+        {
+            var supported = merged.Where(f => f.Hits >= 2).ToList();
+            if (supported.Count >= 3) return supported;
         }
 
         return merged;
@@ -404,7 +527,16 @@ public static class QRDecoder
                         double abx = b.X - a.X, aby = b.Y - a.Y;
                         double acx = c.X - a.X, acy = c.Y - a.Y;
                         double dot = abx * acx + aby * acy;
-                        double score = Math.Abs(dot) / (Math.Sqrt(abx * abx + aby * aby) * Math.Sqrt(acx * acx + acy * acy) + 0.001);
+                        double lenAB = Math.Sqrt(abx * abx + aby * aby);
+                        double lenAC = Math.Sqrt(acx * acx + acy * acy);
+                        double rightAngle = Math.Abs(dot) / (lenAB * lenAC + 0.001);
+                        // A QR code is square and its three finders are the same size, so the true triple has equal legs and
+                        // equal module sizes; a look-alike pattern in the data usually breaks one of the two.
+                        double legs = Math.Abs(lenAB - lenAC) / (Math.Max(lenAB, lenAC) + 0.001);
+                        double smallest = Math.Min(a.ModuleSize, Math.Min(b.ModuleSize, c.ModuleSize));
+                        double largest = Math.Max(a.ModuleSize, Math.Max(b.ModuleSize, c.ModuleSize));
+                        double sizes = (largest - smallest) / (largest + 0.001);
+                        double score = rightAngle + legs + sizes;
 
                         if (score < bestScore)
                         {
@@ -766,13 +898,15 @@ public static class QRDecoder
             }
         }
 
-        // Reed-Solomon error correction per block
+        // Reed-Solomon error correction per block. A block that cannot be corrected fails the whole decode: returning its
+        // damaged bytes as if they were data hands the caller a confident wrong answer (a camera-read ID that is not
+        // the ID), which is worse than no answer.
         for (int block = 0; block < totalBlocks; block++)
         {
             var corrected = ReedSolomonCorrect(dataBlocks[block], ecBlocks[block]);
-            if (corrected != null)
-                dataBlocks[block] = corrected;
-            // If correction fails, use the data as-is (best effort)
+            if (corrected == null)
+                return null;
+            dataBlocks[block] = corrected;
         }
 
         // Concatenate data blocks
@@ -802,105 +936,132 @@ public static class QRDecoder
         System.Array.Copy(data, 0, received, 0, data.Length);
         System.Array.Copy(ec, 0, received, data.Length, ec.Length);
 
-        // 1. Compute syndromes
-        var syndromes = new byte[ecLen];
-        bool hasErrors = false;
-        for (int i = 0; i < ecLen; i++)
+        // The codeword polynomial is r(x) = sum received[j] * x^(n-1-j): received[0] is the HIGHEST degree. QR's generator
+        // has roots alpha^0 .. alpha^(ecLen-1), so the syndromes are S_i = r(alpha^i), evaluated by Horner.
+        var syndromes = Syndromes(received, ecLen);
+        if (syndromes == null)
+            return data; // all syndromes zero: no errors
+
+        // Berlekamp-Massey: error locator Lambda(x) = 1 + l1 x + l2 x^2 + ... (lowest degree first)
+        var lambda = new byte[ecLen + 1];
+        var prev = new byte[ecLen + 1];
+        lambda[0] = 1;
+        prev[0] = 1;
+        int errors = 0;      // L: current number of errors assumed
+        int shift = 1;       // m: iterations since the last length change
+        byte prevDelta = 1;  // b: the discrepancy at the last length change
+        for (int step = 0; step < ecLen; step++)
         {
-            byte val = 0;
-            for (int j = 0; j < n; j++)
-                val ^= GaloisField.Multiply(received[j], GaloisField.Power(GaloisField.Exp[i], j));
-            syndromes[i] = val;
-            if (val != 0) hasErrors = true;
-        }
-
-        if (!hasErrors)
-            return data; // no errors
-
-        // 2. Berlekamp-Massey to find error locator polynomial
-        var errLocator = new byte[] { 1 };
-        var oldLocator = new byte[] { 1 };
-        int syndromeShift = 0;
-
-        for (int i = 0; i < ecLen; i++)
-        {
-            byte delta = syndromes[i];
-            for (int j = 1; j < errLocator.Length; j++)
-                delta ^= GaloisField.Multiply(errLocator[j], syndromes[i - j < 0 ? 0 : i - j]);
-
-            var oldLocatorCopy = new byte[oldLocator.Length + 1];
-            System.Array.Copy(oldLocator, 0, oldLocatorCopy, 1, oldLocator.Length);
-            oldLocator = oldLocatorCopy;
-
-            if (delta != 0)
+            byte delta = syndromes[step];
+            for (int i = 1; i <= errors; i++)
+                delta ^= GaloisField.Multiply(lambda[i], syndromes[step - i]);
+            if (delta == 0)
             {
-                if (oldLocator.Length > errLocator.Length)
-                {
-                    var newLocator = new byte[oldLocator.Length];
-                    for (int j = 0; j < oldLocator.Length; j++)
-                        newLocator[j] = GaloisField.Multiply(oldLocator[j], delta);
-                    oldLocator = new byte[errLocator.Length];
-                    for (int j = 0; j < errLocator.Length; j++)
-                        oldLocator[j] = GaloisField.Multiply(errLocator[j], GaloisField.Inverse(delta));
-                    errLocator = newLocator;
-                }
-
-                var scaled = new byte[oldLocator.Length];
-                for (int j = 0; j < oldLocator.Length; j++)
-                    scaled[j] = GaloisField.Multiply(oldLocator[j], delta);
-
-                // XOR into errLocator (pad if needed)
-                if (scaled.Length > errLocator.Length)
-                {
-                    var padded = new byte[scaled.Length];
-                    System.Array.Copy(errLocator, 0, padded, scaled.Length - errLocator.Length, errLocator.Length);
-                    errLocator = padded;
-                }
-                for (int j = 0; j < scaled.Length; j++)
-                    errLocator[errLocator.Length - scaled.Length + j] ^= scaled[j];
+                shift++;
+                continue;
+            }
+            var before = (byte[])lambda.Clone();
+            byte scale = GaloisField.Divide(delta, prevDelta);
+            for (int i = 0; i + shift <= ecLen; i++)
+                lambda[i + shift] ^= GaloisField.Multiply(scale, prev[i]);
+            if (2 * errors <= step)
+            {
+                errors = step + 1 - errors;
+                prev = before;
+                prevDelta = delta;
+                shift = 1;
+            }
+            else
+            {
+                shift++;
             }
         }
 
-        int numErrors = errLocator.Length - 1;
-        if (numErrors * 2 > ecLen)
-            return null; // too many errors to correct
+        if (errors == 0 || 2 * errors > ecLen)
+            return null; // more errors than this block can repair
 
-        // 3. Chien search — find error positions
-        var errorPositions = new List<int>();
-        for (int i = 0; i < n; i++)
+        // Chien search: position k (the x^k term, k = 0 is the LAST codeword) is in error when Lambda(alpha^-k) == 0.
+        var errorDegrees = new List<int>();
+        for (int k = 0; k < n; k++)
         {
-            byte eval = 0;
-            for (int j = 0; j < errLocator.Length; j++)
-                eval ^= GaloisField.Multiply(errLocator[j], GaloisField.Power(GaloisField.Exp[255 - i], j));
-            if (eval == 0)
-                errorPositions.Add(n - 1 - i);
-        }
-
-        if (errorPositions.Count != numErrors)
-            return null; // Chien search failed — uncorrectable
-
-        // 4. Forney algorithm — compute error values
-        // For simplicity, recompute the corrected message using the syndromes and error positions
-        // This is a simplified approach that works for QR code error correction
-        foreach (int pos in errorPositions)
-        {
-            if (pos < data.Length)
+            byte xInv = GaloisField.Exp[(255 - k) % 255];
+            byte value = 0;
+            byte power = 1;
+            for (int i = 0; i <= errors; i++)
             {
-                // Compute the error value at this position
-                byte xi = GaloisField.Exp[pos];
-                byte xiInv = GaloisField.Inverse(xi);
-
-                // Error evaluator
-                byte errorVal = syndromes[0];
-                for (int j = 1; j < numErrors; j++)
-                    errorVal ^= GaloisField.Multiply(syndromes[j], GaloisField.Power(xiInv, j));
-
-                // Apply correction
-                data[pos] ^= errorVal;
+                value ^= GaloisField.Multiply(lambda[i], power);
+                power = GaloisField.Multiply(power, xInv);
             }
+            if (value == 0)
+                errorDegrees.Add(k);
         }
 
+        if (errorDegrees.Count != errors)
+            return null; // locator roots do not match its degree: the damage is beyond repair
+
+        // Forney: error evaluator Omega(x) = S(x) * Lambda(x) mod x^ecLen, with S(x) = sum S_i x^i.
+        var omega = new byte[ecLen];
+        for (int i = 0; i < ecLen; i++)
+        {
+            byte sum = 0;
+            for (int j = 0; j <= errors && j <= i; j++)
+                sum ^= GaloisField.Multiply(lambda[j], syndromes[i - j]);
+            omega[i] = sum;
+        }
+
+        foreach (int k in errorDegrees)
+        {
+            byte x = GaloisField.Exp[k % 255];
+            byte xInv = GaloisField.Inverse(x);
+
+            byte omegaValue = 0;
+            byte power = 1;
+            for (int i = 0; i < ecLen; i++)
+            {
+                omegaValue ^= GaloisField.Multiply(omega[i], power);
+                power = GaloisField.Multiply(power, xInv);
+            }
+
+            // Formal derivative of Lambda in characteristic 2: only odd-degree terms survive, as l_i * x^(i-1).
+            byte derivative = 0;
+            byte xInvSquared = GaloisField.Multiply(xInv, xInv);
+            byte oddPower = 1; // x^(i-1) for i = 1, 3, 5, ...
+            for (int i = 1; i <= errors; i += 2)
+            {
+                derivative ^= GaloisField.Multiply(lambda[i], oddPower);
+                oddPower = GaloisField.Multiply(oddPower, xInvSquared);
+            }
+            if (derivative == 0)
+                return null;
+
+            // First consecutive root is alpha^0 (b = 0): e = X * Omega(X^-1) / Lambda'(X^-1).
+            byte magnitude = GaloisField.Divide(GaloisField.Multiply(x, omegaValue), derivative);
+            received[n - 1 - k] ^= magnitude;
+        }
+
+        // Trust nothing: the repaired codeword must have all-zero syndromes, or this was a miscorrection.
+        if (Syndromes(received, ecLen) != null)
+            return null;
+
+        System.Array.Copy(received, 0, data, 0, data.Length);
         return data;
+    }
+
+    /// <summary>Syndromes S_i = r(alpha^i), i = 0 .. ecLen-1, or null when every one is zero (the block is clean).</summary>
+    private static byte[]? Syndromes(byte[] received, int ecLen)
+    {
+        var syndromes = new byte[ecLen];
+        bool any = false;
+        for (int i = 0; i < ecLen; i++)
+        {
+            byte x = GaloisField.Exp[i];
+            byte acc = 0;
+            for (int j = 0; j < received.Length; j++)
+                acc = (byte)(GaloisField.Multiply(acc, x) ^ received[j]);
+            syndromes[i] = acc;
+            if (acc != 0) any = true;
+        }
+        return any ? syndromes : null;
     }
 
     #endregion
