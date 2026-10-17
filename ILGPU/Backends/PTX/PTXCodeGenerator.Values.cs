@@ -1209,6 +1209,15 @@ namespace ILGPU.Backends.PTX
         /// <summary cref="IBackendCodeGenerator.GenerateCode(Load)"/>
         public void GenerateCode(Load load)
         {
+            if (load.Source.Resolve() is Alloca promoted &&
+                emitOutputRegisters.TryGetValue(promoted, out var promotedRegister))
+            {
+                // The alloca was an inline-PTX output kept in a register: copy it (a move keeps the
+                // loaded value stable if a later emit rewrites the register).
+                var copy = AllocateHardware(load);
+                Move(promotedRegister, copy);
+                return;
+            }
             var address = LoadHardware(load.Source);
             var sourceType = load.Source.Type.AsNotNullCast<PointerType>();
 
@@ -1421,6 +1430,8 @@ namespace ILGPU.Backends.PTX
         /// <summary cref="IBackendCodeGenerator.GenerateCode(Store)"/>
         public void GenerateCode(Store store)
         {
+            if (store.Target.Resolve() is Alloca promotedTarget && IsPromotableEmitOutput(promotedTarget))
+                return;   // initialiser of an inline-PTX output that is kept in a register (see emitOutputRegisters)
             var address = LoadHardware(store.Target);
             var targetType = store.Target.Type.AsNotNullCast<PointerType>();
             var value = Load(store.Value);
@@ -2289,6 +2300,56 @@ namespace ILGPU.Backends.PTX
             // Invalid write node -> should have been removed
             writeToOutput.Assert(false);
 
+        /// <summary>
+        /// Registers that hold the output operands of inline PTX statements whose address is
+        /// never used for anything else: <c>CudaAsm.Emit(asm, out float d0, ...)</c> declares
+        /// <c>d0</c> as an address-taken local, which becomes an alloca in local memory, so every
+        /// output was stored to local memory right after the statement and loaded back by the
+        /// next use (a register-tiled tensor-core GEMM spent more instructions on that traffic
+        /// than on the MMAs). An output alloca that is used ONLY as an output of one emit and as the
+        /// source of loads is kept in the register the statement wrote instead; its loads become
+        /// register moves.
+        /// </summary>
+        private readonly System.Collections.Generic.Dictionary<Alloca, HardwareRegister> emitOutputRegisters = new();
+
+        private readonly System.Collections.Generic.Dictionary<Alloca, bool> emitOutputPromotable = new();
+
+        /// <summary>
+        /// True when <paramref name="alloca"/> exists only to receive ONE inline-PTX output: its uses are that
+        /// emit (as an output operand), loads of it, and the stores the frontend inserts to zero-initialise an
+        /// <c>out</c> local (never read: C# definite assignment guarantees the emit writes it first).
+        /// </summary>
+        private bool IsPromotableEmitOutput(Alloca alloca)
+        {
+            if (emitOutputPromotable.TryGetValue(alloca, out var known))
+                return known;
+            bool result = alloca.AddressSpace == MemoryAddressSpace.Local &&
+                alloca.AllocaType is PrimitiveType && alloca.IsSimpleAllocation;
+            int emitUses = 0;
+            if (result)
+            {
+                foreach (var use in alloca.Uses)
+                {
+                    var user = use.Resolve();
+                    if (user is LanguageEmitValue le && !le.UsingRefParams &&
+                        le.LanguageKind == LanguageKind.PTX && le.IsOutputArgument(use.Index))
+                        emitUses++;
+                    else if (user is Load load && ReferenceEquals(load.Source.Resolve(), alloca))
+                        continue;
+                    else if (user is Store store && ReferenceEquals(store.Target.Resolve(), alloca))
+                        continue;
+                    else
+                    {
+                        result = false;
+                        break;
+                    }
+                }
+            }
+            result &= emitUses == 1;
+            emitOutputPromotable[alloca] = result;
+            return result;
+        }
+
         /// <summary cref="IBackendCodeGenerator.GenerateCode(LanguageEmitValue)"/>
         public void GenerateCode(LanguageEmitValue emit)
         {
@@ -2359,6 +2420,15 @@ namespace ILGPU.Backends.PTX
                 if (emit.IsOutputArgument(argumentIdx))
                 {
                     var outputArgument = emit.Nodes[argumentIdx];
+                    if (!emit.UsingRefParams &&
+                        registers[argumentIdx] is HardwareRegister outputRegister &&
+                        outputArgument.Resolve() is Alloca outputAlloca &&
+                        IsPromotableEmitOutput(outputAlloca))
+                    {
+                        // Keep the value in the register the statement wrote (see emitOutputRegisters)
+                        emitOutputRegisters[(Alloca)outputArgument.Resolve()] = outputRegister;
+                        continue;
+                    }
                     var address = LoadHardware(outputArgument);
                     var targetType = outputArgument.Type.AsNotNullCast<PointerType>();
                     var newValue = registers[argumentIdx];

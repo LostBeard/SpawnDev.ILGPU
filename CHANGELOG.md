@@ -1,6 +1,22 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.3.8-local.5 (forks 2.3.13-local.3) - 2026-10-17 - CudaAsm.Emit with several output operands, kept in registers
+
+`CudaAsm.Emit` could only return ONE value (`out T0, ...`), so an instruction with several result registers had to use
+`EmitRef` with `Ref<T>` / `Input<T>` structs. That form round-trips every operand through a local-memory slot: the PTX of a
+register-tiled bf16 tensor-core GEMM (`mma.sync.m16n8k16`, 16 MMAs) contained 232 `ld.local` and 256 `st.local`, and the kernel
+ran at 9% of the card's tensor throughput. The compiler already derives every argument's direction from the method
+parameter (`IsOut`) and the PTX backend allocates one register per output, so only the C# overload set was missing:
+`Emit(asm, out T0, out T1 [, out T2, out T3], T_k ...)` for 2 to 4 outputs and up to 16 operands in total
+(generated from `CudaAsm.Generated.tt`). The overloads alone still left each `out` local in local memory (the frontend gives an
+address-taken local an alloca, and the emit node takes its pointer), so the PTX backend now keeps an `out` local whose only uses are
+one emit's output, loads of it, and the frontend's zero-initialising stores in the register the statement wrote (loads become register
+moves, the dead stores are dropped): `PTXCodeGenerator.IsPromotableEmitOutput`. Measured on an RTX 4070 with a 128x128 bf16 tensor-core
+GEMM: PTX `ld.local`/`st.local` 232/256 -> 0/0, 3.7 -> 35 TFLOPS; a flash-attention kernel 4.3 -> 9-14 TFLOPS.
+Tests (CUDA lane, other backends skip): `CudaAsm_FourOutputs_ComputeInRegisters` (also asserts no `st.local`/`ld.local` in the PTX),
+`CudaAsm_LoopCarriedOutputs_KeepTheirValues`. The four-package bundle is bumped together (forks 2.3.13-local.3, wrapper 5.3.8-local.5).
+
 ## 5.3.8-local.2 (forks 2.3.12) - 2026-10-15 - QR decoder: it read the wrong text, could not read large codes, rotated codes or codes seen at an angle
 
 Found by reading a code off a robot camera (Lenticulous): the decoder returned a confident wrong answer

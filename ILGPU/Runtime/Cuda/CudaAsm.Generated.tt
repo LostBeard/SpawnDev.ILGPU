@@ -32,6 +32,31 @@
                 $"<param name=\"arg{r}\">Argument %{r} of the PTX instruction.</param>"),
         };
 
+    // Several output operands (mma.sync writes 4 registers): Emit(asm, out T0, out T1, .., T_k, ..). The compiler already
+    // derives every argument's direction from the method parameter (IsOut) and the PTX backend allocates one register per
+    // output, so only the C# overload set was missing. By-value operands stay in registers; the EmitRef/Ref<T> form round
+    // trips every operand through a local-memory slot (ld.local/st.local around each instruction), which made a
+    // register-tiled tensor-core GEMM spill-bound (measured 2026-10-17).
+    int maxOutArguments = 4;
+    int maxMultiOutArguments = 16;
+    var emitMultiOutCfgs =
+        from outNum in Enumerable.Range(2, maxOutArguments - 1)
+        from argNum in Enumerable.Range(outNum, maxMultiOutArguments - outNum + 1)
+        let range = Enumerable.Range(0, argNum)
+        select new
+        {
+            TypeParams = string.Join(", ", from r in range select $"T{r}"),
+            TypeRestrictions = string.Join(
+                $"{Environment.NewLine}            ",
+                from r in range select $"where T{r} : struct"),
+            MethodParams = string.Join(", ", from r in range select
+                (r < outNum ? $"out T{r} arg{r}" : $"T{r} arg{r}")),
+            MethodParamsDocumentation = string.Join(
+                $"{Environment.NewLine}        /// ",
+                from r in range select
+                $"<param name=\"arg{r}\">Argument %{r} of the PTX instruction{(r < outNum ? " (output)" : "")}.</param>"),
+        };
+
     int numEmitRefArguments = 44;
     var emitRefCfgs =
         from argNum in Enumerable.Range(1, numEmitRefArguments)
@@ -82,6 +107,20 @@ namespace ILGPU.Runtime.Cuda
         public static void Emit<<#= cfg.TypeParams #>>(
             string asm,
             out <#= cfg.MethodParams #>)
+            <#= cfg.TypeRestrictions #> =>
+            throw new NotImplementedException();
+
+<# } #>
+<# foreach (var cfg in emitMultiOutCfgs) { #>
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <#= cfg.MethodParamsDocumentation #>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<<#= cfg.TypeParams #>>(
+            string asm,
+            <#= cfg.MethodParams #>)
             <#= cfg.TypeRestrictions #> =>
             throw new NotImplementedException();
 

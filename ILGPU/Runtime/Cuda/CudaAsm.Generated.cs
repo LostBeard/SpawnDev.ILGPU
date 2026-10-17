@@ -440,6 +440,1222 @@ namespace ILGPU.Runtime.Cuda
             throw new NotImplementedException();
 
         /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1>(
+            string asm,
+            out T0 arg0, out T1 arg1)
+            where T0 : struct
+            where T1 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2>(
+            string asm,
+            out T0 arg0, out T1 arg1, T2 arg2)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction.</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3>(
+            string asm,
+            out T0 arg0, out T1 arg1, T2 arg2, T3 arg3)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction.</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4>(
+            string asm,
+            out T0 arg0, out T1 arg1, T2 arg2, T3 arg3, T4 arg4)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction.</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5>(
+            string asm,
+            out T0 arg0, out T1 arg1, T2 arg2, T3 arg3, T4 arg4, T5 arg5)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction.</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6>(
+            string asm,
+            out T0 arg0, out T1 arg1, T2 arg2, T3 arg3, T4 arg4, T5 arg5, T6 arg6)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction.</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7>(
+            string asm,
+            out T0 arg0, out T1 arg1, T2 arg2, T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction.</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8>(
+            string asm,
+            out T0 arg0, out T1 arg1, T2 arg2, T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction.</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        /// <param name="arg9">Argument %9 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9>(
+            string asm,
+            out T0 arg0, out T1 arg1, T2 arg2, T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8, T9 arg9)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct
+            where T9 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction.</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        /// <param name="arg9">Argument %9 of the PTX instruction.</param>
+        /// <param name="arg10">Argument %10 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>(
+            string asm,
+            out T0 arg0, out T1 arg1, T2 arg2, T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8, T9 arg9, T10 arg10)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct
+            where T9 : struct
+            where T10 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction.</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        /// <param name="arg9">Argument %9 of the PTX instruction.</param>
+        /// <param name="arg10">Argument %10 of the PTX instruction.</param>
+        /// <param name="arg11">Argument %11 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11>(
+            string asm,
+            out T0 arg0, out T1 arg1, T2 arg2, T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8, T9 arg9, T10 arg10, T11 arg11)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct
+            where T9 : struct
+            where T10 : struct
+            where T11 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction.</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        /// <param name="arg9">Argument %9 of the PTX instruction.</param>
+        /// <param name="arg10">Argument %10 of the PTX instruction.</param>
+        /// <param name="arg11">Argument %11 of the PTX instruction.</param>
+        /// <param name="arg12">Argument %12 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12>(
+            string asm,
+            out T0 arg0, out T1 arg1, T2 arg2, T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8, T9 arg9, T10 arg10, T11 arg11, T12 arg12)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct
+            where T9 : struct
+            where T10 : struct
+            where T11 : struct
+            where T12 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction.</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        /// <param name="arg9">Argument %9 of the PTX instruction.</param>
+        /// <param name="arg10">Argument %10 of the PTX instruction.</param>
+        /// <param name="arg11">Argument %11 of the PTX instruction.</param>
+        /// <param name="arg12">Argument %12 of the PTX instruction.</param>
+        /// <param name="arg13">Argument %13 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13>(
+            string asm,
+            out T0 arg0, out T1 arg1, T2 arg2, T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8, T9 arg9, T10 arg10, T11 arg11, T12 arg12, T13 arg13)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct
+            where T9 : struct
+            where T10 : struct
+            where T11 : struct
+            where T12 : struct
+            where T13 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction.</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        /// <param name="arg9">Argument %9 of the PTX instruction.</param>
+        /// <param name="arg10">Argument %10 of the PTX instruction.</param>
+        /// <param name="arg11">Argument %11 of the PTX instruction.</param>
+        /// <param name="arg12">Argument %12 of the PTX instruction.</param>
+        /// <param name="arg13">Argument %13 of the PTX instruction.</param>
+        /// <param name="arg14">Argument %14 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14>(
+            string asm,
+            out T0 arg0, out T1 arg1, T2 arg2, T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8, T9 arg9, T10 arg10, T11 arg11, T12 arg12, T13 arg13, T14 arg14)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct
+            where T9 : struct
+            where T10 : struct
+            where T11 : struct
+            where T12 : struct
+            where T13 : struct
+            where T14 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction.</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        /// <param name="arg9">Argument %9 of the PTX instruction.</param>
+        /// <param name="arg10">Argument %10 of the PTX instruction.</param>
+        /// <param name="arg11">Argument %11 of the PTX instruction.</param>
+        /// <param name="arg12">Argument %12 of the PTX instruction.</param>
+        /// <param name="arg13">Argument %13 of the PTX instruction.</param>
+        /// <param name="arg14">Argument %14 of the PTX instruction.</param>
+        /// <param name="arg15">Argument %15 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15>(
+            string asm,
+            out T0 arg0, out T1 arg1, T2 arg2, T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8, T9 arg9, T10 arg10, T11 arg11, T12 arg12, T13 arg13, T14 arg14, T15 arg15)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct
+            where T9 : struct
+            where T10 : struct
+            where T11 : struct
+            where T12 : struct
+            where T13 : struct
+            where T14 : struct
+            where T15 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, T3 arg3)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, T3 arg3, T4 arg4)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, T3 arg3, T4 arg4, T5 arg5)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, T3 arg3, T4 arg4, T5 arg5, T6 arg6)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        /// <param name="arg9">Argument %9 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8, T9 arg9)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct
+            where T9 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        /// <param name="arg9">Argument %9 of the PTX instruction.</param>
+        /// <param name="arg10">Argument %10 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8, T9 arg9, T10 arg10)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct
+            where T9 : struct
+            where T10 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        /// <param name="arg9">Argument %9 of the PTX instruction.</param>
+        /// <param name="arg10">Argument %10 of the PTX instruction.</param>
+        /// <param name="arg11">Argument %11 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8, T9 arg9, T10 arg10, T11 arg11)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct
+            where T9 : struct
+            where T10 : struct
+            where T11 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        /// <param name="arg9">Argument %9 of the PTX instruction.</param>
+        /// <param name="arg10">Argument %10 of the PTX instruction.</param>
+        /// <param name="arg11">Argument %11 of the PTX instruction.</param>
+        /// <param name="arg12">Argument %12 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8, T9 arg9, T10 arg10, T11 arg11, T12 arg12)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct
+            where T9 : struct
+            where T10 : struct
+            where T11 : struct
+            where T12 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        /// <param name="arg9">Argument %9 of the PTX instruction.</param>
+        /// <param name="arg10">Argument %10 of the PTX instruction.</param>
+        /// <param name="arg11">Argument %11 of the PTX instruction.</param>
+        /// <param name="arg12">Argument %12 of the PTX instruction.</param>
+        /// <param name="arg13">Argument %13 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8, T9 arg9, T10 arg10, T11 arg11, T12 arg12, T13 arg13)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct
+            where T9 : struct
+            where T10 : struct
+            where T11 : struct
+            where T12 : struct
+            where T13 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        /// <param name="arg9">Argument %9 of the PTX instruction.</param>
+        /// <param name="arg10">Argument %10 of the PTX instruction.</param>
+        /// <param name="arg11">Argument %11 of the PTX instruction.</param>
+        /// <param name="arg12">Argument %12 of the PTX instruction.</param>
+        /// <param name="arg13">Argument %13 of the PTX instruction.</param>
+        /// <param name="arg14">Argument %14 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8, T9 arg9, T10 arg10, T11 arg11, T12 arg12, T13 arg13, T14 arg14)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct
+            where T9 : struct
+            where T10 : struct
+            where T11 : struct
+            where T12 : struct
+            where T13 : struct
+            where T14 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction.</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        /// <param name="arg9">Argument %9 of the PTX instruction.</param>
+        /// <param name="arg10">Argument %10 of the PTX instruction.</param>
+        /// <param name="arg11">Argument %11 of the PTX instruction.</param>
+        /// <param name="arg12">Argument %12 of the PTX instruction.</param>
+        /// <param name="arg13">Argument %13 of the PTX instruction.</param>
+        /// <param name="arg14">Argument %14 of the PTX instruction.</param>
+        /// <param name="arg15">Argument %15 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8, T9 arg9, T10 arg10, T11 arg11, T12 arg12, T13 arg13, T14 arg14, T15 arg15)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct
+            where T9 : struct
+            where T10 : struct
+            where T11 : struct
+            where T12 : struct
+            where T13 : struct
+            where T14 : struct
+            where T15 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction (output).</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, out T3 arg3)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction (output).</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, out T3 arg3, T4 arg4)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction (output).</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, out T3 arg3, T4 arg4, T5 arg5)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction (output).</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, out T3 arg3, T4 arg4, T5 arg5, T6 arg6)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction (output).</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, out T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction (output).</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, out T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction (output).</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        /// <param name="arg9">Argument %9 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, out T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8, T9 arg9)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct
+            where T9 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction (output).</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        /// <param name="arg9">Argument %9 of the PTX instruction.</param>
+        /// <param name="arg10">Argument %10 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, out T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8, T9 arg9, T10 arg10)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct
+            where T9 : struct
+            where T10 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction (output).</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        /// <param name="arg9">Argument %9 of the PTX instruction.</param>
+        /// <param name="arg10">Argument %10 of the PTX instruction.</param>
+        /// <param name="arg11">Argument %11 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, out T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8, T9 arg9, T10 arg10, T11 arg11)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct
+            where T9 : struct
+            where T10 : struct
+            where T11 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction (output).</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        /// <param name="arg9">Argument %9 of the PTX instruction.</param>
+        /// <param name="arg10">Argument %10 of the PTX instruction.</param>
+        /// <param name="arg11">Argument %11 of the PTX instruction.</param>
+        /// <param name="arg12">Argument %12 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, out T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8, T9 arg9, T10 arg10, T11 arg11, T12 arg12)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct
+            where T9 : struct
+            where T10 : struct
+            where T11 : struct
+            where T12 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction (output).</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        /// <param name="arg9">Argument %9 of the PTX instruction.</param>
+        /// <param name="arg10">Argument %10 of the PTX instruction.</param>
+        /// <param name="arg11">Argument %11 of the PTX instruction.</param>
+        /// <param name="arg12">Argument %12 of the PTX instruction.</param>
+        /// <param name="arg13">Argument %13 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, out T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8, T9 arg9, T10 arg10, T11 arg11, T12 arg12, T13 arg13)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct
+            where T9 : struct
+            where T10 : struct
+            where T11 : struct
+            where T12 : struct
+            where T13 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction (output).</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        /// <param name="arg9">Argument %9 of the PTX instruction.</param>
+        /// <param name="arg10">Argument %10 of the PTX instruction.</param>
+        /// <param name="arg11">Argument %11 of the PTX instruction.</param>
+        /// <param name="arg12">Argument %12 of the PTX instruction.</param>
+        /// <param name="arg13">Argument %13 of the PTX instruction.</param>
+        /// <param name="arg14">Argument %14 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, out T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8, T9 arg9, T10 arg10, T11 arg11, T12 arg12, T13 arg13, T14 arg14)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct
+            where T9 : struct
+            where T10 : struct
+            where T11 : struct
+            where T12 : struct
+            where T13 : struct
+            where T14 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
+        /// Writes the inline PTX assembly instructions into the kernel (several output operands).
+        /// </summary>
+        /// <param name="asm">The PTX assembly instruction string.</param>
+        /// <param name="arg0">Argument %0 of the PTX instruction (output).</param>
+        /// <param name="arg1">Argument %1 of the PTX instruction (output).</param>
+        /// <param name="arg2">Argument %2 of the PTX instruction (output).</param>
+        /// <param name="arg3">Argument %3 of the PTX instruction (output).</param>
+        /// <param name="arg4">Argument %4 of the PTX instruction.</param>
+        /// <param name="arg5">Argument %5 of the PTX instruction.</param>
+        /// <param name="arg6">Argument %6 of the PTX instruction.</param>
+        /// <param name="arg7">Argument %7 of the PTX instruction.</param>
+        /// <param name="arg8">Argument %8 of the PTX instruction.</param>
+        /// <param name="arg9">Argument %9 of the PTX instruction.</param>
+        /// <param name="arg10">Argument %10 of the PTX instruction.</param>
+        /// <param name="arg11">Argument %11 of the PTX instruction.</param>
+        /// <param name="arg12">Argument %12 of the PTX instruction.</param>
+        /// <param name="arg13">Argument %13 of the PTX instruction.</param>
+        /// <param name="arg14">Argument %14 of the PTX instruction.</param>
+        /// <param name="arg15">Argument %15 of the PTX instruction.</param>
+        [LanguageIntrinsic(LanguageIntrinsicKind.EmitPTX)]
+        public static void Emit<T0, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14, T15>(
+            string asm,
+            out T0 arg0, out T1 arg1, out T2 arg2, out T3 arg3, T4 arg4, T5 arg5, T6 arg6, T7 arg7, T8 arg8, T9 arg9, T10 arg10, T11 arg11, T12 arg12, T13 arg13, T14 arg14, T15 arg15)
+            where T0 : struct
+            where T1 : struct
+            where T2 : struct
+            where T3 : struct
+            where T4 : struct
+            where T5 : struct
+            where T6 : struct
+            where T7 : struct
+            where T8 : struct
+            where T9 : struct
+            where T10 : struct
+            where T11 : struct
+            where T12 : struct
+            where T13 : struct
+            where T14 : struct
+            where T15 : struct =>
+            throw new NotImplementedException();
+
+        /// <summary>
         /// Writes the inline PTX assembly instructions into the kernel.
         /// </summary>
         /// <param name="asm">The PTX assembly instruction string.</param>
