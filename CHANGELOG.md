@@ -1,6 +1,16 @@
-﻿# SpawnDev.ILGPU Changelog
+# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.3.8-local.6 (forks 2.3.13-local.3) - 2026-10-17 - QR codes now conform to ISO/IEC 18004 (the format bits were transposed)
+
+- **FIXED: every generated QR code was unscannable by other readers, and our decoder could not read anyone else's.** `QREncoder.PlaceFormatInfo` wrote the 15 format bits
+  transposed (MSB at row 0 / column 8 instead of row 8 / column 0; the second copy in the wrong order too), and `QRDecoder.ReadFormatInfo` read the same transposed
+  positions, so every round-trip test passed while real scanners rejected the code (found by Tuvok in SpawnDarkly). Both now use ISO/IEC 18004 7.9 positions.
+  MEASURED against independent implementations: zxing-cpp reads 300 of 300 codes the encoder makes (random text, 1-200 bytes, all four EC levels, versions 1-12+);
+  before the fix 0 of 40. OpenCV's detector reads 21 of 24 (the rest are its own detector's misses; zxing-cpp reads those). python-qrcode's codes (byte, alphanumeric,
+  numeric; all EC levels; versions 1-13) decode here 160 of 160 plus the fixed cases; before the fix nearly all failed. Tests `QR_Encoder_FormatInfoSitsAtTheIsoPositions`
+  (geometry asserted directly, both copies, independent of our decoder) and `QR_Decoder_ReadsCodesFromAnIndependentEncoder` (three python-qrcode matrices embedded).
+
 ## 5.3.8-local.5 (forks 2.3.13-local.3) - 2026-10-17 - CudaAsm.Emit with several output operands, kept in registers
 
 `CudaAsm.Emit` could only return ONE value (`out T0, ...`), so an instruction with several result registers had to use

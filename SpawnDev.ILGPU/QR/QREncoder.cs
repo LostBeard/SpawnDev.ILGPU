@@ -538,9 +538,12 @@ public class QREncoder
     {
         int formatBits = FormatInfo[(int)ecLevel * 8 + maskPattern];
 
-        // Place format info around top-left finder
-        int[] rowPositions = { 0, 1, 2, 3, 4, 5, 7, 8, 8, 8, 8, 8, 8, 8, 8 };
-        int[] colPositions = { 8, 8, 8, 8, 8, 8, 8, 8, 7, 5, 4, 3, 2, 1, 0 };
+        // ISO/IEC 18004 7.9: the 15-bit string is written MSB first along row 8 (columns 0-5, 7, 8) then up column 8 (rows 7, 5-0),
+        // and a second copy runs down column 8 from the bottom (MSB at the last row, 7 bits) and along row 8 from column size-8
+        // (the next 8 bits, LSB at the last column). Arrays are [row, column] - they were transposed before (MSB at row 0, column 8),
+        // which no other QR reader accepts.
+        int[] rowPositions = { 8, 8, 8, 8, 8, 8, 8, 8, 7, 5, 4, 3, 2, 1, 0 };
+        int[] colPositions = { 0, 1, 2, 3, 4, 5, 7, 8, 8, 8, 8, 8, 8, 8, 8 };
 
         for (int i = 0; i < 15; i++)
         {
@@ -548,18 +551,17 @@ public class QREncoder
             matrix[rowPositions[i], colPositions[i]] = dark;
         }
 
-        // Place format info near other two finders
-        // Bottom-left (column 8, rows from bottom)
+        // Second copy, bottom-left: column 8, rows size-1 .. size-7 hold bits 14 .. 8
         for (int i = 0; i < 7; i++)
         {
-            bool dark = ((formatBits >> i) & 1) == 1;
+            bool dark = ((formatBits >> (14 - i)) & 1) == 1;
             matrix[size - 1 - i, 8] = dark;
         }
 
-        // Top-right (row 8, columns from right)
+        // Second copy, top-right: row 8, columns size-8 .. size-1 hold bits 7 .. 0
         for (int i = 0; i < 8; i++)
         {
-            bool dark = ((formatBits >> (14 - i)) & 1) == 1;
+            bool dark = ((formatBits >> (7 - i)) & 1) == 1;
             matrix[8, size - 8 + i] = dark;
         }
     }

@@ -380,8 +380,9 @@ public static class QRDecoder
     {
         // Read format bits from around top-left finder
         int bits = 0;
-        int[] rowPos = { 0, 1, 2, 3, 4, 5, 7, 8, 8, 8, 8, 8, 8, 8, 8 };
-        int[] colPos = { 8, 8, 8, 8, 8, 8, 8, 8, 7, 5, 4, 3, 2, 1, 0 };
+        // (ISO/IEC 18004 7.9, [row, column]: MSB at row 8 column 0, LSB at row 0 column 8; same order the encoder writes)
+        int[] rowPos = { 8, 8, 8, 8, 8, 8, 8, 8, 7, 5, 4, 3, 2, 1, 0 };
+        int[] colPos = { 0, 1, 2, 3, 4, 5, 7, 8, 8, 8, 8, 8, 8, 8, 8 };
 
         for (int i = 0; i < 15; i++)
         {

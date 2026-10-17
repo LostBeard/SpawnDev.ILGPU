@@ -731,4 +731,95 @@ public abstract partial class BackendTestBase
         Console.WriteLine($"[QR] Long URL encode: {url.Length} chars → {size}x{size} (EC=H) ✓");
         return Task.CompletedTask;
     }
+
+    // ═══════════════════════════════════════════════════════════
+    //  QR Code — conformance to ISO/IEC 18004 (checked against independent implementations)
+    // ═══════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// The 15 format bits must sit where ISO/IEC 18004 7.9 puts them. 🔴 They were written TRANSPOSED (MSB at row 0 / column 8 instead of row 8 /
+    /// column 0, and both copies in the wrong order) and the decoder read the same transposed positions, so every round-trip test passed while no other
+    /// QR reader could scan a generated code (reported by Tuvok; zxing-cpp and OpenCV now read 300/300 and 21/24 of our codes, python-qrcode's codes decode here).
+    /// This asserts the geometry directly, independent of our own decoder: first copy MSB-first along row 8 (cols 0-5, 7, 8) then up column 8 (rows 7, 5-0);
+    /// second copy down column 8 from the last row (7 bits) and along row 8 from column size-8 (8 bits); both copies equal one table entry of the chosen level.
+    /// </summary>
+    [TestMethod]
+    public Task QR_Encoder_FormatInfoSitsAtTheIsoPositions()
+    {
+        int[] rows = { 8, 8, 8, 8, 8, 8, 8, 8, 7, 5, 4, 3, 2, 1, 0 };
+        int[] cols = { 0, 1, 2, 3, 4, 5, 7, 8, 8, 8, 8, 8, 8, 8, 8 };
+        foreach (var ec in new[] { ECLevel.L, ECLevel.M, ECLevel.Q, ECLevel.H })
+            foreach (var text in new[] { "hello", "https://example.com/a/b?c=d&e=f", new string('x', 120) })
+            {
+                var m = QREncoder.Encode(text, ec);
+                int size = m.GetLength(0);
+                int first = 0;
+                for (int i = 0; i < 15; i++) if (m[rows[i], cols[i]]) first |= 1 << (14 - i);
+                int second = 0;
+                for (int i = 0; i < 7; i++) if (m[size - 1 - i, 8]) second |= 1 << (14 - i);
+                for (int i = 0; i < 8; i++) if (m[8, size - 8 + i]) second |= 1 << (7 - i);
+                if (first != second) throw new Exception($"the two format copies differ for EC={ec}: {first:X4} vs {second:X4}");
+                int match = -1;
+                for (int mask = 0; mask < 8; mask++) if (QRTables.FormatInfo[(int)ec * 8 + mask] == first) match = mask;
+                if (match < 0) throw new Exception($"format bits {first:X4} are not a valid entry of EC level {ec}");
+            }
+        Console.WriteLine("[QR] format info at ISO positions, both copies agree ✓");
+        return Task.CompletedTask;
+    }
+
+    /// <summary>
+    /// Codes produced by an independent encoder (python-qrcode 8, byte / alphanumeric / numeric modes, M / Q / H) must decode. A decoder that only
+    /// reads what our own encoder writes would pass every round trip and fail on every QR code in the world.
+    /// </summary>
+    [TestMethod]
+    public Task QR_Decoder_ReadsCodesFromAnIndependentEncoder()
+    {
+        var cases = new (string Text, string[] Rows)[]
+        {
+            ("https://spawndev.com", new[]
+            {
+                "#######.#...###...#######", "#.....#.##..#.#...#.....#", "#.###.#.####.##...#.###.#", "#.###.#..##.##.##.#.###.#", "#.###.#.###.###...#.###.#",
+                "#.....#...#..##.#.#.....#", "#######.#.#.#.#.#.#######", ".........#.###.##........", "#..#######.##.##.#..#.###", "#...#..#..#.####.#.#####.",
+                "##...##.#.##...#####.#..#", "######..#.##..#..##..####", "..##..######.####.#.....#", "####.#..##..#.###...#..#.", "##.#..#.##....###.#.#####",
+                "#.#.#..#..#.###..###.##.#", "#.#..####.###..######.##.", "........#.##....#...#.##.", "#######.###.###.#.#.#...#", "#.....#.####.#.##...#...#",
+                "#.###.#.#.##.#.######..##", "#.###.#.##..##...##....##", "#.###.#...##.#..#...#####", "#.....#....###....###.###", "#######.##.###..#....#..#",
+            }),
+            ("HELLO WORLD 12345", new[]
+            {
+                "#######....#####..#######", "#.....#.##...###..#.....#", "#.###.#..######...#.###.#", "#.###.#.##.##.##..#.###.#", "#.###.#.##...#.#..#.###.#",
+                "#.....#..#..###...#.....#", "#######.#.#.#.#.#.#######", "........#.#...#..........", ".#.####.##.#.######.##.#.", "#..###..##....#..#...#..#",
+                "..###.##..#...#.....#..#.", "##.##...#.#.#.##.##...#..", "###.###.#..####...##..#.#", "##.#.#.#.#.#.#....##.#.#.", "###.###.########.##......",
+                "#...##..#.##....####..#.#", "#..#.###..#.#..##########", "........##.#..#.#...##...", "#######....##.###.#.#.##.", "#.....#.#.####.##...###.#",
+                "#.###.#.##.#....#######..", "#.###.#.##.#.##.....###.#", "#.###.#...#...#.######.##", "#.....#.#...##..##...#.#.", "#######..##.######..#.###",
+            }),
+            ("0123456789012345", new[]
+            {
+                "#######.###...#######", "#.....#.#####.#.....#", "#.###.#..#.#..#.###.#", "#.###.#.##.##.#.###.#", "#.###.#.#.###.#.###.#",
+                "#.....#.##.##.#.....#", "#######.#.#.#.#######", ".........#.#.........", "...#..#..####..###.##", ".##.#..####.##.#...#.",
+                "###.###..##..#...##..", "#..#....####.##..#.##", "#.######..###.###...#", "........##.....#.....", "#######.....###..#...",
+                "#.....#..####..#####.", "#.###.#..#..#####...#", "#.###.#.##..##.#.#.##", "#.###.#........##...#", "#.....#..#.#..#.#.##.", "#######..###.#..##...",
+            }),
+        };
+        foreach (var (text, rows) in cases)
+        {
+            int n = rows.Length, scale = 6, quiet = 4, side = (n + 2 * quiet) * scale;
+            var px = new byte[side * side * 4];
+            Array.Fill(px, (byte)255);
+            for (int r = 0; r < n; r++)
+                for (int c = 0; c < n; c++)
+                {
+                    if (rows[r][c] != '#') continue;
+                    for (int y = 0; y < scale; y++)
+                        for (int x = 0; x < scale; x++)
+                        {
+                            int o = (((r + quiet) * scale + y) * side + (c + quiet) * scale + x) * 4;
+                            px[o] = px[o + 1] = px[o + 2] = 0;
+                        }
+                }
+            var got = QRCode.Decode(px, side, side);
+            if (got != text) throw new Exception($"decoded '{got}', expected '{text}'");
+        }
+        Console.WriteLine("[QR] decoded 3 codes from an independent encoder (byte, alphanumeric, numeric) ✓");
+        return Task.CompletedTask;
+    }
 }
