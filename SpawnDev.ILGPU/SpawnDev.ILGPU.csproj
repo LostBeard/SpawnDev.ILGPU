@@ -4,9 +4,9 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.3.8-local.7</Version>
+		<Version>5.3.8</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>v5.3.7 (forks 2.3.12) - Blazor WebAssembly AOT: loading a kernel with 6 or more parameters through the stream loaders on WebGPU, WebGL or Wasm no longer kills the .NET runtime (Mono could not create the launcher delegate); they now launch with boxed arguments (Accelerator.SupportsBoxedLaunch, Kernel.LaunchBoxed). Hybrid GPU machines pick the discrete GPU (DevicePreference, context.GetBestDevice). Group.BarrierPopCount/And/Or fixed on WebGPU, Wasm and CPU. Native f16 and subgroup selection follow the device. See CHANGELOG.md.</PackageReleaseNotes>
+		<PackageReleaseNotes>v5.3.8 (forks 2.3.13) - WebGPU: WebGPUAccelerator.PrecompileAsync builds kernel pipelines in the background and in parallel before their first launch (first launches compile one shader at a time with the queue waiting). CUDA: CudaAsm.Emit with several output operands, kept in registers. QR codes conform to ISO/IEC 18004 (format bits were transposed) and the decoder reads large, rotated and angled codes. See CHANGELOG.md.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -68,8 +68,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.3.13-local.3" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.3.13-local.3" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.3.13" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.3.13" />
 	</ItemGroup>
 
 	<ItemGroup>

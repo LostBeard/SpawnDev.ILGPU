@@ -1,6 +1,17 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.3.8 (forks 2.3.13) - 2026-10-17 - background pipeline builds on WebGPU, CudaAsm.Emit with several outputs, QR fixes
+
+The stable release of the 5.3.8 local builds below (details and measurements in each entry):
+- **WebGPU:** `WebGPUAccelerator.PrecompileAsync` / `PrecompileAutoGroupedAsync` build kernel pipelines in the background, in parallel,
+  before their first launch (local.7).
+- **CUDA:** `CudaAsm.Emit` with several output operands, kept in registers (local.5; forks 2.3.13).
+- **QR:** generated codes conform to ISO/IEC 18004 (format bits were transposed; local.6); the decoder reads large, rotated and angled
+  codes (local.1, local.2).
+- Release gate: full PMT 4816 passed / 0 failed / 415 skipped; one CPU-lane subprocess exited before reporting
+  (GlobalExclusiveScanAtScaleTest) and passes on rerun.
+
 ## 5.3.8-local.7 (forks 2.3.13-local.3) - 2026-10-17 - WebGPU: build kernel pipelines in the background, in parallel, before their first launch
 
 - **NEW: `WebGPUAccelerator.PrecompileAsync(kernelMethod, groupDim)` and `PrecompileAutoGroupedAsync(kernelMethod)`.** A WebGPU kernel's
