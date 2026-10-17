@@ -89,6 +89,48 @@ namespace SpawnDev.ILGPU.WebGPU
             accelerator.TrackShaderCheck(CheckShaderAsync(capturedModule, entryPoint, device, accelerator));
         }
 
+        /// <summary>
+        /// Builds a compute shader with <c>createComputePipelineAsync</c>: the browser compiles it on a background thread, and several such
+        /// compiles run in parallel (the synchronous path compiles at the first submit that needs it, one shader at a time, with the GPU
+        /// queue waiting). An invalid shader rejects the pipeline promise, which surfaces here as an exception.
+        /// </summary>
+        internal static async Task<WebGPUComputeShader> CreateAsync(
+            WebGPUNativeAccelerator accelerator,
+            string wgslSource,
+            string entryPoint,
+            Dictionary<string, object>? overrideConstants = null,
+            string? label = null)
+        {
+            var device = accelerator.NativeDevice ?? throw new InvalidOperationException("GPU device not initialized");
+            var module = device.CreateShaderModule(new GPUShaderModuleDescriptor { Code = wgslSource });
+            GPUComputePipeline pipeline;
+            try
+            {
+                pipeline = await device.CreateComputePipelineAsync(new GPUComputePipelineDescriptor
+                {
+                    Layout = "auto",
+                    Compute = new GPUProgrammableStage { Module = module, EntryPoint = entryPoint, Constants = overrideConstants },
+                    Label = label ?? entryPoint
+                });
+            }
+            catch
+            {
+                module.Dispose();
+                throw;
+            }
+            return new WebGPUComputeShader(accelerator, wgslSource, entryPoint, module, pipeline);
+        }
+
+        private WebGPUComputeShader(WebGPUNativeAccelerator accelerator, string wgslSource, string entryPoint, GPUShaderModule module, GPUComputePipeline pipeline)
+        {
+            Accelerator = accelerator;
+            WGSLSource = wgslSource;
+            EntryPoint = entryPoint;
+            _shaderModule = module;
+            _pipeline = pipeline;
+            _bindGroupLayout = pipeline.GetBindGroupLayout(0);
+        }
+
         #endregion
 
         #region Properties

@@ -37,6 +37,65 @@ namespace SpawnDev.ILGPU.WebGPU
         #endregion
 
         /// <summary>
+        /// The WGSL a dispatch with group size (x, y, z) compiles: the kernel's source with @workgroup_size and the workgroup_size constant
+        /// rewritten when they differ from the compiled size. ONE implementation for dispatch and <see cref="PrecompileAsync(Delegate, Index3D)"/>:
+        /// a precompiled shader is found by its exact source text.
+        /// </summary>
+        private static string ResolveWorkgroupSource(WebGPUCompiledKernel compiledKernel, int x, int y, int z)
+        {
+            string wgslSource = compiledKernel.WGSLSource;
+            var (cx, cy, cz) = compiledKernel.CompiledWorkgroupSize;
+            if (cx <= 0 || (cx == x && cy == y && cz == z)) return wgslSource;
+            var wgMatch = s_workgroupSizePattern.Match(wgslSource);
+            if (!wgMatch.Success) return wgslSource;
+            if (WebGPUBackend.VerboseLogging)
+            {
+                WebGPUBackend.Log(
+                    $"[WebGPU] WARNING: Runtime @workgroup_size patching: " +
+                    $"compiled=({cx},{cy},{cz}), dispatch=({x},{y},{z}). " +
+                    $"Kernel: {compiledKernel.EntryPoint?.Name ?? "unknown"}. " +
+                    $"Consider adding KernelSpecialization to LoadKernel.");
+            }
+            wgslSource = wgslSource.Replace(wgMatch.Value, $"@workgroup_size({x}, {y}, {z})");
+            var constMatch = s_constWorkgroupSizePattern.Match(wgslSource);
+            if (constMatch.Success)
+                wgslSource = wgslSource.Replace(
+                    constMatch.Value,
+                    $"const workgroup_size : vec3<u32> = vec3<u32>({x}u, {y}u, {z}u);");
+            return wgslSource;
+        }
+
+        /// <summary>
+        /// Compile an explicitly grouped kernel (the method a <c>LoadStreamKernel</c> / <c>LoadKernel</c> call takes) for launches with
+        /// <paramref name="groupDim"/> threads per group, ahead of its first launch: the IL is compiled now (through the same kernel cache
+        /// the loaders use, so the later load is a cache hit) and the browser builds the pipeline on a background thread
+        /// (<c>createComputePipelineAsync</c>). Start several and await them together: the browser compiles them in parallel, where
+        /// first launches compile one at a time with the GPU queue waiting. MEASURED in Chrome (4 distinct 50 KB shaders): 1571 ms
+        /// first-launch compiles vs 511 ms async in parallel. Kernels with dynamic shared memory or specialized parameters are skipped.
+        /// </summary>
+        public Task PrecompileAsync(Delegate kernel, Index3D groupDim)
+        {
+            ArgumentNullException.ThrowIfNull(kernel);
+            if (LoadBoxedLaunchKernel(kernel.Method, default, out _) is not WebGPUKernel k) return Task.CompletedTask;
+            var compiled = k.CompiledKernel;
+            if (compiled.HasDynamicSharedMemory) return Task.CompletedTask;
+            var source = ResolveWorkgroupSource(compiled, groupDim.X, groupDim.Y, groupDim.Z);
+            return NativeAccelerator.PrecompileComputeShaderAsync(source, "main", compiled.EntryPoint?.Name);
+        }
+
+        /// <summary>
+        /// <see cref="PrecompileAsync(Delegate, Index3D)"/> for an implicitly grouped kernel loaded with <c>LoadAutoGroupedStreamKernel</c>.
+        /// </summary>
+        public Task PrecompileAutoGroupedAsync(Delegate kernel)
+        {
+            ArgumentNullException.ThrowIfNull(kernel);
+            if (LoadBoxedLaunchAutoGroupedKernel(kernel.Method, out _) is not WebGPUKernel k) return Task.CompletedTask;
+            var compiled = k.CompiledKernel;
+            if (compiled.HasDynamicSharedMemory) return Task.CompletedTask;
+            return NativeAccelerator.PrecompileComputeShaderAsync(compiled.WGSLSource, "main", compiled.EntryPoint?.Name);
+        }
+
+        /// <summary>
         /// Gets the native WebGPU accelerator for low-level GPU access.
         /// </summary>
         public WebGPUNativeAccelerator NativeAccelerator { get; private set; } = null!;
@@ -1622,31 +1681,9 @@ namespace SpawnDev.ILGPU.WebGPU
                 var (compiledX, compiledY, compiledZ) = compiledKernel.CompiledWorkgroupSize;
                 wasPatched = compiledX > 0 && (compiledX != reqX || compiledY != reqY || compiledZ != reqZ);
             }
-            string ResolveSource()
-            {
-                string wgslSource = compiledKernel.WGSLSource;
-                if (!wasPatched) return wgslSource;
-                var wgMatch = s_workgroupSizePattern.Match(wgslSource);
-                if (!wgMatch.Success) return wgslSource;
-                // This indicates the kernel was loaded without KernelSpecialization matching the dispatch's
-                // GroupDim; adding one to the LoadKernel call removes the need for the patch.
-                if (WebGPUBackend.VerboseLogging)
-                {
-                    var (cx, cy, cz) = compiledKernel.CompiledWorkgroupSize;
-                    WebGPUBackend.Log(
-                        $"[WebGPU] WARNING: Runtime @workgroup_size patching: " +
-                        $"compiled=({cx},{cy},{cz}), dispatch=({reqX},{reqY},{reqZ}). " +
-                        $"Kernel: {compiledKernel.EntryPoint?.Name ?? "unknown"}. " +
-                        $"Consider adding KernelSpecialization to LoadKernel.");
-                }
-                wgslSource = wgslSource.Replace(wgMatch.Value, $"@workgroup_size({reqX}, {reqY}, {reqZ})");
-                var constMatch = s_constWorkgroupSizePattern.Match(wgslSource);
-                if (constMatch.Success)
-                    wgslSource = wgslSource.Replace(
-                        constMatch.Value,
-                        $"const workgroup_size : vec3<u32> = vec3<u32>({reqX}u, {reqY}u, {reqZ}u);");
-                return wgslSource;
-            }
+            // (a kernel loaded without a KernelSpecialization matching the dispatch's GroupDim gets its WGSL patched;
+            // PrecompileAsync resolves the same source through the same helper)
+            string ResolveSource() => wasPatched ? ResolveWorkgroupSource(compiledKernel, reqX, reqY, reqZ) : compiledKernel.WGSLSource;
 
             // Resolve the compute shader. The result is a pure function of (compiled kernel, dispatch
             // config), so cache it per (kernel identity + config signature) and skip GetOrCreateComputeShader

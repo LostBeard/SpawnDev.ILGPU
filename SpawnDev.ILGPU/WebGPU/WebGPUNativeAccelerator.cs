@@ -568,6 +568,37 @@ namespace SpawnDev.ILGPU.WebGPU
             return shader;
         }
 
+        private readonly Dictionary<(string Wgsl, string Constants), Task> _pendingPrecompiles = new();
+
+        /// <summary>
+        /// Compile a shader in the background (<c>createComputePipelineAsync</c>) and put it in the shader cache, where
+        /// <see cref="GetOrCreateComputeShader"/> finds it at the first dispatch. Several precompiles run in parallel in the browser.
+        /// A failure is not reported here: the shader is simply not cached, so the first dispatch compiles it the usual way and
+        /// reports the error through the usual path. No-op when shader caching is off or the shader is already cached.
+        /// </summary>
+        public async Task PrecompileComputeShaderAsync(string wgslSource, string entryPoint = "main", string? label = null)
+        {
+            if (!WebGPUBackend.EnableShaderCaching) return;
+            var cacheKey = (wgslSource, "");
+            if (_shaderCache.ContainsKey(cacheKey)) return;
+            if (_pendingPrecompiles.TryGetValue(cacheKey, out var pending)) { await pending; return; }
+            var create = WebGPUComputeShader.CreateAsync(this, wgslSource, entryPoint, null, label);
+            _pendingPrecompiles[cacheKey] = create;
+            try
+            {
+                var shader = await create;
+                if (_shaderCache.ContainsKey(cacheKey)) { shader.Dispose(); return; }   // a dispatch compiled it meanwhile
+                var node = _shaderLru.AddFirst(new ShaderCacheEntry { Key = cacheKey, Shader = shader });
+                _shaderCache[cacheKey] = node;
+                TrimShaderCache();
+            }
+            catch (Exception ex)
+            {
+                if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU] Precompile of '{label ?? entryPoint}' failed (the first dispatch compiles it again): {ex.Message}");
+            }
+            finally { _pendingPrecompiles.Remove(cacheKey); }
+        }
+
         /// <summary>
         /// Runs a compute shader with the specified dispatch size.
         /// </summary>

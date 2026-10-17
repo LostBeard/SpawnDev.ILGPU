@@ -1,6 +1,21 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.3.8-local.7 (forks 2.3.13-local.3) - 2026-10-17 - WebGPU: build kernel pipelines in the background, in parallel, before their first launch
+
+- **NEW: `WebGPUAccelerator.PrecompileAsync(kernelMethod, groupDim)` and `PrecompileAutoGroupedAsync(kernelMethod)`.** A WebGPU kernel's
+  pipeline used to be built at its first launch: the browser compiles the shader when the first submit needs it, one shader at a time,
+  with the GPU queue waiting (MEASURED, Chrome on Windows, RTX 4070: a 386 KB register-tiled GEMM shader takes 3.8 s; CUDA/OpenCL first
+  launch ~3 ms). Precompiling compiles the IL now (through the same kernel cache the loaders use, so the later `LoadStreamKernel` is a
+  cache hit) and builds the pipeline with `createComputePipelineAsync`, which the browser runs on background threads and in parallel;
+  the first launch finds it in the shader cache by its exact WGSL (the @workgroup_size patch of a KernelConfig launch is applied by ONE
+  helper shared by dispatch and precompile). MEASURED in Chrome, 4 distinct 50 KB shaders: first-launch compiles 1571 ms, async in
+  parallel 511 ms. Start several, await them together, and await them before the kernels launch (a launch while its pipeline is still
+  building compiles it a second time). Kernels with dynamic shared memory are skipped. A failed precompile caches nothing, so the first
+  launch compiles and reports the error the usual way.
+- Test `ShaderPrecompile_FirstLaunchUsesPrecompiledPipeline` (asserts the first launches compile NO new shader, checks output; red-checked
+  by precompiling the unpatched source: it fails "2 -> 3"). Full WebGPU lane 1437 passed / 0 failed / 23 skipped.
+
 ## 5.3.8-local.6 (forks 2.3.13-local.3) - 2026-10-17 - QR codes now conform to ISO/IEC 18004 (the format bits were transposed)
 
 - **FIXED: every generated QR code was unscannable by other readers, and our decoder could not read anyone else's.** `QREncoder.PlaceFormatInfo` wrote the 15 format bits
