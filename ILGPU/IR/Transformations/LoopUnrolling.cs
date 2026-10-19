@@ -532,6 +532,26 @@ namespace ILGPU.IR.Transformations
                 // Link the current block to the original exit block
                 current.CreateBranch(exitBlock.Location, exitBlock);
 
+                // Phis in the exit block (the join of a loop that sits inside an if, for
+                // instance) still name the block of the break branch as the source of the
+                // value leaving the loop. That block is cleared below and the edge to the
+                // exit now comes from the last unrolled copy: without this remap the phi
+                // never sees the loop's result and keeps the value from before the loop.
+                var breakBlock = inductionVariable.BreakBranch.BasicBlock;
+                var exitPhis = new List<PhiValue>();
+                for (int i = 0, e = exitBlock.Count; i < e; ++i)
+                {
+                    Value exitValue = exitBlock[i];
+                    if (exitValue is PhiValue exitPhi)
+                        exitPhis.Add(exitPhi);
+                }
+                foreach (var exitPhi in exitPhis)
+                {
+                    exitPhi.RemapArguments(
+                        builder,
+                        new PhiValue.BlockRemapper(breakBlock, current.BasicBlock));
+                }
+
                 // Replace all phi values with their computed values
                 loopSpecializer.ReplacePhis();
 

@@ -1,6 +1,18 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## Unreleased (after 5.3.8) - LoopUnrolling: a loop inside an `if` lost its result
+
+- **FIXED (silent wrong results on CUDA, OpenCL, WebGPU, WebGL and Wasm; CPU was right):** a loop with a compile-time trip count inside an `if`, whose result is used after the
+  `if`, returned the value from before the loop in every thread that took the branch. `LoopUnrolling` fully unrolled the loop and linked the last copy to the exit block, but the
+  exit block's phi (the join of the `if`) kept the cleared loop header as the source of the loop's value, so the phi never saw it. The full-unroll path now remaps the exit block's phi
+  sources to the last unrolled copy (`ILGPU/IR/Transformations/LoopUnrolling.cs`). The same kernel with the condition inside the loop, or the loop unrolled by hand, was unaffected,
+  which is why it went unnoticed: `if (label[f] < 0) for (e < 3) { ... m = min(m, ...) }  out[f] = m;` returned `m` unchanged. Found writing the face-propagation kernel of the
+  device UV atlas in SpawnDev.ILGPU.ML (a `for` loop of three face neighbours inside `if (face is unlabelled)`; every seed became a chart of its own).
+  Bisected on CUDA by switching the O1 passes off one at a time: only `LoopUnrolling` mattered; `Debug` (O0) was right, `Release` (O1) and O2 were wrong.
+- Test `LoopInsideIf_ResultReachesTheJoin` (a min and a sum; 4096 threads against a host reference). Red without the fix on CUDA, OpenCL, WebGPU, WebGL and Wasm (2678-3723 of 4096
+  threads wrong), green with it on all six; the 216 tests with "Loop" in the name still pass.
+
 ## 5.3.8 (forks 2.3.13) - 2026-10-17 - background pipeline builds on WebGPU, CudaAsm.Emit with several outputs, QR fixes
 
 The stable release of the 5.3.8 local builds below (details and measurements in each entry):
