@@ -1,7 +1,7 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## Unreleased (after 5.3.8) - LoopUnrolling: a loop inside an `if` lost its result
+## 5.3.9 (forks 2.3.14) - 2026-10-19 - LoopUnrolling: a loop inside an `if` lost its result
 
 - **FIXED (silent wrong results on CUDA, OpenCL, WebGPU, WebGL and Wasm; CPU was right):** a loop with a compile-time trip count inside an `if`, whose result is used after the
   `if`, returned the value from before the loop in every thread that took the branch. `LoopUnrolling` fully unrolled the loop and linked the last copy to the exit block, but the
