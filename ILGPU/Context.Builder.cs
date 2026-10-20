@@ -9,6 +9,7 @@
 // Source License. See LICENSE.txt for details.
 // ---------------------------------------------------------------------------------------
 
+using ILGPU.Backends;
 using ILGPU.Backends.OpenCL;
 using ILGPU.Backends.PTX;
 using ILGPU.Backends.Velocity;
@@ -18,6 +19,8 @@ using ILGPU.Runtime;
 using ILGPU.Runtime.CPU;
 using ILGPU.Runtime.Cuda;
 using ILGPU.Runtime.OpenCL;
+using ILGPU.Runtime.Velocity;
+using ILGPU.Util;
 using System;
 using System.Diagnostics;
 using System.IO;
@@ -86,12 +89,31 @@ namespace ILGPU
             /// Enables all supported accelerators.
             /// </summary>
             /// <remarks>
-            /// Note that this function calls
-            /// <see cref="CPUContextExtensions.DefaultCPU(Builder)"/> only to ensure
-            /// that there is only one CPU accelerator by default.
+            /// The CPU of the result is the SIMD <see cref="VelocityAccelerator"/> (one
+            /// device, the widest vectors supported), which runs kernels on all cores.
+            /// The plain CPU accelerator is ILGPU's debugging backend and is not
+            /// registered here: enable it explicitly with
+            /// <see cref="CPUContextExtensions.DefaultCPU(Builder)"/> or
+            /// <see cref="CPUContextExtensions.CPU(Builder)"/>. Where Velocity cannot
+            /// run (browser, 32-bit processes) the default CPU accelerator is used
+            /// instead. A context without any registered accelerator still falls back
+            /// to the default CPU device.
             /// </remarks>
             /// <returns>The current builder instance.</returns>
-            public Builder AllAccelerators() => this.DefaultCPU().OpenCL().Cuda();
+            public Builder AllAccelerators() => HostCompute().OpenCL().Cuda();
+
+            /// <summary>
+            /// Enables the CPU backend that does the work: Velocity, or the default CPU
+            /// accelerator where Velocity cannot run.
+            /// </summary>
+            private Builder HostCompute()
+            {
+#if NET7_0_OR_GREATER
+                if (!OperatingSystem.IsBrowser() && ILGPU.Backends.Backend.RuntimePlatform.Is64Bit())
+                    return this.Velocity(VelocityDeviceType.Vector128);
+#endif
+                return this.DefaultCPU();
+            }
 
             /// <summary>
             /// Enables all accelerators that fulfill the given predicate.
@@ -101,8 +123,19 @@ namespace ILGPU
             /// </param>
             /// <returns>The current builder instance.</returns>
             public Builder AllAccelerators(
-                Predicate<Device> predicate) =>
-                this.CPU(predicate).OpenCL(predicate).Cuda(predicate);
+                Predicate<Device> predicate)
+            {
+                // The Velocity device passes the predicate like every other device
+#if NET7_0_OR_GREATER
+                if (!OperatingSystem.IsBrowser() && ILGPU.Backends.Backend.RuntimePlatform.Is64Bit())
+                {
+                    var velocity = new VelocityDevice(VelocityDeviceType.Vector128);
+                    if (predicate(velocity))
+                        DeviceRegistry.Register(velocity);
+                }
+#endif
+                return this.OpenCL(predicate).Cuda(predicate);
+            }
 
             /// <summary>
             /// Specifies the inlining mode.

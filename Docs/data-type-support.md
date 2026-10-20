@@ -60,7 +60,7 @@ Updated: 2026-06-19
 | Float32 | float | 4B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float64 | double | 8B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 
-² **Packed 4-bit store is fail-loud on CPU + WebGL.** Writing one nibble means a read-modify-write of the enclosing 32-bit word; on the GPU backends that is an atomic word RMW (`atomicAnd` clear + `atomicOr` set). **WebGL** has no atomics, and the **CPU** managed-reference indexer cannot address a sub-byte element, so a packed-4-bit store on those two throws `UnsupportedKernelFeatureException` / `UnsupportedTestException` rather than silently corrupting the word. Store runs on **CUDA / OpenCL / WebGPU / Wasm**. (Load works on all 6 - decode is read-only.) **Velocity** (the opt-in SIMD CPU backend, not one of the 6) runs packed 4-bit loads and stores: the element address counts nibbles and the store is a compare-exchange on the 32-bit word.
+² **Packed 4-bit store is fail-loud on CPU + WebGL.** Writing one nibble means a read-modify-write of the enclosing 32-bit word; on the GPU backends that is an atomic word RMW (`atomicAnd` clear + `atomicOr` set). **WebGL** has no atomics, and the **CPU** managed-reference indexer cannot address a sub-byte element, so a packed-4-bit store on those two throws `UnsupportedKernelFeatureException` / `UnsupportedTestException` rather than silently corrupting the word. Store runs on **CUDA / OpenCL / WebGPU / Wasm**. (Load works on all 6 - decode is read-only.) **Velocity** (the SIMD CPU backend, the default CPU backend on desktop, not one of the 6) runs packed 4-bit loads and stores: the element address counts nibbles and the store is a compare-exchange on the 32-bit word.
 
 ## End-to-End (Read + Kernel Process + Write)
 

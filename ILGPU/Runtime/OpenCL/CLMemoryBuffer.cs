@@ -87,7 +87,9 @@ namespace ILGPU.Runtime.OpenCL
             var source = sourceView.Buffer;
             var target = targetView.Buffer;
 
-            if (sourceType == AcceleratorType.CPU &&
+            // Velocity buffers are host memory like the CPU ones
+            if ((sourceType == AcceleratorType.CPU ||
+                 sourceType == AcceleratorType.Velocity) &&
                 targetType == AcceleratorType.OpenCL)
             {
                 // Copy from CPU to GPU
@@ -106,6 +108,7 @@ namespace ILGPU.Runtime.OpenCL
                 switch (targetType)
                 {
                     case AcceleratorType.CPU:
+                    case AcceleratorType.Velocity:
                         // Copy from GPU to CPU
                         CLException.ThrowIfFailed(
                             CurrentAPI.ReadBuffer(

@@ -1,5 +1,6 @@
 using ILGPU;
 using ILGPU.Runtime;
+using ILGPU.Runtime.CPU;
 using SpawnDev.ILGPU;
 using SpawnDev.UnitTesting;
 
@@ -18,10 +19,73 @@ using SpawnDev.UnitTesting;
 /// </summary>
 public class AcceleratorRequirementsTests
 {
+    /// <summary>
+    /// The default accelerators (Velocity as the CPU backend, OpenCL, Cuda) plus the plain CPU debugging backend,
+    /// which AllAccelerators() no longer registers: these tests check every desktop device kind.
+    /// </summary>
+    private static Context CreateTestContext() =>
+        Context.Create(builder => builder.AllAccelerators().DefaultCPU());
+
+    [TestMethod]
+    public Task AllAccelerators_RegistersVelocityNotThePlainCpu()
+    {
+        using var context = Context.Create(builder => builder.AllAccelerators());
+        if (!context.Devices.Any(d => d.AcceleratorType == AcceleratorType.Velocity))
+            throw new Exception("AllAccelerators() must register the Velocity device. Devices: " +
+                string.Join(", ", context.Devices.Select(d => d.AcceleratorType)));
+        if (context.Devices.Any(d => d.AcceleratorType == AcceleratorType.CPU))
+            throw new Exception("AllAccelerators() must not register the plain CPU (debugging) backend.");
+        return Task.CompletedTask;
+    }
+
+    [TestMethod]
+    public Task EmptyContext_StillFallsBackToTheDefaultCpuDevice()
+    {
+        using var context = Context.Create(builder => { });
+        if (context.Devices.Length != 1 || context.Devices[0].AcceleratorType != AcceleratorType.CPU)
+            throw new Exception("A context without registered accelerators must fall back to the default CPU device, got: " +
+                string.Join(", ", context.Devices.Select(d => d.AcceleratorType)));
+        return Task.CompletedTask;
+    }
+
+    [TestMethod]
+    public Task GetPreferredDevice_DoesNotPickVelocityOverAGpu()
+    {
+        // Velocity reports an unlimited memory size; ILGPU's own GetPreferredDevice sorts by memory
+        using var context = Context.Create(builder => builder.AllAccelerators());
+        if (!context.Devices.Any(d => d.AcceleratorType is AcceleratorType.Cuda or AcceleratorType.OpenCL))
+            throw new UnsupportedTestException("Host has no GPU device.");
+        var preferred = context.GetPreferredDevice(preferCPU: false);
+        if (preferred.AcceleratorType == AcceleratorType.Velocity)
+            throw new Exception("GetPreferredDevice(false) picked Velocity over a GPU.");
+        var cpu = context.GetPreferredDevice(preferCPU: true);
+        if (cpu.AcceleratorType != AcceleratorType.Velocity)
+            throw new Exception($"GetPreferredDevice(true) should return the CPU backend that is registered (Velocity), got {cpu.AcceleratorType}.");
+        return Task.CompletedTask;
+    }
+
+    [TestMethod]
+    public Task Satisfies_Velocity_FullFeatureSetExceptNativeF16()
+    {
+        using var context = Context.Create(builder => builder.AllAccelerators());
+        var velocity = context.Devices.First(d => d.AcceleratorType == AcceleratorType.Velocity);
+        var req = new AcceleratorRequirements
+        {
+            RequiresAtomics = true, RequiresSharedMemory = true, RequiresBarriers = true, RequiresSubGroups = true,
+            RequiresFloat16 = true, RequiresFloat64Native = true, RequiresInt64Native = true, RequiresPacked4Store = true,
+            RequiresScatterStores = true,
+        };
+        if (!velocity.Satisfies(req))
+            throw new Exception("Velocity must satisfy the full feature set: " + req.Describe());
+        if (velocity.Satisfies(new AcceleratorRequirements { RequiresFloat16Native = true }))
+            throw new Exception("Velocity emulates Float16 (float lanes); RequiresFloat16Native must rule it out.");
+        return Task.CompletedTask;
+    }
+
     [TestMethod]
     public Task None_EnumeratesEveryDevice()
     {
-        using var context = Context.CreateDefault();
+        using var context = CreateTestContext();
         var compatible = context.EnumerateCompatibleDevices(AcceleratorRequirements.None);
         if (compatible.Count != context.Devices.Length)
             throw new Exception(
@@ -33,7 +97,7 @@ public class AcceleratorRequirementsTests
     [TestMethod]
     public Task Satisfies_NoRequirements_AllDevicesPass()
     {
-        using var context = Context.CreateDefault();
+        using var context = CreateTestContext();
         foreach (var device in context.Devices)
         {
             if (!device.Satisfies(AcceleratorRequirements.None))
@@ -46,7 +110,7 @@ public class AcceleratorRequirementsTests
     [TestMethod]
     public Task Satisfies_Atomics_PassesOnCpu()
     {
-        using var context = Context.CreateDefault();
+        using var context = CreateTestContext();
         var cpu = context.Devices.FirstOrDefault(d => d.AcceleratorType == AcceleratorType.CPU);
         if (cpu == null) throw new UnsupportedTestException("No CPU device available - unexpected on desktop.");
         var req = new AcceleratorRequirements { RequiresAtomics = true };
@@ -61,7 +125,7 @@ public class AcceleratorRequirementsTests
     [TestMethod]
     public Task Satisfies_SubGroups_PassesOnCpuAndCuda()
     {
-        using var context = Context.CreateDefault();
+        using var context = CreateTestContext();
         var req = new AcceleratorRequirements { RequiresSubGroups = true };
         foreach (var device in context.Devices.Where(d => d.AcceleratorType is AcceleratorType.CPU or AcceleratorType.Cuda))
             if (!device.Satisfies(req))
@@ -90,7 +154,7 @@ public class AcceleratorRequirementsTests
     [TestMethod]
     public Task Satisfies_LowPrecisionFloats_AllDevicesPass()
     {
-        using var context = Context.CreateDefault();
+        using var context = CreateTestContext();
         // bf16 + both FP8 formats + FP4 are supported (always emulated) on every backend, so these are
         // no-op documentation filters - every device must satisfy them, including combined.
         var req = new AcceleratorRequirements
@@ -114,7 +178,7 @@ public class AcceleratorRequirementsTests
     [TestMethod]
     public Task CreatePreferredAccelerator_NoRequirements_Returns()
     {
-        using var context = Context.CreateDefault();
+        using var context = CreateTestContext();
         using var acc = context.CreatePreferredAccelerator(AcceleratorRequirements.None);
         if (acc == null) throw new Exception("Expected non-null accelerator");
         // Preference is non-CPU when available; log for transparency, don't hard-assert
@@ -126,7 +190,7 @@ public class AcceleratorRequirementsTests
     [TestMethod]
     public Task CreatePreferredAccelerator_ImpossibleRequirements_Throws()
     {
-        using var context = Context.CreateDefault();
+        using var context = CreateTestContext();
         // Toggle an impossible combo: require WebGPU-specific subgroups AND OpenCL-specific
         // Int64Atomics on a desktop host that has neither. The `Satisfies` gate rejects
         // every device so CreatePreferredAccelerator throws.
@@ -203,7 +267,7 @@ public class AcceleratorRequirementsTests
         // passes. The actual WebGL filtering is verified in the browser test suite
         // (SpawnDev.ILGPU.Demo). Here we just confirm the API path is stable and doesn't
         // mistakenly drop desktop GPUs.
-        using var context = Context.CreateDefault();
+        using var context = CreateTestContext();
         var req = new AcceleratorRequirements { RequiresAtomics = true };
         var compatible = context.EnumerateCompatibleDevices(req);
         foreach (var device in compatible)
@@ -226,7 +290,7 @@ public class AcceleratorRequirementsTests
     [TestMethod]
     public Task Enumerate_Float64Native_CoversCpuAtMinimum()
     {
-        using var context = Context.CreateDefault();
+        using var context = CreateTestContext();
         var req = new AcceleratorRequirements { RequiresFloat64Native = true };
         var compatible = context.EnumerateCompatibleDevices(req);
         if (!compatible.Any(d => d.AcceleratorType == AcceleratorType.CPU))
@@ -240,7 +304,7 @@ public class AcceleratorRequirementsTests
         // Strict IEEE 754 f64 must accept native-f64 backends (CPU/CUDA/Wasm always; OpenCL
         // when cl.Float64 is present). The browser-side Ozaki-configuration path is verified
         // in the WASM test suite.
-        using var context = Context.CreateDefault();
+        using var context = CreateTestContext();
         var req = new AcceleratorRequirements { RequiresFloat64Strict = true };
         var compatible = context.EnumerateCompatibleDevices(req);
         if (!compatible.Any(d => d.AcceleratorType == AcceleratorType.CPU))
@@ -261,7 +325,7 @@ public class AcceleratorRequirementsTests
     [TestMethod]
     public Task Satisfies_Float64Strict_AcceptsCpu()
     {
-        using var context = Context.CreateDefault();
+        using var context = CreateTestContext();
         var cpu = context.Devices.FirstOrDefault(d => d.AcceleratorType == AcceleratorType.CPU);
         if (cpu == null) throw new UnsupportedTestException("No CPU device available - unexpected on desktop.");
         var req = new AcceleratorRequirements { RequiresFloat64Strict = true };
@@ -273,13 +337,13 @@ public class AcceleratorRequirementsTests
     [TestMethod]
     public Task PreferredAccelerator_PrefersGpuOverCpuWhenAvailable()
     {
-        using var context = Context.CreateDefault();
+        using var context = CreateTestContext();
         // If the host has ONLY CPU (no Cuda, no OpenCL), this test has nothing to assert.
-        var hasGpu = context.Devices.Any(d => d.AcceleratorType != AcceleratorType.CPU);
+        var hasGpu = context.Devices.Any(d => d.AcceleratorType is AcceleratorType.Cuda or AcceleratorType.OpenCL);
         if (!hasGpu)
             throw new UnsupportedTestException("Host has only CPU; GPU-preference check needs a GPU device.");
         using var acc = context.CreatePreferredAccelerator(AcceleratorRequirements.None);
-        if (acc.AcceleratorType == AcceleratorType.CPU)
+        if (acc.AcceleratorType is AcceleratorType.CPU or AcceleratorType.Velocity)
             throw new Exception(
                 $"Expected GPU preference over CPU. Got {acc.AcceleratorType}. " +
                 $"Devices: {string.Join(", ", context.Devices.Select(d => d.AcceleratorType))}.");
@@ -294,7 +358,7 @@ public class AcceleratorRequirementsTests
     [TestMethod]
     public async Task DevicePreference_RanksCudaThenDiscreteThenIntegratedThenCpu()
     {
-        using var context = Context.CreateDefault();
+        using var context = CreateTestContext();
         var ordered = context.Devices.OrderByPreference();
         if (ordered.Count != context.Devices.Length)
             throw new Exception($"OrderByPreference returned {ordered.Count} of {context.Devices.Length} devices.");
@@ -304,13 +368,14 @@ public class AcceleratorRequirementsTests
             ILGPU.Runtime.OpenCL.CLDevice cl when cl.DeviceType.HasFlag(ILGPU.Runtime.OpenCL.CLDeviceType.CL_DEVICE_TYPE_GPU)
                 => IsHostUnified(cl) ? "cl-igpu" : "cl-dgpu",
             { AcceleratorType: AcceleratorType.OpenCL } => "cl-other",
+            { AcceleratorType: AcceleratorType.Velocity } => "velocity",
             { AcceleratorType: AcceleratorType.CPU } => "cpu",
             _ => "other",
         };
         var desc = string.Join(", ", ordered.Select(d => $"{Kind(d)}:{d.Name}({d.MemorySize >> 20} MB)"));
         Console.WriteLine($"[DevicePreference] desktop order: {desc}");
         Console.WriteLine($"[DevicePreference] upstream GetPreferredDevice(false) = {context.GetPreferredDevice(preferCPU: false).AcceleratorType} {context.GetPreferredDevice(preferCPU: false).Name}");
-        var rank = new[] { "cuda", "cl-dgpu", "cl-igpu", "cl-other", "other", "cpu" };
+        var rank = new[] { "cuda", "cl-dgpu", "cl-igpu", "cl-other", "velocity", "other", "cpu" };
         int last = -1;
         foreach (var d in ordered)
         {
@@ -346,7 +411,7 @@ public class AcceleratorRequirementsTests
     [TestMethod]
     public Task Satisfies_ScatterStores_PassesOnCpu()
     {
-        using var context = Context.CreateDefault();
+        using var context = CreateTestContext();
         var cpu = context.Devices.FirstOrDefault(d => d.AcceleratorType == AcceleratorType.CPU);
         if (cpu == null) throw new UnsupportedTestException("No CPU device available - unexpected on desktop.");
         var req = new AcceleratorRequirements { RequiresScatterStores = true };
@@ -370,7 +435,7 @@ public class AcceleratorRequirementsTests
     {
         // Desktop has no WebGL backend, so every device must remain compatible (and none is
         // WebGL). Real WebGL filtering is verified in the browser suite.
-        using var context = Context.CreateDefault();
+        using var context = CreateTestContext();
         var req = new AcceleratorRequirements { RequiresScatterStores = true };
         var compatible = context.EnumerateCompatibleDevices(req);
         foreach (var device in compatible)
@@ -397,7 +462,7 @@ public class AcceleratorRequirementsTests
     [TestMethod]
     public Task Satisfies_QInt4_QUInt4_AreNoOpTypeFilters()
     {
-        using var context = Context.CreateDefault();
+        using var context = CreateTestContext();
         var cpu = context.Devices.FirstOrDefault(d => d.AcceleratorType == AcceleratorType.CPU);
         if (cpu == null) throw new UnsupportedTestException("No CPU device available - unexpected on desktop.");
         var req = new AcceleratorRequirements { RequiresQInt4 = true, RequiresQUInt4 = true };
@@ -409,7 +474,7 @@ public class AcceleratorRequirementsTests
     [TestMethod]
     public Task Satisfies_Packed4Store_DropsCpu()
     {
-        using var context = Context.CreateDefault();
+        using var context = CreateTestContext();
         var cpu = context.Devices.FirstOrDefault(d => d.AcceleratorType == AcceleratorType.CPU);
         if (cpu == null) throw new UnsupportedTestException("No CPU device available - unexpected on desktop.");
         var req = new AcceleratorRequirements { RequiresPacked4Store = true };
@@ -421,7 +486,7 @@ public class AcceleratorRequirementsTests
     [TestMethod]
     public Task Satisfies_Packed4Store_PassesOnCudaOrOpenCL()
     {
-        using var context = Context.CreateDefault();
+        using var context = CreateTestContext();
         var gpu = context.Devices.FirstOrDefault(d =>
             d.AcceleratorType == AcceleratorType.Cuda || d.AcceleratorType == AcceleratorType.OpenCL);
         if (gpu == null) throw new UnsupportedTestException("No CUDA/OpenCL device available.");
@@ -446,7 +511,7 @@ public class AcceleratorRequirementsTests
     {
         // Unlike ScatterStores (WebGL-only drop), Packed4Store ALSO drops CPU. On desktop that means
         // CPU is filtered out and the GPU desktop devices (CUDA/OpenCL) remain.
-        using var context = Context.CreateDefault();
+        using var context = CreateTestContext();
         var req = new AcceleratorRequirements { RequiresPacked4Store = true };
         var compatible = context.EnumerateCompatibleDevices(req);
         foreach (var device in compatible)

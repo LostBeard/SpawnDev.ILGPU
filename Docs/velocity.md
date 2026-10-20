@@ -2,13 +2,15 @@
 
 Velocity is the desktop/server CPU backend that does real work. It compiles a kernel the way the GPU backends do (ILGPU IR to vectorized .NET IL through `System.Runtime.Intrinsics`), then runs it on all cores, four lanes per warp. The plain **CPU** backend stays what it always was, ILGPU's debugging backend: it runs the kernel's own IL one thread at a time, so you can step through it, and it is slow.
 
-Use Velocity when you want the answer from a CPU (no GPU, a server, a CI machine, a model that must run everywhere), use the CPU backend when you want to debug a kernel.
+Velocity is what you get on a CPU by default. Register the plain CPU backend explicitly when you want to debug a kernel.
 
 - **Desktop / server only.** It is not available in the browser (use the Wasm backend, which has its own SIMD128 path: [wasm-simd.md](wasm-simd.md)).
-- **Opt-in.** `AllAcceleratorsAsync()` does not register it; add it to the context builder yourself (below).
+- **The default CPU backend.** `AllAccelerators()` and `AllAcceleratorsAsync()` register Velocity in place of the plain CPU accelerator. The plain CPU accelerator is not registered any more; add it yourself for debugging (`builder.DefaultCPU()` or `builder.CPU()`). Where Velocity cannot run (the browser, 32-bit processes) the plain CPU accelerator is registered as before. A context with no registered accelerator still falls back to the default CPU device.
 - Runs the whole shared SpawnDev.ILGPU test suite: **731 of 731 tests pass or are skipped** as capability gates (the `VelocityTests` lane; 677 pass / 0 fail / 56 skip).
 
-## Enabling it
+## Using it
+
+`AllAccelerators()` / `AllAcceleratorsAsync()` already register it (device type `Vector128`). To register it alone, or to pick a device type:
 
 ```csharp
 using ILGPU;
@@ -37,7 +39,7 @@ Device types:
 
 ### Selecting it with the other backends
 
-`context.GetBestDevice()` ranks Velocity **below every GPU backend (CUDA, OpenCL, WebGPU, WebGL, Wasm) and above the plain CPU backend**, so a context that registered Velocity and CPU picks Velocity as the CPU fallback. `AcceleratorRequirements` treats it as a full-featured backend (atomics, shared memory, barriers, packed 4-bit stores, sub-groups, native f64 and i64); Float16 is emulated (`RequiresFloat16` passes, `RequiresFloat16Native` does not). See [capabilities-and-backend-selection.md](capabilities-and-backend-selection.md).
+`context.GetBestDevice()` ranks Velocity **below every GPU backend (CUDA, OpenCL, WebGPU, WebGL, Wasm) and above the plain CPU backend**, so a default context picks the GPU if there is one and Velocity otherwise. ILGPU's own `GetPreferredDevice(preferCPU: false)` also skips Velocity (it reports an unlimited memory size, which would otherwise win its sort by memory), and `GetPreferredDevice(preferCPU: true)` returns the Velocity device (then the plain CPU devices). `AcceleratorRequirements` treats it as a full-featured backend (atomics, shared memory, barriers, packed 4-bit stores, sub-groups, native f64 and i64); Float16 is emulated (`RequiresFloat16` passes, `RequiresFloat16Native` does not). See [capabilities-and-backend-selection.md](capabilities-and-backend-selection.md).
 
 ## What is supported
 

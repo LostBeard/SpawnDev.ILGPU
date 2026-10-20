@@ -87,7 +87,7 @@ using var accelerator = await context.CreatePreferredAcceleratorAsync(requiremen
 using var accelerator = context.CreatePreferredAccelerator(requirements);              // desktop
 ```
 
-Filters the context's devices by the requirements, then picks the best one: **WebGPU > WebGL > Wasm** in the browser, and on desktop the [device ranking](#device-ranking-devicepreference) below (CUDA > discrete OpenCL GPU > integrated OpenCL GPU > other OpenCL > CPU). Throws `NotSupportedException` if no device on the host satisfies all flags; the message names the unmet requirements and the available devices, so error reports come with diagnostic context built in.
+Filters the context's devices by the requirements, then picks the best one: **WebGPU > WebGL > Wasm** in the browser, and on desktop the [device ranking](#device-ranking-devicepreference) below (CUDA > discrete OpenCL GPU > integrated OpenCL GPU > other OpenCL > Velocity > CPU). Throws `NotSupportedException` if no device on the host satisfies all flags; the message names the unmet requirements and the available devices, so error reports come with diagnostic context built in.
 
 Use the **async** form in the browser: the WebGPU and Wasm accelerators can only be created asynchronously, so the synchronous form throws `NotSupportedException` when one of them is the pick.
 
@@ -101,7 +101,7 @@ IReadOnlyList<Device> ranked = context.Devices.OrderByPreference();     // all d
 using var accelerator = best.CreateAccelerator(context);                // desktop
 ```
 
-Ranks devices by **kind**, best first: CUDA, then discrete OpenCL GPUs, then integrated OpenCL GPUs (detected with `CL_DEVICE_HOST_UNIFIED_MEMORY`, Intel vendor as the fallback), then other OpenCL devices (CPU runtimes, accelerators), then WebGPU, WebGL, Wasm, then anything else (the opt-in [Velocity](velocity.md) SIMD CPU backend lands here), then the plain CPU backend. Memory size only breaks ties between devices of the same rank, then the original order.
+Ranks devices by **kind**, best first: CUDA, then discrete OpenCL GPUs, then integrated OpenCL GPUs (detected with `CL_DEVICE_HOST_UNIFIED_MEMORY`, Intel vendor as the fallback), then other OpenCL devices (CPU runtimes, accelerators), then WebGPU, WebGL, Wasm, then the [Velocity](velocity.md) SIMD CPU backend, then anything else, then the plain CPU backend. Memory size only breaks ties between devices of the same rank, then the original order.
 
 Use it instead of ILGPU's `Context.GetPreferredDevice(preferCPU: false)`, which sorts by `MemorySize` alone. Integrated GPUs and OpenCL CPU runtimes report system RAM as device memory, so on an Intel HD 620 + NVIDIA 940MX laptop `GetPreferredDevice(false)` picked Intel's OpenCL **CPU** runtime (8 GB) over the 940MX (2 GB), and on an RTX 4070 PC it picked the OpenCL view of the card over CUDA. `GetBestDevice()` picks CUDA in both cases. (The fork leaves `GetPreferredDevice` unchanged to stay close to upstream ILGPU.)
 

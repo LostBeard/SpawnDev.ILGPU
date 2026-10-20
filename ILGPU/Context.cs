@@ -437,17 +437,29 @@ namespace ILGPU
             bool preferCPU,
             bool matchingDevicesOnly)
         {
-            if (preferCPU)
+            // The CPU devices: the Velocity (SIMD) devices first, then the plain CPU ones
+            IEnumerable<Device> GetCPUDevices()
             {
-                return deviceMapping.TryGetValue(AcceleratorType.CPU, out var devices)
-                    ? devices
+                var cpuDevices = new List<Device>();
+                if (deviceMapping.TryGetValue(AcceleratorType.Velocity, out var velocity))
+                    cpuDevices.AddRange(velocity);
+                if (deviceMapping.TryGetValue(AcceleratorType.CPU, out var cpu))
+                    cpuDevices.AddRange(cpu);
+                return cpuDevices.Count > 0
+                    ? cpuDevices
                     : throw new NotSupportedException(
                             RuntimeErrorMessages.NotSupportedTargetAccelerator);
             }
 
+            if (preferCPU)
+                return GetCPUDevices();
+
+            // Velocity reports an unlimited memory size: it must not win by memory
             var sorted = Devices
                 .OrderByDescending(d => d.MemorySize)
-                .Where(d => d.AcceleratorType != AcceleratorType.CPU)
+                .Where(d =>
+                    d.AcceleratorType != AcceleratorType.CPU &&
+                    d.AcceleratorType != AcceleratorType.Velocity)
                 .ToList();
 
             if (sorted.Count > 0)
@@ -467,10 +479,7 @@ namespace ILGPU
             }
             else
             {
-                return deviceMapping.TryGetValue(AcceleratorType.CPU, out var devices)
-                    ? devices
-                    : throw new NotSupportedException(
-                            RuntimeErrorMessages.NotSupportedTargetAccelerator);
+                return GetCPUDevices();
             }
         }
 

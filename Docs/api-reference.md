@@ -17,17 +17,17 @@ using SpawnDev.ILGPU;
 | Method | Return | Description |
 |--------|--------|-------------|
 | `Context.CreateAsync(Action<Builder>)` | `Task<Context>` | Creates a context using an async builder (required for WebGPU probing) |
-| `builder.Velocity(VelocityDeviceType.Vector128)` | `Builder` | (namespace `ILGPU.Runtime.Velocity`) Opt-in: registers the SIMD CPU backend ([velocity.md](velocity.md)). `AllAcceleratorsAsync()` does not register it. Then `context.CreateVelocityAccelerator(0)` |
-| `builder.AllAcceleratorsAsync()` | `Task<Builder>` | Enables all available backends (browser: WebGPU, WebGL, Wasm; desktop: CUDA, OpenCL, CPU). Silently skips unavailable ones. Async (WebGPU/WebGL probing is async) — `await` it |
+| `builder.Velocity(VelocityDeviceType.Vector128)` | `Builder` | (namespace `ILGPU.Runtime.Velocity`) Registers the SIMD CPU backend ([velocity.md](velocity.md)) alone or with a device type; `AllAccelerators()` / `AllAcceleratorsAsync()` already register it on desktop. Then `context.CreateVelocityAccelerator(0)` |
+| `builder.AllAcceleratorsAsync()` | `Task<Builder>` | Enables all available backends (browser: WebGPU, WebGL, Wasm; desktop: CUDA, OpenCL, Velocity). Silently skips unavailable ones. Async (WebGPU/WebGL probing is async) — `await` it |
 | `builder.WebGPU()` | `Task` | Enables WebGPU backend only (async probe — `await` it) |
 | `builder.WebGL()` | `Task` | Enables WebGL backend only (async probe — `await` it) |
 | `builder.Wasm()` | `Builder` | Enables Wasm backend only (synchronous — chainable) |
-| `context.CreatePreferredAcceleratorAsync()` | `Task<Accelerator>` | Creates the best available accelerator (browser: WebGPU > WebGL > Wasm; desktop: CUDA > discrete OpenCL GPU > integrated OpenCL GPU > other OpenCL > CPU) |
+| `context.CreatePreferredAcceleratorAsync()` | `Task<Accelerator>` | Creates the best available accelerator (browser: WebGPU > WebGL > Wasm; desktop: CUDA > discrete OpenCL GPU > integrated OpenCL GPU > other OpenCL > Velocity > CPU) |
 | `context.CreatePreferredAcceleratorAsync(requirements)` | `Task<Accelerator>` | Same, restricted to devices that satisfy an `AcceleratorRequirements`; configures Ozaki f64 on WebGPU/WebGL for `RequiresFloat64Strict`. Throws `NotSupportedException` when nothing fits |
 | `context.CreatePreferredAccelerator(requirements)` | `Accelerator` | Synchronous form (desktop; throws in the browser when WebGPU or Wasm is the pick, as those are async-only to create) |
 | `context.EnumerateCompatibleDevices(requirements)` | `IReadOnlyList<Device>` | Every device that satisfies the requirements, context order |
 | `device.Satisfies(requirements)` | `bool` | Per-device requirement check |
-| `context.GetBestDevice()` | `Device` | Best device per `DevicePreference` (CUDA > discrete OpenCL GPU > integrated OpenCL GPU > other OpenCL > WebGPU > WebGL > Wasm > CPU) |
+| `context.GetBestDevice()` | `Device` | Best device per `DevicePreference` (CUDA > discrete OpenCL GPU > integrated OpenCL GPU > other OpenCL > WebGPU > WebGL > Wasm > Velocity > CPU) |
 | `devices.OrderByPreference()` | `IReadOnlyList<Device>` | The same ranking applied to any device list, best first; memory size only breaks ties |
 | `accelerator.SynchronizeAsync()` | `Task` | Async wait for all GPU work to complete |
 | `accelerator.Flush()` | `void` | Submit pending work without waiting (sync-safe on every backend) |
@@ -76,7 +76,7 @@ Static policy and census for host->device copies on the browser backends.
 
 | Member | Description |
 |--------|-------------|
-| `OrderByPreference(this IEnumerable<Device>)` | Devices best first: CUDA, discrete OpenCL GPU, integrated OpenCL GPU (`CL_DEVICE_HOST_UNIFIED_MEMORY`), other OpenCL, WebGPU, WebGL, Wasm, other, CPU. Memory size breaks ties |
+| `OrderByPreference(this IEnumerable<Device>)` | Devices best first: CUDA, discrete OpenCL GPU, integrated OpenCL GPU (`CL_DEVICE_HOST_UNIFIED_MEMORY`), other OpenCL, WebGPU, WebGL, Wasm, Velocity, other, CPU. Memory size breaks ties |
 | `GetBestDevice(this Context)` | The first device of that ranking. Use instead of ILGPU's `GetPreferredDevice` (memory-only sort) |
 
 ### AcceleratorRequirements / UnsupportedKernelFeatureException

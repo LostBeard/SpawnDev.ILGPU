@@ -74,10 +74,13 @@ public static class DevicePreference
                 return 5;
             case AcceleratorType.Wasm:
                 return 6;
-            case AcceleratorType.CPU:
-                return 8;
-            default:
+            // The SIMD CPU backend: below every GPU backend, above the plain (debugging) CPU backend
+            case AcceleratorType.Velocity:
                 return 7;
+            case AcceleratorType.CPU:
+                return 9;
+            default:
+                return 8;
         }
     }
 

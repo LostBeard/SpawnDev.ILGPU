@@ -31,10 +31,10 @@ SpawnDev.ILGPU supports multiple backends for running ILGPU kernels. In the brow
 | **Atomics** | ✅ | ✅ | ✅ | ✅ |
 | **64-bit** | ✅ Native | ✅ Native | ✅ Native | ✅ Native |
 | **Packed 4-bit store** | ✅ | ✅ | ❌ fail-loud | ✅ |
-| **Requirement** | NVIDIA GPU + driver | OpenCL 2.0+ or 3.0 GPU | None | None (opt-in: `builder.Velocity(...)`) |
+| **Requirement** | NVIDIA GPU + driver | OpenCL 2.0+ or 3.0 GPU | None (explicit: `builder.CPU()`) | None (default CPU backend) |
 
 **Auto-selection priority (browser):** WebGPU -> WebGL -> Wasm
-**Auto-selection priority (desktop):** Cuda -> discrete OpenCL GPU -> integrated OpenCL GPU -> other OpenCL devices -> CPU. Devices are ranked by kind, not reported memory (integrated GPUs and OpenCL CPU runtimes report system RAM), so a hybrid laptop gets its discrete GPU. See [Device ranking](capabilities-and-backend-selection.md#device-ranking-devicepreference).
+**Auto-selection priority (desktop):** Cuda -> discrete OpenCL GPU -> integrated OpenCL GPU -> other OpenCL devices -> Velocity -> CPU. Devices are ranked by kind, not reported memory (integrated GPUs and OpenCL CPU runtimes report system RAM), so a hybrid laptop gets its discrete GPU. See [Device ranking](capabilities-and-backend-selection.md#device-ranking-devicepreference).
 
 > **CUDA extras:** The CUDA backend also provides access to NVIDIA-specific libraries: nvJPEG (image encode/decode), cuRand (random numbers), cuBLAS (linear algebra), cuFFT (FFT), and NVML (device monitoring). See [CUDA Libraries](cuda-libraries.md).
 
@@ -61,7 +61,7 @@ var results = await bufC.CopyToHostAsync<float>();   // The only GPU→CPU data 
 
 `AllAcceleratorsAsync()` automatically detects the environment:
 - **Browser:** Registers WebGPU, WebGL, and Wasm (plus ILGPU's CPU accelerator, the last-resort fallback; in the browser it runs on the single UI thread)
-- **Desktop:** Registers Cuda, OpenCL, and CPU (browser backends are skipped)
+- **Desktop:** Registers Cuda, OpenCL, and Velocity, the SIMD CPU backend (browser backends are skipped; the plain CPU accelerator is no longer registered)
 
 `CreatePreferredAcceleratorAsync()` picks the best available backend on either platform.
 
@@ -335,7 +335,7 @@ foreach (var device in context)
 
 ### Velocity (Desktop, SIMD CPU)
 
-The CPU backend that does real work. It compiles kernels like the GPU backends (vectorized IL over `Vector128<T>`, four lanes per warp) and runs them on all cores, with shared memory, barriers (a group with barriers runs as a team, one thread per warp), atomics, warp shuffles, the ILGPU Algorithms, 1D/2D/3D grids and groups of up to 256 threads, and the whole low-precision type tier. It is **opt-in**: `AllAcceleratorsAsync()` does not register it.
+The CPU backend that does real work. It compiles kernels like the GPU backends (vectorized IL over `Vector128<T>`, four lanes per warp) and runs them on all cores, with shared memory, barriers (a group with barriers runs as a team, one thread per warp), atomics, warp shuffles, the ILGPU Algorithms, 1D/2D/3D grids and groups of up to 256 threads, and the whole low-precision type tier. It is **the default CPU backend**: `AllAccelerators()` / `AllAcceleratorsAsync()` register it instead of the plain CPU accelerator (browser and 32-bit processes keep the plain one).
 
 ```csharp
 using ILGPU.Runtime.Velocity;
@@ -348,7 +348,7 @@ using var accelerator = context.CreateVelocityAccelerator(0);
 
 ### CPU (Desktop)
 
-The debugging CPU backend. Multi-threaded CPU accelerator: runs kernels as .NET code on ILGPU's own worker threads, one simulated multiprocessor per thread. Kernels without barriers or warp operations run each group's lanes in a plain loop. Useful as a reference or for machines without GPU drivers. Full ILGPU feature support (shared memory, barriers, atomics). Not available in the browser - use the Wasm backend for off-main-thread compute in Blazor.
+The debugging CPU backend (no longer registered by `AllAccelerators()`: add it with `builder.DefaultCPU()` / `builder.CPU()`). Multi-threaded CPU accelerator: runs kernels as .NET code on ILGPU's own worker threads, one simulated multiprocessor per thread. Kernels without barriers or warp operations run each group's lanes in a plain loop. Useful as a reference or for machines without GPU drivers. Full ILGPU feature support (shared memory, barriers, atomics). Not available in the browser - use the Wasm backend for off-main-thread compute in Blazor.
 
 ```csharp
 using ILGPU;

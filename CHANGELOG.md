@@ -1,7 +1,9 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## Unreleased (after 5.3.9) - Velocity (the SIMD CPU backend) becomes a complete backend
+## Unreleased (after 5.3.9; becomes 5.4.0) - Velocity (the SIMD CPU backend) becomes a complete backend and the default CPU backend
+
+- **BEHAVIOR CHANGE: `Context.Builder.AllAccelerators()` (and so `Default()`, `Context.CreateDefault()` and SpawnDev's `AllAcceleratorsAsync()`) registers Velocity instead of the plain CPU accelerator on desktop and server.** The plain CPU accelerator is ILGPU's debugging backend: register it explicitly (`builder.DefaultCPU()` / `builder.CPU()`) where you need it (`context.GetCPUDevice(0)` and `CreateCPUAccelerator(0)` on a default context now fail). Browser and 32-bit processes keep the plain CPU accelerator (Velocity needs a 64-bit process). A context with nothing registered still falls back to the default CPU device. `GetBestDevice()` ranks Velocity below the GPU backends and above the plain CPU; `GetPreferredDevice(false)` skips Velocity (unlimited memory size) and `GetPreferredDevice(true)` returns it. Copies between Velocity and OpenCL buffers work like the CPU ones.
 
 Velocity runs the whole shared test suite (731 tests: all pass or skip, as `VelocityTests` in the desktop lane). Details and measurements in `Plans/velocity-as-production-cpu-backend-2026-10-20.md`.
 - **NEW: Half, BFloat16, FP8 (E4M3, E5M2), FP4 and packed QInt4/QUInt4 on Velocity** (float lanes rounded to the narrow type, results equal the CPU backend; 4-bit views are packed two per byte with atomic nibble stores). The Velocity capability reports Float16.
