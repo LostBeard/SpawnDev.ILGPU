@@ -85,7 +85,18 @@ namespace ILGPU.Backends.Velocity
             switch (value.Dimension)
             {
                 case DeviceConstantDimension3D.X:
+                    // The thread index within the group: the lane plus the number of
+                    // threads of this group that earlier warps covered (zero for a
+                    // group of at most one warp, see the kernel iteration loop)
+                    LoadGlobalIndexScalar();
+                    LoadGroupDimScalar();
+                    Emitter.Emit(OpCodes.Rem);
+                    Specializer.ConvertScalarTo32(Emitter, VelocityWarpOperationMode.I);
                     Specializer.LoadLaneIndexVector32(Emitter);
+                    Specializer.BinaryOperation32(
+                        Emitter,
+                        BinaryArithmeticKind.Add,
+                        VelocityWarpOperationMode.I);
                     break;
                 case DeviceConstantDimension3D.Y:
                 case DeviceConstantDimension3D.Z:
@@ -147,35 +158,51 @@ namespace ILGPU.Backends.Velocity
         /// <inheritdoc />
         public void GenerateCode(PredicateBarrier barrier)
         {
-            // Load predicate
-            Emitter.Emit(LocalOperation.Load, GetBlockMask(barrier.BasicBlock));
-            Load(barrier.Predicate);
-
-            // Load and call predicate operation
+            Module.UsesGroupSynchronization = true;
             if (!barrier.IsTreatedAs32Bit())
                 throw new InternalCompilerException();
-            LoadGroupDimScalar();
+
+            // Every kind is a count of lanes summed over the warps of the group: the
+            // lanes of this warp that take part (the block mask) and satisfy the
+            // predicate; for And the lanes that do not (And holds when there are none)
+            Emitter.Emit(LocalOperation.Load, GetBlockMask(barrier.BasicBlock));
+            Load(barrier.Predicate);
+            if (barrier.Kind == PredicateBarrierKind.And)
+                Specializer.NegateMask32(Emitter);
+            Specializer.IntersectMask32(Emitter);
+            Specializer.GetNumberOfActiveLanes(Emitter);
+            Specializer.GroupSum(Emitter);
+
             switch (barrier.Kind)
             {
                 case PredicateBarrierKind.PopCount:
-                    Specializer.BarrierPopCount32(Emitter);
-                    break;
-                case PredicateBarrierKind.And:
-                    Specializer.BarrierAnd32(Emitter);
                     break;
                 case PredicateBarrierKind.Or:
-                    Specializer.BarrierOr32(Emitter);
+                    // any lane satisfied it: a true boolean is a mask of all bits
+                    Emitter.EmitConstant(0);
+                    Emitter.Emit(OpCodes.Cgt);
+                    Emitter.Emit(OpCodes.Neg);
+                    break;
+                case PredicateBarrierKind.And:
+                    // no lane failed it
+                    Emitter.EmitConstant(0);
+                    Emitter.Emit(OpCodes.Ceq);
+                    Emitter.Emit(OpCodes.Neg);
                     break;
                 default:
                     throw new NotSupportedException();
             }
+            Specializer.ConvertScalarTo32(Emitter, VelocityWarpOperationMode.I);
 
             Store(barrier);
         }
 
         /// <inheritdoc />
-        public void GenerateCode(Barrier barrier) =>
+        public void GenerateCode(Barrier barrier)
+        {
+            Module.UsesGroupSynchronization = true;
             Specializer.Barrier(Emitter);
+        }
 
         /// <inheritdoc />
         public void GenerateCode(Broadcast broadcast) =>

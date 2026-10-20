@@ -11,6 +11,7 @@
 
 using ILGPU.Backends;
 using ILGPU.Backends.IL;
+using ILGPU.Backends.Velocity;
 using ILGPU.IR.Intrinsics;
 using ILGPU.Util;
 using System;
@@ -75,6 +76,17 @@ namespace ILGPU.Algorithms.IL
             manager.RegisterMethod(
                 sourceMethod,
                 new ILIntrinsic(targetType, name, IntrinsicImplementationMode.Redirect));
+
+            // The Velocity (SIMD CPU) backend runs the same IL-level implementations (the
+            // warp operations are shuffle based, the group operations use shared memory
+            // and barriers): without this mapping a call such as GroupExtensions.AllReduce
+            // had no implementation on Velocity and returned zero
+            manager.RegisterMethod(
+                sourceMethod,
+                new VelocityIntrinsic(
+                    targetType,
+                    name,
+                    IntrinsicImplementationMode.Redirect));
         }
     }
 }

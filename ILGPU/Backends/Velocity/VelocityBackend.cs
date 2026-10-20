@@ -185,7 +185,8 @@ namespace ILGPU.Backends.Velocity
                 module.ParametersType,
                 module.ParametersTypeConstructor,
                 module.ParameterFields,
-                module.SharedAllocationSize);
+                module.SharedAllocationSize,
+                module.UsesGroupSynchronization);
         }
     }
 }

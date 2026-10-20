@@ -165,6 +165,12 @@ namespace ILGPU.Runtime.Velocity
 
         private readonly ParallelOptions parallelOptions;
 
+        [SuppressMessage(
+            "Microsoft.Usage",
+            "CA2213: Disposable fields should be disposed",
+            Justification = "This is disposed in DisposeAccelerator_SyncRoot")]
+        private readonly VelocityGroupTeamRunner teamRunner;
+
         /// <summary>
         /// Constructs a new Velocity accelerator.
         /// </summary>
@@ -188,6 +194,7 @@ namespace ILGPU.Runtime.Velocity
                 MaxDegreeOfParallelism = device.NumMultiprocessors,
             };
             executionEngine = new ParallelExecutionEngine(this);
+            teamRunner = new VelocityGroupTeamRunner(this);
 
             // Uncomment this line and comment the corresponding creation line to enable
             // code generation debugging on the command line
@@ -237,7 +244,8 @@ namespace ILGPU.Runtime.Velocity
             KernelConfig userKernelConfig,
             RuntimeKernelConfig runtimeKernelConfig,
             VelocityEntryPointHandler entryPointHandler,
-            VelocityParameters velocityParameters)
+            VelocityParameters velocityParameters,
+            bool usesGroupSynchronization)
         {
             // Avoid concurrent executions of kernels.. we have to wait for the current
             // kernel to finish first
@@ -252,6 +260,22 @@ namespace ILGPU.Runtime.Velocity
                 // Determine actual thread-grid sizes
                 int gridSize = runtimeKernelConfig.GridDim.Size;
                 int groupSize = runtimeKernelConfig.GroupDim.Size;
+
+                // A group of more than a warp whose threads have to meet (barriers) is
+                // executed by a team of warps that run at the same time; every other
+                // group is processed by the kernel's own loop, warp after warp
+                if (usesGroupSynchronization && groupSize > WarpSize)
+                {
+                    teamRunner.Run(
+                        entryPointHandler,
+                        velocityParameters,
+                        groupSize,
+                        gridSize,
+                        gridSize,
+                        userKernelConfig.GetIntSize(),
+                        runtimeKernelConfig.SharedMemoryConfig.DynamicArraySize);
+                    return;
+                }
 
                 // Setup engine properties
                 executionEngine.GroupDim = groupSize;
@@ -375,6 +399,9 @@ namespace ILGPU.Runtime.Velocity
 
             // Load the parameters object
             emitter.Emit(LocalOperation.Load, parametersInstance);
+
+            // Tell the run method whether the kernel contains barriers
+            emitter.EmitConstant(kernel.UsesGroupSynchronization ? 1 : 0);
 
             // Launch kernel execution
             emitter.EmitCall(RunMethodInfo);
@@ -572,6 +599,7 @@ namespace ILGPU.Runtime.Velocity
             // Dispose task engine
             taskConcurrencyLimit.Wait();
             executionEngine.Dispose();
+            teamRunner.Dispose();
 
             // Dispose barriers
             taskConcurrencyLimit.Dispose();

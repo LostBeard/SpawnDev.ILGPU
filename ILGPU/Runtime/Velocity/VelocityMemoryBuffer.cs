@@ -131,6 +131,22 @@ namespace ILGPU.Runtime.Velocity
             return new ArrayView<T>(this, newOffset, length);
         }
 
+        /// <summary>
+        /// Allocates from the given offset instead of the pool's own: the warps of a
+        /// group that share this pool each keep their own offset, and as they all
+        /// allocate in the same order they get the same addresses.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public ArrayView<T> AllocateAt<T>(ref int offset, int length)
+            where T : unmanaged
+        {
+            int totalElementSize = length * Interop.SizeOf<T>();
+            int alignment = Interop.ComputeAlignmentOffset(offset, totalElementSize);
+            int newOffset = offset + alignment;
+            offset += alignment + totalElementSize;
+            return new ArrayView<T>(this, newOffset, length);
+        }
+
         #endregion
     }
 }

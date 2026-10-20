@@ -47,9 +47,11 @@ namespace ILGPU.Backends.Velocity
             Type parametersType,
             ConstructorInfo parametersTypeConstructor,
             ImmutableArray<FieldInfo> parameterFields,
-            int allocatedSharedMemorySize)
+            int allocatedSharedMemorySize,
+            bool usesGroupSynchronization)
             : base(context, entryPoint, null)
         {
+            UsesGroupSynchronization = usesGroupSynchronization;
             KernelMethod = kernelMethod;
             ParametersType = parametersType;
             ParameterFields = parameterFields;
@@ -85,6 +87,11 @@ namespace ILGPU.Backends.Velocity
         /// Returns the size of statically allocated shared memory in bytes.
         /// </summary>
         public int AllocatedSharedMemorySize { get; }
+
+        /// <summary>
+        /// True if the kernel contains barriers (its groups are limited to one warp).
+        /// </summary>
+        internal bool UsesGroupSynchronization { get; }
 
         #endregion
 

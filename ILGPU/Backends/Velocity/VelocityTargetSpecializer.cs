@@ -38,6 +38,10 @@ namespace ILGPU.Backends.Velocity
 
         private static readonly MethodInfo MemoryBarrierMethod =
             GetMethod<VelocityTargetSpecializer>(nameof(MemoryBarrier));
+        private static readonly MethodInfo GroupBarrierMethod =
+            GetMethod<VelocityTargetSpecializer>(nameof(GroupBarrierImpl));
+        private static readonly MethodInfo GroupSumMethod =
+            GetMethod<VelocityTargetSpecializer>(nameof(GroupSumImpl));
 
         private static readonly MethodInfo GetDynamicSharedMemoryMethod =
             GetMethod<VelocityTargetSpecializer>(
@@ -56,6 +60,20 @@ namespace ILGPU.Backends.Velocity
         /// Wrapper around an Interlocked memory barrier.
         /// </summary>
         internal static void MemoryBarrier() => Interlocked.MemoryBarrier();
+
+        /// <summary>
+        /// A group barrier: the warps of the group meet.
+        /// </summary>
+        internal static void GroupBarrierImpl(VelocityGroupExecutionContext context) =>
+            context.Barrier();
+
+        /// <summary>
+        /// Sums a value over the warps of the group.
+        /// </summary>
+        internal static int GroupSumImpl(
+            int value,
+            VelocityGroupExecutionContext context) =>
+            context.GroupSum(value);
 
         /// <summary>
         /// Wrapper around a group extension context.
@@ -362,9 +380,26 @@ namespace ILGPU.Backends.Velocity
 
         #region Threads
 
+        /// <summary>
+        /// Emits a group barrier: the warps of the thread group meet (the execution
+        /// context is the first argument of every generated method).
+        /// </summary>
         public virtual void Barrier<TILEmitter>(TILEmitter emitter)
-            where TILEmitter : struct, IILEmitter =>
-            emitter.EmitCall(MemoryBarrierMethod);
+            where TILEmitter : struct, IILEmitter
+        {
+            emitter.Emit(OpCodes.Ldarg_0);
+            emitter.EmitCall(GroupBarrierMethod);
+        }
+
+        /// <summary>
+        /// Emits the sum over the warps of the thread group of the int on the stack.
+        /// </summary>
+        public void GroupSum<TILEmitter>(TILEmitter emitter)
+            where TILEmitter : struct, IILEmitter
+        {
+            emitter.Emit(OpCodes.Ldarg_0);
+            emitter.EmitCall(GroupSumMethod);
+        }
 
         public abstract void BarrierPopCount32<TILEmitter>(TILEmitter emitter)
             where TILEmitter : struct, IILEmitter;

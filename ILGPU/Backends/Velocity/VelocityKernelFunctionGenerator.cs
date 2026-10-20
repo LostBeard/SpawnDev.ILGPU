@@ -15,7 +15,9 @@ using ILGPU.Backends.IL;
 using ILGPU.IR;
 using ILGPU.IR.Analyses;
 using ILGPU.IR.Values;
+using ILGPU.Util;
 using System;
+using System.Reflection;
 using System.Reflection.Emit;
 
 namespace ILGPU.Backends.Velocity
@@ -71,6 +73,10 @@ namespace ILGPU.Backends.Velocity
         /// <summary>
         /// Returns the current entry point.
         /// </summary>
+        private static readonly MethodInfo MathMinInt32 = typeof(Math).GetMethod(
+            nameof(Math.Min),
+            new Type[] { typeof(int), typeof(int) }).AsNotNull();
+
         public EntryPoint EntryPoint { get; }
 
         /// <summary>
@@ -129,16 +135,10 @@ namespace ILGPU.Backends.Velocity
             Emitter.Emit(ArgumentOperation.Load, GlobalStartIndex);
             Emitter.Emit(LocalOperation.Store, globalIndex);
 
-            // Setup the current main kernel mask based on the current group size
+            // The main kernel mask of an iteration depends on how many threads of the
+            // current group it covers (see below)
             var baseGroupMask = Emitter.DeclareLocal(Specializer.WarpType32);
-            Specializer.LoadLaneIndexVector32(Emitter);
-            Emitter.Emit(ArgumentOperation.Load, GlobalGroupDimIndex);
-            Specializer.ConvertScalarTo32(Emitter, VelocityWarpOperationMode.I);
-            Specializer.Compare32(
-                Emitter,
-                CompareKind.LessThan,
-                VelocityWarpOperationMode.I);
-            Emitter.Emit(LocalOperation.Store, baseGroupMask);
+            var iterationStep = Emitter.DeclareLocal(typeof(int));
 
             // Build our execution loop header
             var iterationHeader = Emitter.DeclareLabel();
@@ -149,6 +149,32 @@ namespace ILGPU.Backends.Velocity
             Emitter.Emit(LocalOperation.Load, globalIndex);
             Emitter.Emit(ArgumentOperation.Load, GlobalEndIndex);
             Emitter.Emit(OpCodes.Bge, exitMarker);
+
+            // An iteration runs one warp: the next WarpSize threads of the current group,
+            // or fewer when the group ends sooner (a group is smaller than a warp, or its
+            // size is not a multiple of the warp size). A group of more threads than a
+            // warp is processed by consecutive warps; a chunk always starts at the
+            // beginning of a group, so (global index % group size) is the number of
+            // threads of this group that earlier iterations covered.
+            // step = min(WarpSize, groupDim - globalIndex % groupDim)
+            Emitter.Emit(ArgumentOperation.Load, GlobalGroupDimIndex);
+            Emitter.Emit(LocalOperation.Load, globalIndex);
+            Emitter.Emit(ArgumentOperation.Load, GlobalGroupDimIndex);
+            Emitter.Emit(OpCodes.Rem);
+            Emitter.Emit(OpCodes.Sub);
+            Emitter.EmitConstant(Specializer.WarpSize);
+            Emitter.EmitCall(MathMinInt32);
+            Emitter.Emit(LocalOperation.Store, iterationStep);
+
+            // The lanes of the warp that belong to this group
+            Specializer.LoadLaneIndexVector32(Emitter);
+            Emitter.Emit(LocalOperation.Load, iterationStep);
+            Specializer.ConvertScalarTo32(Emitter, VelocityWarpOperationMode.I);
+            Specializer.Compare32(
+                Emitter,
+                CompareKind.LessThan,
+                VelocityWarpOperationMode.I);
+            Emitter.Emit(LocalOperation.Store, baseGroupMask);
 
             // Build our execution body
             {
@@ -193,10 +219,9 @@ namespace ILGPU.Backends.Velocity
                 Emitter.MarkLabel(localExitMarker);
             }
 
-            // Increase the processing index
+            // Increase the processing index by the number of threads this iteration covered
             Emitter.Emit(LocalOperation.Load, globalIndex);
-            Emitter.Emit(ArgumentOperation.Load, GlobalGroupDimIndex);
-            Emitter.Emit(OpCodes.Conv_I8);
+            Emitter.Emit(LocalOperation.Load, iterationStep);
             Emitter.Emit(OpCodes.Add);
             Emitter.Emit(LocalOperation.Store, globalIndex);
 

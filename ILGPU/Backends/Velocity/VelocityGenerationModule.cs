@@ -412,6 +412,12 @@ namespace ILGPU.Backends.Velocity
         /// </summary>
         public int SharedAllocationSize { get; }
 
+        /// <summary>
+        /// True if any generated method contains a barrier: the threads of a group have
+        /// to meet, which limits a group to one warp (set by the code generators).
+        /// </summary>
+        public bool UsesGroupSynchronization { get; set; }
+
         #endregion
 
         #region Methods

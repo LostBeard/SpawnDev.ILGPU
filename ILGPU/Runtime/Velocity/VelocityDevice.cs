@@ -49,6 +49,13 @@ namespace ILGPU.Runtime.Velocity
     {
         #region Static
 
+        /// <summary>
+        /// The maximum number of threads of a group. A group of more than a warp that
+        /// has barriers runs one thread per warp (256 threads = 64 warps of 4 lanes),
+        /// so this is not raised to the 1024 of a GPU.
+        /// </summary>
+        private const int MaxGroupThreads = 256;
+
         private static readonly Func<VelocityTargetSpecializer>[] VelocitySpecializers =
             new Func<VelocityTargetSpecializer>[]
         {
@@ -86,7 +93,13 @@ namespace ILGPU.Runtime.Velocity
             DeviceType = deviceType;
             TargetSpecializer = VelocitySpecializers[(int)deviceType]();
             WarpSize = TargetSpecializer.WarpSize;
-            MaxNumThreadsPerGroup = MaxNumThreadsPerMultiprocessor = WarpSize;
+            // A group may have more threads than a warp: the warps of a group without
+            // barriers run one after the other on one thread (see the kernel iteration
+            // loop), those of a group with barriers run at the same time, one thread
+            // per warp (VelocityGroupTeamRunner). Algorithms divide the threads of a
+            // multiprocessor by the group size, so a multiprocessor holds a full group.
+            MaxNumThreadsPerGroup = MaxNumThreadsPerMultiprocessor =
+                Math.Max(WarpSize, MaxGroupThreads);
 #if DEBUG
             NumMultiprocessors = 1;
 #else

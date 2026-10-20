@@ -57,22 +57,41 @@ namespace ILGPU.Backends.Velocity
             manager.RegisterBroadcast(
                 BroadcastKind.GroupLevel,
                 CreateIntrinsic(
-                    nameof(GroupAndWarpBroadcast),
+                    nameof(GroupBroadcast),
                     IntrinsicImplementationMode.Redirect));
             manager.RegisterBroadcast(
                 BroadcastKind.WarpLevel,
                 CreateIntrinsic(
-                    nameof(GroupAndWarpBroadcast),
+                    nameof(WarpBroadcast),
                     IntrinsicImplementationMode.Redirect));
         }
 
         /// <summary>
-        /// Wraps a single warp and group-broadcast operation.
+        /// Wraps a single warp-broadcast operation.
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static T GroupAndWarpBroadcast<T>(T value, int laneIndex)
+        private static T WarpBroadcast<T>(T value, int laneIndex)
             where T : unmanaged =>
             Warp.Shuffle(value, laneIndex);
+
+        /// <summary>
+        /// A group-broadcast operation: the thread with the given index in the group
+        /// hands its value to every thread of the group. A group may have several
+        /// warps (a shuffle reaches only the lanes of one warp), so the value goes
+        /// through shared memory: written by the source thread, read by everybody after
+        /// a barrier, and the slot is not reused before everybody has read it.
+        /// </summary>
+        private static T GroupBroadcast<T>(T value, int groupIndex)
+            where T : unmanaged
+        {
+            var slot = SharedMemory.Allocate<T>(1);
+            if (Group.IdxX == groupIndex)
+                slot[0] = value;
+            Group.Barrier();
+            var result = slot[0];
+            Group.Barrier();
+            return result;
+        }
 
         #endregion
     }
