@@ -310,6 +310,12 @@ namespace ILGPU.Backends.Velocity
                     ? OpCodes.Conv_U4
                     : OpCodes.Conv_U8);
 
+                // A boolean lane is a mask (all bits set for true): selects are bitwise,
+                // so a kernel parameter of 1 selected the false value (and only bit 0 of
+                // the true one)
+                if (basicValueType == BasicValueType.Int1)
+                    emitter.Emit(OpCodes.Neg);
+
                 mode = VelocityWarpOperationMode.U;
             }
             else

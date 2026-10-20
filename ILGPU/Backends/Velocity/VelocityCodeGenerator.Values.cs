@@ -151,6 +151,32 @@ namespace ILGPU.Backends.Velocity
                 Specializer.Compare32(Emitter, value.Kind, warpMode);
             else
                 Specializer.Compare64(Emitter, value.Kind, warpMode);
+
+            // An unordered float comparison (the negation of an ordered one, which is
+            // what an inverted branch condition is) is also true when either operand is
+            // NaN: `if (x < y)` was taken for NaN once the condition was inverted
+            if (value.IsUnsignedOrUnordered && warpMode == VelocityWarpOperationMode.F)
+            {
+                foreach (var operand in new[] { value.Left, value.Right })
+                {
+                    Load(operand);
+                    if (value.CompareType.GetBasicValueType().IsTreatedAs32Bit())
+                    {
+                        Specializer.UnaryOperation32(
+                            Emitter,
+                            UnaryArithmeticKind.IsNaNF,
+                            warpMode);
+                    }
+                    else
+                    {
+                        Specializer.UnaryOperation64(
+                            Emitter,
+                            UnaryArithmeticKind.IsNaNF,
+                            warpMode);
+                    }
+                    Specializer.UnifyMask32(Emitter);
+                }
+            }
             Store(value);
         }
 
