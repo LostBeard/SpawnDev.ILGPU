@@ -105,6 +105,16 @@ namespace ILGPU.Backends.Velocity
                 ArithmeticBasicValueType.Float16 => VelocityWarpOperationMode.F,
                 ArithmeticBasicValueType.Float32 => VelocityWarpOperationMode.F,
                 ArithmeticBasicValueType.Float64 => VelocityWarpOperationMode.D,
+
+                // The low precision floats are float lanes, rounded to the narrow type
+                ArithmeticBasicValueType.BFloat16 => VelocityWarpOperationMode.F,
+                ArithmeticBasicValueType.Float8E4M3 => VelocityWarpOperationMode.F,
+                ArithmeticBasicValueType.Float8E5M2 => VelocityWarpOperationMode.F,
+                ArithmeticBasicValueType.Float4E2M1 => VelocityWarpOperationMode.F,
+
+                // The packed 4bit integers are raw nibbles in integer lanes
+                ArithmeticBasicValueType.QInt4 => VelocityWarpOperationMode.I,
+                ArithmeticBasicValueType.QUInt4 => VelocityWarpOperationMode.U,
                 _ => throw new NotSupportedException()
             };
 

@@ -360,6 +360,28 @@ namespace ILGPU.Backends.Velocity.Scalar
 
         #region IO
 
+        public override void DecodeNarrow<TILEmitter>(
+            TILEmitter emitter,
+            BasicValueType basicValueType) =>
+            emitter.EmitCall(ScalarOperations2.GetDecodeNarrowOperation(basicValueType));
+
+        public override void EncodeNarrow<TILEmitter>(
+            TILEmitter emitter,
+            BasicValueType basicValueType) =>
+            emitter.EmitCall(ScalarOperations2.GetEncodeNarrowOperation(basicValueType));
+
+        public override void SignExtendNibble<TILEmitter>(TILEmitter emitter) =>
+            emitter.EmitCall(ScalarOperations2.SignExtendNibbleMethod);
+
+        public override void MaskNibble<TILEmitter>(TILEmitter emitter) =>
+            emitter.EmitCall(ScalarOperations2.MaskNibbleMethod);
+
+        public override void LoadNibble<TILEmitter>(TILEmitter emitter) =>
+            emitter.EmitCall(ScalarOperations2.LoadNibbleMethod);
+
+        public override void StoreNibble<TILEmitter>(TILEmitter emitter) =>
+            emitter.EmitCall(ScalarOperations2.StoreNibbleMethod);
+
         public override void Load8<TILEmitter>(TILEmitter emitter) =>
             emitter.EmitCall(ScalarOperations2.Load8Method);
 

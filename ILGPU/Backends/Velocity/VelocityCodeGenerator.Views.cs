@@ -65,6 +65,25 @@ namespace ILGPU.Backends.Velocity
         /// <inheritdoc />
         public void GenerateCode(LoadElementAddress value)
         {
+            var sourceType = value.Source.Type.As<AddressSpaceType>(value);
+            if (sourceType.ElementType.BasicValueType.IsPackedNibble())
+            {
+                // Packed 4bit elements (two per byte): the address counts nibbles, the
+                // loads and stores of these types split it into byte and nibble
+                Load(value.Source);
+                Emitter.EmitConstant(2L);
+                Specializer.ConvertScalarTo64(Emitter, VelocityWarpOperationMode.U);
+                Load(value.Offset);
+                if (value.Is32BitAccess)
+                    Specializer.Convert32To64(Emitter, VelocityWarpOperationMode.I);
+                Specializer.TernaryOperation64(
+                    Emitter,
+                    TernaryArithmeticKind.MultiplyAdd,
+                    VelocityWarpOperationMode.U);
+                Store(value);
+                return;
+            }
+
             // Load the raw element offset to multiply
             Load(value.Offset);
 
@@ -73,7 +92,6 @@ namespace ILGPU.Backends.Velocity
                 Specializer.Convert32To64(Emitter, VelocityWarpOperationMode.I);
 
             // Load the source type information and the element size to multiply
-            var sourceType = value.Source.Type.As<AddressSpaceType>(value);
             Emitter.EmitConstant((long)sourceType.ElementType.Size);
             Specializer.ConvertScalarTo64(Emitter, VelocityWarpOperationMode.U);
 

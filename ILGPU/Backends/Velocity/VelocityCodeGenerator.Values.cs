@@ -94,7 +94,18 @@ namespace ILGPU.Backends.Velocity
             else
                 Specializer.UnaryOperation64(Emitter, value.Kind, warpMode);
 
+            RoundNarrowResult(value);
             Store(value);
+        }
+
+        /// <summary>
+        /// Rounds the result of an operation on the stack to the low precision float
+        /// (Half, BFloat16, FP8, FP4) the value is of, which the lanes compute as floats.
+        /// </summary>
+        private void RoundNarrowResult(Value value)
+        {
+            if (value.BasicValueType.IsNarrowFloat())
+                Specializer.RoundNarrow(Emitter, value.BasicValueType);
         }
 
         /// <inheritdoc/>
@@ -120,6 +131,7 @@ namespace ILGPU.Backends.Velocity
                 Specializer.BinaryOperation32(Emitter, value.Kind, warpMode);
             else
                 Specializer.BinaryOperation64(Emitter, value.Kind, warpMode);
+            RoundNarrowResult(value);
             Store(value);
         }
 
@@ -136,6 +148,7 @@ namespace ILGPU.Backends.Velocity
                 Specializer.TernaryOperation32(Emitter, value.Kind, warpMode);
             else
                 Specializer.TernaryOperation64(Emitter, value.Kind, warpMode);
+            RoundNarrowResult(value);
             Store(value);
         }
 
@@ -183,17 +196,28 @@ namespace ILGPU.Backends.Velocity
         /// <inheritdoc/>
         public void GenerateCode(ConvertValue value)
         {
+            // The low precision types live in the lanes of the type they are computed
+            // with: floats for Half, BFloat16, FP8 and FP4, integers for the nibbles.
+            // They are converted like their lane type and the result is rounded to the
+            // narrow type afterwards
+            var sourceType = value.SourceType.GetLaneType();
+            var targetType = value.TargetType.GetLaneType();
+
             // Check to which value we have to convert the current value
-            var sourceMode = value.SourceType.GetWarpMode();
-            var targetMode = value.TargetType.GetWarpMode();
+            var sourceMode = sourceType.GetWarpMode();
+            var targetMode = targetType.GetWarpMode();
 
             // Load source
             Load(value.Value);
 
+            // A packed signed nibble is extended first
+            if (value.SourceType == ArithmeticBasicValueType.QInt4)
+                Specializer.SignExtendNibble(Emitter);
+
             // Check whether have to expand or to narrow the current values on the stack
-            var sourceBasicValueType = value.SourceType.GetBasicValueType();
+            var sourceBasicValueType = sourceType.GetBasicValueType();
             bool sourceIs32Bit = sourceBasicValueType.IsTreatedAs32Bit();
-            bool targetIs32Bit = value.IsTreatedAs32Bit();
+            bool targetIs32Bit = targetType.GetBasicValueType().IsTreatedAs32Bit();
 
             if (sourceIs32Bit)
             {
@@ -205,8 +229,8 @@ namespace ILGPU.Backends.Velocity
                     // Use the local conversion functionality
                     Specializer.ConvertSoftware32(
                         Emitter,
-                        value.SourceType,
-                        value.TargetType);
+                        sourceType,
+                        targetType);
                 }
                 else
                 {
@@ -220,7 +244,7 @@ namespace ILGPU.Backends.Velocity
                     else
                     {
                         // Extent types to 32bit only while preserving the sign
-                        targetType32 = value.TargetType.ForceTo32Bit();
+                        targetType32 = targetType.ForceTo32Bit();
                         if (targetType32.IsFloat())
                         {
                             targetType32 = value.IsSourceUnsigned
@@ -231,7 +255,7 @@ namespace ILGPU.Backends.Velocity
 
                     Specializer.ConvertSoftware32(
                         Emitter,
-                        value.SourceType,
+                        sourceType,
                         targetType32);
 
                     // Widen first
@@ -257,9 +281,21 @@ namespace ILGPU.Backends.Velocity
                     // Convert the remaining parts
                     Specializer.ConvertSoftware32(
                         Emitter,
-                        value.TargetType.ForceTo32Bit(),
-                        value.TargetType);
+                        targetType.ForceTo32Bit(),
+                        targetType);
                 }
+            }
+
+            // Round to the narrow type
+            if (value.TargetType.IsNarrowFloat())
+            {
+                Specializer.RoundNarrow(
+                    Emitter,
+                    value.TargetType.GetBasicValueType());
+            }
+            else if (value.TargetType.IsNibbleInt())
+            {
+                Specializer.MaskNibble(Emitter);
             }
 
             Store(value);
@@ -268,6 +304,16 @@ namespace ILGPU.Backends.Velocity
         /// <inheritdoc/>
         public void GenerateCode(FloatAsIntCast value)
         {
+            var sourceType = value.Value.BasicValueType;
+            if (sourceType.IsNarrowFloat())
+            {
+                // The lanes are floats: the integer is the bits of the narrow type
+                Load(value.Value);
+                Specializer.EncodeNarrow(Emitter, sourceType);
+                Store(value);
+                return;
+            }
+
             // Do nothing as this does not change any register contents
             var valueLocal = GetLocal(value.Value);
             Alias(value, valueLocal);
@@ -276,6 +322,15 @@ namespace ILGPU.Backends.Velocity
         /// <inheritdoc/>
         public void GenerateCode(IntAsFloatCast value)
         {
+            if (value.BasicValueType.IsNarrowFloat())
+            {
+                // The lanes are floats: decode the bits of the narrow type
+                Load(value.Value);
+                Specializer.DecodeNarrow(Emitter, value.BasicValueType);
+                Store(value);
+                return;
+            }
+
             // Do nothing as this does not change any register contents
             var valueLocal = GetLocal(value.Value);
             Alias(value, valueLocal);
@@ -408,7 +463,30 @@ namespace ILGPU.Backends.Velocity
                     Specializer.ConvertScalarTo64(Emitter, VelocityWarpOperationMode.U);
                     break;
                 case BasicValueType.Float16:
-                    throw VelocityCapabilityContext.GetNotSupportedFloat16Exception();
+                    Emitter.EmitConstant((float)value.Float16Value);
+                    Specializer.ConvertScalarTo32(Emitter, VelocityWarpOperationMode.F);
+                    break;
+                case BasicValueType.BFloat16:
+                    Emitter.EmitConstant((float)value.BFloat16Value);
+                    Specializer.ConvertScalarTo32(Emitter, VelocityWarpOperationMode.F);
+                    break;
+                case BasicValueType.Float8E4M3:
+                    Emitter.EmitConstant((float)value.Float8E4M3Value);
+                    Specializer.ConvertScalarTo32(Emitter, VelocityWarpOperationMode.F);
+                    break;
+                case BasicValueType.Float8E5M2:
+                    Emitter.EmitConstant((float)value.Float8E5M2Value);
+                    Specializer.ConvertScalarTo32(Emitter, VelocityWarpOperationMode.F);
+                    break;
+                case BasicValueType.Float4E2M1:
+                    Emitter.EmitConstant((float)value.Float4E2M1Value);
+                    Specializer.ConvertScalarTo32(Emitter, VelocityWarpOperationMode.F);
+                    break;
+                case BasicValueType.QInt4:
+                    // The raw nibble
+                    Emitter.LoadIntegerConstant((int)value.QUInt4Value.RawValue & 0xF);
+                    Specializer.ConvertScalarTo32(Emitter, VelocityWarpOperationMode.U);
+                    break;
                 case BasicValueType.Float32:
                     Emitter.EmitConstant(value.Float32Value);
                     Specializer.ConvertScalarTo32(Emitter, VelocityWarpOperationMode.F);

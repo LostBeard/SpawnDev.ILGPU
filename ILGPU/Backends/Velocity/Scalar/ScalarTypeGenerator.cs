@@ -43,6 +43,7 @@ namespace ILGPU.Backends.Velocity.Scalar
             ScalarOperations2.WarpType32, // Float8E4M3 (ordinal 10) - placeholder
             ScalarOperations2.WarpType32, // Float8E5M2 (ordinal 11) - placeholder
             ScalarOperations2.WarpType32, // Float4E2M1 (ordinal 12) - placeholder
+            ScalarOperations2.WarpType32, // QInt4 (ordinal 13), a raw nibble
         };
 
         #endregion

@@ -46,7 +46,7 @@ using System.Runtime.CompilerServices;
 
 namespace ILGPU.Backends.Velocity.Scalar
 {
-    static class ScalarOperations2
+    static partial class ScalarOperations2
     {
         #region Warp Types
 

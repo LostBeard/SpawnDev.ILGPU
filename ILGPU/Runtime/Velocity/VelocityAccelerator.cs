@@ -85,6 +85,21 @@ namespace ILGPU.Runtime.Velocity
             public int GridDim { get; set; }
 
             /// <summary>
+            /// Gets or sets the dimensions of the launch.
+            /// </summary>
+            public Index3D GridDims { get; set; }
+
+            /// <summary>
+            /// Gets or sets the dimensions of the groups of the launch.
+            /// </summary>
+            public Index3D GroupDims { get; set; }
+
+            /// <summary>
+            /// Gets or sets the extent of the index of an implicitly grouped kernel.
+            /// </summary>
+            public Index3D Extent { get; set; }
+
+            /// <summary>
             /// Returns the parent user size.
             /// </summary>
             public int UserSize { get; set; }
@@ -125,6 +140,7 @@ namespace ILGPU.Runtime.Velocity
                 ParallelLoopState? loopState,
                 VelocityGroupExecutionContext intermediateState)
             {
+                intermediateState.SetLaunchDimensions(GridDims, GroupDims, Extent);
                 intermediateState.SetupThreadGrid(DynamicSharedMemoryLengthInBytes);
 
                 // Invoke the actual kernel
@@ -260,6 +276,22 @@ namespace ILGPU.Runtime.Velocity
                 // Determine actual thread-grid sizes
                 int gridSize = runtimeKernelConfig.GridDim.Size;
                 int groupSize = runtimeKernelConfig.GroupDim.Size;
+                if (groupSize > VelocityDevice.MaxGroupThreads)
+                {
+                    throw new ArgumentOutOfRangeException(
+                        nameof(runtimeKernelConfig),
+                        $"A group of {groupSize} threads exceeds the maximum of " +
+                        $"{VelocityDevice.MaxGroupThreads} threads of Velocity");
+                }
+
+                // The threads that run: the extent of the index of an implicitly
+                // grouped kernel, or every thread of the grid. A kernel of several
+                // dimensions can have more threads in a row than the extent (the last
+                // group of a row), and checks that its index is inside its extent
+                var extent = userKernelConfig.GridDim;
+                int userSize = extent.Y * extent.Z > 1
+                    ? gridSize * groupSize
+                    : userKernelConfig.GetIntSize();
 
                 // A group of more than a warp whose threads have to meet (barriers) is
                 // executed by a team of warps that run at the same time; every other
@@ -272,15 +304,21 @@ namespace ILGPU.Runtime.Velocity
                         groupSize,
                         gridSize,
                         gridSize,
-                        userKernelConfig.GetIntSize(),
-                        runtimeKernelConfig.SharedMemoryConfig.DynamicArraySize);
+                        userSize,
+                        runtimeKernelConfig.SharedMemoryConfig.DynamicArraySize,
+                        runtimeKernelConfig.GridDim,
+                        runtimeKernelConfig.GroupDim,
+                        extent);
                     return;
                 }
 
                 // Setup engine properties
                 executionEngine.GroupDim = groupSize;
-                executionEngine.UserSize = userKernelConfig.GetIntSize();
+                executionEngine.UserSize = userSize;
                 executionEngine.GridDim = gridSize;
+                executionEngine.GridDims = runtimeKernelConfig.GridDim;
+                executionEngine.GroupDims = runtimeKernelConfig.GroupDim;
+                executionEngine.Extent = extent;
                 executionEngine.DynamicSharedMemoryLengthInBytes =
                     runtimeKernelConfig.SharedMemoryConfig.DynamicArraySize;
                 executionEngine.EntryPointHandler = entryPointHandler;
@@ -536,7 +574,7 @@ namespace ILGPU.Runtime.Velocity
             int groupSize,
             int dynamicSharedMemorySizeInBytes) =>
             kernel is VelocityKernel
-            ? groupSize > MaxGroupSize.Size ? 0 : NumMultiprocessors
+            ? groupSize > VelocityDevice.MaxGroupThreads ? 0 : NumMultiprocessors
             : throw new NotSupportedException(RuntimeErrorMessages.NotSupportedKernel);
 
         /// <summary cref="Accelerator.EstimateGroupSizeInternal(
@@ -552,7 +590,7 @@ namespace ILGPU.Runtime.Velocity
 
             // Estimation
             minGridSize = MaxNumThreads / WarpSize;
-            return Math.Min(maxGroupSize, MaxGroupSize.Size);
+            return Math.Min(maxGroupSize, VelocityDevice.MaxGroupThreads);
         }
 
         /// <summary cref="Accelerator.EstimateGroupSizeInternal(

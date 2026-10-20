@@ -350,6 +350,28 @@ namespace ILGPU.Backends.Velocity.Vec128
 
         #region IO
 
+        public override void DecodeNarrow<TILEmitter>(
+            TILEmitter emitter,
+            BasicValueType basicValueType) =>
+            emitter.EmitCall(Vec128Operations.GetDecodeNarrowOperation(basicValueType));
+
+        public override void EncodeNarrow<TILEmitter>(
+            TILEmitter emitter,
+            BasicValueType basicValueType) =>
+            emitter.EmitCall(Vec128Operations.GetEncodeNarrowOperation(basicValueType));
+
+        public override void SignExtendNibble<TILEmitter>(TILEmitter emitter) =>
+            emitter.EmitCall(Vec128Operations.SignExtendNibbleMethod);
+
+        public override void MaskNibble<TILEmitter>(TILEmitter emitter) =>
+            emitter.EmitCall(Vec128Operations.MaskNibbleMethod);
+
+        public override void LoadNibble<TILEmitter>(TILEmitter emitter) =>
+            emitter.EmitCall(Vec128Operations.LoadNibbleMethod);
+
+        public override void StoreNibble<TILEmitter>(TILEmitter emitter) =>
+            emitter.EmitCall(Vec128Operations.StoreNibbleMethod);
+
         public override void Load8<TILEmitter>(TILEmitter emitter) =>
             emitter.EmitCall(Vec128Operations.Load8Method);
 

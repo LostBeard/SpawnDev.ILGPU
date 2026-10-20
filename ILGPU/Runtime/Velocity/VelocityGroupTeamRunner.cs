@@ -36,6 +36,9 @@ namespace ILGPU.Runtime.Velocity
             public VelocityParameters Parameters = null!;
             public int GroupDim;
             public int GridDim;
+            public Index3D GroupDims;
+            public Index3D GridDims;
+            public Index3D Extent;
             public int GridSize;
             public int UserSize;
             public int WarpSize;
@@ -92,7 +95,10 @@ namespace ILGPU.Runtime.Velocity
             int gridDim,
             int gridSize,
             int userSize,
-            int dynamicSharedMemory)
+            int dynamicSharedMemory,
+            Index3D gridDims,
+            Index3D groupDims,
+            Index3D extent)
         {
             int warpSize = accelerator.WarpSize;
             int numWarps = IntrinsicMath.DivRoundUp(groupDim, warpSize);
@@ -124,6 +130,9 @@ namespace ILGPU.Runtime.Velocity
                 Parameters = parameters,
                 GroupDim = groupDim,
                 GridDim = gridDim,
+                GroupDims = groupDims,
+                GridDims = gridDims,
+                Extent = extent,
                 GridSize = gridSize,
                 UserSize = userSize,
                 WarpSize = warpSize,
@@ -210,6 +219,10 @@ namespace ILGPU.Runtime.Velocity
                         Math.Min(start + launch.WarpSize, groupStart + launch.GroupDim),
                         launch.UserSize);
 
+                    context.SetLaunchDimensions(
+                        launch.GridDims,
+                        launch.GroupDims,
+                        launch.Extent);
                     context.SetupThreadGrid(launch.DynamicSharedMemory);
                     if (start < end)
                     {

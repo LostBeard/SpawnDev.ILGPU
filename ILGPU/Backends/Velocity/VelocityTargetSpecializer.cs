@@ -447,9 +447,74 @@ namespace ILGPU.Backends.Velocity
         public abstract void Load64<TILEmitter>(TILEmitter emitter)
             where TILEmitter : struct, IILEmitter;
 
-        public void Load<TILEmitter>(
+        /// <summary>
+        /// Converts the bits of a low precision float (Half, BFloat16, FP8, FP4) on the
+        /// stack into the float lanes it is computed with.
+        /// </summary>
+        public abstract void DecodeNarrow<TILEmitter>(
             TILEmitter emitter,
             BasicValueType basicValueType)
+            where TILEmitter : struct, IILEmitter;
+
+        /// <summary>
+        /// Converts the float lanes of a low precision float (Half, BFloat16, FP8, FP4)
+        /// on the stack into its bits.
+        /// </summary>
+        public abstract void EncodeNarrow<TILEmitter>(
+            TILEmitter emitter,
+            BasicValueType basicValueType)
+            where TILEmitter : struct, IILEmitter;
+
+        /// <summary>
+        /// Rounds the float lanes on the stack to the given low precision float.
+        /// </summary>
+        public void RoundNarrow<TILEmitter>(
+            TILEmitter emitter,
+            BasicValueType basicValueType)
+            where TILEmitter : struct, IILEmitter
+        {
+            EncodeNarrow(emitter, basicValueType);
+            DecodeNarrow(emitter, basicValueType);
+        }
+
+        /// <summary>
+        /// Sign extends the raw nibbles (0 to 15) on the stack.
+        /// </summary>
+        public abstract void SignExtendNibble<TILEmitter>(TILEmitter emitter)
+            where TILEmitter : struct, IILEmitter;
+
+        /// <summary>
+        /// Reduces the integers on the stack to their raw nibble (0 to 15).
+        /// </summary>
+        public abstract void MaskNibble<TILEmitter>(TILEmitter emitter)
+            where TILEmitter : struct, IILEmitter;
+
+        /// <summary>
+        /// Loads the raw nibbles (mask and nibble addresses on the stack).
+        /// </summary>
+        public abstract void LoadNibble<TILEmitter>(TILEmitter emitter)
+            where TILEmitter : struct, IILEmitter;
+
+        /// <summary>
+        /// Stores the raw nibbles (mask, nibble addresses and values on the stack).
+        /// </summary>
+        public abstract void StoreNibble<TILEmitter>(TILEmitter emitter)
+            where TILEmitter : struct, IILEmitter;
+
+        /// <summary>
+        /// Loads a value of the given type.
+        /// </summary>
+        /// <param name="emitter">The emitter.</param>
+        /// <param name="basicValueType">The type to load.</param>
+        /// <param name="nibbleAddress">
+        /// True if the address of a packed 4bit type counts nibbles (the elements of
+        /// views), false if it is the address of a byte holding the nibble (the field of
+        /// a structure).
+        /// </param>
+        public void Load<TILEmitter>(
+            TILEmitter emitter,
+            BasicValueType basicValueType,
+            bool nibbleAddress = true)
             where TILEmitter : struct, IILEmitter
         {
             switch (basicValueType)
@@ -459,8 +524,40 @@ namespace ILGPU.Backends.Velocity
                     Load8(emitter);
                     break;
                 case BasicValueType.Int16:
-                case BasicValueType.Float16:
                     Load16(emitter);
+                    break;
+                case BasicValueType.Float16:
+                case BasicValueType.BFloat16:
+                    Load16(emitter);
+                    DecodeNarrow(emitter, basicValueType);
+                    break;
+                case BasicValueType.Float8E4M3:
+                case BasicValueType.Float8E5M2:
+                    Load8(emitter);
+                    DecodeNarrow(emitter, basicValueType);
+                    break;
+                case BasicValueType.QInt4:
+                    if (nibbleAddress)
+                    {
+                        LoadNibble(emitter);
+                    }
+                    else
+                    {
+                        Load8(emitter);
+                        MaskNibble(emitter);
+                    }
+                    break;
+                case BasicValueType.Float4E2M1:
+                    if (nibbleAddress)
+                    {
+                        LoadNibble(emitter);
+                    }
+                    else
+                    {
+                        Load8(emitter);
+                        MaskNibble(emitter);
+                    }
+                    DecodeNarrow(emitter, basicValueType);
                     break;
                 case BasicValueType.Int32:
                 case BasicValueType.Float32:
@@ -485,9 +582,14 @@ namespace ILGPU.Backends.Velocity
         public abstract void Store64<TILEmitter>(TILEmitter emitter)
             where TILEmitter : struct, IILEmitter;
 
+        /// <summary>
+        /// Stores a value of the given type (see <see cref="Load{TILEmitter}"/> for the
+        /// addresses of packed 4bit types).
+        /// </summary>
         public void Store<TILEmitter>(
             TILEmitter emitter,
-            BasicValueType basicValueType)
+            BasicValueType basicValueType,
+            bool nibbleAddress = true)
             where TILEmitter : struct, IILEmitter
         {
             switch (basicValueType)
@@ -497,8 +599,30 @@ namespace ILGPU.Backends.Velocity
                     Store8(emitter);
                     break;
                 case BasicValueType.Int16:
-                case BasicValueType.Float16:
                     Store16(emitter);
+                    break;
+                case BasicValueType.Float16:
+                case BasicValueType.BFloat16:
+                    EncodeNarrow(emitter, basicValueType);
+                    Store16(emitter);
+                    break;
+                case BasicValueType.Float8E4M3:
+                case BasicValueType.Float8E5M2:
+                    EncodeNarrow(emitter, basicValueType);
+                    Store8(emitter);
+                    break;
+                case BasicValueType.QInt4:
+                    if (nibbleAddress)
+                        StoreNibble(emitter);
+                    else
+                        Store8(emitter);
+                    break;
+                case BasicValueType.Float4E2M1:
+                    EncodeNarrow(emitter, basicValueType);
+                    if (nibbleAddress)
+                        StoreNibble(emitter);
+                    else
+                        Store8(emitter);
                     break;
                 case BasicValueType.Int32:
                 case BasicValueType.Float32:

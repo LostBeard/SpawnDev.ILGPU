@@ -178,10 +178,24 @@ namespace ILGPU.Backends.Velocity
 
             // Build our execution body
             {
-                // Bind the current implicitly grouped kernel index (if any)
+                // Bind the current implicitly grouped kernel index (if any): the linear
+                // thread number, or a structure with the index in every dimension
                 var offsetVector = Emitter.DeclareLocal(Specializer.WarpType32);
+                ILLocal? indexLocal = null;
+                int numIndexDimensions = EntryPoint.NumFlattendedIndexParameters;
                 if (EntryPoint.IsImplicitlyGrouped)
-                    Alias(Method.Parameters[0], offsetVector);
+                {
+                    if (numIndexDimensions < 2)
+                    {
+                        Alias(Method.Parameters[0], offsetVector);
+                    }
+                    else
+                    {
+                        indexLocal = DeclareVectorizedTemporary(
+                            Method.Parameters[0].ParameterType);
+                        Alias(Method.Parameters[0], indexLocal.Value);
+                    }
+                }
 
                 // Compute the current global index
                 Emitter.Emit(LocalOperation.Load, globalIndex);
@@ -203,6 +217,40 @@ namespace ILGPU.Backends.Velocity
                     VelocityWarpOperationMode.I);
                 Emitter.Emit(LocalOperation.Load, baseGroupMask);
                 Specializer.IntersectMask32(Emitter);
+
+                // The index of several dimensions: its coordinates are the group index
+                // times the group size plus the thread index, and the last group of
+                // a row can cover more threads than the extent
+                if (indexLocal.HasValue)
+                {
+                    var indexType = indexLocal.Value.VariableType;
+                    for (int i = 0; i < numIndexDimensions; ++i)
+                    {
+                        var dimension = (DeviceConstantDimension3D)i;
+                        Emitter.Emit(LocalOperation.LoadAddress, indexLocal.Value);
+                        EmitGridIndex(dimension);
+                        LoadContextField(GetGroupDimField(dimension));
+                        Specializer.ConvertScalarTo32(
+                            Emitter,
+                            VelocityWarpOperationMode.I);
+                        EmitGroupIndex(dimension);
+                        Specializer.TernaryOperation32(
+                            Emitter,
+                            TernaryArithmeticKind.MultiplyAdd,
+                            VelocityWarpOperationMode.I);
+                        Emitter.StoreField(indexType, i);
+                    }
+
+                    // The first coordinate is the one that can pass the extent
+                    Emitter.Emit(LocalOperation.LoadAddress, indexLocal.Value);
+                    Emitter.LoadField(indexType, 0);
+                    LoadExtentVector(0);
+                    Specializer.Compare32(
+                        Emitter,
+                        CompareKind.LessThan,
+                        VelocityWarpOperationMode.I);
+                    Specializer.IntersectMask32(Emitter);
+                }
 
                 var entryPointMask = GetBlockMask(Method.EntryBlock);
                 Emitter.Emit(OpCodes.Dup);

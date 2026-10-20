@@ -47,6 +47,50 @@ namespace ILGPU.Runtime.Velocity
         }
 
         /// <summary>
+        /// The dimensions of a group (the threads of a group are numbered X first, then
+        /// Y, then Z).
+        /// </summary>
+        public int GroupDimX, GroupDimY, GroupDimZ;
+
+        /// <summary>
+        /// The dimensions of the grid (groups are numbered like threads).
+        /// </summary>
+        public int GridDimX, GridDimY, GridDimZ;
+
+        /// <summary>
+        /// The extent of an implicitly grouped kernel, the dimensions of its index.
+        /// </summary>
+        public int ExtentX, ExtentY, ExtentZ;
+
+        /// <summary>
+        /// 1 if the group and the grid are one dimensional: every index is then the
+        /// linear one, and kernels skip the decomposition into dimensions.
+        /// </summary>
+        public int IsLinear;
+
+        /// <summary>
+        /// Sets the dimensions of the launch this context runs.
+        /// </summary>
+        public void SetLaunchDimensions(
+            in Index3D gridDim,
+            in Index3D groupDim,
+            in Index3D extent)
+        {
+            GridDimX = gridDim.X;
+            GridDimY = gridDim.Y;
+            GridDimZ = gridDim.Z;
+            GroupDimX = groupDim.X;
+            GroupDimY = groupDim.Y;
+            GroupDimZ = groupDim.Z;
+            ExtentX = extent.X;
+            ExtentY = extent.Y;
+            ExtentZ = extent.Z;
+            IsLinear =
+                gridDim.Y == 1 && gridDim.Z == 1 &&
+                groupDim.Y == 1 && groupDim.Z == 1 ? 1 : 0;
+        }
+
+        /// <summary>
         /// Returns a view to dynamic shared memory (if any).
         /// </summary>
         public ArrayView<byte> DynamicSharedMemory { get; private set; }

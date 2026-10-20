@@ -46,6 +46,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vec128Operations.WarpType32, // Float8E4M3 (ordinal 10) - placeholder
             Vec128Operations.WarpType32, // Float8E5M2 (ordinal 11) - placeholder
             Vec128Operations.WarpType32, // Float4E2M1 (ordinal 12) - placeholder
+            Vec128Operations.WarpType32, // QInt4 (ordinal 13), a raw nibble
         };
 
         #endregion
@@ -69,8 +70,6 @@ namespace ILGPU.Backends.Velocity.Vec128
 
         public override Type GetVectorizedBasicType(BasicValueType basicValueType)
         {
-            if (basicValueType == BasicValueType.Float16 && !CapabilityContext.Float16)
-                throw VelocityCapabilityContext.GetNotSupportedFloat16Exception();
             return VectorizedBasicTypeMapping[(int)basicValueType];
         }
 

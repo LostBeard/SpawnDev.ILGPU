@@ -301,6 +301,19 @@ namespace ILGPU.Backends.Velocity
                     : typeNode.BasicValueType
             };
 
+            // Low precision types are passed as their structure and become the value of
+            // a lane: a rounded float, or the raw nibble
+            if (basicValueType.IsNarrowFloat() || basicValueType == BasicValueType.QInt4)
+            {
+                emitter.EmitCall(VelocityNarrowTypes.GetParameterMethod(basicValueType));
+                specializer.ConvertScalarTo32(
+                    emitter,
+                    basicValueType == BasicValueType.QInt4
+                    ? VelocityWarpOperationMode.U
+                    : VelocityWarpOperationMode.F);
+                return;
+            }
+
             // Convert value on top of the evaluation stack without sign extension
             var mode = VelocityWarpOperationMode.F;
             if (basicValueType.IsInt())
@@ -317,11 +330,6 @@ namespace ILGPU.Backends.Velocity
                     emitter.Emit(OpCodes.Neg);
 
                 mode = VelocityWarpOperationMode.U;
-            }
-            else
-            {
-                if (basicValueType == BasicValueType.Float16)
-                    throw CapabilityContext.GetNotSupportedFloat16Exception();
             }
 
             // Load the values onto the evaluation stack

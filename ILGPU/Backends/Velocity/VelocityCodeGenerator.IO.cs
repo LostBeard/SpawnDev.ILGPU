@@ -32,12 +32,15 @@ namespace ILGPU.Backends.Velocity
         /// Creates code to load primitive values and pointers from memory while using
         /// the given mask to differentiate between active and inactive lanes.
         /// </summary>
-        private void CreateNonStructureLoad(TypeNode typeNode)
+        private void CreateNonStructureLoad(TypeNode typeNode, bool nibbleAddress)
         {
             switch (typeNode)
             {
                 case PrimitiveType primitiveType:
-                    Specializer.Load(Emitter, primitiveType.BasicValueType);
+                    Specializer.Load(
+                        Emitter,
+                        primitiveType.BasicValueType,
+                        nibbleAddress);
                     break;
                 case PointerType _:
                     Specializer.Load(Emitter, BasicValueType.Int64);
@@ -83,7 +86,7 @@ namespace ILGPU.Backends.Velocity
                         VelocityWarpOperationMode.U);
 
                     // Load the converted field type
-                    CreateNonStructureLoad(fieldType);
+                    CreateNonStructureLoad(fieldType, nibbleAddress: false);
 
                     // Store it into out structure field
                     Emitter.StoreField(vectorizedType, fieldAccess.Index);
@@ -100,7 +103,7 @@ namespace ILGPU.Backends.Velocity
                 // Load the type directly
                 Emitter.Emit(LocalOperation.Load, source);
 
-                CreateNonStructureLoad(typeNode);
+                CreateNonStructureLoad(typeNode, nibbleAddress: true);
             }
         }
 
@@ -109,7 +112,7 @@ namespace ILGPU.Backends.Velocity
         /// Generates code to store primitive values and pointers from memory while using
         /// the given mask to differentiate between active and inactive lanes.
         /// </summary>
-        private void GenerateNonStructureStore(TypeNode typeNode)
+        private void GenerateNonStructureStore(TypeNode typeNode, bool nibbleAddress)
         {
             var basicValueType = typeNode switch
             {
@@ -120,7 +123,7 @@ namespace ILGPU.Backends.Velocity
                     ErrorMessages.NotSupportedType, typeNode)
             };
 
-            Specializer.Store(Emitter, basicValueType);
+            Specializer.Store(Emitter, basicValueType, nibbleAddress);
         }
 
         /// <inheritdoc/>
@@ -163,7 +166,7 @@ namespace ILGPU.Backends.Velocity
                     Emitter.LoadField(vectorizedType, fieldAccess.Index);
 
                     // Store the field into memory
-                    GenerateNonStructureStore(fieldType);
+                    GenerateNonStructureStore(fieldType, nibbleAddress: false);
                 }
             }
             else
@@ -172,7 +175,7 @@ namespace ILGPU.Backends.Velocity
                 Emitter.Emit(LocalOperation.Load, target);
                 Emitter.Emit(LocalOperation.Load, value);
 
-                GenerateNonStructureStore(type);
+                GenerateNonStructureStore(type, nibbleAddress: true);
             }
         }
     }

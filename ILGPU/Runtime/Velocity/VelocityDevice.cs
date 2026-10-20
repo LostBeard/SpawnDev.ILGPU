@@ -54,7 +54,7 @@ namespace ILGPU.Runtime.Velocity
         /// that has barriers runs one thread per warp (256 threads = 64 warps of 4
         /// lanes), so this is not raised to the 1024 of a GPU.
         /// </summary>
-        private const int MaxGroupThreads = 256;
+        internal const int MaxGroupThreads = 256;
 
         /// <summary>
         /// The group size that algorithms and kernels pick (they read
@@ -117,13 +117,13 @@ namespace ILGPU.Runtime.Velocity
 #else
             NumMultiprocessors = Environment.ProcessorCount;
 #endif
-            MaxGroupSize = new Index3D(
-                Math.Max(MaxNumThreadsPerGroup, MaxGroupThreads),
-                1,
-                1);
+            // Every dimension may use up to the maximum, the number of threads of the
+            // whole group is limited by it as well (see VelocityAccelerator.Run)
+            int maxGroupDim = Math.Max(MaxNumThreadsPerGroup, MaxGroupThreads);
+            MaxGroupSize = new Index3D(maxGroupDim, maxGroupDim, maxGroupDim);
 
             MemorySize = long.MaxValue;
-            MaxGridSize = new Index3D(int.MaxValue, 1, 1);
+            MaxGridSize = new Index3D(int.MaxValue, ushort.MaxValue, ushort.MaxValue);
             MaxConstantMemory = int.MaxValue;
             NumThreads = MaxNumThreads;
 
