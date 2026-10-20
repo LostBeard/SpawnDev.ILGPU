@@ -1,0 +1,163 @@
+<#
+string vecName = "Vector" + vecBits;
+string opsClass = "Vec" + vecBits + "Operations";
+string vecClass = "Vec" + vecBits;
+int warpSize = vecBits / 32;
+int half = warpSize / 2;
+string Join(int from, int to, Func<int, string> f) =>
+    string.Join(", ", Enumerable.Range(from, to - from).Select(f));
+#>
+// ---------------------------------------------------------------------------------------
+//                                        ILGPU
+//                           Copyright (c) 2024 ILGPU Project
+//                                    www.ilgpu.net
+//
+// File: <#= vecClass #>Extensions.cs
+//
+// This file is part of ILGPU and is distributed under the University of Illinois Open
+// Source License. See LICENSE.txt for details.
+// ---------------------------------------------------------------------------------------
+
+using System;
+using System.Numerics;
+using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
+
+#if NET7_0_OR_GREATER
+
+namespace ILGPU.Backends.Velocity.<#= vecClass #>
+{
+    partial class <#= opsClass #>
+    {
+        #region Rcp
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static <#= vecName #><float> RcpImpl(<#= vecName #><float> value) =>
+            <#= vecName #>.Create(1.0f) / value;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static <#= vecName #><double> RcpImpl(<#= vecName #><double> value) =>
+            <#= vecName #>.Create(1.0) / value;
+
+        #endregion
+
+        #region Thread Operations
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static int BarrierPopCount32Scalar(
+            <#= vecName #><int> mask,
+            <#= vecName #><int> warp) =>
+            -<#= vecName #>.Sum(AndI32(mask, warp));
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static <#= vecName #><int> BarrierPopCount32(
+            <#= vecName #><int> mask,
+            <#= vecName #><int> warp) =>
+            <#= vecName #>.Create(BarrierPopCount32Scalar(mask, warp));
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static int BarrierPopCount64Scalar(
+            <#= vecName #><int> mask,
+            (<#= vecName #><long>, <#= vecName #><long>) warp)
+        {
+            var parts = AndI64(Convert32To64I(mask), warp);
+            return -(int)(
+                <#= vecName #>.Sum(parts.Item1) +
+                <#= vecName #>.Sum(parts.Item2));
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static (<#= vecName #><long>, <#= vecName #><long>) BarrierPopCount64(
+            <#= vecName #><int> mask,
+            (<#= vecName #><long>, <#= vecName #><long>) warp) =>
+            FromScalarI64(BarrierPopCount64Scalar(mask, warp));
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        internal static <#= vecName #><int> BarrierAnd32(
+            <#= vecName #><int> mask,
+            <#= vecName #><int> warp,
+            int groupSize) =>
+            BarrierPopCount32Scalar(mask, warp) == groupSize
+                ? <#= vecName #><int>.AllBitsSet
+                : <#= vecName #><int>.Zero;
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        internal static (<#= vecName #><long>, <#= vecName #><long>) BarrierAnd64(
+            <#= vecName #><int> mask,
+            (<#= vecName #><long>, <#= vecName #><long>) warp,
+            int groupSize) =>
+            BarrierPopCount64Scalar(mask, warp) == groupSize
+                ? (<#= vecName #><long>.AllBitsSet, <#= vecName #><long>.AllBitsSet)
+                : (<#= vecName #><long>.Zero, <#= vecName #><long>.Zero);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static <#= vecName #><int> BarrierOr32(
+            <#= vecName #><int> mask,
+            <#= vecName #><int> warp) =>
+            BarrierPopCount32Scalar(mask, warp) != 0
+                ? <#= vecName #><int>.AllBitsSet
+                : <#= vecName #><int>.Zero;
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static (<#= vecName #><long>, <#= vecName #><long>) BarrierOr64(
+            <#= vecName #><int> mask,
+            (<#= vecName #><long>, <#= vecName #><long>) warp) =>
+            BarrierPopCount64Scalar(mask, warp) != 0
+                ? (<#= vecName #><long>.AllBitsSet, <#= vecName #><long>.AllBitsSet)
+                : (<#= vecName #><long>.Zero, <#= vecName #><long>.Zero);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static <#= vecName #><int> Broadcast32(
+            <#= vecName #><int> _,
+            <#= vecName #><int> value,
+            <#= vecName #><int> sourceLane)
+        {
+            // Extract base source lane
+            int sourceLaneIndex = sourceLane.GetElement(0);
+
+            // Broadcast without referring to the current mask
+            return Broadcast32Internal(value, sourceLaneIndex);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static <#= vecName #><int> Broadcast32Internal(
+            <#= vecName #><int> value,
+            int sourceLaneIndex) =>
+            <#= vecName #>.Create(value[sourceLaneIndex]);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static (<#= vecName #><long>, <#= vecName #><long>) Broadcast64(
+            <#= vecName #><int> _,
+            (<#= vecName #><long>, <#= vecName #><long>) value,
+            (<#= vecName #><long>, <#= vecName #><long>) sourceLane) =>
+            throw new NotImplementedException();
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static <#= vecName #><int> Shuffle32(
+            <#= vecName #><int> _,
+            <#= vecName #><int> value,
+            <#= vecName #><int> sourceLanes)
+        {
+            var lanes = MinI32(
+                MaxI32(sourceLanes, <#= vecName #><int>.Zero),
+                WarpSizeM1Vector);
+
+<# for (int i = 0; i < warpSize; ++i) { #>
+            int value<#= i #> = value.GetElement(lanes.GetElement(<#= i #>));
+<# } #>
+
+            return <#= vecName #>.Create(<#= Join(0, warpSize, i => "value" + i) #>);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static (<#= vecName #><long>, <#= vecName #><long>) Shuffle64(
+            <#= vecName #><int> _,
+            (<#= vecName #><long>, <#= vecName #><long>) value,
+            <#= vecName #><int> sourceLanes) =>
+            throw new NotImplementedException();
+
+        #endregion
+    }
+}
+
+#endif

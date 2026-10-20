@@ -332,6 +332,13 @@ public class Velocity128Config
     [XmlElement]
     public string Implementation { get; set; }
 
+    /// <summary>
+    /// The vector type the expressions are written for is Vector128: templates of wider
+    /// vectors (Vector256, Vector512) set the name that replaces it.
+    /// </summary>
+    [XmlIgnore]
+    public string VectorName { get; set; } = "Vector128";
+
     private static string GetFieldString(int? field)
     {
         var fieldString = string.Empty;
@@ -343,7 +350,14 @@ public class Velocity128Config
     public string GetImplementation(
         MathOp mathOp,
         int? field = null,
-        params string[] variables)
+        params string[] variables) =>
+        GetImplementationInternal(mathOp, field, variables)
+        .Replace("Vector128", VectorName);
+
+    private string GetImplementationInternal(
+        MathOp mathOp,
+        int? field,
+        string[] variables)
     {
         var fieldString = GetFieldString(field);
         if (mathOp != null && string.IsNullOrWhiteSpace(Implementation))

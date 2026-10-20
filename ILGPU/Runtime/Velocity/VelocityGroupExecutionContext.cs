@@ -36,6 +36,10 @@ namespace ILGPU.Runtime.Velocity
         // in the same order and therefore ends up at the same addresses
         private int teamSharedOffset;
 
+        // The bytes of the shared memory pool that hold the dynamic shared memory of the
+        // launch: the allocations of a group start behind them
+        private int sharedMemoryBase;
+
         /// <summary>
         /// Constructs a new execution context.
         /// </summary>
@@ -121,6 +125,23 @@ namespace ILGPU.Runtime.Velocity
                 DynamicSharedMemory =
                     GetSharedMemoryFromPool<byte>(dynamicSharedMemoryLength);
             }
+            sharedMemoryBase = sharedMemoryPool?.Offset ?? 0;
+        }
+
+        /// <summary>
+        /// Called by the kernel at the start of every iteration (one warp of a group):
+        /// the local memory of the previous iteration is dead, and a new group starts
+        /// with the shared memory of the previous group freed. Without this, a kernel
+        /// with shared or local arrays that runs thousands of groups per chunk allocated
+        /// new memory for every one of them and ran out of the pool.
+        /// </summary>
+        /// <param name="globalIndex">The thread index of the first lane.</param>
+        /// <param name="groupDim">The number of threads of a group.</param>
+        public void BeginIteration(int globalIndex, int groupDim)
+        {
+            localMemoryPool?.Reset();
+            if (team == null && globalIndex % groupDim == 0)
+                sharedMemoryPool?.ResetTo(sharedMemoryBase);
         }
 
         /// <summary>

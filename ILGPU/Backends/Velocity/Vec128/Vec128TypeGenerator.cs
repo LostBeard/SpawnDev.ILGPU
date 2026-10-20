@@ -61,7 +61,7 @@ namespace ILGPU.Backends.Velocity.Vec128
         public Vec128TypeGenerator(
             VelocityCapabilityContext capabilityContext,
             RuntimeSystem runtimeSystem)
-            : base(capabilityContext, runtimeSystem, Vector<int>.Count)
+            : base(capabilityContext, runtimeSystem, Vec128Operations.WarpSize)
         { }
 
         #endregion

@@ -1,0 +1,89 @@
+<#
+string vecName = "Vector" + vecBits;
+string opsClass = "Vec" + vecBits + "Operations";
+string vecClass = "Vec" + vecBits;
+int warpSize = vecBits / 32;
+int half = warpSize / 2;
+string Join(int from, int to, Func<int, string> f) =>
+    string.Join(", ", Enumerable.Range(from, to - from).Select(f));
+#>
+// ---------------------------------------------------------------------------------------
+//                                        ILGPU
+//                           Copyright (c) 2024 ILGPU Project
+//                                    www.ilgpu.net
+//
+// File: <#= vecClass #>TypeGenerator.cs
+//
+// This file is part of ILGPU and is distributed under the University of Illinois Open
+// Source License. See LICENSE.txt for details.
+// ---------------------------------------------------------------------------------------
+
+using ILGPU.Backends.IL;
+using ILGPU.Runtime.Velocity;
+using System;
+using System.Numerics;
+
+#if NET7_0_OR_GREATER
+
+namespace ILGPU.Backends.Velocity.<#= vecClass #>
+{
+    /// <summary>
+    /// A vector type generator of 128bit vectors to be used with the Velocity backend.
+    /// </summary>
+    sealed class <#= vecClass #>TypeGenerator : VelocityTypeGenerator
+    {
+        #region Static
+
+        /// <summary>
+        /// Maps basic types to vectorized basic types.
+        /// </summary>
+        private static readonly Type[] VectorizedBasicTypeMapping = new Type[]
+        {
+            <#= opsClass #>.WarpType32, // None/Unknown
+
+            <#= opsClass #>.WarpType32, // Int1
+            <#= opsClass #>.WarpType32, // Int8
+            <#= opsClass #>.WarpType32, // Int16
+            <#= opsClass #>.WarpType32, // Int32
+            <#= opsClass #>.WarpType64, // Int64
+
+            <#= opsClass #>.WarpType32, // Float16
+            <#= opsClass #>.WarpType32, // Float32
+            <#= opsClass #>.WarpType64, // Float64
+
+            <#= opsClass #>.WarpType32, // BFloat16 (ordinal 9) - placeholder (Phase 3)
+            <#= opsClass #>.WarpType32, // Float8E4M3 (ordinal 10) - placeholder
+            <#= opsClass #>.WarpType32, // Float8E5M2 (ordinal 11) - placeholder
+            <#= opsClass #>.WarpType32, // Float4E2M1 (ordinal 12) - placeholder
+            <#= opsClass #>.WarpType32, // QInt4 (ordinal 13), a raw nibble
+        };
+
+        #endregion
+
+        #region Instance
+
+        /// <summary>
+        /// Constructs a new IL vector type generator.
+        /// </summary>
+        /// <param name="capabilityContext">The parent capability context.</param>
+        /// <param name="runtimeSystem">The parent runtime system.</param>
+        public <#= vecClass #>TypeGenerator(
+            VelocityCapabilityContext capabilityContext,
+            RuntimeSystem runtimeSystem)
+            : base(capabilityContext, runtimeSystem, <#= opsClass #>.WarpSize)
+        { }
+
+        #endregion
+
+        #region Type System
+
+        public override Type GetVectorizedBasicType(BasicValueType basicValueType)
+        {
+            return VectorizedBasicTypeMapping[(int)basicValueType];
+        }
+
+        #endregion
+    }
+}
+
+#endif

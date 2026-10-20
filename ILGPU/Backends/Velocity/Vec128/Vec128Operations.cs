@@ -31,6 +31,7 @@
 // Source License. See LICENSE.txt for details.
 // ---------------------------------------------------------------------------------------
 
+
 using ILGPU.IR.Values;
 using ILGPU.Util;
 using System;
@@ -151,7 +152,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             GetMethod(nameof(LoadLaneIndexVector64));
 
         private static readonly Vector128<int> LaneLengthVector32 =
-            Vector128.Create(Vector<int>.Count);
+            Vector128.Create(WarpSize);
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static Vector128<int> LoadVectorLengthVector32() => LaneLengthVector32;
@@ -159,7 +160,7 @@ namespace ILGPU.Backends.Velocity.Vec128
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static (Vector128<long>, Vector128<long>) LoadVectorLengthVector64()
         {
-            long count = Vector<int>.Count;
+            long count = WarpSize;
             return (Vector128.Create(count), Vector128.Create(count));
         }
 
@@ -543,15 +544,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = warp;
-            var result = Vector128.Create(
-                IntrinsicMath.BitOperations.PopCount(value.GetElement(0))
-                ,
-                IntrinsicMath.BitOperations.PopCount(value.GetElement(1))
-                ,
-                IntrinsicMath.BitOperations.PopCount(value.GetElement(2))
-                ,
-                IntrinsicMath.BitOperations.PopCount(value.GetElement(3))
-                );
+            var result = Vector128.Create(IntrinsicMath.BitOperations.PopCount(value.GetElement(0)), IntrinsicMath.BitOperations.PopCount(value.GetElement(1)), IntrinsicMath.BitOperations.PopCount(value.GetElement(2)), IntrinsicMath.BitOperations.PopCount(value.GetElement(3)));
             return result;
         }
 
@@ -560,15 +553,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToU32(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.BitOperations.PopCount(value.GetElement(0))
-                ,
-                IntrinsicMath.BitOperations.PopCount(value.GetElement(1))
-                ,
-                IntrinsicMath.BitOperations.PopCount(value.GetElement(2))
-                ,
-                IntrinsicMath.BitOperations.PopCount(value.GetElement(3))
-                );
+            var result = Vector128.Create(IntrinsicMath.BitOperations.PopCount(value.GetElement(0)), IntrinsicMath.BitOperations.PopCount(value.GetElement(1)), IntrinsicMath.BitOperations.PopCount(value.GetElement(2)), IntrinsicMath.BitOperations.PopCount(value.GetElement(3)));
             return result;
         }
 
@@ -577,15 +562,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) warp)
         {
             var value = warp;
-            var result = Vector128.Create(
-                IntrinsicMath.BitOperations.PopCount(value.Item1.GetElement(0))
-                ,
-                IntrinsicMath.BitOperations.PopCount(value.Item1.GetElement(1))
-                ,
-                IntrinsicMath.BitOperations.PopCount(value.Item2.GetElement(0))
-                ,
-                IntrinsicMath.BitOperations.PopCount(value.Item2.GetElement(1))
-                );
+            var result = Vector128.Create(IntrinsicMath.BitOperations.PopCount(value.Item1.GetElement(0)), IntrinsicMath.BitOperations.PopCount(value.Item1.GetElement(1)), IntrinsicMath.BitOperations.PopCount(value.Item2.GetElement(0)), IntrinsicMath.BitOperations.PopCount(value.Item2.GetElement(1)));
             return result;
         }
 
@@ -594,15 +571,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) warp)
         {
             var value = CastIToU64(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.BitOperations.PopCount(value.Item1.GetElement(0))
-                ,
-                IntrinsicMath.BitOperations.PopCount(value.Item1.GetElement(1))
-                ,
-                IntrinsicMath.BitOperations.PopCount(value.Item2.GetElement(0))
-                ,
-                IntrinsicMath.BitOperations.PopCount(value.Item2.GetElement(1))
-                );
+            var result = Vector128.Create(IntrinsicMath.BitOperations.PopCount(value.Item1.GetElement(0)), IntrinsicMath.BitOperations.PopCount(value.Item1.GetElement(1)), IntrinsicMath.BitOperations.PopCount(value.Item2.GetElement(0)), IntrinsicMath.BitOperations.PopCount(value.Item2.GetElement(1)));
             return result;
         }
 
@@ -612,15 +581,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = warp;
-            var result = Vector128.Create(
-                IntrinsicMath.BitOperations.LeadingZeroCount(value.GetElement(0))
-                ,
-                IntrinsicMath.BitOperations.LeadingZeroCount(value.GetElement(1))
-                ,
-                IntrinsicMath.BitOperations.LeadingZeroCount(value.GetElement(2))
-                ,
-                IntrinsicMath.BitOperations.LeadingZeroCount(value.GetElement(3))
-                );
+            var result = Vector128.Create(IntrinsicMath.BitOperations.LeadingZeroCount(value.GetElement(0)), IntrinsicMath.BitOperations.LeadingZeroCount(value.GetElement(1)), IntrinsicMath.BitOperations.LeadingZeroCount(value.GetElement(2)), IntrinsicMath.BitOperations.LeadingZeroCount(value.GetElement(3)));
             return result;
         }
 
@@ -629,15 +590,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToU32(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.BitOperations.LeadingZeroCount(value.GetElement(0))
-                ,
-                IntrinsicMath.BitOperations.LeadingZeroCount(value.GetElement(1))
-                ,
-                IntrinsicMath.BitOperations.LeadingZeroCount(value.GetElement(2))
-                ,
-                IntrinsicMath.BitOperations.LeadingZeroCount(value.GetElement(3))
-                );
+            var result = Vector128.Create(IntrinsicMath.BitOperations.LeadingZeroCount(value.GetElement(0)), IntrinsicMath.BitOperations.LeadingZeroCount(value.GetElement(1)), IntrinsicMath.BitOperations.LeadingZeroCount(value.GetElement(2)), IntrinsicMath.BitOperations.LeadingZeroCount(value.GetElement(3)));
             return result;
         }
 
@@ -646,15 +599,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) warp)
         {
             var value = warp;
-            var result = Vector128.Create(
-                IntrinsicMath.BitOperations.LeadingZeroCount(value.Item1.GetElement(0))
-                ,
-                IntrinsicMath.BitOperations.LeadingZeroCount(value.Item1.GetElement(1))
-                ,
-                IntrinsicMath.BitOperations.LeadingZeroCount(value.Item2.GetElement(0))
-                ,
-                IntrinsicMath.BitOperations.LeadingZeroCount(value.Item2.GetElement(1))
-                );
+            var result = Vector128.Create(IntrinsicMath.BitOperations.LeadingZeroCount(value.Item1.GetElement(0)), IntrinsicMath.BitOperations.LeadingZeroCount(value.Item1.GetElement(1)), IntrinsicMath.BitOperations.LeadingZeroCount(value.Item2.GetElement(0)), IntrinsicMath.BitOperations.LeadingZeroCount(value.Item2.GetElement(1)));
             return result;
         }
 
@@ -663,15 +608,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) warp)
         {
             var value = CastIToU64(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.BitOperations.LeadingZeroCount(value.Item1.GetElement(0))
-                ,
-                IntrinsicMath.BitOperations.LeadingZeroCount(value.Item1.GetElement(1))
-                ,
-                IntrinsicMath.BitOperations.LeadingZeroCount(value.Item2.GetElement(0))
-                ,
-                IntrinsicMath.BitOperations.LeadingZeroCount(value.Item2.GetElement(1))
-                );
+            var result = Vector128.Create(IntrinsicMath.BitOperations.LeadingZeroCount(value.Item1.GetElement(0)), IntrinsicMath.BitOperations.LeadingZeroCount(value.Item1.GetElement(1)), IntrinsicMath.BitOperations.LeadingZeroCount(value.Item2.GetElement(0)), IntrinsicMath.BitOperations.LeadingZeroCount(value.Item2.GetElement(1)));
             return result;
         }
 
@@ -681,15 +618,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = warp;
-            var result = Vector128.Create(
-                IntrinsicMath.BitOperations.TrailingZeroCount(value.GetElement(0))
-                ,
-                IntrinsicMath.BitOperations.TrailingZeroCount(value.GetElement(1))
-                ,
-                IntrinsicMath.BitOperations.TrailingZeroCount(value.GetElement(2))
-                ,
-                IntrinsicMath.BitOperations.TrailingZeroCount(value.GetElement(3))
-                );
+            var result = Vector128.Create(IntrinsicMath.BitOperations.TrailingZeroCount(value.GetElement(0)), IntrinsicMath.BitOperations.TrailingZeroCount(value.GetElement(1)), IntrinsicMath.BitOperations.TrailingZeroCount(value.GetElement(2)), IntrinsicMath.BitOperations.TrailingZeroCount(value.GetElement(3)));
             return result;
         }
 
@@ -698,15 +627,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToU32(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.BitOperations.TrailingZeroCount(value.GetElement(0))
-                ,
-                IntrinsicMath.BitOperations.TrailingZeroCount(value.GetElement(1))
-                ,
-                IntrinsicMath.BitOperations.TrailingZeroCount(value.GetElement(2))
-                ,
-                IntrinsicMath.BitOperations.TrailingZeroCount(value.GetElement(3))
-                );
+            var result = Vector128.Create(IntrinsicMath.BitOperations.TrailingZeroCount(value.GetElement(0)), IntrinsicMath.BitOperations.TrailingZeroCount(value.GetElement(1)), IntrinsicMath.BitOperations.TrailingZeroCount(value.GetElement(2)), IntrinsicMath.BitOperations.TrailingZeroCount(value.GetElement(3)));
             return result;
         }
 
@@ -715,15 +636,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) warp)
         {
             var value = warp;
-            var result = Vector128.Create(
-                IntrinsicMath.BitOperations.TrailingZeroCount(value.Item1.GetElement(0))
-                ,
-                IntrinsicMath.BitOperations.TrailingZeroCount(value.Item1.GetElement(1))
-                ,
-                IntrinsicMath.BitOperations.TrailingZeroCount(value.Item2.GetElement(0))
-                ,
-                IntrinsicMath.BitOperations.TrailingZeroCount(value.Item2.GetElement(1))
-                );
+            var result = Vector128.Create(IntrinsicMath.BitOperations.TrailingZeroCount(value.Item1.GetElement(0)), IntrinsicMath.BitOperations.TrailingZeroCount(value.Item1.GetElement(1)), IntrinsicMath.BitOperations.TrailingZeroCount(value.Item2.GetElement(0)), IntrinsicMath.BitOperations.TrailingZeroCount(value.Item2.GetElement(1)));
             return result;
         }
 
@@ -732,15 +645,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) warp)
         {
             var value = CastIToU64(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.BitOperations.TrailingZeroCount(value.Item1.GetElement(0))
-                ,
-                IntrinsicMath.BitOperations.TrailingZeroCount(value.Item1.GetElement(1))
-                ,
-                IntrinsicMath.BitOperations.TrailingZeroCount(value.Item2.GetElement(0))
-                ,
-                IntrinsicMath.BitOperations.TrailingZeroCount(value.Item2.GetElement(1))
-                );
+            var result = Vector128.Create(IntrinsicMath.BitOperations.TrailingZeroCount(value.Item1.GetElement(0)), IntrinsicMath.BitOperations.TrailingZeroCount(value.Item1.GetElement(1)), IntrinsicMath.BitOperations.TrailingZeroCount(value.Item2.GetElement(0)), IntrinsicMath.BitOperations.TrailingZeroCount(value.Item2.GetElement(1)));
             return result;
         }
 
@@ -771,15 +676,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.CPUOnly.IsNaN(value.GetElement(0))
-                 ? -1 : 0,
-                IntrinsicMath.CPUOnly.IsNaN(value.GetElement(1))
-                 ? -1 : 0,
-                IntrinsicMath.CPUOnly.IsNaN(value.GetElement(2))
-                 ? -1 : 0,
-                IntrinsicMath.CPUOnly.IsNaN(value.GetElement(3))
-                 ? -1 : 0);
+            var result = Vector128.Create(IntrinsicMath.CPUOnly.IsNaN(value.GetElement(0)) ? -1 : 0, IntrinsicMath.CPUOnly.IsNaN(value.GetElement(1)) ? -1 : 0, IntrinsicMath.CPUOnly.IsNaN(value.GetElement(2)) ? -1 : 0, IntrinsicMath.CPUOnly.IsNaN(value.GetElement(3)) ? -1 : 0);
             return result;
         }
 
@@ -788,15 +685,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) warp)
         {
             var value = CastIToF64(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.CPUOnly.IsNaN(value.Item1.GetElement(0))
-                 ? -1 : 0,
-                IntrinsicMath.CPUOnly.IsNaN(value.Item1.GetElement(1))
-                 ? -1 : 0,
-                IntrinsicMath.CPUOnly.IsNaN(value.Item2.GetElement(0))
-                 ? -1 : 0,
-                IntrinsicMath.CPUOnly.IsNaN(value.Item2.GetElement(1))
-                 ? -1 : 0);
+            var result = Vector128.Create(IntrinsicMath.CPUOnly.IsNaN(value.Item1.GetElement(0)) ? -1 : 0, IntrinsicMath.CPUOnly.IsNaN(value.Item1.GetElement(1)) ? -1 : 0, IntrinsicMath.CPUOnly.IsNaN(value.Item2.GetElement(0)) ? -1 : 0, IntrinsicMath.CPUOnly.IsNaN(value.Item2.GetElement(1)) ? -1 : 0);
             return result;
         }
 
@@ -806,15 +695,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.CPUOnly.IsInfinity(value.GetElement(0))
-                 ? -1 : 0,
-                IntrinsicMath.CPUOnly.IsInfinity(value.GetElement(1))
-                 ? -1 : 0,
-                IntrinsicMath.CPUOnly.IsInfinity(value.GetElement(2))
-                 ? -1 : 0,
-                IntrinsicMath.CPUOnly.IsInfinity(value.GetElement(3))
-                 ? -1 : 0);
+            var result = Vector128.Create(IntrinsicMath.CPUOnly.IsInfinity(value.GetElement(0)) ? -1 : 0, IntrinsicMath.CPUOnly.IsInfinity(value.GetElement(1)) ? -1 : 0, IntrinsicMath.CPUOnly.IsInfinity(value.GetElement(2)) ? -1 : 0, IntrinsicMath.CPUOnly.IsInfinity(value.GetElement(3)) ? -1 : 0);
             return result;
         }
 
@@ -823,15 +704,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) warp)
         {
             var value = CastIToF64(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.CPUOnly.IsInfinity(value.Item1.GetElement(0))
-                 ? -1 : 0,
-                IntrinsicMath.CPUOnly.IsInfinity(value.Item1.GetElement(1))
-                 ? -1 : 0,
-                IntrinsicMath.CPUOnly.IsInfinity(value.Item2.GetElement(0))
-                 ? -1 : 0,
-                IntrinsicMath.CPUOnly.IsInfinity(value.Item2.GetElement(1))
-                 ? -1 : 0);
+            var result = Vector128.Create(IntrinsicMath.CPUOnly.IsInfinity(value.Item1.GetElement(0)) ? -1 : 0, IntrinsicMath.CPUOnly.IsInfinity(value.Item1.GetElement(1)) ? -1 : 0, IntrinsicMath.CPUOnly.IsInfinity(value.Item2.GetElement(0)) ? -1 : 0, IntrinsicMath.CPUOnly.IsInfinity(value.Item2.GetElement(1)) ? -1 : 0);
             return result;
         }
 
@@ -841,15 +714,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.CPUOnly.IsFinite(value.GetElement(0))
-                 ? -1 : 0,
-                IntrinsicMath.CPUOnly.IsFinite(value.GetElement(1))
-                 ? -1 : 0,
-                IntrinsicMath.CPUOnly.IsFinite(value.GetElement(2))
-                 ? -1 : 0,
-                IntrinsicMath.CPUOnly.IsFinite(value.GetElement(3))
-                 ? -1 : 0);
+            var result = Vector128.Create(IntrinsicMath.CPUOnly.IsFinite(value.GetElement(0)) ? -1 : 0, IntrinsicMath.CPUOnly.IsFinite(value.GetElement(1)) ? -1 : 0, IntrinsicMath.CPUOnly.IsFinite(value.GetElement(2)) ? -1 : 0, IntrinsicMath.CPUOnly.IsFinite(value.GetElement(3)) ? -1 : 0);
             return result;
         }
 
@@ -858,15 +723,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) warp)
         {
             var value = CastIToF64(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.CPUOnly.IsFinite(value.Item1.GetElement(0))
-                 ? -1 : 0,
-                IntrinsicMath.CPUOnly.IsFinite(value.Item1.GetElement(1))
-                 ? -1 : 0,
-                IntrinsicMath.CPUOnly.IsFinite(value.Item2.GetElement(0))
-                 ? -1 : 0,
-                IntrinsicMath.CPUOnly.IsFinite(value.Item2.GetElement(1))
-                 ? -1 : 0);
+            var result = Vector128.Create(IntrinsicMath.CPUOnly.IsFinite(value.Item1.GetElement(0)) ? -1 : 0, IntrinsicMath.CPUOnly.IsFinite(value.Item1.GetElement(1)) ? -1 : 0, IntrinsicMath.CPUOnly.IsFinite(value.Item2.GetElement(0)) ? -1 : 0, IntrinsicMath.CPUOnly.IsFinite(value.Item2.GetElement(1)) ? -1 : 0);
             return result;
         }
 
@@ -918,15 +775,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.CPUOnly.Asin(value.GetElement(0))
-                ,
-                IntrinsicMath.CPUOnly.Asin(value.GetElement(1))
-                ,
-                IntrinsicMath.CPUOnly.Asin(value.GetElement(2))
-                ,
-                IntrinsicMath.CPUOnly.Asin(value.GetElement(3))
-                );
+            var result = Vector128.Create(IntrinsicMath.CPUOnly.Asin(value.GetElement(0)), IntrinsicMath.CPUOnly.Asin(value.GetElement(1)), IntrinsicMath.CPUOnly.Asin(value.GetElement(2)), IntrinsicMath.CPUOnly.Asin(value.GetElement(3)));
             return CastFToI32(result);
         }
 
@@ -935,17 +784,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) warp)
         {
             var value = CastIToF64(warp);
-            var result = (
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Asin(value.Item1.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Asin(value.Item1.GetElement(1))
-                    ),
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Asin(value.Item2.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Asin(value.Item2.GetElement(1))
-                    ));
+            var result = (Vector128.Create(IntrinsicMath.CPUOnly.Asin(value.Item1.GetElement(0)), IntrinsicMath.CPUOnly.Asin(value.Item1.GetElement(1))), Vector128.Create(IntrinsicMath.CPUOnly.Asin(value.Item2.GetElement(0)), IntrinsicMath.CPUOnly.Asin(value.Item2.GetElement(1))));
             return CastFToI64(result);
         }
 
@@ -955,15 +794,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.CPUOnly.Sin(value.GetElement(0))
-                ,
-                IntrinsicMath.CPUOnly.Sin(value.GetElement(1))
-                ,
-                IntrinsicMath.CPUOnly.Sin(value.GetElement(2))
-                ,
-                IntrinsicMath.CPUOnly.Sin(value.GetElement(3))
-                );
+            var result = Vector128.Create(IntrinsicMath.CPUOnly.Sin(value.GetElement(0)), IntrinsicMath.CPUOnly.Sin(value.GetElement(1)), IntrinsicMath.CPUOnly.Sin(value.GetElement(2)), IntrinsicMath.CPUOnly.Sin(value.GetElement(3)));
             return CastFToI32(result);
         }
 
@@ -972,17 +803,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) warp)
         {
             var value = CastIToF64(warp);
-            var result = (
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Sin(value.Item1.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Sin(value.Item1.GetElement(1))
-                    ),
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Sin(value.Item2.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Sin(value.Item2.GetElement(1))
-                    ));
+            var result = (Vector128.Create(IntrinsicMath.CPUOnly.Sin(value.Item1.GetElement(0)), IntrinsicMath.CPUOnly.Sin(value.Item1.GetElement(1))), Vector128.Create(IntrinsicMath.CPUOnly.Sin(value.Item2.GetElement(0)), IntrinsicMath.CPUOnly.Sin(value.Item2.GetElement(1))));
             return CastFToI64(result);
         }
 
@@ -992,15 +813,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.CPUOnly.Sinh(value.GetElement(0))
-                ,
-                IntrinsicMath.CPUOnly.Sinh(value.GetElement(1))
-                ,
-                IntrinsicMath.CPUOnly.Sinh(value.GetElement(2))
-                ,
-                IntrinsicMath.CPUOnly.Sinh(value.GetElement(3))
-                );
+            var result = Vector128.Create(IntrinsicMath.CPUOnly.Sinh(value.GetElement(0)), IntrinsicMath.CPUOnly.Sinh(value.GetElement(1)), IntrinsicMath.CPUOnly.Sinh(value.GetElement(2)), IntrinsicMath.CPUOnly.Sinh(value.GetElement(3)));
             return CastFToI32(result);
         }
 
@@ -1009,17 +822,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) warp)
         {
             var value = CastIToF64(warp);
-            var result = (
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Sinh(value.Item1.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Sinh(value.Item1.GetElement(1))
-                    ),
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Sinh(value.Item2.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Sinh(value.Item2.GetElement(1))
-                    ));
+            var result = (Vector128.Create(IntrinsicMath.CPUOnly.Sinh(value.Item1.GetElement(0)), IntrinsicMath.CPUOnly.Sinh(value.Item1.GetElement(1))), Vector128.Create(IntrinsicMath.CPUOnly.Sinh(value.Item2.GetElement(0)), IntrinsicMath.CPUOnly.Sinh(value.Item2.GetElement(1))));
             return CastFToI64(result);
         }
 
@@ -1029,15 +832,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.CPUOnly.Acos(value.GetElement(0))
-                ,
-                IntrinsicMath.CPUOnly.Acos(value.GetElement(1))
-                ,
-                IntrinsicMath.CPUOnly.Acos(value.GetElement(2))
-                ,
-                IntrinsicMath.CPUOnly.Acos(value.GetElement(3))
-                );
+            var result = Vector128.Create(IntrinsicMath.CPUOnly.Acos(value.GetElement(0)), IntrinsicMath.CPUOnly.Acos(value.GetElement(1)), IntrinsicMath.CPUOnly.Acos(value.GetElement(2)), IntrinsicMath.CPUOnly.Acos(value.GetElement(3)));
             return CastFToI32(result);
         }
 
@@ -1046,17 +841,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) warp)
         {
             var value = CastIToF64(warp);
-            var result = (
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Acos(value.Item1.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Acos(value.Item1.GetElement(1))
-                    ),
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Acos(value.Item2.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Acos(value.Item2.GetElement(1))
-                    ));
+            var result = (Vector128.Create(IntrinsicMath.CPUOnly.Acos(value.Item1.GetElement(0)), IntrinsicMath.CPUOnly.Acos(value.Item1.GetElement(1))), Vector128.Create(IntrinsicMath.CPUOnly.Acos(value.Item2.GetElement(0)), IntrinsicMath.CPUOnly.Acos(value.Item2.GetElement(1))));
             return CastFToI64(result);
         }
 
@@ -1066,15 +851,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.CPUOnly.Cos(value.GetElement(0))
-                ,
-                IntrinsicMath.CPUOnly.Cos(value.GetElement(1))
-                ,
-                IntrinsicMath.CPUOnly.Cos(value.GetElement(2))
-                ,
-                IntrinsicMath.CPUOnly.Cos(value.GetElement(3))
-                );
+            var result = Vector128.Create(IntrinsicMath.CPUOnly.Cos(value.GetElement(0)), IntrinsicMath.CPUOnly.Cos(value.GetElement(1)), IntrinsicMath.CPUOnly.Cos(value.GetElement(2)), IntrinsicMath.CPUOnly.Cos(value.GetElement(3)));
             return CastFToI32(result);
         }
 
@@ -1083,17 +860,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) warp)
         {
             var value = CastIToF64(warp);
-            var result = (
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Cos(value.Item1.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Cos(value.Item1.GetElement(1))
-                    ),
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Cos(value.Item2.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Cos(value.Item2.GetElement(1))
-                    ));
+            var result = (Vector128.Create(IntrinsicMath.CPUOnly.Cos(value.Item1.GetElement(0)), IntrinsicMath.CPUOnly.Cos(value.Item1.GetElement(1))), Vector128.Create(IntrinsicMath.CPUOnly.Cos(value.Item2.GetElement(0)), IntrinsicMath.CPUOnly.Cos(value.Item2.GetElement(1))));
             return CastFToI64(result);
         }
 
@@ -1103,15 +870,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.CPUOnly.Cosh(value.GetElement(0))
-                ,
-                IntrinsicMath.CPUOnly.Cosh(value.GetElement(1))
-                ,
-                IntrinsicMath.CPUOnly.Cosh(value.GetElement(2))
-                ,
-                IntrinsicMath.CPUOnly.Cosh(value.GetElement(3))
-                );
+            var result = Vector128.Create(IntrinsicMath.CPUOnly.Cosh(value.GetElement(0)), IntrinsicMath.CPUOnly.Cosh(value.GetElement(1)), IntrinsicMath.CPUOnly.Cosh(value.GetElement(2)), IntrinsicMath.CPUOnly.Cosh(value.GetElement(3)));
             return CastFToI32(result);
         }
 
@@ -1120,17 +879,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) warp)
         {
             var value = CastIToF64(warp);
-            var result = (
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Cosh(value.Item1.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Cosh(value.Item1.GetElement(1))
-                    ),
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Cosh(value.Item2.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Cosh(value.Item2.GetElement(1))
-                    ));
+            var result = (Vector128.Create(IntrinsicMath.CPUOnly.Cosh(value.Item1.GetElement(0)), IntrinsicMath.CPUOnly.Cosh(value.Item1.GetElement(1))), Vector128.Create(IntrinsicMath.CPUOnly.Cosh(value.Item2.GetElement(0)), IntrinsicMath.CPUOnly.Cosh(value.Item2.GetElement(1))));
             return CastFToI64(result);
         }
 
@@ -1140,15 +889,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.CPUOnly.Tan(value.GetElement(0))
-                ,
-                IntrinsicMath.CPUOnly.Tan(value.GetElement(1))
-                ,
-                IntrinsicMath.CPUOnly.Tan(value.GetElement(2))
-                ,
-                IntrinsicMath.CPUOnly.Tan(value.GetElement(3))
-                );
+            var result = Vector128.Create(IntrinsicMath.CPUOnly.Tan(value.GetElement(0)), IntrinsicMath.CPUOnly.Tan(value.GetElement(1)), IntrinsicMath.CPUOnly.Tan(value.GetElement(2)), IntrinsicMath.CPUOnly.Tan(value.GetElement(3)));
             return CastFToI32(result);
         }
 
@@ -1157,17 +898,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) warp)
         {
             var value = CastIToF64(warp);
-            var result = (
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Tan(value.Item1.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Tan(value.Item1.GetElement(1))
-                    ),
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Tan(value.Item2.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Tan(value.Item2.GetElement(1))
-                    ));
+            var result = (Vector128.Create(IntrinsicMath.CPUOnly.Tan(value.Item1.GetElement(0)), IntrinsicMath.CPUOnly.Tan(value.Item1.GetElement(1))), Vector128.Create(IntrinsicMath.CPUOnly.Tan(value.Item2.GetElement(0)), IntrinsicMath.CPUOnly.Tan(value.Item2.GetElement(1))));
             return CastFToI64(result);
         }
 
@@ -1177,15 +908,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.CPUOnly.Tanh(value.GetElement(0))
-                ,
-                IntrinsicMath.CPUOnly.Tanh(value.GetElement(1))
-                ,
-                IntrinsicMath.CPUOnly.Tanh(value.GetElement(2))
-                ,
-                IntrinsicMath.CPUOnly.Tanh(value.GetElement(3))
-                );
+            var result = Vector128.Create(IntrinsicMath.CPUOnly.Tanh(value.GetElement(0)), IntrinsicMath.CPUOnly.Tanh(value.GetElement(1)), IntrinsicMath.CPUOnly.Tanh(value.GetElement(2)), IntrinsicMath.CPUOnly.Tanh(value.GetElement(3)));
             return CastFToI32(result);
         }
 
@@ -1194,17 +917,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) warp)
         {
             var value = CastIToF64(warp);
-            var result = (
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Tanh(value.Item1.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Tanh(value.Item1.GetElement(1))
-                    ),
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Tanh(value.Item2.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Tanh(value.Item2.GetElement(1))
-                    ));
+            var result = (Vector128.Create(IntrinsicMath.CPUOnly.Tanh(value.Item1.GetElement(0)), IntrinsicMath.CPUOnly.Tanh(value.Item1.GetElement(1))), Vector128.Create(IntrinsicMath.CPUOnly.Tanh(value.Item2.GetElement(0)), IntrinsicMath.CPUOnly.Tanh(value.Item2.GetElement(1))));
             return CastFToI64(result);
         }
 
@@ -1214,15 +927,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.CPUOnly.Atan(value.GetElement(0))
-                ,
-                IntrinsicMath.CPUOnly.Atan(value.GetElement(1))
-                ,
-                IntrinsicMath.CPUOnly.Atan(value.GetElement(2))
-                ,
-                IntrinsicMath.CPUOnly.Atan(value.GetElement(3))
-                );
+            var result = Vector128.Create(IntrinsicMath.CPUOnly.Atan(value.GetElement(0)), IntrinsicMath.CPUOnly.Atan(value.GetElement(1)), IntrinsicMath.CPUOnly.Atan(value.GetElement(2)), IntrinsicMath.CPUOnly.Atan(value.GetElement(3)));
             return CastFToI32(result);
         }
 
@@ -1231,17 +936,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) warp)
         {
             var value = CastIToF64(warp);
-            var result = (
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Atan(value.Item1.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Atan(value.Item1.GetElement(1))
-                    ),
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Atan(value.Item2.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Atan(value.Item2.GetElement(1))
-                    ));
+            var result = (Vector128.Create(IntrinsicMath.CPUOnly.Atan(value.Item1.GetElement(0)), IntrinsicMath.CPUOnly.Atan(value.Item1.GetElement(1))), Vector128.Create(IntrinsicMath.CPUOnly.Atan(value.Item2.GetElement(0)), IntrinsicMath.CPUOnly.Atan(value.Item2.GetElement(1))));
             return CastFToI64(result);
         }
 
@@ -1251,15 +946,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.CPUOnly.Exp(value.GetElement(0))
-                ,
-                IntrinsicMath.CPUOnly.Exp(value.GetElement(1))
-                ,
-                IntrinsicMath.CPUOnly.Exp(value.GetElement(2))
-                ,
-                IntrinsicMath.CPUOnly.Exp(value.GetElement(3))
-                );
+            var result = Vector128.Create(IntrinsicMath.CPUOnly.Exp(value.GetElement(0)), IntrinsicMath.CPUOnly.Exp(value.GetElement(1)), IntrinsicMath.CPUOnly.Exp(value.GetElement(2)), IntrinsicMath.CPUOnly.Exp(value.GetElement(3)));
             return CastFToI32(result);
         }
 
@@ -1268,17 +955,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) warp)
         {
             var value = CastIToF64(warp);
-            var result = (
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Exp(value.Item1.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Exp(value.Item1.GetElement(1))
-                    ),
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Exp(value.Item2.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Exp(value.Item2.GetElement(1))
-                    ));
+            var result = (Vector128.Create(IntrinsicMath.CPUOnly.Exp(value.Item1.GetElement(0)), IntrinsicMath.CPUOnly.Exp(value.Item1.GetElement(1))), Vector128.Create(IntrinsicMath.CPUOnly.Exp(value.Item2.GetElement(0)), IntrinsicMath.CPUOnly.Exp(value.Item2.GetElement(1))));
             return CastFToI64(result);
         }
 
@@ -1288,15 +965,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.CPUOnly.Exp2(value.GetElement(0))
-                ,
-                IntrinsicMath.CPUOnly.Exp2(value.GetElement(1))
-                ,
-                IntrinsicMath.CPUOnly.Exp2(value.GetElement(2))
-                ,
-                IntrinsicMath.CPUOnly.Exp2(value.GetElement(3))
-                );
+            var result = Vector128.Create(IntrinsicMath.CPUOnly.Exp2(value.GetElement(0)), IntrinsicMath.CPUOnly.Exp2(value.GetElement(1)), IntrinsicMath.CPUOnly.Exp2(value.GetElement(2)), IntrinsicMath.CPUOnly.Exp2(value.GetElement(3)));
             return CastFToI32(result);
         }
 
@@ -1305,17 +974,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) warp)
         {
             var value = CastIToF64(warp);
-            var result = (
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Exp2(value.Item1.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Exp2(value.Item1.GetElement(1))
-                    ),
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Exp2(value.Item2.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Exp2(value.Item2.GetElement(1))
-                    ));
+            var result = (Vector128.Create(IntrinsicMath.CPUOnly.Exp2(value.Item1.GetElement(0)), IntrinsicMath.CPUOnly.Exp2(value.Item1.GetElement(1))), Vector128.Create(IntrinsicMath.CPUOnly.Exp2(value.Item2.GetElement(0)), IntrinsicMath.CPUOnly.Exp2(value.Item2.GetElement(1))));
             return CastFToI64(result);
         }
 
@@ -1367,15 +1026,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.CPUOnly.Log(value.GetElement(0))
-                ,
-                IntrinsicMath.CPUOnly.Log(value.GetElement(1))
-                ,
-                IntrinsicMath.CPUOnly.Log(value.GetElement(2))
-                ,
-                IntrinsicMath.CPUOnly.Log(value.GetElement(3))
-                );
+            var result = Vector128.Create(IntrinsicMath.CPUOnly.Log(value.GetElement(0)), IntrinsicMath.CPUOnly.Log(value.GetElement(1)), IntrinsicMath.CPUOnly.Log(value.GetElement(2)), IntrinsicMath.CPUOnly.Log(value.GetElement(3)));
             return CastFToI32(result);
         }
 
@@ -1384,17 +1035,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) warp)
         {
             var value = CastIToF64(warp);
-            var result = (
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Log(value.Item1.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Log(value.Item1.GetElement(1))
-                    ),
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Log(value.Item2.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Log(value.Item2.GetElement(1))
-                    ));
+            var result = (Vector128.Create(IntrinsicMath.CPUOnly.Log(value.Item1.GetElement(0)), IntrinsicMath.CPUOnly.Log(value.Item1.GetElement(1))), Vector128.Create(IntrinsicMath.CPUOnly.Log(value.Item2.GetElement(0)), IntrinsicMath.CPUOnly.Log(value.Item2.GetElement(1))));
             return CastFToI64(result);
         }
 
@@ -1404,15 +1045,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.CPUOnly.Log2(value.GetElement(0))
-                ,
-                IntrinsicMath.CPUOnly.Log2(value.GetElement(1))
-                ,
-                IntrinsicMath.CPUOnly.Log2(value.GetElement(2))
-                ,
-                IntrinsicMath.CPUOnly.Log2(value.GetElement(3))
-                );
+            var result = Vector128.Create(IntrinsicMath.CPUOnly.Log2(value.GetElement(0)), IntrinsicMath.CPUOnly.Log2(value.GetElement(1)), IntrinsicMath.CPUOnly.Log2(value.GetElement(2)), IntrinsicMath.CPUOnly.Log2(value.GetElement(3)));
             return CastFToI32(result);
         }
 
@@ -1421,17 +1054,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) warp)
         {
             var value = CastIToF64(warp);
-            var result = (
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Log2(value.Item1.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Log2(value.Item1.GetElement(1))
-                    ),
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Log2(value.Item2.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Log2(value.Item2.GetElement(1))
-                    ));
+            var result = (Vector128.Create(IntrinsicMath.CPUOnly.Log2(value.Item1.GetElement(0)), IntrinsicMath.CPUOnly.Log2(value.Item1.GetElement(1))), Vector128.Create(IntrinsicMath.CPUOnly.Log2(value.Item2.GetElement(0)), IntrinsicMath.CPUOnly.Log2(value.Item2.GetElement(1))));
             return CastFToI64(result);
         }
 
@@ -1441,15 +1064,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            var result = Vector128.Create(
-                IntrinsicMath.CPUOnly.Log10(value.GetElement(0))
-                ,
-                IntrinsicMath.CPUOnly.Log10(value.GetElement(1))
-                ,
-                IntrinsicMath.CPUOnly.Log10(value.GetElement(2))
-                ,
-                IntrinsicMath.CPUOnly.Log10(value.GetElement(3))
-                );
+            var result = Vector128.Create(IntrinsicMath.CPUOnly.Log10(value.GetElement(0)), IntrinsicMath.CPUOnly.Log10(value.GetElement(1)), IntrinsicMath.CPUOnly.Log10(value.GetElement(2)), IntrinsicMath.CPUOnly.Log10(value.GetElement(3)));
             return CastFToI32(result);
         }
 
@@ -1458,17 +1073,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) warp)
         {
             var value = CastIToF64(warp);
-            var result = (
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Log10(value.Item1.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Log10(value.Item1.GetElement(1))
-                    ),
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Log10(value.Item2.GetElement(0))
-                    ,
-                    IntrinsicMath.CPUOnly.Log10(value.Item2.GetElement(1))
-                    ));
+            var result = (Vector128.Create(IntrinsicMath.CPUOnly.Log10(value.Item1.GetElement(0)), IntrinsicMath.CPUOnly.Log10(value.Item1.GetElement(1))), Vector128.Create(IntrinsicMath.CPUOnly.Log10(value.Item2.GetElement(0)), IntrinsicMath.CPUOnly.Log10(value.Item2.GetElement(1))));
             return CastFToI64(result);
         }
 
@@ -2118,11 +1723,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             var right = CastIToF32(second);
 
             // x - x / y * y has no truncation: a float remainder is the IEEE fmod of every lane (what the CPU backend computes)
-            var result = Vector128.Create(
-                left.GetElement(0) % right.GetElement(0),
-                left.GetElement(1) % right.GetElement(1),
-                left.GetElement(2) % right.GetElement(2),
-                left.GetElement(3) % right.GetElement(3));
+            var result = Vector128.Create(left.GetElement(0) % right.GetElement(0), left.GetElement(1) % right.GetElement(1), left.GetElement(2) % right.GetElement(2), left.GetElement(3) % right.GetElement(3));
             return CastFToI32(result);
         }
 
@@ -2165,13 +1766,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             var right = CastIToF64(second);
 
             // x - x / y * y has no truncation: a float remainder is the IEEE fmod of every lane (what the CPU backend computes)
-            var result = (
-                Vector128.Create(
-                    left.Item1.GetElement(0) % right.Item1.GetElement(0),
-                    left.Item1.GetElement(1) % right.Item1.GetElement(1)),
-                Vector128.Create(
-                    left.Item2.GetElement(0) % right.Item2.GetElement(0),
-                    left.Item2.GetElement(1) % right.Item2.GetElement(1)));
+            var result = (Vector128.Create(left.Item1.GetElement(0) % right.Item1.GetElement(0), left.Item1.GetElement(1) % right.Item1.GetElement(1)), Vector128.Create(left.Item2.GetElement(0) % right.Item2.GetElement(0), left.Item2.GetElement(1) % right.Item2.GetElement(1)));
 
             return CastFToI64(result);
         }
@@ -2346,11 +1941,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             var left = first;
             var right = second;
 
-            var result = Vector128.Create(
-                left.GetElement(0) << (int)right.GetElement(0),
-                left.GetElement(1) << (int)right.GetElement(1),
-                left.GetElement(2) << (int)right.GetElement(2),
-                left.GetElement(3) << (int)right.GetElement(3));
+            var result = Vector128.Create(left.GetElement(0) << (int)right.GetElement(0), left.GetElement(1) << (int)right.GetElement(1), left.GetElement(2) << (int)right.GetElement(2), left.GetElement(3) << (int)right.GetElement(3));
             return result;
         }
 
@@ -2362,11 +1953,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             var left = CastIToU32(first);
             var right = CastIToU32(second);
 
-            var result = Vector128.Create(
-                left.GetElement(0) << (int)right.GetElement(0),
-                left.GetElement(1) << (int)right.GetElement(1),
-                left.GetElement(2) << (int)right.GetElement(2),
-                left.GetElement(3) << (int)right.GetElement(3));
+            var result = Vector128.Create(left.GetElement(0) << (int)right.GetElement(0), left.GetElement(1) << (int)right.GetElement(1), left.GetElement(2) << (int)right.GetElement(2), left.GetElement(3) << (int)right.GetElement(3));
             return CastUToI32(result);
         }
 
@@ -2378,13 +1965,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             var left = first;
             var right = second;
 
-            var result = (
-                Vector128.Create(
-                    left.Item1.GetElement(0) << (int)right.Item1.GetElement(0),
-                    left.Item1.GetElement(1) << (int)right.Item1.GetElement(1)),
-                Vector128.Create(
-                    left.Item2.GetElement(0) << (int)right.Item2.GetElement(0),
-                    left.Item2.GetElement(1) << (int)right.Item2.GetElement(1)));
+            var result = (Vector128.Create(left.Item1.GetElement(0) << (int)right.Item1.GetElement(0), left.Item1.GetElement(1) << (int)right.Item1.GetElement(1)), Vector128.Create(left.Item2.GetElement(0) << (int)right.Item2.GetElement(0), left.Item2.GetElement(1) << (int)right.Item2.GetElement(1)));
 
             return result;
         }
@@ -2397,13 +1978,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             var left = CastIToU64(first);
             var right = CastIToU64(second);
 
-            var result = (
-                Vector128.Create(
-                    left.Item1.GetElement(0) << (int)right.Item1.GetElement(0),
-                    left.Item1.GetElement(1) << (int)right.Item1.GetElement(1)),
-                Vector128.Create(
-                    left.Item2.GetElement(0) << (int)right.Item2.GetElement(0),
-                    left.Item2.GetElement(1) << (int)right.Item2.GetElement(1)));
+            var result = (Vector128.Create(left.Item1.GetElement(0) << (int)right.Item1.GetElement(0), left.Item1.GetElement(1) << (int)right.Item1.GetElement(1)), Vector128.Create(left.Item2.GetElement(0) << (int)right.Item2.GetElement(0), left.Item2.GetElement(1) << (int)right.Item2.GetElement(1)));
 
             return CastUToI64(result);
         }
@@ -2416,11 +1991,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             var left = first;
             var right = second;
 
-            var result = Vector128.Create(
-                left.GetElement(0) >> (int)right.GetElement(0),
-                left.GetElement(1) >> (int)right.GetElement(1),
-                left.GetElement(2) >> (int)right.GetElement(2),
-                left.GetElement(3) >> (int)right.GetElement(3));
+            var result = Vector128.Create(left.GetElement(0) >> (int)right.GetElement(0), left.GetElement(1) >> (int)right.GetElement(1), left.GetElement(2) >> (int)right.GetElement(2), left.GetElement(3) >> (int)right.GetElement(3));
             return result;
         }
 
@@ -2432,11 +2003,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             var left = CastIToU32(first);
             var right = CastIToU32(second);
 
-            var result = Vector128.Create(
-                left.GetElement(0) >> (int)right.GetElement(0),
-                left.GetElement(1) >> (int)right.GetElement(1),
-                left.GetElement(2) >> (int)right.GetElement(2),
-                left.GetElement(3) >> (int)right.GetElement(3));
+            var result = Vector128.Create(left.GetElement(0) >> (int)right.GetElement(0), left.GetElement(1) >> (int)right.GetElement(1), left.GetElement(2) >> (int)right.GetElement(2), left.GetElement(3) >> (int)right.GetElement(3));
             return CastUToI32(result);
         }
 
@@ -2448,13 +2015,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             var left = first;
             var right = second;
 
-            var result = (
-                Vector128.Create(
-                    left.Item1.GetElement(0) >> (int)right.Item1.GetElement(0),
-                    left.Item1.GetElement(1) >> (int)right.Item1.GetElement(1)),
-                Vector128.Create(
-                    left.Item2.GetElement(0) >> (int)right.Item2.GetElement(0),
-                    left.Item2.GetElement(1) >> (int)right.Item2.GetElement(1)));
+            var result = (Vector128.Create(left.Item1.GetElement(0) >> (int)right.Item1.GetElement(0), left.Item1.GetElement(1) >> (int)right.Item1.GetElement(1)), Vector128.Create(left.Item2.GetElement(0) >> (int)right.Item2.GetElement(0), left.Item2.GetElement(1) >> (int)right.Item2.GetElement(1)));
 
             return result;
         }
@@ -2467,13 +2028,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             var left = CastIToU64(first);
             var right = CastIToU64(second);
 
-            var result = (
-                Vector128.Create(
-                    left.Item1.GetElement(0) >> (int)right.Item1.GetElement(0),
-                    left.Item1.GetElement(1) >> (int)right.Item1.GetElement(1)),
-                Vector128.Create(
-                    left.Item2.GetElement(0) >> (int)right.Item2.GetElement(0),
-                    left.Item2.GetElement(1) >> (int)right.Item2.GetElement(1)));
+            var result = (Vector128.Create(left.Item1.GetElement(0) >> (int)right.Item1.GetElement(0), left.Item1.GetElement(1) >> (int)right.Item1.GetElement(1)), Vector128.Create(left.Item2.GetElement(0) >> (int)right.Item2.GetElement(0), left.Item2.GetElement(1) >> (int)right.Item2.GetElement(1)));
 
             return CastUToI64(result);
         }
@@ -2648,11 +2203,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             var left = CastIToF32(first);
             var right = CastIToF32(second);
 
-            var result = Vector128.Create(
-                IntrinsicMath.CPUOnly.Atan2(left.GetElement(0), right.GetElement(0)),
-                IntrinsicMath.CPUOnly.Atan2(left.GetElement(1), right.GetElement(1)),
-                IntrinsicMath.CPUOnly.Atan2(left.GetElement(2), right.GetElement(2)),
-                IntrinsicMath.CPUOnly.Atan2(left.GetElement(3), right.GetElement(3)));
+            var result = Vector128.Create(IntrinsicMath.CPUOnly.Atan2(left.GetElement(0), right.GetElement(0)), IntrinsicMath.CPUOnly.Atan2(left.GetElement(1), right.GetElement(1)), IntrinsicMath.CPUOnly.Atan2(left.GetElement(2), right.GetElement(2)), IntrinsicMath.CPUOnly.Atan2(left.GetElement(3), right.GetElement(3)));
             return CastFToI32(result);
         }
 
@@ -2664,13 +2215,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             var left = CastIToF64(first);
             var right = CastIToF64(second);
 
-            var result = (
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Atan2(left.Item1.GetElement(0), right.Item1.GetElement(0)),
-                    IntrinsicMath.CPUOnly.Atan2(left.Item1.GetElement(1), right.Item1.GetElement(1))),
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Atan2(left.Item2.GetElement(0), right.Item2.GetElement(0)),
-                    IntrinsicMath.CPUOnly.Atan2(left.Item2.GetElement(1), right.Item2.GetElement(1))));
+            var result = (Vector128.Create(IntrinsicMath.CPUOnly.Atan2(left.Item1.GetElement(0), right.Item1.GetElement(0)), IntrinsicMath.CPUOnly.Atan2(left.Item1.GetElement(1), right.Item1.GetElement(1))), Vector128.Create(IntrinsicMath.CPUOnly.Atan2(left.Item2.GetElement(0), right.Item2.GetElement(0)), IntrinsicMath.CPUOnly.Atan2(left.Item2.GetElement(1), right.Item2.GetElement(1))));
 
             return CastFToI64(result);
         }
@@ -2683,11 +2228,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             var left = CastIToF32(first);
             var right = CastIToF32(second);
 
-            var result = Vector128.Create(
-                IntrinsicMath.CPUOnly.Pow(left.GetElement(0), right.GetElement(0)),
-                IntrinsicMath.CPUOnly.Pow(left.GetElement(1), right.GetElement(1)),
-                IntrinsicMath.CPUOnly.Pow(left.GetElement(2), right.GetElement(2)),
-                IntrinsicMath.CPUOnly.Pow(left.GetElement(3), right.GetElement(3)));
+            var result = Vector128.Create(IntrinsicMath.CPUOnly.Pow(left.GetElement(0), right.GetElement(0)), IntrinsicMath.CPUOnly.Pow(left.GetElement(1), right.GetElement(1)), IntrinsicMath.CPUOnly.Pow(left.GetElement(2), right.GetElement(2)), IntrinsicMath.CPUOnly.Pow(left.GetElement(3), right.GetElement(3)));
             return CastFToI32(result);
         }
 
@@ -2699,13 +2240,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             var left = CastIToF64(first);
             var right = CastIToF64(second);
 
-            var result = (
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Pow(left.Item1.GetElement(0), right.Item1.GetElement(0)),
-                    IntrinsicMath.CPUOnly.Pow(left.Item1.GetElement(1), right.Item1.GetElement(1))),
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Pow(left.Item2.GetElement(0), right.Item2.GetElement(0)),
-                    IntrinsicMath.CPUOnly.Pow(left.Item2.GetElement(1), right.Item2.GetElement(1))));
+            var result = (Vector128.Create(IntrinsicMath.CPUOnly.Pow(left.Item1.GetElement(0), right.Item1.GetElement(0)), IntrinsicMath.CPUOnly.Pow(left.Item1.GetElement(1), right.Item1.GetElement(1))), Vector128.Create(IntrinsicMath.CPUOnly.Pow(left.Item2.GetElement(0), right.Item2.GetElement(0)), IntrinsicMath.CPUOnly.Pow(left.Item2.GetElement(1), right.Item2.GetElement(1))));
 
             return CastFToI64(result);
         }
@@ -2718,11 +2253,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             var left = CastIToF32(first);
             var right = CastIToF32(second);
 
-            var result = Vector128.Create(
-                IntrinsicMath.CPUOnly.Log(left.GetElement(0), right.GetElement(0)),
-                IntrinsicMath.CPUOnly.Log(left.GetElement(1), right.GetElement(1)),
-                IntrinsicMath.CPUOnly.Log(left.GetElement(2), right.GetElement(2)),
-                IntrinsicMath.CPUOnly.Log(left.GetElement(3), right.GetElement(3)));
+            var result = Vector128.Create(IntrinsicMath.CPUOnly.Log(left.GetElement(0), right.GetElement(0)), IntrinsicMath.CPUOnly.Log(left.GetElement(1), right.GetElement(1)), IntrinsicMath.CPUOnly.Log(left.GetElement(2), right.GetElement(2)), IntrinsicMath.CPUOnly.Log(left.GetElement(3), right.GetElement(3)));
             return CastFToI32(result);
         }
 
@@ -2734,13 +2265,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             var left = CastIToF64(first);
             var right = CastIToF64(second);
 
-            var result = (
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Log(left.Item1.GetElement(0), right.Item1.GetElement(0)),
-                    IntrinsicMath.CPUOnly.Log(left.Item1.GetElement(1), right.Item1.GetElement(1))),
-                Vector128.Create(
-                    IntrinsicMath.CPUOnly.Log(left.Item2.GetElement(0), right.Item2.GetElement(0)),
-                    IntrinsicMath.CPUOnly.Log(left.Item2.GetElement(1), right.Item2.GetElement(1))));
+            var result = (Vector128.Create(IntrinsicMath.CPUOnly.Log(left.Item1.GetElement(0), right.Item1.GetElement(0)), IntrinsicMath.CPUOnly.Log(left.Item1.GetElement(1), right.Item1.GetElement(1))), Vector128.Create(IntrinsicMath.CPUOnly.Log(left.Item2.GetElement(0), right.Item2.GetElement(0)), IntrinsicMath.CPUOnly.Log(left.Item2.GetElement(1), right.Item2.GetElement(1))));
 
             return CastFToI64(result);
         }
@@ -2753,11 +2278,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             var left = CastIToF32(first);
             var right = CastIToF32(second);
 
-            var result = Vector128.Create(
-                IntrinsicMath.CopySign(left.GetElement(0), right.GetElement(0)),
-                IntrinsicMath.CopySign(left.GetElement(1), right.GetElement(1)),
-                IntrinsicMath.CopySign(left.GetElement(2), right.GetElement(2)),
-                IntrinsicMath.CopySign(left.GetElement(3), right.GetElement(3)));
+            var result = Vector128.Create(IntrinsicMath.CopySign(left.GetElement(0), right.GetElement(0)), IntrinsicMath.CopySign(left.GetElement(1), right.GetElement(1)), IntrinsicMath.CopySign(left.GetElement(2), right.GetElement(2)), IntrinsicMath.CopySign(left.GetElement(3), right.GetElement(3)));
             return CastFToI32(result);
         }
 
@@ -2769,13 +2290,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             var left = CastIToF64(first);
             var right = CastIToF64(second);
 
-            var result = (
-                Vector128.Create(
-                    IntrinsicMath.CopySign(left.Item1.GetElement(0), right.Item1.GetElement(0)),
-                    IntrinsicMath.CopySign(left.Item1.GetElement(1), right.Item1.GetElement(1))),
-                Vector128.Create(
-                    IntrinsicMath.CopySign(left.Item2.GetElement(0), right.Item2.GetElement(0)),
-                    IntrinsicMath.CopySign(left.Item2.GetElement(1), right.Item2.GetElement(1))));
+            var result = (Vector128.Create(IntrinsicMath.CopySign(left.Item1.GetElement(0), right.Item1.GetElement(0)), IntrinsicMath.CopySign(left.Item1.GetElement(1), right.Item1.GetElement(1))), Vector128.Create(IntrinsicMath.CopySign(left.Item2.GetElement(0), right.Item2.GetElement(0)), IntrinsicMath.CopySign(left.Item2.GetElement(1), right.Item2.GetElement(1))));
 
             return CastFToI64(result);
         }
@@ -3756,11 +3271,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = warp;
-            return Vector128.Create(
-                (short)(sbyte)value.GetElement(0),
-                (short)(sbyte)value.GetElement(1),
-                (short)(sbyte)value.GetElement(2),
-                (short)(sbyte)value.GetElement(3))
+            return Vector128.Create((short)(sbyte)value.GetElement(0), (short)(sbyte)value.GetElement(1), (short)(sbyte)value.GetElement(2), (short)(sbyte)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -3769,11 +3280,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = warp;
-            return Vector128.Create(
-                (int)(sbyte)value.GetElement(0),
-                (int)(sbyte)value.GetElement(1),
-                (int)(sbyte)value.GetElement(2),
-                (int)(sbyte)value.GetElement(3))
+            return Vector128.Create((int)(sbyte)value.GetElement(0), (int)(sbyte)value.GetElement(1), (int)(sbyte)value.GetElement(2), (int)(sbyte)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -3789,11 +3296,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = warp;
-            return Vector128.Create(
-                (ushort)(sbyte)value.GetElement(0),
-                (ushort)(sbyte)value.GetElement(1),
-                (ushort)(sbyte)value.GetElement(2),
-                (ushort)(sbyte)value.GetElement(3))
+            return Vector128.Create((ushort)(sbyte)value.GetElement(0), (ushort)(sbyte)value.GetElement(1), (ushort)(sbyte)value.GetElement(2), (ushort)(sbyte)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -3802,11 +3305,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = warp;
-            return Vector128.Create(
-                (uint)(sbyte)value.GetElement(0),
-                (uint)(sbyte)value.GetElement(1),
-                (uint)(sbyte)value.GetElement(2),
-                (uint)(sbyte)value.GetElement(3))
+            return Vector128.Create((uint)(sbyte)value.GetElement(0), (uint)(sbyte)value.GetElement(1), (uint)(sbyte)value.GetElement(2), (uint)(sbyte)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -3815,11 +3314,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = warp;
-            return Vector128.Create(
-                (Half)(sbyte)value.GetElement(0),
-                (Half)(sbyte)value.GetElement(1),
-                (Half)(sbyte)value.GetElement(2),
-                (Half)(sbyte)value.GetElement(3))
+            return Vector128.Create((Half)(sbyte)value.GetElement(0), (Half)(sbyte)value.GetElement(1), (Half)(sbyte)value.GetElement(2), (Half)(sbyte)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -3828,11 +3323,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = warp;
-            return Vector128.Create(
-                (float)(sbyte)value.GetElement(0),
-                (float)(sbyte)value.GetElement(1),
-                (float)(sbyte)value.GetElement(2),
-                (float)(sbyte)value.GetElement(3))
+            return Vector128.Create((float)(sbyte)value.GetElement(0), (float)(sbyte)value.GetElement(1), (float)(sbyte)value.GetElement(2), (float)(sbyte)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -3841,11 +3332,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = warp;
-            return Vector128.Create(
-                (sbyte)(short)value.GetElement(0),
-                (sbyte)(short)value.GetElement(1),
-                (sbyte)(short)value.GetElement(2),
-                (sbyte)(short)value.GetElement(3))
+            return Vector128.Create((sbyte)(short)value.GetElement(0), (sbyte)(short)value.GetElement(1), (sbyte)(short)value.GetElement(2), (sbyte)(short)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -3861,11 +3348,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = warp;
-            return Vector128.Create(
-                (int)(short)value.GetElement(0),
-                (int)(short)value.GetElement(1),
-                (int)(short)value.GetElement(2),
-                (int)(short)value.GetElement(3))
+            return Vector128.Create((int)(short)value.GetElement(0), (int)(short)value.GetElement(1), (int)(short)value.GetElement(2), (int)(short)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -3874,11 +3357,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = warp;
-            return Vector128.Create(
-                (byte)(short)value.GetElement(0),
-                (byte)(short)value.GetElement(1),
-                (byte)(short)value.GetElement(2),
-                (byte)(short)value.GetElement(3))
+            return Vector128.Create((byte)(short)value.GetElement(0), (byte)(short)value.GetElement(1), (byte)(short)value.GetElement(2), (byte)(short)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -3894,11 +3373,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = warp;
-            return Vector128.Create(
-                (uint)(short)value.GetElement(0),
-                (uint)(short)value.GetElement(1),
-                (uint)(short)value.GetElement(2),
-                (uint)(short)value.GetElement(3))
+            return Vector128.Create((uint)(short)value.GetElement(0), (uint)(short)value.GetElement(1), (uint)(short)value.GetElement(2), (uint)(short)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -3907,11 +3382,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = warp;
-            return Vector128.Create(
-                (Half)(short)value.GetElement(0),
-                (Half)(short)value.GetElement(1),
-                (Half)(short)value.GetElement(2),
-                (Half)(short)value.GetElement(3))
+            return Vector128.Create((Half)(short)value.GetElement(0), (Half)(short)value.GetElement(1), (Half)(short)value.GetElement(2), (Half)(short)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -3920,11 +3391,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = warp;
-            return Vector128.Create(
-                (float)(short)value.GetElement(0),
-                (float)(short)value.GetElement(1),
-                (float)(short)value.GetElement(2),
-                (float)(short)value.GetElement(3))
+            return Vector128.Create((float)(short)value.GetElement(0), (float)(short)value.GetElement(1), (float)(short)value.GetElement(2), (float)(short)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -3933,11 +3400,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = warp;
-            return Vector128.Create(
-                (sbyte)(int)value.GetElement(0),
-                (sbyte)(int)value.GetElement(1),
-                (sbyte)(int)value.GetElement(2),
-                (sbyte)(int)value.GetElement(3))
+            return Vector128.Create((sbyte)(int)value.GetElement(0), (sbyte)(int)value.GetElement(1), (sbyte)(int)value.GetElement(2), (sbyte)(int)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -3946,11 +3409,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = warp;
-            return Vector128.Create(
-                (short)(int)value.GetElement(0),
-                (short)(int)value.GetElement(1),
-                (short)(int)value.GetElement(2),
-                (short)(int)value.GetElement(3))
+            return Vector128.Create((short)(int)value.GetElement(0), (short)(int)value.GetElement(1), (short)(int)value.GetElement(2), (short)(int)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -3966,11 +3425,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = warp;
-            return Vector128.Create(
-                (byte)(int)value.GetElement(0),
-                (byte)(int)value.GetElement(1),
-                (byte)(int)value.GetElement(2),
-                (byte)(int)value.GetElement(3))
+            return Vector128.Create((byte)(int)value.GetElement(0), (byte)(int)value.GetElement(1), (byte)(int)value.GetElement(2), (byte)(int)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -3979,11 +3434,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = warp;
-            return Vector128.Create(
-                (ushort)(int)value.GetElement(0),
-                (ushort)(int)value.GetElement(1),
-                (ushort)(int)value.GetElement(2),
-                (ushort)(int)value.GetElement(3))
+            return Vector128.Create((ushort)(int)value.GetElement(0), (ushort)(int)value.GetElement(1), (ushort)(int)value.GetElement(2), (ushort)(int)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -3999,11 +3450,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = warp;
-            return Vector128.Create(
-                (Half)(int)value.GetElement(0),
-                (Half)(int)value.GetElement(1),
-                (Half)(int)value.GetElement(2),
-                (Half)(int)value.GetElement(3))
+            return Vector128.Create((Half)(int)value.GetElement(0), (Half)(int)value.GetElement(1), (Half)(int)value.GetElement(2), (Half)(int)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4027,11 +3474,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToU32(warp);
-            return Vector128.Create(
-                (short)(byte)value.GetElement(0),
-                (short)(byte)value.GetElement(1),
-                (short)(byte)value.GetElement(2),
-                (short)(byte)value.GetElement(3))
+            return Vector128.Create((short)(byte)value.GetElement(0), (short)(byte)value.GetElement(1), (short)(byte)value.GetElement(2), (short)(byte)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4040,11 +3483,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToU32(warp);
-            return Vector128.Create(
-                (int)(byte)value.GetElement(0),
-                (int)(byte)value.GetElement(1),
-                (int)(byte)value.GetElement(2),
-                (int)(byte)value.GetElement(3))
+            return Vector128.Create((int)(byte)value.GetElement(0), (int)(byte)value.GetElement(1), (int)(byte)value.GetElement(2), (int)(byte)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4060,11 +3499,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToU32(warp);
-            return Vector128.Create(
-                (ushort)(byte)value.GetElement(0),
-                (ushort)(byte)value.GetElement(1),
-                (ushort)(byte)value.GetElement(2),
-                (ushort)(byte)value.GetElement(3))
+            return Vector128.Create((ushort)(byte)value.GetElement(0), (ushort)(byte)value.GetElement(1), (ushort)(byte)value.GetElement(2), (ushort)(byte)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4073,11 +3508,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToU32(warp);
-            return Vector128.Create(
-                (uint)(byte)value.GetElement(0),
-                (uint)(byte)value.GetElement(1),
-                (uint)(byte)value.GetElement(2),
-                (uint)(byte)value.GetElement(3))
+            return Vector128.Create((uint)(byte)value.GetElement(0), (uint)(byte)value.GetElement(1), (uint)(byte)value.GetElement(2), (uint)(byte)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4086,11 +3517,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToU32(warp);
-            return Vector128.Create(
-                (Half)(byte)value.GetElement(0),
-                (Half)(byte)value.GetElement(1),
-                (Half)(byte)value.GetElement(2),
-                (Half)(byte)value.GetElement(3))
+            return Vector128.Create((Half)(byte)value.GetElement(0), (Half)(byte)value.GetElement(1), (Half)(byte)value.GetElement(2), (Half)(byte)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4099,11 +3526,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToU32(warp);
-            return Vector128.Create(
-                (float)(byte)value.GetElement(0),
-                (float)(byte)value.GetElement(1),
-                (float)(byte)value.GetElement(2),
-                (float)(byte)value.GetElement(3))
+            return Vector128.Create((float)(byte)value.GetElement(0), (float)(byte)value.GetElement(1), (float)(byte)value.GetElement(2), (float)(byte)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4112,11 +3535,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToU32(warp);
-            return Vector128.Create(
-                (sbyte)(ushort)value.GetElement(0),
-                (sbyte)(ushort)value.GetElement(1),
-                (sbyte)(ushort)value.GetElement(2),
-                (sbyte)(ushort)value.GetElement(3))
+            return Vector128.Create((sbyte)(ushort)value.GetElement(0), (sbyte)(ushort)value.GetElement(1), (sbyte)(ushort)value.GetElement(2), (sbyte)(ushort)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4132,11 +3551,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToU32(warp);
-            return Vector128.Create(
-                (int)(ushort)value.GetElement(0),
-                (int)(ushort)value.GetElement(1),
-                (int)(ushort)value.GetElement(2),
-                (int)(ushort)value.GetElement(3))
+            return Vector128.Create((int)(ushort)value.GetElement(0), (int)(ushort)value.GetElement(1), (int)(ushort)value.GetElement(2), (int)(ushort)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4145,11 +3560,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToU32(warp);
-            return Vector128.Create(
-                (byte)(ushort)value.GetElement(0),
-                (byte)(ushort)value.GetElement(1),
-                (byte)(ushort)value.GetElement(2),
-                (byte)(ushort)value.GetElement(3))
+            return Vector128.Create((byte)(ushort)value.GetElement(0), (byte)(ushort)value.GetElement(1), (byte)(ushort)value.GetElement(2), (byte)(ushort)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4165,11 +3576,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToU32(warp);
-            return Vector128.Create(
-                (uint)(ushort)value.GetElement(0),
-                (uint)(ushort)value.GetElement(1),
-                (uint)(ushort)value.GetElement(2),
-                (uint)(ushort)value.GetElement(3))
+            return Vector128.Create((uint)(ushort)value.GetElement(0), (uint)(ushort)value.GetElement(1), (uint)(ushort)value.GetElement(2), (uint)(ushort)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4178,11 +3585,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToU32(warp);
-            return Vector128.Create(
-                (Half)(ushort)value.GetElement(0),
-                (Half)(ushort)value.GetElement(1),
-                (Half)(ushort)value.GetElement(2),
-                (Half)(ushort)value.GetElement(3))
+            return Vector128.Create((Half)(ushort)value.GetElement(0), (Half)(ushort)value.GetElement(1), (Half)(ushort)value.GetElement(2), (Half)(ushort)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4191,11 +3594,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToU32(warp);
-            return Vector128.Create(
-                (float)(ushort)value.GetElement(0),
-                (float)(ushort)value.GetElement(1),
-                (float)(ushort)value.GetElement(2),
-                (float)(ushort)value.GetElement(3))
+            return Vector128.Create((float)(ushort)value.GetElement(0), (float)(ushort)value.GetElement(1), (float)(ushort)value.GetElement(2), (float)(ushort)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4204,11 +3603,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToU32(warp);
-            return Vector128.Create(
-                (sbyte)(uint)value.GetElement(0),
-                (sbyte)(uint)value.GetElement(1),
-                (sbyte)(uint)value.GetElement(2),
-                (sbyte)(uint)value.GetElement(3))
+            return Vector128.Create((sbyte)(uint)value.GetElement(0), (sbyte)(uint)value.GetElement(1), (sbyte)(uint)value.GetElement(2), (sbyte)(uint)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4217,11 +3612,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToU32(warp);
-            return Vector128.Create(
-                (short)(uint)value.GetElement(0),
-                (short)(uint)value.GetElement(1),
-                (short)(uint)value.GetElement(2),
-                (short)(uint)value.GetElement(3))
+            return Vector128.Create((short)(uint)value.GetElement(0), (short)(uint)value.GetElement(1), (short)(uint)value.GetElement(2), (short)(uint)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4237,11 +3628,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToU32(warp);
-            return Vector128.Create(
-                (byte)(uint)value.GetElement(0),
-                (byte)(uint)value.GetElement(1),
-                (byte)(uint)value.GetElement(2),
-                (byte)(uint)value.GetElement(3))
+            return Vector128.Create((byte)(uint)value.GetElement(0), (byte)(uint)value.GetElement(1), (byte)(uint)value.GetElement(2), (byte)(uint)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4250,11 +3637,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToU32(warp);
-            return Vector128.Create(
-                (ushort)(uint)value.GetElement(0),
-                (ushort)(uint)value.GetElement(1),
-                (ushort)(uint)value.GetElement(2),
-                (ushort)(uint)value.GetElement(3))
+            return Vector128.Create((ushort)(uint)value.GetElement(0), (ushort)(uint)value.GetElement(1), (ushort)(uint)value.GetElement(2), (ushort)(uint)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4270,11 +3653,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToU32(warp);
-            return Vector128.Create(
-                (Half)(uint)value.GetElement(0),
-                (Half)(uint)value.GetElement(1),
-                (Half)(uint)value.GetElement(2),
-                (Half)(uint)value.GetElement(3))
+            return Vector128.Create((Half)(uint)value.GetElement(0), (Half)(uint)value.GetElement(1), (Half)(uint)value.GetElement(2), (Half)(uint)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4291,11 +3670,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            return Vector128.Create(
-                (sbyte)(Half)value.GetElement(0),
-                (sbyte)(Half)value.GetElement(1),
-                (sbyte)(Half)value.GetElement(2),
-                (sbyte)(Half)value.GetElement(3))
+            return Vector128.Create((sbyte)(Half)value.GetElement(0), (sbyte)(Half)value.GetElement(1), (sbyte)(Half)value.GetElement(2), (sbyte)(Half)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4304,11 +3679,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            return Vector128.Create(
-                (short)(Half)value.GetElement(0),
-                (short)(Half)value.GetElement(1),
-                (short)(Half)value.GetElement(2),
-                (short)(Half)value.GetElement(3))
+            return Vector128.Create((short)(Half)value.GetElement(0), (short)(Half)value.GetElement(1), (short)(Half)value.GetElement(2), (short)(Half)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4317,11 +3688,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            return Vector128.Create(
-                (int)(Half)value.GetElement(0),
-                (int)(Half)value.GetElement(1),
-                (int)(Half)value.GetElement(2),
-                (int)(Half)value.GetElement(3))
+            return Vector128.Create((int)(Half)value.GetElement(0), (int)(Half)value.GetElement(1), (int)(Half)value.GetElement(2), (int)(Half)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4330,11 +3697,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            return Vector128.Create(
-                (byte)(Half)value.GetElement(0),
-                (byte)(Half)value.GetElement(1),
-                (byte)(Half)value.GetElement(2),
-                (byte)(Half)value.GetElement(3))
+            return Vector128.Create((byte)(Half)value.GetElement(0), (byte)(Half)value.GetElement(1), (byte)(Half)value.GetElement(2), (byte)(Half)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4343,11 +3706,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            return Vector128.Create(
-                (ushort)(Half)value.GetElement(0),
-                (ushort)(Half)value.GetElement(1),
-                (ushort)(Half)value.GetElement(2),
-                (ushort)(Half)value.GetElement(3))
+            return Vector128.Create((ushort)(Half)value.GetElement(0), (ushort)(Half)value.GetElement(1), (ushort)(Half)value.GetElement(2), (ushort)(Half)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4356,11 +3715,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            return Vector128.Create(
-                (uint)(Half)value.GetElement(0),
-                (uint)(Half)value.GetElement(1),
-                (uint)(Half)value.GetElement(2),
-                (uint)(Half)value.GetElement(3))
+            return Vector128.Create((uint)(Half)value.GetElement(0), (uint)(Half)value.GetElement(1), (uint)(Half)value.GetElement(2), (uint)(Half)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4376,11 +3731,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            return Vector128.Create(
-                (float)(Half)value.GetElement(0),
-                (float)(Half)value.GetElement(1),
-                (float)(Half)value.GetElement(2),
-                (float)(Half)value.GetElement(3))
+            return Vector128.Create((float)(Half)value.GetElement(0), (float)(Half)value.GetElement(1), (float)(Half)value.GetElement(2), (float)(Half)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4389,11 +3740,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            return Vector128.Create(
-                (sbyte)(float)value.GetElement(0),
-                (sbyte)(float)value.GetElement(1),
-                (sbyte)(float)value.GetElement(2),
-                (sbyte)(float)value.GetElement(3))
+            return Vector128.Create((sbyte)(float)value.GetElement(0), (sbyte)(float)value.GetElement(1), (sbyte)(float)value.GetElement(2), (sbyte)(float)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4402,11 +3749,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            return Vector128.Create(
-                (short)(float)value.GetElement(0),
-                (short)(float)value.GetElement(1),
-                (short)(float)value.GetElement(2),
-                (short)(float)value.GetElement(3))
+            return Vector128.Create((short)(float)value.GetElement(0), (short)(float)value.GetElement(1), (short)(float)value.GetElement(2), (short)(float)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4423,11 +3766,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            return Vector128.Create(
-                (byte)(float)value.GetElement(0),
-                (byte)(float)value.GetElement(1),
-                (byte)(float)value.GetElement(2),
-                (byte)(float)value.GetElement(3))
+            return Vector128.Create((byte)(float)value.GetElement(0), (byte)(float)value.GetElement(1), (byte)(float)value.GetElement(2), (byte)(float)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4436,11 +3775,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            return Vector128.Create(
-                (ushort)(float)value.GetElement(0),
-                (ushort)(float)value.GetElement(1),
-                (ushort)(float)value.GetElement(2),
-                (ushort)(float)value.GetElement(3))
+            return Vector128.Create((ushort)(float)value.GetElement(0), (ushort)(float)value.GetElement(1), (ushort)(float)value.GetElement(2), (ushort)(float)value.GetElement(3))
                 .AsInt32();
         }
 
@@ -4457,11 +3792,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> warp)
         {
             var value = CastIToF32(warp);
-            return Vector128.Create(
-                (Half)(float)value.GetElement(0),
-                (Half)(float)value.GetElement(1),
-                (Half)(float)value.GetElement(2),
-                (Half)(float)value.GetElement(3))
+            return Vector128.Create((Half)(float)value.GetElement(0), (Half)(float)value.GetElement(1), (Half)(float)value.GetElement(2), (Half)(float)value.GetElement(3))
                 .AsInt32();
         }
 

@@ -31,9 +31,32 @@ namespace ILGPU.Runtime.Velocity
         public static Context.Builder AllVelocity(this Context.Builder builder)
         {
             foreach (var deviceType in Enum.GetValues<VelocityDeviceType>())
-                builder.Velocity(deviceType);
+            {
+                if (IsHardwareAccelerated(deviceType))
+                    builder.Velocity(deviceType);
+            }
             return builder;
         }
+
+        /// <summary>
+        /// Returns true if the vectors of the given device type are executed by the
+        /// hardware (the others run through the slower software fallback of .NET).
+        /// </summary>
+        /// <param name="deviceType">The Velocity device type.</param>
+        public static bool IsHardwareAccelerated(VelocityDeviceType deviceType) =>
+            deviceType switch
+            {
+                VelocityDeviceType.Scalar2 => true,
+#if NET7_0_OR_GREATER
+                VelocityDeviceType.Vector128 =>
+                    System.Runtime.Intrinsics.Vector128.IsHardwareAccelerated,
+                VelocityDeviceType.Vector256 =>
+                    System.Runtime.Intrinsics.Vector256.IsHardwareAccelerated,
+                VelocityDeviceType.Vector512 =>
+                    System.Runtime.Intrinsics.Vector512.IsHardwareAccelerated,
+#endif
+                _ => false,
+            };
 
         /// <summary>
         /// Enables the Velocity device with the maximum vector length supported by the

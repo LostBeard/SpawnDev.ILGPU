@@ -119,6 +119,17 @@ namespace ILGPU.Runtime.Velocity
         public void Reset() => sharedMemoryOffset = 0;
 
         /// <summary>
+        /// Gets the internal shared memory offset: the bytes allocated so far.
+        /// </summary>
+        public int Offset => sharedMemoryOffset;
+
+        /// <summary>
+        /// Resets the internal shared memory offset to the given one, which keeps the
+        /// allocations before it.
+        /// </summary>
+        public void ResetTo(int offset) => sharedMemoryOffset = offset;
+
+        /// <summary>
         /// Gets a chunk of memory of a certain type.
         /// </summary>
         /// <param name="length">The number of elements.</param>

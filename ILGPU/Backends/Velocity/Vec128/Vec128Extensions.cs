@@ -38,7 +38,7 @@ namespace ILGPU.Backends.Velocity.Vec128
         internal static int BarrierPopCount32Scalar(
             Vector128<int> mask,
             Vector128<int> warp) =>
-            -Vector.Sum(AndI32(mask, warp).AsVector());
+            -Vector128.Sum(AndI32(mask, warp));
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static Vector128<int> BarrierPopCount32(
@@ -53,8 +53,8 @@ namespace ILGPU.Backends.Velocity.Vec128
         {
             var parts = AndI64(Convert32To64I(mask), warp);
             return -(int)(
-                Vector.Sum(parts.Item1.AsVector()) -
-                Vector.Sum(parts.Item2.AsVector()));
+                Vector128.Sum(parts.Item1) +
+                Vector128.Sum(parts.Item2));
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

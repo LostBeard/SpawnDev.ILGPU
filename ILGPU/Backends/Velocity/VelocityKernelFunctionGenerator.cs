@@ -77,6 +77,11 @@ namespace ILGPU.Backends.Velocity
             nameof(Math.Min),
             new Type[] { typeof(int), typeof(int) }).AsNotNull();
 
+        private static readonly MethodInfo BeginIterationMethod =
+            typeof(ILGPU.Runtime.Velocity.VelocityGroupExecutionContext).GetMethod(
+                nameof(ILGPU.Runtime.Velocity.VelocityGroupExecutionContext.BeginIteration))
+            .AsNotNull();
+
         public EntryPoint EntryPoint { get; }
 
         /// <summary>
@@ -175,6 +180,12 @@ namespace ILGPU.Backends.Velocity
                 CompareKind.LessThan,
                 VelocityWarpOperationMode.I);
             Emitter.Emit(LocalOperation.Store, baseGroupMask);
+
+            // A new iteration (one warp of a group) frees the memory of the previous one
+            Emitter.Emit(OpCodes.Ldarg_0);
+            Emitter.Emit(LocalOperation.Load, globalIndex);
+            Emitter.Emit(ArgumentOperation.Load, GlobalGroupDimIndex);
+            Emitter.EmitCall(BeginIterationMethod);
 
             // Build our execution body
             {

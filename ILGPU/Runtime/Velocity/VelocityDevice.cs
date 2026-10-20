@@ -14,6 +14,8 @@ using ILGPU.Backends.Velocity;
 using ILGPU.Backends.Velocity.Scalar;
 #if NET7_0_OR_GREATER
 using ILGPU.Backends.Velocity.Vec128;
+using ILGPU.Backends.Velocity.Vec256;
+using ILGPU.Backends.Velocity.Vec512;
 #endif
 using ILGPU.Util;
 using System;
@@ -36,6 +38,18 @@ namespace ILGPU.Runtime.Velocity
         /// acceleration via AdvSimd and SSE/AVX.
         /// </summary>
         Vector128,
+
+        /// <summary>
+        /// 256bit vector operations to simulate eight lanes per warp using hardware
+        /// acceleration via AVX2.
+        /// </summary>
+        Vector256,
+
+        /// <summary>
+        /// 512bit vector operations to simulate sixteen lanes per warp using hardware
+        /// acceleration via AVX-512.
+        /// </summary>
+        Vector512,
 
 #endif
     }
@@ -74,6 +88,8 @@ namespace ILGPU.Runtime.Velocity
             () => new Scalar(),
 #if NET7_0_OR_GREATER
             () => new Vec128(),
+            () => new Vec256(),
+            () => new Vec512(),
 #endif
         };
 
@@ -94,7 +110,9 @@ namespace ILGPU.Runtime.Velocity
                     break;
 #if NET7_0_OR_GREATER
                 case VelocityDeviceType.Vector128:
-                    // Vector always runs using software in the worst case
+                case VelocityDeviceType.Vector256:
+                case VelocityDeviceType.Vector512:
+                    // Vectors always run using software in the worst case
                     break;
 #endif
                 default:

@@ -32,10 +32,12 @@ Device types:
 
 | `VelocityDeviceType` | Lanes per warp | Notes |
 |---|---|---|
-| `Vector128` | 4 | The one to use. Software fallback on hardware without 128-bit vectors. |
-| `Scalar2` | 2 | No SIMD vectors; a fallback that runs the same tests through a second set of operations (`VelocityScalar2Tests`, not in the default lane list). |
+| `Vector128` | 4 | The default. SSE / AdvSimd; software fallback on hardware without 128-bit vectors. |
+| `Vector256` | 8 | AVX2. Faster on arithmetic-heavy kernels and on kernels with barriers, see the table below; the same on memory-bound kernels. |
+| `Vector512` | 16 | AVX-512. Fastest on arithmetic-heavy kernels and barriers, slower on kernels that gather many scalars (the matrix multiply below). |
+| `Scalar2` | 2 | No SIMD vectors; a fallback that runs the same tests through a second set of operations. |
 
-`builder.Velocity()` (no argument) registers both, in that order (Scalar2 is device 0).
+`builder.Velocity()` (no argument) registers `Scalar2` and `Vector128`, in that order (Scalar2 is device 0). `builder.AllVelocity()` registers every device type the hardware accelerates (`VelocityContextExtensions.IsHardwareAccelerated`). All four run the whole shared test suite (`VelocityTests`, `VelocityVector256Tests`, `VelocityVector512Tests`, `VelocityScalar2Tests`); only `VelocityTests` is in the default lane list.
 
 ### Selecting it with the other backends
 
@@ -75,12 +77,24 @@ MEASURED on a PC with 12 logical processors, .NET 10 Release (full numbers and t
 
 The first three rows are ML kernels, 2 timed iterations, measured at the start of the Velocity work (identical results); the last two after the barrier work. Group-per-row kernels with barriers are where the plain CPU backend is pathologically slow (barriers between emulated threads); plain elementwise and matrix kernels gain the SIMD factor. Several test processes at once (PMT runs four CPU lanes in parallel) each want all processors and slow each other down.
 
+### Vector widths
+
+MEASURED on the same PC (AVX-512, best of 3 to 5 runs):
+
+| Kernel | CPU backend | Scalar2 | Vector128 | Vector256 | Vector512 |
+|---|---|---|---|---|---|
+| elementwise `c = a*b + a`, 16 M floats (memory bound) | 36.7 ms | 19.5 ms | 9.3 ms | 9.6 ms | 9.3 ms |
+| compute bound, 16 M x 64 multiply-adds | 141.2 ms | 430.3 ms | 38.3 ms | 21.9 ms | 17.8 ms |
+| matmul 512 x 512 x 512 (global loads, `Index2D`) | 117.7 ms | 53.1 ms | 29.5 ms | 30.1 ms | 42.8 ms |
+| row reduce 4096 x 2048 (groups of 16 with barriers) | 941.6 ms | 18.1 ms | 4.9 ms | 2.8 ms | 2.1 ms |
+
+Arithmetic scales with the width (2.2x from 128 to 512 bits); memory-bound kernels do not move; barrier kernels gain because the preferred group of 16 threads is four warps on `Vector128`, two on `Vector256` and one on `Vector512` (fewer threads meet at a barrier). Loads and stores are per lane (the warp's addresses are not assumed contiguous), so a kernel that gathers many scalars builds its vectors from scalars, which costs more the wider they are (matmul on `Vector512`). `Vector128` stays the default; try `Vector256` for arithmetic-heavy kernels and measure your own. `Scalar2` is only for the tests: on arithmetic it is slower than the plain CPU backend.
+
 ## Limits and known gaps
 
 - A method without a body (an internal call nothing implements) fails to compile instead of returning a wrong value.
 - Groups above 256 threads are rejected at launch.
 - The CPU backend's debugger-friendly behavior (stepping through the original IL) does not exist here: the kernel is compiled to different IL. Debug a kernel on the CPU backend, then run it on Velocity.
-- 128-bit vectors only (`Vector256` / `Vector512` device types are not implemented).
 - `Group.BarrierAnd/Or/PopCount` and the other group operations behave like CUDA on Velocity; on the plain CPU backend `BarrierAnd` after other predicate barriers is wrong for one thread, and OpenCL's `BarrierAnd` is wrong for an 8-thread group (found by the shared tests, not fixed there).
 
 ## Tests

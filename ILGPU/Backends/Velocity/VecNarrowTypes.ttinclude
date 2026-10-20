@@ -1,0 +1,119 @@
+// ---------------------------------------------------------------------------------------
+//                                        ILGPU
+//                           Copyright (c) 2026 ILGPU Project
+//                                    www.ilgpu.net
+//
+// File: Vec<#= vecBits #>Operations.NarrowTypes.cs
+//
+// This file is part of ILGPU and is distributed under the University of Illinois Open
+// Source License. See LICENSE.txt for details.
+// ---------------------------------------------------------------------------------------
+
+// Operations of the low precision types (see VelocityNarrowTypes), generated for every
+// vector width by VecNarrowTypes.ttinclude
+
+<#
+string vecName = "Vector" + vecBits;
+string opsClass = "Vec" + vecBits + "Operations";
+int warpSize = vecBits / 32;
+int half = warpSize / 2;
+string Join(int from, int to, Func<int, string> f) =>
+    string.Join(", ", Enumerable.Range(from, to - from).Select(f));
+string GetItemRef64(string name, int counter) => counter < half
+    ? $"{name}.Item1.GetElement({counter})"
+    : $"{name}.Item2.GetElement({counter - half})";
+var kinds = new (string Short, string Basic)[]
+{
+    ("F16", "Float16"), ("BF16", "BFloat16"), ("E4M3", "Float8E4M3"), ("E5M2", "Float8E5M2"), ("E2M1", "Float4E2M1"),
+};
+#>
+using System;
+using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Runtime.Intrinsics;
+
+#if NET7_0_OR_GREATER
+
+namespace ILGPU.Backends.Velocity.Vec<#= vecBits #>
+{
+    static partial class <#= opsClass #>
+    {
+        #region Low Precision Types
+
+<# foreach (var (k, basic) in kinds) { #>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static <#= vecName #><int> DecodeNarrow<#= k #>(<#= vecName #><int> warp) =>
+            <#= vecName #>.Create(<#= Join(0, warpSize, i => "BitConverter.SingleToInt32Bits(VelocityNarrowTypes.Decode" + k + "(warp.GetElement(" + i + ")))") #>);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static <#= vecName #><int> EncodeNarrow<#= k #>(<#= vecName #><int> warp) =>
+            <#= vecName #>.Create(<#= Join(0, warpSize, i => "VelocityNarrowTypes.Encode" + k + "(BitConverter.Int32BitsToSingle(warp.GetElement(" + i + ")))") #>);
+
+<# } #>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static <#= vecName #><int> SignExtendNibble(<#= vecName #><int> warp) =>
+            <#= vecName #>.ShiftRightArithmetic(<#= vecName #>.ShiftLeft(warp, 28), 28);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static <#= vecName #><int> MaskNibble(<#= vecName #><int> warp) =>
+            warp & <#= vecName #>.Create(0xF);
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static unsafe <#= vecName #><int> LoadNibble(
+            <#= vecName #><int> mask,
+            (<#= vecName #><long>, <#= vecName #><long>) address)
+        {
+<# for (int i = 0; i < warpSize; ++i) { #>
+            int result<#= i #> = mask.GetElement(<#= i #>) != 0
+                ? VelocityNarrowTypes.LoadNibble(<#= GetItemRef64("address", i) #>)
+                : 0;
+<# } #>
+            return <#= vecName #>.Create(<#= Join(0, warpSize, i => "result" + i) #>);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static unsafe void StoreNibble(
+            <#= vecName #><int> mask,
+            (<#= vecName #><long>, <#= vecName #><long>) address,
+            <#= vecName #><int> value)
+        {
+<# for (int i = 0; i < warpSize; ++i) { #>
+            if (mask.GetElement(<#= i #>) != 0)
+                VelocityNarrowTypes.StoreNibble(<#= GetItemRef64("address", i) #>, value.GetElement(<#= i #>));
+<# } #>
+        }
+
+        public static readonly MethodInfo SignExtendNibbleMethod =
+            GetMethod(nameof(SignExtendNibble));
+        public static readonly MethodInfo MaskNibbleMethod =
+            GetMethod(nameof(MaskNibble));
+        public static readonly MethodInfo LoadNibbleMethod =
+            GetMethod(nameof(LoadNibble));
+        public static readonly MethodInfo StoreNibbleMethod =
+            GetMethod(nameof(StoreNibble));
+
+        /// <summary>Gets the operation that converts the lanes of a low precision float from its bits.</summary>
+        public static MethodInfo GetDecodeNarrowOperation(BasicValueType valueType) =>
+            valueType switch
+            {
+<# foreach (var (k, basic) in kinds) { #>
+                BasicValueType.<#= basic #> => GetMethod(nameof(DecodeNarrow<#= k #>)),
+<# } #>
+                _ => throw new NotSupportedException(valueType.ToString()),
+            };
+
+        /// <summary>Gets the operation that converts the lanes of a low precision float to its bits.</summary>
+        public static MethodInfo GetEncodeNarrowOperation(BasicValueType valueType) =>
+            valueType switch
+            {
+<# foreach (var (k, basic) in kinds) { #>
+                BasicValueType.<#= basic #> => GetMethod(nameof(EncodeNarrow<#= k #>)),
+<# } #>
+                _ => throw new NotSupportedException(valueType.ToString()),
+            };
+
+        #endregion
+    }
+}
+
+#endif

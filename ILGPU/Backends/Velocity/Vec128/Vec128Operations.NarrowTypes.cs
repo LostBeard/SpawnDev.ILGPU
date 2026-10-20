@@ -9,8 +9,8 @@
 // Source License. See LICENSE.txt for details.
 // ---------------------------------------------------------------------------------------
 
-// Operations of the low precision types (see VelocityNarrowTypes): hand written, not
-// generated from the T4 template, to keep the template free of the type specifics
+// Operations of the low precision types (see VelocityNarrowTypes), generated for every
+// vector width by VecNarrowTypes.ttinclude
 
 using System;
 using System.Reflection;
@@ -26,79 +26,57 @@ namespace ILGPU.Backends.Velocity.Vec128
         #region Low Precision Types
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal static Vector128<int> DecodeNarrowF16(Vector128<int> warp)
-        {
-            return Vector128.Create(BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeF16(warp.GetElement(0))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeF16(warp.GetElement(1))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeF16(warp.GetElement(2))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeF16(warp.GetElement(3))));
-        }
+        internal static Vector128<int> DecodeNarrowF16(Vector128<int> warp) =>
+            Vector128.Create(BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeF16(warp.GetElement(0))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeF16(warp.GetElement(1))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeF16(warp.GetElement(2))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeF16(warp.GetElement(3))));
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal static Vector128<int> EncodeNarrowF16(Vector128<int> warp)
-        {
-            return Vector128.Create(VelocityNarrowTypes.EncodeF16(BitConverter.Int32BitsToSingle(warp.GetElement(0))), VelocityNarrowTypes.EncodeF16(BitConverter.Int32BitsToSingle(warp.GetElement(1))), VelocityNarrowTypes.EncodeF16(BitConverter.Int32BitsToSingle(warp.GetElement(2))), VelocityNarrowTypes.EncodeF16(BitConverter.Int32BitsToSingle(warp.GetElement(3))));
-        }
+        internal static Vector128<int> EncodeNarrowF16(Vector128<int> warp) =>
+            Vector128.Create(VelocityNarrowTypes.EncodeF16(BitConverter.Int32BitsToSingle(warp.GetElement(0))), VelocityNarrowTypes.EncodeF16(BitConverter.Int32BitsToSingle(warp.GetElement(1))), VelocityNarrowTypes.EncodeF16(BitConverter.Int32BitsToSingle(warp.GetElement(2))), VelocityNarrowTypes.EncodeF16(BitConverter.Int32BitsToSingle(warp.GetElement(3))));
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal static Vector128<int> DecodeNarrowBF16(Vector128<int> warp)
-        {
-            return Vector128.Create(BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeBF16(warp.GetElement(0))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeBF16(warp.GetElement(1))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeBF16(warp.GetElement(2))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeBF16(warp.GetElement(3))));
-        }
+        internal static Vector128<int> DecodeNarrowBF16(Vector128<int> warp) =>
+            Vector128.Create(BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeBF16(warp.GetElement(0))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeBF16(warp.GetElement(1))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeBF16(warp.GetElement(2))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeBF16(warp.GetElement(3))));
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal static Vector128<int> EncodeNarrowBF16(Vector128<int> warp)
-        {
-            return Vector128.Create(VelocityNarrowTypes.EncodeBF16(BitConverter.Int32BitsToSingle(warp.GetElement(0))), VelocityNarrowTypes.EncodeBF16(BitConverter.Int32BitsToSingle(warp.GetElement(1))), VelocityNarrowTypes.EncodeBF16(BitConverter.Int32BitsToSingle(warp.GetElement(2))), VelocityNarrowTypes.EncodeBF16(BitConverter.Int32BitsToSingle(warp.GetElement(3))));
-        }
+        internal static Vector128<int> EncodeNarrowBF16(Vector128<int> warp) =>
+            Vector128.Create(VelocityNarrowTypes.EncodeBF16(BitConverter.Int32BitsToSingle(warp.GetElement(0))), VelocityNarrowTypes.EncodeBF16(BitConverter.Int32BitsToSingle(warp.GetElement(1))), VelocityNarrowTypes.EncodeBF16(BitConverter.Int32BitsToSingle(warp.GetElement(2))), VelocityNarrowTypes.EncodeBF16(BitConverter.Int32BitsToSingle(warp.GetElement(3))));
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal static Vector128<int> DecodeNarrowE4M3(Vector128<int> warp)
-        {
-            return Vector128.Create(BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE4M3(warp.GetElement(0))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE4M3(warp.GetElement(1))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE4M3(warp.GetElement(2))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE4M3(warp.GetElement(3))));
-        }
+        internal static Vector128<int> DecodeNarrowE4M3(Vector128<int> warp) =>
+            Vector128.Create(BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE4M3(warp.GetElement(0))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE4M3(warp.GetElement(1))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE4M3(warp.GetElement(2))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE4M3(warp.GetElement(3))));
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal static Vector128<int> EncodeNarrowE4M3(Vector128<int> warp)
-        {
-            return Vector128.Create(VelocityNarrowTypes.EncodeE4M3(BitConverter.Int32BitsToSingle(warp.GetElement(0))), VelocityNarrowTypes.EncodeE4M3(BitConverter.Int32BitsToSingle(warp.GetElement(1))), VelocityNarrowTypes.EncodeE4M3(BitConverter.Int32BitsToSingle(warp.GetElement(2))), VelocityNarrowTypes.EncodeE4M3(BitConverter.Int32BitsToSingle(warp.GetElement(3))));
-        }
+        internal static Vector128<int> EncodeNarrowE4M3(Vector128<int> warp) =>
+            Vector128.Create(VelocityNarrowTypes.EncodeE4M3(BitConverter.Int32BitsToSingle(warp.GetElement(0))), VelocityNarrowTypes.EncodeE4M3(BitConverter.Int32BitsToSingle(warp.GetElement(1))), VelocityNarrowTypes.EncodeE4M3(BitConverter.Int32BitsToSingle(warp.GetElement(2))), VelocityNarrowTypes.EncodeE4M3(BitConverter.Int32BitsToSingle(warp.GetElement(3))));
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal static Vector128<int> DecodeNarrowE5M2(Vector128<int> warp)
-        {
-            return Vector128.Create(BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE5M2(warp.GetElement(0))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE5M2(warp.GetElement(1))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE5M2(warp.GetElement(2))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE5M2(warp.GetElement(3))));
-        }
+        internal static Vector128<int> DecodeNarrowE5M2(Vector128<int> warp) =>
+            Vector128.Create(BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE5M2(warp.GetElement(0))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE5M2(warp.GetElement(1))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE5M2(warp.GetElement(2))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE5M2(warp.GetElement(3))));
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal static Vector128<int> EncodeNarrowE5M2(Vector128<int> warp)
-        {
-            return Vector128.Create(VelocityNarrowTypes.EncodeE5M2(BitConverter.Int32BitsToSingle(warp.GetElement(0))), VelocityNarrowTypes.EncodeE5M2(BitConverter.Int32BitsToSingle(warp.GetElement(1))), VelocityNarrowTypes.EncodeE5M2(BitConverter.Int32BitsToSingle(warp.GetElement(2))), VelocityNarrowTypes.EncodeE5M2(BitConverter.Int32BitsToSingle(warp.GetElement(3))));
-        }
+        internal static Vector128<int> EncodeNarrowE5M2(Vector128<int> warp) =>
+            Vector128.Create(VelocityNarrowTypes.EncodeE5M2(BitConverter.Int32BitsToSingle(warp.GetElement(0))), VelocityNarrowTypes.EncodeE5M2(BitConverter.Int32BitsToSingle(warp.GetElement(1))), VelocityNarrowTypes.EncodeE5M2(BitConverter.Int32BitsToSingle(warp.GetElement(2))), VelocityNarrowTypes.EncodeE5M2(BitConverter.Int32BitsToSingle(warp.GetElement(3))));
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal static Vector128<int> DecodeNarrowE2M1(Vector128<int> warp)
-        {
-            return Vector128.Create(BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE2M1(warp.GetElement(0))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE2M1(warp.GetElement(1))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE2M1(warp.GetElement(2))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE2M1(warp.GetElement(3))));
-        }
+        internal static Vector128<int> DecodeNarrowE2M1(Vector128<int> warp) =>
+            Vector128.Create(BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE2M1(warp.GetElement(0))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE2M1(warp.GetElement(1))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE2M1(warp.GetElement(2))), BitConverter.SingleToInt32Bits(VelocityNarrowTypes.DecodeE2M1(warp.GetElement(3))));
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal static Vector128<int> EncodeNarrowE2M1(Vector128<int> warp)
-        {
-            return Vector128.Create(VelocityNarrowTypes.EncodeE2M1(BitConverter.Int32BitsToSingle(warp.GetElement(0))), VelocityNarrowTypes.EncodeE2M1(BitConverter.Int32BitsToSingle(warp.GetElement(1))), VelocityNarrowTypes.EncodeE2M1(BitConverter.Int32BitsToSingle(warp.GetElement(2))), VelocityNarrowTypes.EncodeE2M1(BitConverter.Int32BitsToSingle(warp.GetElement(3))));
-        }
+        internal static Vector128<int> EncodeNarrowE2M1(Vector128<int> warp) =>
+            Vector128.Create(VelocityNarrowTypes.EncodeE2M1(BitConverter.Int32BitsToSingle(warp.GetElement(0))), VelocityNarrowTypes.EncodeE2M1(BitConverter.Int32BitsToSingle(warp.GetElement(1))), VelocityNarrowTypes.EncodeE2M1(BitConverter.Int32BitsToSingle(warp.GetElement(2))), VelocityNarrowTypes.EncodeE2M1(BitConverter.Int32BitsToSingle(warp.GetElement(3))));
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal static Vector128<int> SignExtendNibble(Vector128<int> warp)
-        {
-            return Vector128.ShiftRightArithmetic(Vector128.ShiftLeft(warp, 28), 28);
-        }
+        internal static Vector128<int> SignExtendNibble(Vector128<int> warp) =>
+            Vector128.ShiftRightArithmetic(Vector128.ShiftLeft(warp, 28), 28);
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal static Vector128<int> MaskNibble(Vector128<int> warp)
-        {
-            return warp & Vector128.Create(0xF);
-        }
+        internal static Vector128<int> MaskNibble(Vector128<int> warp) =>
+            warp & Vector128.Create(0xF);
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal static unsafe Vector128<int> LoadNibble(Vector128<int> mask, (Vector128<long>, Vector128<long>) address)
+        internal static unsafe Vector128<int> LoadNibble(
+            Vector128<int> mask,
+            (Vector128<long>, Vector128<long>) address)
         {
             int result0 = mask.GetElement(0) != 0
                 ? VelocityNarrowTypes.LoadNibble(address.Item1.GetElement(0))
@@ -116,7 +94,10 @@ namespace ILGPU.Backends.Velocity.Vec128
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal static unsafe void StoreNibble(Vector128<int> mask, (Vector128<long>, Vector128<long>) address, Vector128<int> value)
+        internal static unsafe void StoreNibble(
+            Vector128<int> mask,
+            (Vector128<long>, Vector128<long>) address,
+            Vector128<int> value)
         {
             if (mask.GetElement(0) != 0)
                 VelocityNarrowTypes.StoreNibble(address.Item1.GetElement(0), value.GetElement(0));
