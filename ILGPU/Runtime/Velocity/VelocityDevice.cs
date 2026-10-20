@@ -50,11 +50,23 @@ namespace ILGPU.Runtime.Velocity
         #region Static
 
         /// <summary>
-        /// The maximum number of threads of a group. A group of more than a warp that
-        /// has barriers runs one thread per warp (256 threads = 64 warps of 4 lanes),
-        /// so this is not raised to the 1024 of a GPU.
+        /// The most threads a group can be launched with. A group of more than a warp
+        /// that has barriers runs one thread per warp (256 threads = 64 warps of 4
+        /// lanes), so this is not raised to the 1024 of a GPU.
         /// </summary>
         private const int MaxGroupThreads = 256;
+
+        /// <summary>
+        /// The group size that algorithms and kernels pick (they read
+        /// <see cref="Device.MaxNumThreadsPerGroup"/>): 16 threads, 4 warps of 4 lanes.
+        /// Measured (radix sort of 1.4 M keys, 12 processors): 16 threads 8.7 s, 32
+        /// threads 10.5 s, 64 threads 40 s, 256 threads 48 s: the warps of a group with
+        /// barriers are threads, and a barrier is only cheap while all of them are
+        /// running at the same time (0.7 us with up to 12 warps on 12 processors, 15 to
+        /// 60 us with 16 to 64). 16 is the least the radix sort accepts (16 counters,
+        /// one per thread) and leaves room for several groups at once (teams).
+        /// </summary>
+        private const int PreferredGroupThreads = 16;
 
         private static readonly Func<VelocityTargetSpecializer>[] VelocitySpecializers =
             new Func<VelocityTargetSpecializer>[]
@@ -99,14 +111,14 @@ namespace ILGPU.Runtime.Velocity
             // per warp (VelocityGroupTeamRunner). Algorithms divide the threads of a
             // multiprocessor by the group size, so a multiprocessor holds a full group.
             MaxNumThreadsPerGroup = MaxNumThreadsPerMultiprocessor =
-                Math.Max(WarpSize, MaxGroupThreads);
+                Math.Max(WarpSize, PreferredGroupThreads);
 #if DEBUG
             NumMultiprocessors = 1;
 #else
             NumMultiprocessors = Environment.ProcessorCount;
 #endif
             MaxGroupSize = new Index3D(
-                MaxNumThreadsPerGroup,
+                Math.Max(MaxNumThreadsPerGroup, MaxGroupThreads),
                 1,
                 1);
 

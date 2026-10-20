@@ -24,19 +24,35 @@ namespace ILGPU.Runtime.Velocity
     /// </summary>
     sealed class VelocityGroupBarrier
     {
+        /// <summary>
+        /// Rounds of <see cref="Thread.SpinWait(int)"/> (8 iterations each, a few
+        /// microseconds in all) a waiting warp spins before it yields its processor.
+        /// </summary>
+        private const int SpinsBeforeYield = 200;
+
+        /// <summary>
+        /// True when more threads than processors take part in the launch (set per launch):
+        /// a waiting warp must then give its processor up at once, as spinning would burn
+        /// the time slice of a thread that is needed to complete the barrier.
+        /// </summary>
+        public bool Oversubscribed { get; set; }
+
         private readonly object sync = new();
         private readonly int initialParticipants;
-        private int participants;
-        private int arrived;
         private volatile int phase;
         private volatile bool aborted;
+
+        // The warps that take part (high 32 bits) and the ones that have arrived (low 32
+        // bits) in one word: arriving and leaving are compare-and-swap loops, no lock
+        private long state;
 
         /// <summary>
         /// Constructs a barrier for the given number of warps.
         /// </summary>
         public VelocityGroupBarrier(int participants)
         {
-            initialParticipants = this.participants = participants;
+            initialParticipants = participants;
+            state = (long)participants << 32;
         }
 
         /// <summary>
@@ -46,9 +62,8 @@ namespace ILGPU.Runtime.Velocity
         {
             lock (sync)
             {
-                participants = initialParticipants;
-                arrived = 0;
                 aborted = false;
+                Volatile.Write(ref state, (long)initialParticipants << 32);
             }
         }
 
@@ -68,27 +83,56 @@ namespace ILGPU.Runtime.Velocity
         /// </summary>
         public void SignalAndWait()
         {
-            int myPhase;
-            lock (sync)
+            // No warp can complete this round before this one has arrived, so the phase
+            // read here is the phase of this round
+            int myPhase = phase;
+            while (true)
             {
                 if (aborted)
                     throw new OperationCanceledException();
-                myPhase = phase;
-                if (++arrived >= participants)
+                long s = Volatile.Read(ref state);
+                int parts = (int)(s >> 32), arr = (int)s;
+                if (arr + 1 >= parts)
                 {
-                    // The last warp releases the others
-                    arrived = 0;
-                    phase = myPhase + 1;
-                    return;
+                    // The last warp: re-arm, then release the others by advancing the phase
+                    if (Interlocked.CompareExchange(ref state, (long)parts << 32, s) == s)
+                    {
+                        phase = myPhase + 1;
+                        return;
+                    }
+                }
+                else if (Interlocked.CompareExchange(ref state, s + 1, s) == s)
+                {
+                    break;
                 }
             }
 
-            // Spin first (the warps usually arrive within microseconds), then give the
-            // processor to a warp that has not arrived: more warps than processors must
-            // still make progress, so this never sleeps for a millisecond
-            var spinner = new SpinWait();
-            while (phase == myPhase)
-                spinner.SpinOnce(-1);
+            // Spin first while every warp of the launch has a processor (they arrive
+            // within microseconds), then give the processor up; with more warps than
+            // processors a spinning warp would only burn the time slice of the one that
+            // is needed, so it yields at once and never sleeps for a millisecond
+            if (Oversubscribed)
+            {
+                var spinner = new SpinWait();
+                while (phase == myPhase)
+                    spinner.SpinOnce(-1);
+            }
+            else
+            {
+                int spins = 0;
+                while (phase == myPhase)
+                {
+                    if (++spins < SpinsBeforeYield)
+                    {
+                        Thread.SpinWait(8);
+                    }
+                    else
+                    {
+                        Thread.Yield();
+                        spins = 0;
+                    }
+                }
+            }
             if (aborted)
                 throw new OperationCanceledException();
         }
@@ -99,19 +143,29 @@ namespace ILGPU.Runtime.Velocity
         /// </summary>
         public void Leave()
         {
-            lock (sync)
+            while (true)
             {
-                if (--participants <= 0)
+                long s = Volatile.Read(ref state);
+                int parts = (int)(s >> 32), arr = (int)s;
+                int newParts = parts - 1;
+                if (newParts <= 0)
                 {
                     // Everybody is done: ready for the next group
-                    participants = initialParticipants;
-                    arrived = 0;
+                    if (Interlocked.CompareExchange(ref state, (long)initialParticipants << 32, s) == s)
+                        return;
                 }
-                else if (arrived >= participants)
+                else if (arr >= newParts)
                 {
                     // The warps that were waiting for this one are complete now
-                    arrived = 0;
-                    phase++;
+                    if (Interlocked.CompareExchange(ref state, (long)newParts << 32, s) == s)
+                    {
+                        phase++;
+                        return;
+                    }
+                }
+                else if (Interlocked.CompareExchange(ref state, ((long)newParts << 32) | (uint)arr, s) == s)
+                {
+                    return;
                 }
             }
         }

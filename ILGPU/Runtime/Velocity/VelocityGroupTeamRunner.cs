@@ -108,9 +108,12 @@ namespace ILGPU.Runtime.Velocity
             while (cached.Count < teams)
                 cached.Add(new VelocityGroupTeam(accelerator, numWarps));
             var teamObjects = new VelocityGroupTeam[teams];
+            bool oversubscribed = workersNeeded > accelerator.NumMultiprocessors;
             for (int i = 0; i < teams; ++i)
             {
                 teamObjects[i] = cached[i];
+                teamObjects[i].KernelBarrier.Oversubscribed = oversubscribed;
+                teamObjects[i].GroupEnd.Oversubscribed = oversubscribed;
                 teamObjects[i].KernelBarrier.Reset();    // a failed launch left them aborted
                 teamObjects[i].GroupEnd.Reset();
             }
