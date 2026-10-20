@@ -2117,7 +2117,12 @@ namespace ILGPU.Backends.Velocity.Vec128
             var left = CastIToF32(first);
             var right = CastIToF32(second);
 
-            var result = left - left / right * right;
+            // x - x / y * y has no truncation: a float remainder is the IEEE fmod of every lane (what the CPU backend computes)
+            var result = Vector128.Create(
+                left.GetElement(0) % right.GetElement(0),
+                left.GetElement(1) % right.GetElement(1),
+                left.GetElement(2) % right.GetElement(2),
+                left.GetElement(3) % right.GetElement(3));
             return CastFToI32(result);
         }
 
@@ -2159,9 +2164,14 @@ namespace ILGPU.Backends.Velocity.Vec128
             var left = CastIToF64(first);
             var right = CastIToF64(second);
 
+            // x - x / y * y has no truncation: a float remainder is the IEEE fmod of every lane (what the CPU backend computes)
             var result = (
-                left.Item1 - left.Item1 / right.Item1 * right.Item1,
-                left.Item2 - left.Item2 / right.Item2 * right.Item2);
+                Vector128.Create(
+                    left.Item1.GetElement(0) % right.Item1.GetElement(0),
+                    left.Item1.GetElement(1) % right.Item1.GetElement(1)),
+                Vector128.Create(
+                    left.Item2.GetElement(0) % right.Item2.GetElement(0),
+                    left.Item2.GetElement(1) % right.Item2.GetElement(1)));
 
             return CastFToI64(result);
         }

@@ -485,7 +485,14 @@ namespace ILGPU.Backends.Velocity.Vec128
             var left = <#= GetCastIToX32(prefix, "first") #>;
             var right = <#= GuardDivisor(op.Name, prefix, GetCastIToX32(prefix, "second")) #>;
 
-<#          if (velocity == null) { #>
+<#          if (op.Name == "Rem" && prefix == "F") { #>
+            // x - x / y * y has no truncation: a float remainder is the IEEE fmod of every lane (what the CPU backend computes)
+            var result = Vector128.Create(
+                left.GetElement(0) % right.GetElement(0),
+                left.GetElement(1) % right.GetElement(1),
+                left.GetElement(2) % right.GetElement(2),
+                left.GetElement(3) % right.GetElement(3));
+<#          } else if (velocity == null) { #>
             var result = <#= op.GetOpOrCall(isBool: false, "left", "right") #>;
 <#          } else if (velocity.SoftwareEmulation) { #>
             var result = Vector128.Create(
@@ -511,7 +518,16 @@ namespace ILGPU.Backends.Velocity.Vec128
             var left = <#= GetCastIToX64(prefix, "first") #>;
             var right = <#= GuardDivisor(op.Name, prefix, GetCastIToX64(prefix, "second")) #>;
 
-<#          if (velocity == null) { #>
+<#          if (op.Name == "Rem" && prefix == "F") { #>
+            // x - x / y * y has no truncation: a float remainder is the IEEE fmod of every lane (what the CPU backend computes)
+            var result = (
+                Vector128.Create(
+                    left.Item1.GetElement(0) % right.Item1.GetElement(0),
+                    left.Item1.GetElement(1) % right.Item1.GetElement(1)),
+                Vector128.Create(
+                    left.Item2.GetElement(0) % right.Item2.GetElement(0),
+                    left.Item2.GetElement(1) % right.Item2.GetElement(1)));
+<#          } else if (velocity == null) { #>
             var result = (
                 <#= op.GetOpOrCall(isBool: false, "left.Item1", "right.Item1") #>,
                 <#= op.GetOpOrCall(isBool: false, "left.Item2", "right.Item2") #>);

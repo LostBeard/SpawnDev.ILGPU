@@ -62,6 +62,11 @@ namespace ILGPU.Backends.Velocity.Analyses
         private readonly Dictionary<Loop, ILLocal> loopMasks = new();
 
         /// <summary>
+        /// Maps each loop to its exit block that is generated first.
+        /// </summary>
+        private readonly Dictionary<Loop, BasicBlock> firstExits = new();
+
+        /// <summary>
         /// Maps blocks to their input masks.
         /// </summary>
         private readonly BasicBlockMap<ILLocal> blockMasks;
@@ -82,6 +87,11 @@ namespace ILGPU.Backends.Velocity.Analyses
             loopBlocks = blocks.CreateSet();
             blockMasks = blocks.CreateMap<ILLocal>();
 
+            // The position of each block in the order the code is generated in
+            var blockIndices = new Dictionary<BasicBlock, int>();
+            foreach (var block in blocks)
+                blockIndices.Add(block, blockIndices.Count);
+
             // Iterate over all loops and determine all body blocks and all back edges
             var cfg = blocks.CreateCFG();
             loops = cfg.CreateLoops();
@@ -100,8 +110,15 @@ namespace ILGPU.Backends.Velocity.Analyses
                     loopBlocks.Add(block);
 
                 // Remember all exits
+                BasicBlock? firstExit = null;
                 foreach (var block in loop.Exits)
                 {
+                    if (firstExit is null ||
+                        blockIndices[block] < blockIndices[firstExit])
+                    {
+                        firstExit = block;
+                    }
+
                     if (!exitBlocks.TryGetValue(block, out var set))
                     {
                         set = new HashSet<Loop>(2)
@@ -115,6 +132,8 @@ namespace ILGPU.Backends.Velocity.Analyses
                     }
                     exitBlocks[block] = set;
                 }
+                if (firstExit is not null)
+                    firstExits[loop] = firstExit;
 
                 // Register all back edges
                 foreach (var backEdge in loop.BackEdges)
@@ -214,6 +233,19 @@ namespace ILGPU.Backends.Velocity.Analyses
             containsLoop = null;
             return false;
         }
+
+        /// <summary>
+        /// Returns the exit block of the given loop that is generated first. Lanes that
+        /// leave a loop wait in the mask of the exit block they leave to, and the loop
+        /// is done when no lane is left in it: leaving it has to continue with the first
+        /// exit block and flow through the others (a block without active lanes does
+        /// nothing), as jumping straight to one exit block would skip the lanes that
+        /// are waiting in an earlier one (an early return from a loop and the normal
+        /// exit are two exit blocks).
+        /// </summary>
+        /// <param name="loop">The loop to lookup.</param>
+        /// <returns>The first exit block of the loop.</returns>
+        public BasicBlock GetFirstExit(Loop loop) => firstExits[loop];
 
         /// <summary>
         /// Returns true if the given block is a target potentially hit from a back edge.

@@ -156,7 +156,10 @@ namespace ILGPU.Backends.Velocity
                         // we continue processing the exit block
                         codeGenerator.UnifyWithMaskOf(target, keepOnStack: false);
 
-                        targets.Add((target, () =>
+                        // Continue with the first exit block of the loop, not with this
+                        // target: lanes that left the loop through another exit block
+                        // (an early return and the normal exit) wait in that block's mask
+                        targets.Add((Masks.GetFirstExit(currentLoop.AsNotNull()), () =>
                         {
                             // Load loop mask to see whether we have any lanes left
                             Emitter.Emit(LocalOperation.Load, loopMask);
