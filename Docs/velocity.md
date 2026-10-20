@@ -5,7 +5,7 @@ Velocity is the desktop/server CPU backend that does real work. It compiles a ke
 Velocity is what you get on a CPU by default. Register the plain CPU backend explicitly when you want to debug a kernel.
 
 - **Desktop / server only.** It is not available in the browser (use the Wasm backend, which has its own SIMD128 path: [wasm-simd.md](wasm-simd.md)).
-- **The default CPU backend.** `AllAccelerators()` and `AllAcceleratorsAsync()` register Velocity in place of the plain CPU accelerator. The plain CPU accelerator is not registered any more; add it yourself for debugging (`builder.DefaultCPU()` or `builder.CPU()`). Where Velocity cannot run (the browser, 32-bit processes) the plain CPU accelerator is registered as before. A context with no registered accelerator still falls back to the default CPU device.
+- **The default CPU backend.** `AllAccelerators()` and `AllAcceleratorsAsync()` register Velocity in place of the plain CPU accelerator. The plain CPU accelerator is not registered any more; add it yourself for debugging (`builder.DefaultCPU()` or `builder.CPU()`). Where Velocity cannot run (32-bit processes) the plain CPU accelerator is registered as before; the browser registers no CPU accelerator at all (its backends are WebGPU, WebGL and Wasm). A context with no registered accelerator still falls back to the default CPU device.
 - Runs the whole shared SpawnDev.ILGPU test suite: **731 of 731 tests pass or are skipped** as capability gates (the `VelocityTests` lane; 677 pass / 0 fail / 56 skip).
 
 ## Using it

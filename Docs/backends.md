@@ -60,7 +60,7 @@ var results = await bufC.CopyToHostAsync<float>();   // The only GPU→CPU data 
 ```
 
 `AllAcceleratorsAsync()` automatically detects the environment:
-- **Browser:** Registers WebGPU, WebGL, and Wasm (plus ILGPU's CPU accelerator, the last-resort fallback; in the browser it runs on the single UI thread)
+- **Browser:** Registers WebGPU, WebGL, and Wasm (no CPU accelerator: the browser builds have no threads and the CPU backends are not tested there)
 - **Desktop:** Registers Cuda, OpenCL, and Velocity, the SIMD CPU backend (browser backends are skipped; the plain CPU accelerator is no longer registered)
 
 `CreatePreferredAcceleratorAsync()` picks the best available backend on either platform.
@@ -335,7 +335,7 @@ foreach (var device in context)
 
 ### Velocity (Desktop, SIMD CPU)
 
-The CPU backend that does real work. It compiles kernels like the GPU backends (vectorized IL over `Vector128<T>`, four lanes per warp) and runs them on all cores, with shared memory, barriers (a group with barriers runs as a team, one thread per warp), atomics, warp shuffles, the ILGPU Algorithms, 1D/2D/3D grids and groups of up to 256 threads, and the whole low-precision type tier. It is **the default CPU backend**: `AllAccelerators()` / `AllAcceleratorsAsync()` register it instead of the plain CPU accelerator (browser and 32-bit processes keep the plain one).
+The CPU backend that does real work. It compiles kernels like the GPU backends (vectorized IL over `Vector128<T>`, four lanes per warp) and runs them on all cores, with shared memory, barriers (a group with barriers runs as a team, one thread per warp), atomics, warp shuffles, the ILGPU Algorithms, 1D/2D/3D grids and groups of up to 256 threads, and the whole low-precision type tier. It is **the default CPU backend**: `AllAccelerators()` / `AllAcceleratorsAsync()` register it instead of the plain CPU accelerator (32-bit processes keep the plain one; the browser registers no CPU accelerator).
 
 ```csharp
 using ILGPU.Runtime.Velocity;

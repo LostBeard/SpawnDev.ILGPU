@@ -237,7 +237,7 @@ using global::ILGPU.Runtime;
 using SpawnDev.ILGPU;
 
 // SAME code as Blazor WASM - AllAcceleratorsAsync auto-detects the environment
-// Browser: registers WebGPU, WebGL, Wasm (+ ILGPU's CPU accelerator as a last resort)
+// Browser: registers WebGPU, WebGL, Wasm
 // Desktop: registers Cuda, OpenCL, Velocity (the SIMD CPU backend; browser backends are skipped)
 using var context = await Context.CreateAsync(builder => builder.AllAcceleratorsAsync());
 using var accelerator = await context.CreatePreferredAcceleratorAsync();
@@ -454,7 +454,7 @@ using var context = Context.Create(builder => builder.Velocity(VelocityDeviceTyp
 using var accelerator = context.CreateVelocityAccelerator(0);   // then the same kernels and API as every other backend
 ```
 
-MEASURED on a 12-processor PC: LayerNorm 1369 x 384 411 ms on the CPU backend, 0.69 ms on Velocity; MatMul 512^3 94 ms -> 43 ms; an at-scale inclusive scan 131 s -> 1 s; radix sort of 1.4 M keys 7.8 s -> 6.7 s. `AllAccelerators()` and `AllAcceleratorsAsync()` register Velocity instead of the plain CPU accelerator on desktop and server (browser and 32-bit processes keep the plain CPU accelerator); `GetBestDevice()` ranks it below every GPU backend and above the plain CPU backend. Details, limits and how it works: **[Docs/velocity.md](Docs/velocity.md)**; plan and measurements: [`Plans/velocity-as-production-cpu-backend-2026-10-20.md`](Plans/velocity-as-production-cpu-backend-2026-10-20.md).
+MEASURED on a 12-processor PC: LayerNorm 1369 x 384 411 ms on the CPU backend, 0.69 ms on Velocity; MatMul 512^3 94 ms -> 43 ms; an at-scale inclusive scan 131 s -> 1 s; radix sort of 1.4 M keys 7.8 s -> 6.7 s. `AllAccelerators()` and `AllAcceleratorsAsync()` register Velocity instead of the plain CPU accelerator on desktop and server (32-bit processes keep the plain CPU accelerator; the browser registers no CPU accelerator at all); `GetBestDevice()` ranks it below every GPU backend and above the plain CPU backend. Details, limits and how it works: **[Docs/velocity.md](Docs/velocity.md)**; plan and measurements: [`Plans/velocity-as-production-cpu-backend-2026-10-20.md`](Plans/velocity-as-production-cpu-backend-2026-10-20.md).
 
 ## Support This Project
 

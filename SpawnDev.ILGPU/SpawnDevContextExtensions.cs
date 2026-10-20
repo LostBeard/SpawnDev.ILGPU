@@ -27,14 +27,15 @@ namespace SpawnDev.ILGPU
     /// <summary>
     /// Unified context extensions for Blazor WebAssembly.
     /// Provides async device probing for all WASM-compatible backends
-    /// (WebGPU, WebGL, Wasm, CPU).
+    /// (WebGPU, WebGL, Wasm).
     /// </summary>
     public static class SpawnDevContextExtensions
     {
         #region Builder Extensions
 
         /// <summary>
-        /// Enables all supported WASM accelerators: CPU, WebGL, Wasm, and WebGPU.
+        /// Enables all supported accelerators. Browser: WebGPU, WebGL and Wasm (no CPU
+        /// accelerator). Desktop: Cuda, OpenCL and Velocity (the SIMD CPU backend).
         /// WebGPU requires async GPU probing, so this method is async.
         /// If WebGPU is not available, it is silently skipped.
         /// </summary>
@@ -46,7 +47,8 @@ namespace SpawnDev.ILGPU
             // Enable algorithms by default — users shouldn't need to call this manually
             builder.EnableAlgorithms();
 
-            // Synchronous backends first (CPU, OpenCL, Cuda — latter two fail silently in WASM)
+            // Synchronous backends first (Velocity as the CPU backend, OpenCL, Cuda: the browser
+            // registers none of them; there it is Wasm, WebGPU and WebGL below)
             builder.AllAccelerators();
 
             // Browser backends — only available in Blazor WebAssembly

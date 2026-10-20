@@ -95,21 +95,26 @@ namespace ILGPU
             /// registered here: enable it explicitly with
             /// <see cref="CPUContextExtensions.DefaultCPU(Builder)"/> or
             /// <see cref="CPUContextExtensions.CPU(Builder)"/>. Where Velocity cannot
-            /// run (browser, 32-bit processes) the default CPU accelerator is used
-            /// instead. A context without any registered accelerator still falls back
-            /// to the default CPU device.
+            /// run (32-bit processes) the default CPU accelerator is used instead. In
+            /// the browser no CPU accelerator is registered (the browser backends are
+            /// WebGPU, WebGL and Wasm, which SpawnDev's AllAcceleratorsAsync adds). A
+            /// context without any registered accelerator still falls back to the
+            /// default CPU device.
             /// </remarks>
             /// <returns>The current builder instance.</returns>
             public Builder AllAccelerators() => HostCompute().OpenCL().Cuda();
 
             /// <summary>
             /// Enables the CPU backend that does the work: Velocity, or the default CPU
-            /// accelerator where Velocity cannot run.
+            /// accelerator where Velocity cannot run (32-bit processes). Nothing in the
+            /// browser, where the CPU accelerators are not used (no threads).
             /// </summary>
             private Builder HostCompute()
             {
+                if (OperatingSystem.IsBrowser())
+                    return this;
 #if NET7_0_OR_GREATER
-                if (!OperatingSystem.IsBrowser() && ILGPU.Backends.Backend.RuntimePlatform.Is64Bit())
+                if (ILGPU.Backends.Backend.RuntimePlatform.Is64Bit())
                     return this.Velocity(VelocityDeviceType.Vector128);
 #endif
                 return this.DefaultCPU();
@@ -126,15 +131,18 @@ namespace ILGPU
                 Predicate<Device> predicate)
             {
                 // The Velocity device passes the predicate like every other device
+                if (OperatingSystem.IsBrowser())
+                    return this.OpenCL(predicate).Cuda(predicate);
 #if NET7_0_OR_GREATER
-                if (!OperatingSystem.IsBrowser() && ILGPU.Backends.Backend.RuntimePlatform.Is64Bit())
+                if (ILGPU.Backends.Backend.RuntimePlatform.Is64Bit())
                 {
                     var velocity = new VelocityDevice(VelocityDeviceType.Vector128);
                     if (predicate(velocity))
                         DeviceRegistry.Register(velocity);
+                    return this.OpenCL(predicate).Cuda(predicate);
                 }
 #endif
-                return this.OpenCL(predicate).Cuda(predicate);
+                return this.CPU(predicate).OpenCL(predicate).Cuda(predicate);
             }
 
             /// <summary>
