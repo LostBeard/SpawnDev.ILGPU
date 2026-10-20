@@ -95,7 +95,6 @@ namespace ILGPU.Runtime.Velocity
 
         internal VelocityCapabilityContext()
         {
-            // Half lanes are floats that are rounded to half precision
             Float16 = true;
         }
 

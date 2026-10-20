@@ -7,7 +7,7 @@
             <Extension>cl_khr_fp16</Extension>
         </OpenCL>
         <Cuda minPTX="SM_53" />
-        <Velocity supported="false"/>
+        <Velocity supported="true"/>
     </Capability>
 
     <Capability Name="Float16_Min">
