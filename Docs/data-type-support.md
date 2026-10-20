@@ -60,7 +60,7 @@ Updated: 2026-06-19
 | Float32 | float | 4B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 | Float64 | double | 8B | [x] | [x] | [x] | [x] | [x] | [x] | [x] |
 
-² **Packed 4-bit store is fail-loud on CPU + WebGL.** Writing one nibble means a read-modify-write of the enclosing 32-bit word; on the GPU backends that is an atomic word RMW (`atomicAnd` clear + `atomicOr` set). **WebGL** has no atomics, and the **CPU** managed-reference indexer cannot address a sub-byte element, so a packed-4-bit store on those two throws `UnsupportedKernelFeatureException` / `UnsupportedTestException` rather than silently corrupting the word. Store runs on **CUDA / OpenCL / WebGPU / Wasm**. (Load works on all 6 - decode is read-only.)
+² **Packed 4-bit store is fail-loud on CPU + WebGL.** Writing one nibble means a read-modify-write of the enclosing 32-bit word; on the GPU backends that is an atomic word RMW (`atomicAnd` clear + `atomicOr` set). **WebGL** has no atomics, and the **CPU** managed-reference indexer cannot address a sub-byte element, so a packed-4-bit store on those two throws `UnsupportedKernelFeatureException` / `UnsupportedTestException` rather than silently corrupting the word. Store runs on **CUDA / OpenCL / WebGPU / Wasm**. (Load works on all 6 - decode is read-only.) **Velocity** (the opt-in SIMD CPU backend, not one of the 6) runs packed 4-bit loads and stores: the element address counts nibbles and the store is a compare-exchange on the 32-bit word.
 
 ## End-to-End (Read + Kernel Process + Write)
 
@@ -173,6 +173,7 @@ NaN-preservation guard. Values compute as f32 everywhere; only the storage is 2-
 | **OpenCL** | Emulated (no common native bf16 extension; `cl_khr_fp16` is fp16, not bf16). View params are `ushort*` (2-byte storage stride - a `float*` typedef silently corrupts), `_bf16_bits_to_f32` / `_f32_to_bf16_bits` OpenCL-C helpers + tracked LEA base pointer. |
 | **CUDA** | **f32-register-compute model** (PTX has no native bf16 *arithmetic*): the value lives in an `.f32` register and computes as f32; arithmetic/compare route through the f32 tables; `ConvertValue` bf16<->f32 is a register no-op. **The bf16<->f32 conversion at the load/store boundary uses PORTABLE bit-manipulation (basic integer ops on EVERY CUDA arch), NOT the native `cvt.*.bf16`** - those `cvt` instructions are sm_80+ (Ampere) only, so the earlier native-cvt path failed to compile on pre-Ampere cards (Pascal sm_61 / Volta sm_70 / Turing sm_75). Load = `ld.global.u8`... no: `ld.global.b16` + zero-extend + `shl 16` + reinterpret (exact, bf16 = top 16 bits of fp32); store = RNE round + NaN-guard + `st.global.b16`. Byte-identical to every other backend. (4.13.0+; pre-4.13.0 used the sm_80 native cvt and broke on older cards.) |
 | **CPU** | Native - the managed `BFloat16` struct runs directly (`DefaultILBackend`). |
+| **Velocity** | f32 lanes rounded to bf16 after every operation and conversion; load/store/argument/cast conversions are the managed struct applied per lane (bit-identical to CPU). Same model for `Half`, FP8 and FP4. See [velocity.md](velocity.md). |
 
 ### FP8 (`Float8E4M3` + `Float8E5M2`) buffer access
 

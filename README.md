@@ -4,12 +4,14 @@
 
 > 💜 **Built and maintained by one independent developer** — no company, no overhead, just code. If SpawnDev.ILGPU saves you time, please consider [**sponsoring its development »**](https://github.com/sponsors/LostBeard). Sponsorship is what keeps it alive and maintained.
 
-**Run [ILGPU](https://github.com/m4rs-mt/ILGPU) C# kernels on WebGPU, WebGL, Wasm, Cuda, OpenCL, and CPU - from a single codebase.**  
+**Run [ILGPU](https://github.com/m4rs-mt/ILGPU) C# kernels on WebGPU, WebGL, Wasm, Cuda, OpenCL, and CPU (plain or SIMD-vectorized Velocity) - from a single codebase.**  
 Write parallel compute code in C# and let the library pick the best available backend automatically. In the browser, three backends (WebGPU, WebGL, Wasm) bring GPU-accelerated compute to virtually every modern browser. On desktop and server, ILGPU's native Cuda and OpenCL backends are available alongside CPU. The same async extension methods work everywhere.
 
 > **Your existing ILGPU kernels run in the browser with zero changes to the kernel code - and the same code runs on desktop too.**
 
 ## Recent Highlights
+
+**Unreleased (after 5.3.9):** **Velocity, the SIMD CPU backend, is a complete backend.** It runs all 731 tests of the shared suite (pass or capability skip) as the `VelocityTests` desktop lane, with `Half` / `BFloat16` / FP8 / FP4 / packed 4-bit types, 1D/2D/3D grids and groups of up to 256 threads with fast barriers, shared memory, atomics and the ILGPU Algorithms. MEASURED: a LayerNorm that takes 411 ms on the plain CPU backend takes 0.69 ms on Velocity; an at-scale scan 131 s -> 1 s. Opt-in: `builder.Velocity(VelocityDeviceType.Vector128)`. See [Docs/velocity.md](Docs/velocity.md).
 
 **5.3.7:** **Blazor WebAssembly AOT: kernels with 6 or more parameters no longer kill the runtime.** On WebGPU, WebGL and Wasm the stream loaders now launch with boxed arguments instead of creating a launcher delegate that Mono AOT could not always create. **Hybrid GPU machines pick the discrete GPU.** `CreatePreferredAccelerator(Async)` and the new `context.GetBestDevice()` / `DevicePreference.OrderByPreference()` rank CUDA > discrete OpenCL GPU > integrated OpenCL GPU > other OpenCL > CPU. Memory size only breaks ties now, because integrated GPUs and Intel's OpenCL CPU runtime report system RAM. In the browser the order is WebGPU > WebGL > Wasm.
 
@@ -40,10 +42,10 @@ Write parallel compute code in C# and let the library pick the best available ba
 
 **Desktop backends** (Console, WPF, ASP.NET) - auto-selected: Cuda -> discrete OpenCL GPU -> integrated OpenCL GPU -> other OpenCL -> CPU
 
-| | Cuda | OpenCL | CPU |
-|---|---|---|---|
-| **Compiles to** | PTX | OpenCL C | - |
-| **Runs on** | NVIDIA GPU | Any GPU | CPU cores |
+| | Cuda | OpenCL | CPU | Velocity (opt-in) |
+|---|---|---|---|---|
+| **Compiles to** | PTX | OpenCL C | - (runs the kernel's IL, the debugging backend) | vectorized IL (`Vector128<T>`) |
+| **Runs on** | NVIDIA GPU | Any GPU | CPU cores | CPU cores, SIMD |
 
 ## Demo Applications
 
@@ -76,6 +78,7 @@ Comprehensive documentation is available in the [Docs](Docs/) folder:
 
 - **[Getting Started](Docs/getting-started.md)** - Installation, setup, first kernel
 - **[Backends](Docs/backends.md)** - WebGPU, WebGL, Wasm, Cuda, OpenCL, CPU setup & configuration
+- **[Velocity](Docs/velocity.md)** - The SIMD CPU backend: enabling it, what it supports, group sizes and barriers, measured speedups over the plain CPU backend, limits
 - **[Writing Kernels](Docs/kernels.md)** - Kernel rules, index types, math functions, shared memory
 - **[Memory & Buffers](Docs/memory-and-buffers.md)** - Allocation, async readback, zero-allocation patterns
 - **[Data Type Support](Docs/data-type-support.md)** - Sub-word types (Int8/16), low-precision floats (`Half`, `BFloat16`, FP8 `Float8E4M3`/`E5M2`, FP4 `Float4E2M1`), packed 4-bit ints (`QInt4`/`QUInt4`), 64-bit emulation, per-backend details
@@ -96,9 +99,9 @@ Six backends from one NuGet package - the same C# kernel runs on all of them:
 
 | Browser (Blazor WASM) | Desktop / Server |
 |---|---|
-| **WebGPU** (WGSL compute) · **WebGL** (GLSL Transform-Feedback) · **Wasm** (multi-worker WebAssembly) | **CUDA** (PTX) · **OpenCL** (incl. 3.0) · **CPU** |
+| **WebGPU** (WGSL compute) · **WebGL** (GLSL Transform-Feedback) · **Wasm** (multi-worker WebAssembly) | **CUDA** (PTX) · **OpenCL** (incl. 3.0) · **CPU** · **Velocity** (opt-in SIMD CPU backend, [Docs/velocity.md](Docs/velocity.md)) |
 
-All support the sub-word + low-precision types (`Int8/16`, `Half`, `BFloat16`, FP8 `Float8E4M3`/`E5M2`, FP4 `Float4E2M1`, packed 4-bit ints `QInt4`/`QUInt4`), 64-bit (native on Wasm/CUDA/OpenCL/CPU, emulated on WebGPU/WebGL), and the ILGPU Algorithms. Packed 4-bit (`Float4E2M1`/`QInt4`/`QUInt4`) **loads on all 6**; in-kernel packed stores run on CUDA/OpenCL/WebGPU/Wasm and are fail-loud on CPU + WebGL (no atomics for the nibble RMW). **WebGL is the exception** - no shared memory / barriers / atomics, so in-kernel group/warp ops throw (host `RadixSort`/`Scan`/`Reduce` still work, all key types). Auto-selection: WebGPU->WebGL->Wasm (browser), CUDA->discrete OpenCL GPU->integrated OpenCL GPU->other OpenCL->CPU (desktop), via `CreatePreferredAcceleratorAsync`. Full per-backend capability matrix + setup: **[Docs/backends.md](Docs/backends.md)**.
+All support the sub-word + low-precision types (`Int8/16`, `Half`, `BFloat16`, FP8 `Float8E4M3`/`E5M2`, FP4 `Float4E2M1`, packed 4-bit ints `QInt4`/`QUInt4`), 64-bit (native on Wasm/CUDA/OpenCL/CPU, emulated on WebGPU/WebGL), and the ILGPU Algorithms. Packed 4-bit (`Float4E2M1`/`QInt4`/`QUInt4`) **loads on all 6**; in-kernel packed stores run on CUDA/OpenCL/WebGPU/Wasm/Velocity and are fail-loud on CPU + WebGL (no atomics for the nibble RMW). **WebGL is the exception** - no shared memory / barriers / atomics, so in-kernel group/warp ops throw (host `RadixSort`/`Scan`/`Reduce` still work, all key types). Auto-selection: WebGPU->WebGL->Wasm (browser), CUDA->discrete OpenCL GPU->integrated OpenCL GPU->other OpenCL->CPU (desktop), via `CreatePreferredAcceleratorAsync`. Full per-backend capability matrix + setup: **[Docs/backends.md](Docs/backends.md)**.
 
 ## Features
 
@@ -109,7 +112,8 @@ All support the sub-word + low-precision types (`Int8/16`, `Half`, `BFloat16`, F
 - **CopyFromStreamAsync / CopyToStreamAsync** - Stream a `System.IO.Stream` into a GPU buffer, or a GPU buffer out to a `Stream`, in bounded chunks (all 6 backends). On the browser backends, if the stream implements `IJSReadStream` / `IJSWriteStream` (`SpawnDev.SpawnJS.Toolbox`), the bytes move JS↔GPU without entering the .NET/WASM managed heap - load a multi-hundred-MB model from a `Blob`/OPFS or save a large buffer to OPFS with one chunk resident at a time. See [Memory & Buffers](Docs/memory-and-buffers.md)
 - **Lambda kernels** - Write kernels as capturing C# lambdas - captured scalar values are automatically passed to the GPU at dispatch time. No boilerplate, all 6 backends
 - **Higher-order kernels** - `DelegateSpecialization<Func<T,R>>` lets you pass operations as kernel parameters. The delegate is resolved and inlined at compile time - one kernel, many behaviors
-- **Cross-platform** - Same kernel code runs in browser (WebGPU, WebGL, Wasm) and desktop (Cuda, OpenCL, CPU) from one NuGet package
+- **Velocity, the SIMD CPU backend** - a vectorized CPU backend for real work (the plain CPU backend stays the debugger): `builder.Velocity(VelocityDeviceType.Vector128)`. Shared memory, barriers, atomics, warp shuffles, the ILGPU Algorithms, 1D/2D/3D grids and groups, and the full low-precision type tier. Opt-in on desktop/server. See [Docs/velocity.md](Docs/velocity.md)
+- **Cross-platform** - Same kernel code runs in browser (WebGPU, WebGL, Wasm) and desktop (Cuda, OpenCL, CPU, Velocity) from one NuGet package
 - **Automatic backend selection** - `CreatePreferredAcceleratorAsync()` picks the best backend on any platform (browser or desktop). On hybrid laptops it picks the discrete GPU (`context.GetBestDevice()` ranks devices by kind, not by reported memory)
 - **Capability gating** - declare what a kernel needs (`AcceleratorRequirements`: atomics, shared memory, native f64, packed 4-bit stores, ...) and selection skips backends that cannot run it. See [Capabilities & Backend Selection](Docs/capabilities-and-backend-selection.md)
 - **Device memory budget** - holders of idle device memory implement `IDeviceMemoryReclaimer` and register with the accelerator; allocations reclaim least-recently-used memory before the device runs out (and before the NVIDIA driver silently spills to system RAM)
@@ -303,7 +307,7 @@ dotnet run --project SpawnDev.ILGPU.Demo
 
 ## Test Coverage
 
-Every feature is tested on all 6 backends (WebGPU, WebGPU-no-subgroups, WebGL, Wasm, CUDA, OpenCL, CPU) through the unified **PlaywrightMultiTest** runner in one `dotnet test`: memory, indexing, arithmetic/bitwise/math, atomics, control flow, structs, the sub-word + low-precision types (`Int8/16`, `Half`, `BFloat16`, FP8, FP4 `Float4E2M1`, packed `QInt4`/`QUInt4` - load/store, packed round-trip, radix, and conversion bit-exactness vs `ml_dtypes`/IEEE), 64-bit emulation, shared memory, broadcast/subgroups, the full ILGPU Algorithms (RadixSort/Scan/Reduce/Histogram), lambda + delegate specialization, and more. Latest full cross-backend sweep (5.3.5): **4638 pass / 0 fail / 387 skip** (skips are backend capability gates, e.g. shared memory on WebGL).
+Every feature is tested on all 6 backends (WebGPU, WebGPU-no-subgroups, WebGL, Wasm, CUDA, OpenCL, CPU), plus the Velocity CPU backend as its own lane (731 tests, all pass or skip), through the unified **PlaywrightMultiTest** runner in one `dotnet test`: memory, indexing, arithmetic/bitwise/math, atomics, control flow, structs, the sub-word + low-precision types (`Int8/16`, `Half`, `BFloat16`, FP8, FP4 `Float4E2M1`, packed `QInt4`/`QUInt4` - load/store, packed round-trip, radix, and conversion bit-exactness vs `ml_dtypes`/IEEE), 64-bit emulation, shared memory, broadcast/subgroups, the full ILGPU Algorithms (RadixSort/Scan/Reduce/Histogram), lambda + delegate specialization, and more. Latest full cross-backend sweep (5.3.5): **4638 pass / 0 fail / 387 skip** (skips are backend capability gates, e.g. shared memory on WebGL).
 
 ## Browser Requirements
 
@@ -439,22 +443,18 @@ A 7th backend - **AcceleratorType.P2P** ([SpawnDev.ILGPU.P2P](SpawnDev.ILGPU.P2P
 
 **The vision:** Every device in your home contributing to one shared compute pool - phone, laptop, tablet, desktop, old gaming PC. The living room becomes a compute cluster. Same C# kernel code, same `LoadAutoGroupedStreamKernel` API. The developer writes one kernel, it runs on 1 GPU or 10 GPUs across a household.
 
-## Planned: CPU backend SIMD vectorization
+## Velocity: the SIMD CPU backend
 
-The CPU accelerator is currently the **only backend with no vectorization**. The Wasm backend emits 4-wide
-`v128` SIMD (`WasmSimdAnalysis` + `WasmSimdKernelEmitter`); the CPU accelerator runs scalar IL per
-work-item on managed threads.
+The plain CPU backend is ILGPU's debugging backend: it runs the kernel's own IL one thread at a time. **Velocity** is the CPU backend that does real work: it compiles kernels like the GPU backends do (vectorized IL over `Vector128<T>`, four lanes per warp) and runs them on all cores, with shared memory, barriers, atomics, warp shuffles, the ILGPU Algorithms, 1D/2D/3D grids and groups (up to 256 threads), and the whole low-precision type tier (`Half`, `BFloat16`, FP8, FP4, packed 4-bit ints, loads and stores). It runs the entire shared test suite (731 tests pass or skip).
 
-MEASURED 2026-09-08 on RMBG-1.4 at 256x256 versus its native 1024x1024 (16x the pixels): Wasm grows
-**1.2x** (74 s -> 89 s, so its cost is mostly the fixed model load and graph compile) while CPU grows
-**12.4x** (27 s -> 336 s, i.e. compute-bound and linear in element count). The ranking between the two
-inverts with resolution, so never compare them at a single size.
+```csharp
+using ILGPU.Runtime.Velocity;
 
-The plan is to lift `WasmSimdAnalysis` into a shared component and have the IL backend emit
-`System.Runtime.Intrinsics.Vector128<T>` for the kernels it accepts, keeping the scalar path as the
-fallback. Full write-up, including what was already ruled out (the `CPUDevice` presets are 1-multiprocessor
-debug simulators and would be slower, and `CPUDevice.Default` is already tuned):
-[`Plans/cpu-backend-simd-vectorization-plan-2026-09-08.md`](Plans/cpu-backend-simd-vectorization-plan-2026-09-08.md).
+using var context = Context.Create(builder => builder.Velocity(VelocityDeviceType.Vector128).EnableAlgorithms());
+using var accelerator = context.CreateVelocityAccelerator(0);   // then the same kernels and API as every other backend
+```
+
+MEASURED on a 12-processor PC: LayerNorm 1369 x 384 411 ms on the CPU backend, 0.69 ms on Velocity; MatMul 512^3 94 ms -> 43 ms; an at-scale inclusive scan 131 s -> 1 s; radix sort of 1.4 M keys 7.8 s -> 6.7 s. Velocity is opt-in (not registered by `AllAcceleratorsAsync()`); `GetBestDevice()` ranks it below every GPU backend and above the plain CPU backend. Details, limits and how it works: **[Docs/velocity.md](Docs/velocity.md)**; plan and measurements: [`Plans/velocity-as-production-cpu-backend-2026-10-20.md`](Plans/velocity-as-production-cpu-backend-2026-10-20.md).
 
 ## Support This Project
 

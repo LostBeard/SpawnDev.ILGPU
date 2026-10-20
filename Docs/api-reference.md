@@ -17,6 +17,7 @@ using SpawnDev.ILGPU;
 | Method | Return | Description |
 |--------|--------|-------------|
 | `Context.CreateAsync(Action<Builder>)` | `Task<Context>` | Creates a context using an async builder (required for WebGPU probing) |
+| `builder.Velocity(VelocityDeviceType.Vector128)` | `Builder` | (namespace `ILGPU.Runtime.Velocity`) Opt-in: registers the SIMD CPU backend ([velocity.md](velocity.md)). `AllAcceleratorsAsync()` does not register it. Then `context.CreateVelocityAccelerator(0)` |
 | `builder.AllAcceleratorsAsync()` | `Task<Builder>` | Enables all available backends (browser: WebGPU, WebGL, Wasm; desktop: CUDA, OpenCL, CPU). Silently skips unavailable ones. Async (WebGPU/WebGL probing is async) — `await` it |
 | `builder.WebGPU()` | `Task` | Enables WebGPU backend only (async probe — `await` it) |
 | `builder.WebGL()` | `Task` | Enables WebGL backend only (async probe — `await` it) |

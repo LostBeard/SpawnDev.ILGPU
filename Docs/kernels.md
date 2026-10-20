@@ -471,7 +471,7 @@ These .NET methods contain internal `throw` statements, but all browser backends
 
 Shared memory allows threads within a workgroup to share data. It's much faster than global memory but limited in size.
 
-> **Availability:** Supported on WebGPU, Wasm, CUDA, OpenCL, and CPU backends. WebGL does not support shared memory.
+> **Availability:** Supported on WebGPU, Wasm, CUDA, OpenCL, CPU and Velocity backends. WebGL does not support shared memory.
 
 ### Static Shared Memory
 

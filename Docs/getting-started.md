@@ -2,7 +2,7 @@
 
 This guide walks you through installing SpawnDev.ILGPU and running your first GPU kernel — in the browser via Blazor WebAssembly or on desktop via a console app.
 
-SpawnDev.ILGPU extends [ILGPU](https://github.com/m4rs-mt/ILGPU) — a high-performance .NET GPU computing framework by [Marcel Koester](https://github.com/m4rs-mt) — with three browser backends (WebGPU, WebGL, Wasm) while also supporting ILGPU's native desktop backends (CUDA, OpenCL, CPU). Your existing ILGPU kernels work across all six backends with zero changes to the kernel code.
+SpawnDev.ILGPU extends [ILGPU](https://github.com/m4rs-mt/ILGPU) — a high-performance .NET GPU computing framework by [Marcel Koester](https://github.com/m4rs-mt) — with three browser backends (WebGPU, WebGL, Wasm) while also supporting ILGPU's native desktop backends (CUDA, OpenCL, CPU). Your existing ILGPU kernels work across all six backends with zero changes to the kernel code. On desktop and server, the opt-in [Velocity](velocity.md) SIMD CPU backend runs them on all CPU cores when no GPU is available.
 
 ## Prerequisites
 
@@ -170,7 +170,7 @@ Here's a complete example that adds two arrays on the GPU:
 using var context = await Context.CreateAsync(builder => builder.AllAcceleratorsAsync());
 ```
 
-`Context.CreateAsync` is the async version of ILGPU's `Context.Create`. The `AllAcceleratorsAsync()` extension probes the environment for all available backends — browser backends (WebGPU, WebGL, Wasm) in Blazor, or native backends (CUDA, OpenCL, CPU) on desktop — and registers them.
+`Context.CreateAsync` is the async version of ILGPU's `Context.Create`. The `AllAcceleratorsAsync()` extension probes the environment for all available backends — browser backends (WebGPU, WebGL, Wasm) in Blazor, or native backends (CUDA, OpenCL, CPU) on desktop — and registers them. (The SIMD CPU backend [Velocity](velocity.md) is opt-in: `builder.Velocity(VelocityDeviceType.Vector128)`.)
 
 ### Accelerator Creation
 

@@ -273,6 +273,8 @@ static void Good(Index1D i, ArrayView<float> data, Config config) { }
 
 ### "Unknown hard error" dialog on Windows
 
+**Velocity** (the opt-in SIMD CPU backend, [velocity.md](velocity.md)): groups are limited to 256 threads in total, `MathF.Truncate` / `Math.Truncate` need `EnableAlgorithms()` (without it Velocity throws a `NotSupportedException` naming the method), `Vector256` / `Vector512` device types do not exist yet, and it is not available in the browser.
+
 If you see an "Unknown hard error" dialog when running ILGPU kernels on the CPU backend, this is caused by the **Windows Error Reporting** service being disabled.
 
 **Fix:** Enable the Windows Error Reporting service:

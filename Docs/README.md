@@ -1,6 +1,6 @@
 # SpawnDev.ILGPU Documentation
 
-Comprehensive documentation for SpawnDev.ILGPU — run ILGPU C# kernels on WebGPU, WebGL, and Wasm in the browser, or Cuda, OpenCL, and CPU on desktop/server, from a single codebase.
+Comprehensive documentation for SpawnDev.ILGPU — run ILGPU C# kernels on WebGPU, WebGL, and Wasm in the browser, or Cuda, OpenCL, CPU and the SIMD Velocity backend on desktop/server, from a single codebase.
 
 > **Your existing ILGPU kernels run in the browser with zero changes to the kernel code — and the same code runs on desktop too.**
 
@@ -11,6 +11,7 @@ Comprehensive documentation for SpawnDev.ILGPU — run ILGPU C# kernels on WebGP
 
 ### Core Concepts
 - **[Backends](backends.md)** — WebGPU, WebGL, Wasm (browser) and Cuda, OpenCL, CPU (desktop): setup, capabilities, and auto-selection
+- **[Velocity (SIMD CPU backend)](velocity.md)** - The CPU backend that does real work: enabling it, supported features and types, group sizes and barriers, measured speedups, limits
 - **[Capabilities & Backend Selection](capabilities-and-backend-selection.md)** - `AcceleratorRequirements` declarative gating, device ranking (`GetBestDevice` / `DevicePreference`, discrete GPU first on hybrid machines), `UnsupportedKernelFeatureException`
 - **[Async API](async.md)** - The sync/async contract: which operations wait or read back (async-only in the browser) and which are fire-and-forget
 - **[Writing Kernels](kernels.md)** — Kernel fundamentals, index types, loading, launching, math functions, and kernel rules

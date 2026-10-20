@@ -23,14 +23,15 @@ SpawnDev.ILGPU supports multiple backends for running ILGPU kernels. In the brow
 
 ### Desktop/Server Backends
 
-| | 🚀 **Cuda** | 🔧 **OpenCL** | 🐢 **CPU** |
-|---|---|---|---|
-| **Executes on** | NVIDIA GPU | NVIDIA/AMD/Intel GPU | CPU cores |
-| **Transpiles to** | PTX | OpenCL C | — (interpreted) |
-| **Shared Memory** | ✅ | ✅ | ✅ |
-| **Atomics** | ✅ | ✅ | ✅ |
-| **64-bit** | ✅ Native | ✅ Native | ✅ Native |
-| **Requirement** | NVIDIA GPU + driver | OpenCL 2.0+ or 3.0 GPU | None |
+| | 🚀 **Cuda** | 🔧 **OpenCL** | 🐢 **CPU** | ⚡ **Velocity** |
+|---|---|---|---|---|
+| **Executes on** | NVIDIA GPU | NVIDIA/AMD/Intel GPU | CPU cores | CPU cores (SIMD) |
+| **Transpiles to** | PTX | OpenCL C | — (interpreted) | vectorized .NET IL (`Vector128<T>`) |
+| **Shared Memory** | ✅ | ✅ | ✅ | ✅ |
+| **Atomics** | ✅ | ✅ | ✅ | ✅ |
+| **64-bit** | ✅ Native | ✅ Native | ✅ Native | ✅ Native |
+| **Packed 4-bit store** | ✅ | ✅ | ❌ fail-loud | ✅ |
+| **Requirement** | NVIDIA GPU + driver | OpenCL 2.0+ or 3.0 GPU | None | None (opt-in: `builder.Velocity(...)`) |
 
 **Auto-selection priority (browser):** WebGPU -> WebGL -> Wasm
 **Auto-selection priority (desktop):** Cuda -> discrete OpenCL GPU -> integrated OpenCL GPU -> other OpenCL devices -> CPU. Devices are ranked by kind, not reported memory (integrated GPUs and OpenCL CPU runtimes report system RAM), so a hybrid laptop gets its discrete GPU. See [Device ranking](capabilities-and-backend-selection.md#device-ranking-devicepreference).
@@ -301,7 +302,7 @@ For multi-worker mode, the page must be cross-origin isolated (COOP/COEP headers
 
 All modern browsers that support Blazor WebAssembly.
 
-## Desktop Backends (Cuda, OpenCL & CPU)
+## Desktop Backends (Cuda, OpenCL, CPU & Velocity)
 
 When running outside the browser (console apps, WPF, ASP.NET, etc.), SpawnDev.ILGPU uses ILGPU's native Cuda and OpenCL backends automatically. These are registered by the standard `builder.AllAccelerators()` call.
 
@@ -332,9 +333,22 @@ foreach (var device in context)
 - NVIDIA GPUs with OpenCL 3.0 drivers are now compatible — the `GenericAddressSpace` requirement that previously blocked these devices has been relaxed
 - Subgroup-dependent tests (e.g., `Warp.Shuffle`) are dynamically skipped on devices that don't report subgroup support
 
+### Velocity (Desktop, SIMD CPU)
+
+The CPU backend that does real work. It compiles kernels like the GPU backends (vectorized IL over `Vector128<T>`, four lanes per warp) and runs them on all cores, with shared memory, barriers (a group with barriers runs as a team, one thread per warp), atomics, warp shuffles, the ILGPU Algorithms, 1D/2D/3D grids and groups of up to 256 threads, and the whole low-precision type tier. It is **opt-in**: `AllAcceleratorsAsync()` does not register it.
+
+```csharp
+using ILGPU.Runtime.Velocity;
+
+using var context = Context.Create(b => b.Velocity(VelocityDeviceType.Vector128).EnableAlgorithms());
+using var accelerator = context.CreateVelocityAccelerator(0);
+```
+
+`GetBestDevice()` ranks it below every GPU backend and above the plain CPU backend. Full documentation, measurements and limits: **[velocity.md](velocity.md)**.
+
 ### CPU (Desktop)
 
-Multi-threaded CPU accelerator: runs kernels as .NET code on ILGPU's own worker threads, one simulated multiprocessor per thread. Kernels without barriers or warp operations run each group's lanes in a plain loop. Useful as a reference or for machines without GPU drivers. Full ILGPU feature support (shared memory, barriers, atomics). Not available in the browser - use the Wasm backend for off-main-thread compute in Blazor.
+The debugging CPU backend. Multi-threaded CPU accelerator: runs kernels as .NET code on ILGPU's own worker threads, one simulated multiprocessor per thread. Kernels without barriers or warp operations run each group's lanes in a plain loop. Useful as a reference or for machines without GPU drivers. Full ILGPU feature support (shared memory, barriers, atomics). Not available in the browser - use the Wasm backend for off-main-thread compute in Blazor.
 
 ```csharp
 using ILGPU;

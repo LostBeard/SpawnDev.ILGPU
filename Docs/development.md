@@ -8,7 +8,7 @@ This page collects the non-obvious traps and conventions you need to know to con
 
 ### What happens
 
-The `ILGPU/` subdirectory contains the forked ILGPU core. Many `.cs` files in there are **generated** from `.tt` (T4 text-template) files — for example, `ILGPU/Static/CapabilityContext.cs` is generated from `ILGPU/Static/CapabilityContext.tt`.
+The `ILGPU/` subdirectory contains the forked ILGPU core. Many `.cs` files in there are **generated** from `.tt` (T4 text-template) files — for example, `ILGPU/Static/CapabilityContext.cs` is generated from `ILGPU/Static/CapabilityContext.tt`, which reads the capability values (what each backend supports, e.g. Velocity's Float16) from `ILGPU/Static/Capabilities.xml`: change the XML, not the `.cs` (a hand edit of that file failed the drift check twice, 2026-10-20). The Velocity operation files `Vec128Operations.cs` / `ScalarOperations.cs` are generated from `Vec128Operations.tt` / `ScalarOperations.tt` the same way.
 
 - **Local incremental builds DO NOT run T4 transforms.** If you manually edit a generated `.cs` file, your edit sticks, your build passes, your tests pass, and you ship. Looks great.
 - **Clean builds (CI, fresh clones, deploy pipelines, new dev machines) DO run T4 transforms.** They run the `.tt`, regenerate the `.cs`, and silently overwrite your manual edit. Then downstream consumers fail to compile or behave wrong.

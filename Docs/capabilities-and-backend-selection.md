@@ -101,7 +101,7 @@ IReadOnlyList<Device> ranked = context.Devices.OrderByPreference();     // all d
 using var accelerator = best.CreateAccelerator(context);                // desktop
 ```
 
-Ranks devices by **kind**, best first: CUDA, then discrete OpenCL GPUs, then integrated OpenCL GPUs (detected with `CL_DEVICE_HOST_UNIFIED_MEMORY`, Intel vendor as the fallback), then other OpenCL devices (CPU runtimes, accelerators), then WebGPU, WebGL, Wasm, then anything else, then CPU. Memory size only breaks ties between devices of the same rank, then the original order.
+Ranks devices by **kind**, best first: CUDA, then discrete OpenCL GPUs, then integrated OpenCL GPUs (detected with `CL_DEVICE_HOST_UNIFIED_MEMORY`, Intel vendor as the fallback), then other OpenCL devices (CPU runtimes, accelerators), then WebGPU, WebGL, Wasm, then anything else (the opt-in [Velocity](velocity.md) SIMD CPU backend lands here), then the plain CPU backend. Memory size only breaks ties between devices of the same rank, then the original order.
 
 Use it instead of ILGPU's `Context.GetPreferredDevice(preferCPU: false)`, which sorts by `MemorySize` alone. Integrated GPUs and OpenCL CPU runtimes report system RAM as device memory, so on an Intel HD 620 + NVIDIA 940MX laptop `GetPreferredDevice(false)` picked Intel's OpenCL **CPU** runtime (8 GB) over the 940MX (2 GB), and on an RTX 4070 PC it picked the OpenCL view of the card over CUDA. `GetBestDevice()` picks CUDA in both cases. (The fork leaves `GetPreferredDevice` unchanged to stay close to upstream ILGPU.)
 
