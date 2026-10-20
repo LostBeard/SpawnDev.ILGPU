@@ -211,7 +211,8 @@ try
     runner.SetTestTypes(new[]
     {
         typeof(CPUTests),
-        // typeof(VelocityTests),   // the SIMD CPU backend as a lane: about 630 of 731 pass today (Plans/velocity-as-production-cpu-backend-2026-10-20.md); enable when green
+        typeof(VelocityTests),   // the SIMD CPU backend (Vector128) as a lane: all 731 pass or skip (Plans/velocity-as-production-cpu-backend-2026-10-20.md)
+        // typeof(VelocityScalar2Tests),   // the two-lane scalar fallback of Velocity: the same tests, a second set of operations; a sample of 129 passes, enable to run all
         typeof(CudaTests),
         typeof(OpenCLTests),
         typeof(AcceleratorRequirementsTests),

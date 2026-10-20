@@ -55,6 +55,54 @@ namespace ILGPU.Algorithms.IL
         internal static readonly Type CPUWarpExtensionsType = typeof(ILWarpExtensions);
 
         /// <summary>
+        /// The <see cref="ILMath"/> type.
+        /// </summary>
+        [DynamicallyAccessedMembers(TrimmingAnnotations.HandlerMethods)]
+        private static readonly Type ILMathType = typeof(ILMath);
+
+        /// <summary>
+        /// Registers the math functions of <see cref="XMath"/> that have to be
+        /// implemented by the Velocity backend (see <see cref="ILMath"/>).
+        /// </summary>
+        /// <param name="manager">The current manager.</param>
+        internal static void EnableILMathAlgorithms(
+            IntrinsicImplementationManager manager)
+        {
+            foreach (var type in new[] { typeof(float), typeof(double) })
+            {
+                RegisterXMathRedirect(manager, "RoundAwayFromZero", type);
+                RegisterXMathRedirect(manager, "RoundToEven", type);
+                RegisterXMathRedirect(manager, "IEEERemainder", type, type);
+            }
+        }
+
+        /// <summary>
+        /// Redirects an <see cref="XMath"/> function to its <see cref="ILMath"/>
+        /// implementation on the Velocity backend.
+        /// </summary>
+        private static void RegisterXMathRedirect(
+            IntrinsicImplementationManager manager,
+            string name,
+            params Type[] types)
+        {
+            var xmathMethod = AlgorithmContext.XMathType.GetMethod(
+                name,
+                AlgorithmContext.IntrinsicBindingFlags,
+                null,
+                types,
+                null).ThrowIfNull();
+            var implementation = ILMathType.GetMethod(
+                name,
+                AlgorithmContext.IntrinsicBindingFlags,
+                null,
+                types,
+                null).ThrowIfNull();
+            manager.RegisterMethod(
+                xmathMethod,
+                new VelocityIntrinsic(implementation, IntrinsicImplementationMode.Redirect));
+        }
+
+        /// <summary>
         /// Registers an intrinsic mapping.
         /// </summary>
         /// <param name="manager">The current manager.</param>

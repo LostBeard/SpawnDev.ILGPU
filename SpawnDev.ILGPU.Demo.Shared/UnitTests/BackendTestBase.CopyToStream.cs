@@ -124,7 +124,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         public async Task CopyToStreamJSWriteStreamFloatTest() => await RunTest(async accelerator =>
         {
             if (accelerator.AcceleratorType is AcceleratorType.CPU
-                or AcceleratorType.Cuda or AcceleratorType.OpenCL)
+                or AcceleratorType.Velocity or AcceleratorType.Cuda or AcceleratorType.OpenCL)
                 throw new UnsupportedTestException("Browser-only: IJSWriteStream is a JS-backed stream");
 
             const int n = 4096;
@@ -154,7 +154,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         public async Task CopyToStreamJSWriteStreamHalfOddCountTest() => await RunTest(async accelerator =>
         {
             if (accelerator.AcceleratorType is AcceleratorType.CPU
-                or AcceleratorType.Cuda or AcceleratorType.OpenCL)
+                or AcceleratorType.Velocity or AcceleratorType.Cuda or AcceleratorType.OpenCL)
                 throw new UnsupportedTestException("Browser-only: IJSWriteStream is a JS-backed stream");
             if (!accelerator.Capabilities.Float16)
                 throw new UnsupportedTestException("Float16 not supported on this device");

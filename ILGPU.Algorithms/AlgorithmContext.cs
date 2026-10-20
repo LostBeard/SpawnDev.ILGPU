@@ -99,6 +99,7 @@ namespace ILGPU
             var intrinsicManager = builder.GetIntrinsicManager();
             CLContext.EnableCLAlgorithms(intrinsicManager);
             ILContext.EnableILAlgorithms(intrinsicManager);
+            ILContext.EnableILMathAlgorithms(intrinsicManager);
             PTXContext.EnablePTXAlgorithms(intrinsicManager);
             return builder;
         }

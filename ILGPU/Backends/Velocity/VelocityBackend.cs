@@ -19,6 +19,7 @@ using ILGPU.IR.Transformations;
 using ILGPU.Runtime;
 using ILGPU.Runtime.Velocity;
 using ILGPU.Util;
+using System;
 using System.Diagnostics.CodeAnalysis;
 
 namespace ILGPU.Backends.Velocity
@@ -157,8 +158,20 @@ namespace ILGPU.Backends.Velocity
             CreateFunctionCodeGenerator(
             Method method,
             Allocas allocas,
-            VelocityCodeGenerator<TILEmitter>.GeneratorArgs data) =>
-            new VelocityFunctionGenerator<TILEmitter>(data, method, allocas);
+            VelocityCodeGenerator<TILEmitter>.GeneratorArgs data)
+        {
+            // An external method has no body to compile (an internal call such as
+            // MathF.Truncate that no intrinsic implements): generating code for it
+            // produced a function that returned the wrong value without any error
+            if (method.HasFlags(MethodFlags.External))
+            {
+                throw new NotSupportedException(
+                    $"The Velocity backend cannot compile the external method " +
+                    $"'{method.Name}': it has no managed body and no ILGPU " +
+                    $"intrinsic implements it");
+            }
+            return new VelocityFunctionGenerator<TILEmitter>(data, method, allocas);
+        }
 
         protected override VelocityCodeGenerator<TILEmitter>
             CreateKernelCodeGenerator(

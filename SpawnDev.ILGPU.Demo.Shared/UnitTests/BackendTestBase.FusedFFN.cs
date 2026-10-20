@@ -89,6 +89,14 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         // can't launch a 256-thread tiled group - they are capability-gated in the test bodies / WebGL override.
         // Barriers sit in UNIFORM control flow (loop bound numKTiles identical for every thread) - WebGPU-safe.
         // Out-of-range threads still load zeros + hit every barrier; they only skip the final store.
+        // The most threads one (1D) group can be launched with: the preferred size of a backend (what
+        // algorithms pick, MaxNumThreadsPerGroup) can be smaller than what it launches (Velocity prefers
+        // 16 threads because its barriers are cheap up to there, and launches groups of up to 256).
+        static int MaxLaunchableGroupThreads(Accelerator accelerator) =>
+            accelerator.AcceleratorType == AcceleratorType.Velocity
+            ? accelerator.MaxGroupSize.X
+            : accelerator.MaxNumThreadsPerGroup;
+
         const int FusedTile = 16;
 
         static void FusedLinearActivationTiled(
@@ -190,7 +198,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             // Capability gate: the tiled kernel needs a FusedTile*FusedTile (256) thread group.
             // CPU (64-thread cap) and any backend with a smaller group cap can't launch it - skip there
             // (production uses a simple non-tiled fused fallback on those backends).
-            if (accelerator.MaxNumThreadsPerGroup < FusedTile * FusedTile)
+            if (MaxLaunchableGroupThreads(accelerator) < FusedTile * FusedTile)
                 throw new UnsupportedTestException(
                     $"{accelerator.AcceleratorType}: tiled FFN needs a {FusedTile * FusedTile}-thread group; " +
                     $"MaxNumThreadsPerGroup={accelerator.MaxNumThreadsPerGroup}");
@@ -249,7 +257,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             // erf-GELU path (activation==2) - the GPT-2 / PyTorch-default variant the decoder
             // fusion must use to preserve the GPT-2==ORT argmax. Verifies XMath.Exp + the A&S
             // erf polynomial transpile + the fused result matches the ML-side erf reference.
-            if (accelerator.MaxNumThreadsPerGroup < FusedTile * FusedTile)
+            if (MaxLaunchableGroupThreads(accelerator) < FusedTile * FusedTile)
                 throw new UnsupportedTestException(
                     $"{accelerator.AcceleratorType}: tiled FFN needs a {FusedTile * FusedTile}-thread group; " +
                     $"MaxNumThreadsPerGroup={accelerator.MaxNumThreadsPerGroup}");
@@ -432,7 +440,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 
         async Task RunRegBlockedFusedFFN(Accelerator accelerator, int activation, int seed, float spread)
         {
-            if (accelerator.MaxNumThreadsPerGroup < RbBlock * RbBlock)
+            if (MaxLaunchableGroupThreads(accelerator) < RbBlock * RbBlock)
                 throw new UnsupportedTestException(
                     $"{accelerator.AcceleratorType}: register-blocked FFN needs a {RbBlock * RbBlock}-thread group; " +
                     $"MaxNumThreadsPerGroup={accelerator.MaxNumThreadsPerGroup}");

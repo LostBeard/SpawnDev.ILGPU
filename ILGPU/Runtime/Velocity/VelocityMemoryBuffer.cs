@@ -43,6 +43,12 @@ namespace ILGPU.Runtime.Velocity
 
             // Allocate resources and assign pointers
             NativePtr = new IntPtr(NativeMemory.AlignedAlloc(nativeLength, alignment));
+
+            // Zero-init like every other backend (the CPU backend, CUDA, OpenCL and the
+            // browser backends hand back zeroed buffers): a kernel that reads a slot it
+            // or nobody has written would otherwise see whatever the process left there
+            if (LengthInBytes > 0)
+                NativeMemory.Clear(NativePtr.ToPointer(), nativeLength);
         }
 
         #endregion

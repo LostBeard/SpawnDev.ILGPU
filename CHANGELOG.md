@@ -1,7 +1,15 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## Unreleased (after 5.3.9) - Velocity (the SIMD CPU backend): integer divide in masked lanes
+## Unreleased (after 5.3.9) - Velocity (the SIMD CPU backend) becomes a complete backend
+
+Velocity runs the whole shared test suite (731 tests: all pass or skip, as `VelocityTests` in the desktop lane). Details and measurements in `Plans/velocity-as-production-cpu-backend-2026-10-20.md`.
+- **NEW: Half, BFloat16, FP8 (E4M3, E5M2), FP4 and packed QInt4/QUInt4 on Velocity** (float lanes rounded to the narrow type, results equal the CPU backend; 4-bit views are packed two per byte with atomic nibble stores). The Velocity capability reports Float16.
+- **NEW: grids and groups of up to three dimensions** (Index2D / Index3D kernels, 2D / 3D groups with barriers); groups of up to 256 threads; multi-warp groups with barriers.
+- **FIXED: `XMath.RoundToEven`, `RoundAwayFromZero`, `IEEERemainder` returned 0 on Velocity** (a cycle through the Algorithms remapping); Velocity buffers are zeroed like on every other backend; a method without a body now fails to compile on Velocity instead of returning a wrong value (`MathF.Truncate` without ILGPU.Algorithms still has no implementation on any compiled backend).
+- Earlier in this series: loops with several exits, float remainder, NaN comparisons in branches, bool kernel parameters, thread-group barriers (lock-free), `Group.Broadcast`, ILGPU.Algorithms mapping for Velocity.
+
+### Velocity: integer divide in masked lanes
 
 - **FIXED: Velocity threw `DivideByZeroException` for integer `/` and `%` whenever any lane of a warp had a zero divisor, also lanes whose result is never used.** A SIMD warp executes all four lanes of every instruction (the tail of the last warp, lanes switched
   off by `if (divisor != 0)`); `NonZeroDivisor` in `Vec128Operations` (template and generated file) replaces zero divisor lanes by one, the active lanes are untouched. Test `SimdLaneDivision_TailLanesAndGuardedLanesDoNotThrow` (red on Velocity without the fix, green with it, same
