@@ -1,6 +1,13 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## Unreleased (after 5.3.9) - Velocity (the SIMD CPU backend): integer divide in masked lanes
+
+- **FIXED: Velocity threw `DivideByZeroException` for integer `/` and `%` whenever any lane of a warp had a zero divisor, also lanes whose result is never used.** A SIMD warp executes all four lanes of every instruction (the tail of the last warp, lanes switched
+  off by `if (divisor != 0)`); `NonZeroDivisor` in `Vec128Operations` (template and generated file) replaces zero divisor lanes by one, the active lanes are untouched. Test `SimdLaneDivision_TailLanesAndGuardedLanesDoNotThrow` (red on Velocity without the fix, green with it, same
+  answers on CPU and CUDA). Found running SpawnDev.ILGPU.ML on Velocity: 60 of 150 failures. `Scalar2` has the same shape and still needs the guard.
+- `SpawnDev.ILGPU.DemoConsole/VelocityTests.cs`: Velocity as a test lane (not registered yet: 443 of 655 of the suite pass; plan and failure classes in `Plans/velocity-as-production-cpu-backend-2026-10-20.md`).
+
 ## 5.3.9 (forks 2.3.14) - 2026-10-19 - LoopUnrolling: a loop inside an `if` lost its result
 
 - **FIXED (silent wrong results on CUDA, OpenCL, WebGPU, WebGL and Wasm; CPU was right):** a loop with a compile-time trip count inside an `if`, whose result is used after the

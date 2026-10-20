@@ -1738,6 +1738,27 @@ namespace ILGPU.Backends.Velocity.Vec128
 
         #endregion
 
+        /// <summary>
+        /// The divisor of an integer division or remainder with every zero lane replaced by one. A SIMD warp executes ALL of its lanes, also the ones whose
+        /// result is never used (the tail of the last warp, lanes switched off by divergent control flow): their operands are whatever the registers held, often
+        /// zero, and a zero divisor in any lane makes the vector division throw <see cref="DivideByZeroException"/> for the whole warp. The lanes that matter are
+        /// not changed (an active lane dividing by zero is undefined on every GPU backend).
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static Vector128<T> NonZeroDivisor<T>(Vector128<T> value)
+            where T : struct =>
+            Vector128.ConditionalSelect(
+                Vector128.Equals(value, Vector128<T>.Zero),
+                Vector128<T>.One,
+                value);
+
+        /// <summary>The 64-bit lane pair form of <see cref="NonZeroDivisor{T}(Vector128{T})"/>.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static (Vector128<T>, Vector128<T>) NonZeroDivisor<T>(
+            (Vector128<T>, Vector128<T>) value)
+            where T : struct =>
+            (NonZeroDivisor(value.Item1), NonZeroDivisor(value.Item2));
+
         #region Binary Operations
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1989,7 +2010,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> second)
         {
             var left = first;
-            var right = second;
+            var right = NonZeroDivisor(second);
 
             var result = left / right;
             return result;
@@ -2001,7 +2022,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> second)
         {
             var left = CastIToU32(first);
-            var right = CastIToU32(second);
+            var right = NonZeroDivisor(CastIToU32(second));
 
             var result = left / right;
             return CastUToI32(result);
@@ -2025,7 +2046,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) second)
         {
             var left = first;
-            var right = second;
+            var right = NonZeroDivisor(second);
 
             var result = (
                 left.Item1 / right.Item1,
@@ -2040,7 +2061,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) second)
         {
             var left = CastIToU64(first);
-            var right = CastIToU64(second);
+            var right = NonZeroDivisor(CastIToU64(second));
 
             var result = (
                 left.Item1 / right.Item1,
@@ -2070,7 +2091,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> second)
         {
             var left = first;
-            var right = second;
+            var right = NonZeroDivisor(second);
 
             var result = left - left / right * right;
             return result;
@@ -2082,7 +2103,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> second)
         {
             var left = CastIToU32(first);
-            var right = CastIToU32(second);
+            var right = NonZeroDivisor(CastIToU32(second));
 
             var result = left - left / right * right;
             return CastUToI32(result);
@@ -2106,7 +2127,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) second)
         {
             var left = first;
-            var right = second;
+            var right = NonZeroDivisor(second);
 
             var result = (
                 left.Item1 - left.Item1 / right.Item1 * right.Item1,
@@ -2121,7 +2142,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) second)
         {
             var left = CastIToU64(first);
-            var right = CastIToU64(second);
+            var right = NonZeroDivisor(CastIToU64(second));
 
             var result = (
                 left.Item1 - left.Item1 / right.Item1 * right.Item1,

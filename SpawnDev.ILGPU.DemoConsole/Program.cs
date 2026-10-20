@@ -211,6 +211,7 @@ try
     runner.SetTestTypes(new[]
     {
         typeof(CPUTests),
+        // typeof(VelocityTests),   // the SIMD CPU backend as a lane: 443 of 655 pass today (Plans/velocity-as-production-cpu-backend-2026-10-20.md); enable when green
         typeof(CudaTests),
         typeof(OpenCLTests),
         typeof(AcceleratorRequirementsTests),

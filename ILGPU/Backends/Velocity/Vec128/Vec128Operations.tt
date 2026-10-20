@@ -52,6 +52,9 @@ string GetWarpTypeName64(string elementTypeName) =>
 string GetItemRef64(string name, int counter) => counter < 2
     ? $"{name}.Item1.GetElement({counter})"
     : $"{name}.Item2.GetElement({counter - 2})";
+// integer division and remainder run on every lane of the warp, also the unused ones: see NonZeroDivisor
+string GuardDivisor(string opName, string prefix, string expression) =>
+    (opName == "Div" || opName == "Rem") && prefix != "F" ? $"NonZeroDivisor({expression})" : expression;
 string GetCastIToX32(string prefix, string variable) =>
     prefix != "I" ? $"CastITo{prefix}32({variable})" : variable;
 string GetCastIToX64(string prefix, string variable) =>
@@ -447,6 +450,27 @@ namespace ILGPU.Backends.Velocity.Vec128
 
         #endregion
 
+        /// <summary>
+        /// The divisor of an integer division or remainder with every zero lane replaced by one. A SIMD warp executes ALL of its lanes, also the ones whose
+        /// result is never used (the tail of the last warp, lanes switched off by divergent control flow): their operands are whatever the registers held, often
+        /// zero, and a zero divisor in any lane makes the vector division throw <see cref="DivideByZeroException"/> for the whole warp. The lanes that matter are
+        /// not changed (an active lane dividing by zero is undefined on every GPU backend).
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static Vector128<T> NonZeroDivisor<T>(Vector128<T> value)
+            where T : struct =>
+            Vector128.ConditionalSelect(
+                Vector128.Equals(value, Vector128<T>.Zero),
+                Vector128<T>.One,
+                value);
+
+        /// <summary>The 64-bit lane pair form of <see cref="NonZeroDivisor{T}(Vector128{T})"/>.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static (Vector128<T>, Vector128<T>) NonZeroDivisor<T>(
+            (Vector128<T>, Vector128<T>) value)
+            where T : struct =>
+            (NonZeroDivisor(value.Item1), NonZeroDivisor(value.Item2));
+
         #region Binary Operations
 
 <# foreach (var op in binaryOps) { #>
@@ -459,7 +483,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             <#= warpType32 #> second)
         {
             var left = <#= GetCastIToX32(prefix, "first") #>;
-            var right = <#= GetCastIToX32(prefix, "second") #>;
+            var right = <#= GuardDivisor(op.Name, prefix, GetCastIToX32(prefix, "second")) #>;
 
 <#          if (velocity == null) { #>
             var result = <#= op.GetOpOrCall(isBool: false, "left", "right") #>;
@@ -485,7 +509,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             <#= warpType64 #> second)
         {
             var left = <#= GetCastIToX64(prefix, "first") #>;
-            var right = <#= GetCastIToX64(prefix, "second") #>;
+            var right = <#= GuardDivisor(op.Name, prefix, GetCastIToX64(prefix, "second")) #>;
 
 <#          if (velocity == null) { #>
             var result = (
