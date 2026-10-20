@@ -77,7 +77,6 @@ The first three rows are ML kernels, 2 timed iterations, measured at the start o
 
 ## Limits and known gaps
 
-- **`MathF.Truncate` / `Math.Truncate`** compile to an internal call (`ModF`) that no ILGPU operation implements, on every compiled backend. Velocity now throws a `NotSupportedException` naming the method at compile time (it used to return the input unchanged). With `EnableAlgorithms()` the call is remapped to `XMath.Truncate` and works.
 - A method without a body (an internal call nothing implements) fails to compile instead of returning a wrong value.
 - Groups above 256 threads are rejected at launch.
 - The CPU backend's debugger-friendly behavior (stepping through the original IL) does not exist here: the kernel is compiled to different IL. Debug a kernel on the CPU backend, then run it on Velocity.

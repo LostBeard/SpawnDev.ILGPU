@@ -135,6 +135,7 @@ namespace ILGPU.Frontend.Intrinsic
                 typeof(double));
 
             RegisterMathRemappings();
+            RegisterTruncateRemappings();
             RegisterBitConverterRemappings();
             // BitOperations methods may not exist in all runtimes (e.g., Blazor WebAssembly)
             try
@@ -357,6 +358,32 @@ namespace ILGPU.Frontend.Intrinsic
 
             public static ulong Decrement(ref ulong value) =>
                 (ulong)Atomic.Add(ref Unsafe.As<ulong, long>(ref value), -1L);
+        }
+
+        #endregion
+
+        #region Truncate remappings
+
+        /// <summary>
+        /// Implementations of the truncate functions: System.Math.Truncate is an internal
+        /// call (ModF) that no ILGPU operation covers, so a kernel that used it compiled to
+        /// a function without a body (CUDA failed at PTX JIT, Velocity returned the input).
+        /// Ceiling for negative values and floor otherwise gives the same results as the
+        /// framework (-0.5 truncates to -0, NaN and infinities stay).
+        /// </summary>
+        static class Truncation
+        {
+            public static float Truncate(float value) =>
+                value < 0.0f ? MathF.Ceiling(value) : MathF.Floor(value);
+
+            public static double Truncate(double value) =>
+                value < 0.0 ? Math.Ceiling(value) : Math.Floor(value);
+        }
+
+        private static void RegisterTruncateRemappings()
+        {
+            AddRemapping(typeof(MathF), typeof(Truncation), "Truncate", typeof(float));
+            AddRemapping(typeof(Math), typeof(Truncation), "Truncate", typeof(double));
         }
 
         #endregion
