@@ -4,7 +4,7 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.4.0</Version>
+		<Version>5.4.1-local.1</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
 		<PackageReleaseNotes>v5.4.0 (forks 2.4.0) - Velocity, the SIMD CPU backend, is a complete backend and the default CPU backend: AllAccelerators() / AllAcceleratorsAsync() register it instead of the plain CPU accelerator on desktop and server (BEHAVIOR CHANGE: the plain CPU accelerator is the debugging backend now, register it with builder.DefaultCPU(); 32-bit processes keep it, the browser registers no CPU accelerator). Velocity runs all 731 shared tests: Half, BFloat16, FP8, FP4 and packed 4-bit types, 1D/2D/3D grids and groups, groups of up to 256 threads with fast barriers, Vector256 / Vector512 device types. MathF.Truncate / Math.Truncate work on every compiled backend. See CHANGELOG.md. v5.3.9 (forks 2.3.14) - FIXED: a loop with a compile-time trip count inside an if, whose result is used after the if, returned the value from before the loop in every thread that took the branch, on CUDA, OpenCL, WebGPU, WebGL and Wasm (LoopUnrolling left the exit block phi naming the cleared loop header as its source). See CHANGELOG.md.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
@@ -68,8 +68,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.4.0" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.4.0" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.4.1-local.1" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.4.1-local.1" />
 	</ItemGroup>
 
 	<ItemGroup>
