@@ -127,6 +127,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // .Empty: run on every method, not only ones an earlier pass flagged.
                 builder.Add(Transformer.Create(
                     TransformerConfiguration.Empty,
+                    // GLSL cannot implement assertions or debug output; drop them so their operands die in the DCE below.
+                    new RemoveDebugOperations(),
                     new InlineAddressParameterCalls(),
                     new SimplifyControlFlow(),
                     new DeadCodeElimination()));

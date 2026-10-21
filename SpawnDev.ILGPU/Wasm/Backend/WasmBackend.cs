@@ -309,6 +309,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 builder.Add(Transformer.Create(
                     TransformerConfiguration.Empty,
                     new LowerArrays(MemoryAddressSpace.Local)));
+
+                // The Wasm generator emits nothing for assertions or debug output, so drop them and let the DCE remove
+                // the operands only they used (every ArrayView access carries an index and a length assertion).
+                builder.Add(Transformer.Create(
+                    TransformerConfiguration.Empty,
+                    new RemoveDebugOperations(),
+                    new DeadCodeElimination()));
             });
 
             // Hard reference for bundling

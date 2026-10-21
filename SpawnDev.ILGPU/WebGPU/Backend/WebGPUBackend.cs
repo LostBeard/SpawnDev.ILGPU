@@ -722,6 +722,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // .Empty: run on every method, not only ones an earlier pass flagged.
                 builder.Add(Transformer.Create(
                     TransformerConfiguration.Empty,
+                    // WGSL cannot implement assertions or debug output (the generator emits nothing for them), but their
+                    // operands - emulated-i64 index/length compares from every ArrayView access - stayed alive as dead
+                    // assignments (32-47 % of the TRELLIS.2 attention/gemm shaders). DeadCodeElimination below drops them.
+                    new RemoveDebugOperations(),
                     new InlineAddressParameterCalls(inlineBudgetSurvivors: true),
                     new SimplifyControlFlow(),
                     new DeadCodeElimination()));
