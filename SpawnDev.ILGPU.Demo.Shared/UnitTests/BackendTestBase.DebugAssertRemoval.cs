@@ -91,5 +91,57 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new Exception($"{nameof(DebugAssertViewKernel)}: WGSL calls the i64 emulation x{calls} for 32-bit view indexing ({wgsl.Length} chars): debug-assert chains are still emitted.");
             await Task.CompletedTask;
         });
+
+        // SpawnDev.ILGPU.ML's CenterCropPadImpl: a loop that breaks out when the coordinate is out of range, then a select
+        // between a view read and 0 - the shape that failed DXC validation on WebGPU once RemoveDebugOperations ran
+        // (WebGPUTests.Op_CenterCropPad_CopiesData, found by Tuvok 2026-10-21).
+        static void DebugAssertLoopBreakKernel(Index1D idx, ArrayView1D<float, Stride1D.Dense> input,
+            ArrayView1D<float, Stride1D.Dense> output, ArrayView1D<float, Stride1D.Dense> paramsArr)
+        {
+            int rank = (int)paramsArr[0];
+            int tmp = idx;
+            bool inBounds = true;
+            int srcIdx = 0;
+            for (int d = rank - 1; d >= 0; d--)
+            {
+                int inSize = (int)paramsArr[1 + d];
+                int outSize = (int)paramsArr[1 + rank + d];
+                int inStride = (int)paramsArr[1 + 2 * rank + d];
+                int outCoord = tmp % outSize;
+                tmp /= outSize;
+                int inCoord = outCoord - (outSize - inSize) / 2;
+                if (inCoord < 0 || inCoord >= inSize) { inBounds = false; break; }
+                srcIdx += inCoord * inStride;
+            }
+            output[idx] = inBounds ? input[srcIdx] : 0f;
+        }
+
+        [TestMethod]
+        public async Task DebugAssertRemoval_LoopWithBreak_CenterCropPad_CorrectOutput() => await RunTest(async accelerator =>
+        {
+            // input 2x3 centered into 4x5 (pad) and a second case cropping 4x5 to 2x3: both directions of the centre offset
+            foreach (var (inH, inW, outH, outW) in new[] { (2, 3, 4, 5), (4, 5, 2, 3), (2, 2, 2, 2) })
+            {
+                var input = new float[inH * inW];
+                for (int i = 0; i < input.Length; i++) input[i] = i + 1;
+                var prm = new float[] { 2, inH, inW, outH, outW, inW, 1 };
+                var expected = new float[outH * outW];
+                for (int oy = 0; oy < outH; oy++)
+                    for (int ox = 0; ox < outW; ox++)
+                    {
+                        int iy = oy - (outH - inH) / 2, ix = ox - (outW - inW) / 2;
+                        expected[oy * outW + ox] = iy >= 0 && iy < inH && ix >= 0 && ix < inW ? input[iy * inW + ix] : 0f;
+                    }
+                using var inBuf = accelerator.Allocate1D(input);
+                using var outBuf = accelerator.Allocate1D<float>(outH * outW);
+                using var pBuf = accelerator.Allocate1D(prm);
+                accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>>(DebugAssertLoopBreakKernel)(outH * outW, inBuf.View, outBuf.View, pBuf.View);
+                await accelerator.SynchronizeAsync();
+                var got = await outBuf.CopyToHostAsync<float>();
+                for (int i = 0; i < expected.Length; i++)
+                    if (got[i] != expected[i])
+                        throw new Exception($"in {inH}x{inW} out {outH}x{outW}: out[{i}] = {got[i]}, expected {expected[i]}");
+            }
+        });
     }
 }

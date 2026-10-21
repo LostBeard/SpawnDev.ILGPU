@@ -4012,7 +4012,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             // Replace the sentinel with the real signature + builtin copies
             string fullOutput = Builder.ToString(signatureInsertPosition, Builder.Length - signatureInsertPosition);
-            fullOutput = fullOutput.Replace(signatureSentinel, signature + builtinCopies);
+            string scalarParamLets = HoistScalarParamLoads(ref fullOutput);
+            fullOutput = fullOutput.Replace(signatureSentinel, signature + builtinCopies + scalarParamLets);
 
             Builder.Remove(signatureInsertPosition, Builder.Length - signatureInsertPosition);
             Builder.Append(fullOutput);
@@ -4026,6 +4027,39 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             //     Console.WriteLine($"WGSL_DUMP[{_kernelMethodName}|loops={_loops.Count}]:{escaped}:END_WGSL_DUMP");
             // }
         }
+        // "_scalar_params[N]" with a literal slot (the dynamic-index forms are left alone)
+        [System.Text.RegularExpressions.GeneratedRegex(@"\b_scalar_params\[(\d+)\]")]
+        private static partial System.Text.RegularExpressions.Regex ScalarParamLoadPattern();
+
+        /// <summary>
+        /// Replaces every literal-slot read of <c>_scalar_params[N]</c> in the kernel body by <c>_sp_N</c> and returns the
+        /// <c>let _sp_N : u32 = _scalar_params[N];</c> lines that load each slot ONCE at kernel entry.
+        /// </summary>
+        /// <remarks>
+        /// Every view access re-read its element offset (and every scalar parameter its value) from the storage buffer, in
+        /// whatever block it sat. DXC merges those equal loads across blocks into a PHI OF RESOURCE HANDLES, which is invalid
+        /// DXIL ("Resource handle should returned by createHandle"): the shader of a loop with breaks, a select between a view
+        /// read and 0, and a later store failed pipeline creation with "DXC compile failed with error: E_FAIL"
+        /// (SpawnDev.ILGPU.ML CenterCropPadImpl, WebGPUTests.Op_CenterCropPad_CopiesData, 2026-10-21; reproduced as
+        /// DebugAssertRemoval_LoopWithBreak_CenterCropPad_CorrectOutput). Whether DXC does it depends on the surrounding
+        /// code - removing the dead debug-assert chains is what exposed it - so the cure is the shape, not that kernel: the
+        /// slots are loaded in the entry block only, where there is nothing to merge. The values are dispatch constants, so
+        /// hoisting changes no result; it also drops the repeated loads from hot loops.
+        /// </summary>
+        private static string HoistScalarParamLoads(ref string body)
+        {
+            var slots = new SortedSet<int>();
+            foreach (System.Text.RegularExpressions.Match m in ScalarParamLoadPattern().Matches(body))
+                slots.Add(int.Parse(m.Groups[1].Value));
+            if (slots.Count == 0)
+                return "";
+            body = ScalarParamLoadPattern().Replace(body, "_sp_$1");
+            var lets = new StringBuilder();
+            foreach (int slot in slots)
+                lets.Append("    let _sp_").Append(slot).Append(" : u32 = _scalar_params[").Append(slot).Append("];\n");
+            return lets.ToString();
+        }
+
         private string GetPrefix(Value value)
         {
             // If the variable was hoisted to the top of main(), it's already a 'var'
