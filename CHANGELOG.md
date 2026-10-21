@@ -1,7 +1,7 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## Unreleased (after 5.3.9; becomes 5.4.0) - Velocity (the SIMD CPU backend) becomes a complete backend and the default CPU backend
+## 5.4.0 (forks 2.4.0) - 2026-10-20 - Velocity (the SIMD CPU backend) becomes a complete backend and the default CPU backend
 
 - **NEW: Velocity `Vector256` (8 lanes) and `Vector512` (16 lanes) device types** next to `Vector128`; the operation classes are generated for every width from shared T4 includes. All 733 shared tests pass on both. `builder.AllVelocity()` registers the widths the hardware accelerates. Measured (AVX-512 PC): arithmetic-bound kernel 38 / 22 / 18 ms, barrier kernel 4.9 / 2.8 / 2.1 ms, memory-bound unchanged, gather-heavy matmul 29.5 / 30.1 / 42.8 ms for 128 / 256 / 512 bits; `Vector128` stays the default (see Docs/velocity.md).
 - **FIXED (Velocity): shared memory of groups of at most one warp was allocated again for every group of a chunk.** The 2 MB pool was only reset at the start of a chunk, so a kernel with shared arrays that ran about 16000 groups (a group is one warp on the 512-bit device) wrote outside the pool (access violation). Each group frees the shared memory of the previous one (`VelocityGroupExecutionContext.BeginIteration`); the local memory pool is reset every iteration. Test `SharedMemory_ManyGroupsOfOneWarp_DoNotExhaustThePool` (red before, on the 128 and 512 bit devices).
