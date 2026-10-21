@@ -34,7 +34,8 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task MathTruncate_Double_MatchesTheFramework() => await RunEmulatedTest(async accelerator =>
         {
-            var input = new[] { 2.5, -2.5, 3.9, -3.9, 0.5, -0.5, 0.0, 1e15, -1e15, 4503599627370495.5, double.PositiveInfinity, double.NegativeInfinity, double.NaN, 7.0, -7.0 };
+            // values up to 2^40: the emulated doubles of WebGPU and WebGL (pairs of floats) hold about 48 bits, a fraction at 2^52 is lost before the truncation
+            var input = new[] { 2.5, -2.5, 3.9, -3.9, 0.5, -0.5, 0.0, 1e15, -1e15, 123456789012.5, -123456789012.5, double.PositiveInfinity, double.NegativeInfinity, double.NaN, 7.0, -7.0 };
             using var inBuf = accelerator.Allocate1D(input);
             using var outBuf = accelerator.Allocate1D<double>(input.Length);
             accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<double>, ArrayView<double>>(TruncateDoubleKernel)(input.Length, inBuf.View, outBuf.View);
