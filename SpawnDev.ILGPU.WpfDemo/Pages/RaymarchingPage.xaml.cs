@@ -73,13 +73,14 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
 
         private static int GetBackendPriority(string key) => key switch
         {
-            "Cuda" => 0, "OpenCL" => 1, "CPU" => 2, _ => 3
+            "Cuda" => 0, "OpenCL" => 1, "Velocity" => 2, "CPU" => 3, _ => 4
         };
 
         private async Task DetectAvailableBackends()
         {
             var backends = new List<(string Key, string Label)>();
-            using var probeContext = await Context.CreateAsync(builder => builder.AllAcceleratorsAsync());
+            // AllAccelerators registers Velocity (SIMD CPU) rather than the plain CPU accelerator; add the plain one for debugging.
+            using var probeContext = await Context.CreateAsync(async builder => { await builder.AllAcceleratorsAsync(); builder.DefaultCPU(); });
             foreach (var device in probeContext)
             {
                 string key = device.AcceleratorType.ToString();
@@ -88,7 +89,8 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
                 {
                     AcceleratorType.Cuda => "🚀 CUDA",
                     AcceleratorType.OpenCL => "⚡ OpenCL",
-                    AcceleratorType.CPU => "🐢 CPU",
+                    AcceleratorType.Velocity => "🏎 Velocity (SIMD CPU)",
+                    AcceleratorType.CPU => "🐢 CPU (debug)",
                     _ => $"❓ {device.Name}"
                 };
                 backends.Add((key, $"{label} — {device.Name}"));
@@ -129,7 +131,7 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
 
         private void InitializeBackend(string backendName)
         {
-            _ilgpuContext = Context.Create(builder => builder.AllAccelerators());
+            _ilgpuContext = Context.Create(builder => builder.AllAccelerators().DefaultCPU());
             Device? device = null;
             foreach (var d in _ilgpuContext)
             {

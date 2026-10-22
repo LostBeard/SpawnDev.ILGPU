@@ -16,12 +16,12 @@
                 </TextBlock.Foreground>
                 Massive Parallelism on Desktop
             </TextBlock>
-            <TextBlock Text="Running C# ILGPU kernels on CUDA, OpenCL, and CPU"
+            <TextBlock Text="Running C# ILGPU kernels on CUDA, OpenCL, and the CPU (Velocity SIMD)"
                        TextAlignment="Center" FontSize="18" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,0,12" />
             <TextBlock TextAlignment="Center" FontSize="14" Foreground="{StaticResource TextMutedBrush}"
                        TextWrapping="Wrap" MaxWidth="600" Margin="0,0,0,30" HorizontalAlignment="Center">
                 This desktop demo uses the same ILGPU kernels as the Blazor WebAssembly version.
-                CUDA and OpenCL dispatch to the GPU, while the CPU backend provides a debug fallback.
+                CUDA and OpenCL dispatch to the GPU, Velocity runs vectorized on all CPU cores, and the plain CPU backend is the debugger.
                 Same kernel code, different platforms.
             </TextBlock>
 
@@ -29,7 +29,7 @@
             <TextBlock Text="Desktop Backends" TextAlignment="Center" FontSize="22" FontWeight="Bold"
                        Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,20" />
             
-            <UniformGrid Columns="3" Margin="0,0,0,30">
+            <UniformGrid Columns="4" Margin="0,0,0,30">
                 <!-- CUDA -->
                 <Border Background="#1C2B4A" BorderBrush="#2B4B8B" BorderThickness="1" CornerRadius="10" Margin="6" Padding="20">
                     <StackPanel>
@@ -48,12 +48,21 @@
                                    FontSize="12.5" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
                     </StackPanel>
                 </Border>
+                <!-- Velocity -->
+                <Border Background="#251C4A" BorderBrush="#4B2B8B" BorderThickness="1" CornerRadius="10" Margin="6" Padding="20">
+                    <StackPanel>
+                        <TextBlock Text="🏎" FontSize="28" Margin="0,0,0,10" />
+                        <TextBlock Text="Velocity Backend" FontSize="15" FontWeight="SemiBold" Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,6" />
+                        <TextBlock Text="SIMD-vectorized CPU execution on all cores. The default CPU backend, and fast enough for real work."
+                                   FontSize="12.5" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
                 <!-- CPU -->
                 <Border Background="#1E293B" BorderBrush="{StaticResource BorderSubtleBrush}" BorderThickness="1" CornerRadius="10" Margin="6" Padding="20">
                     <StackPanel>
                         <TextBlock Text="🐢" FontSize="28" Margin="0,0,0,10" />
                         <TextBlock Text="CPU Backend" FontSize="15" FontWeight="SemiBold" Foreground="{StaticResource TextPrimaryBrush}" Margin="0,0,0,6" />
-                        <TextBlock Text="Multi-threaded CPU execution. Useful for debugging, testing, and systems without GPU support."
+                        <TextBlock Text="ILGPU's debugging CPU accelerator: runs the kernel's own IL, so you can step through it. Slow by design."
                                    FontSize="12.5" Foreground="{StaticResource TextSecondaryBrush}" TextWrapping="Wrap" />
                     </StackPanel>
                 </Border>

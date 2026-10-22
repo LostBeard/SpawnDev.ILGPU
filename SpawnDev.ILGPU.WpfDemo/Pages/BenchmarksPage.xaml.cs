@@ -32,6 +32,7 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
         [
             new("Cuda", BenchmarkDefs.StandardProfile.DefaultN, BenchmarkDefs.StandardProfile.MandelbrotSize, BenchmarkDefs.StandardProfile.PrimesN),
             new("OpenCL", BenchmarkDefs.StandardProfile.DefaultN, BenchmarkDefs.StandardProfile.MandelbrotSize, BenchmarkDefs.StandardProfile.PrimesN),
+            new("Velocity", BenchmarkDefs.StandardProfile.DefaultN, BenchmarkDefs.StandardProfile.MandelbrotSize, BenchmarkDefs.StandardProfile.PrimesN),
             new("CPU", BenchmarkDefs.StandardProfile.DefaultN, BenchmarkDefs.StandardProfile.MandelbrotSize, BenchmarkDefs.StandardProfile.PrimesN),
         ];
 
@@ -40,6 +41,7 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
         {
             "Cuda" => Color.FromRgb(0x22, 0xC5, 0x5E),
             "OpenCL" => Color.FromRgb(0xF9, 0x73, 0x16),
+            "Velocity" => Color.FromRgb(0x8B, 0x5C, 0xF6),
             "CPU" => Color.FromRgb(0x64, 0x74, 0x8B),
             _ => Color.FromRgb(0x94, 0xA3, 0xB8),
         };
@@ -48,6 +50,7 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
         {
             "Cuda" => "#22C55E",
             "OpenCL" => "#F97316",
+            "Velocity" => "#8B5CF6",
             "CPU" => "#64748B",
             _ => "#94A3B8",
         };
@@ -71,11 +74,14 @@ namespace SpawnDev.ILGPU.WpfDemo.Pages
                 {
                     "Cuda" => AcceleratorType.Cuda,
                     "OpenCL" => AcceleratorType.OpenCL,
+                    "Velocity" => AcceleratorType.Velocity,
                     "CPU" => AcceleratorType.CPU,
                     _ => throw new ArgumentException($"Unknown backend: {name}")
                 };
 
-                var ctx = global::ILGPU.Context.Create(builder => builder.AllAccelerators());
+                // AllAccelerators() registers Velocity (the SIMD CPU backend) instead of the plain CPU accelerator
+                // since 5.4.0; the plain one is the debugging backend and is added explicitly for the "CPU" row.
+                var ctx = global::ILGPU.Context.Create(builder => builder.AllAccelerators().DefaultCPU());
                 Device? device = null;
                 foreach (var d in ctx)
                 {

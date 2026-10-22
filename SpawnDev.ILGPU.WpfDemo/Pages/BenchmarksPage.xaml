@@ -61,7 +61,7 @@
                     </TextBlock.Foreground>
                     ⚡ Backend Benchmarks
                 </TextBlock>
-                <TextBlock Text="Compare CUDA, OpenCL, and CPU performance"
+                <TextBlock Text="Compare CUDA, OpenCL, Velocity, and CPU performance"
                            Foreground="{StaticResource TextSecondaryBrush}" FontSize="14"
                            HorizontalAlignment="Center" Margin="0,0,0,20" />
 
