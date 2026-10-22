@@ -9,7 +9,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="SpawnDev.ILGPU" Version="5.3.7" />
+    <PackageReference Include="SpawnDev.ILGPU" Version="5.4.1" />
   </ItemGroup>
 
 </Project>

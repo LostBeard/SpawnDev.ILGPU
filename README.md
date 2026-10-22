@@ -1,160 +1,86 @@
+<div align="center">
+
 # SpawnDev.ILGPU
 
-[![NuGet](https://img.shields.io/nuget/v/SpawnDev.ILGPU.svg?)](https://www.nuget.org/packages/SpawnDev.ILGPU)
+**GPU compute in C#, in the browser or on the desktop.**
 
-> 💜 **Built and maintained by one independent developer** — no company, no overhead, just code. If SpawnDev.ILGPU saves you time, please consider [**sponsoring its development »**](https://github.com/sponsors/LostBeard). Sponsorship is what keeps it alive and maintained.
+Write [ILGPU](https://github.com/m4rs-mt/ILGPU) kernels once. They run as WGSL, GLSL ES, WebAssembly, PTX, OpenCL C or SIMD CPU code.
+No JavaScript to write, no shaders to write, no native binaries to ship.
 
-**Run [ILGPU](https://github.com/m4rs-mt/ILGPU) C# kernels on WebGPU, WebGL, Wasm, Cuda, OpenCL, and CPU (plain or SIMD-vectorized Velocity) - from a single codebase.**  
-Write parallel compute code in C# and let the library pick the best available backend automatically. In the browser, three backends (WebGPU, WebGL, Wasm) bring GPU-accelerated compute to virtually every modern browser. On desktop and server, ILGPU's native Cuda and OpenCL backends are available alongside CPU. The same async extension methods work everywhere.
+[![NuGet](https://img.shields.io/nuget/v/SpawnDev.ILGPU.svg?label=nuget&logo=nuget)](https://www.nuget.org/packages/SpawnDev.ILGPU)
+[![Downloads](https://img.shields.io/nuget/dt/SpawnDev.ILGPU.svg?label=downloads)](https://www.nuget.org/packages/SpawnDev.ILGPU)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.txt)
+[![.NET 10](https://img.shields.io/badge/.NET-10-512bd4.svg)](https://dotnet.microsoft.com/)
+[![Live demo](https://img.shields.io/badge/live%20demo-GitHub%20Pages-2ea44f.svg)](https://lostbeard.github.io/SpawnDev.ILGPU/)
+[![Sponsor](https://img.shields.io/badge/sponsor-LostBeard-ea4aaa.svg?logo=githubsponsors)](https://github.com/sponsors/LostBeard)
 
-> **Your existing ILGPU kernels run in the browser with zero changes to the kernel code - and the same code runs on desktop too.**
+[**Live demo**](https://lostbeard.github.io/SpawnDev.ILGPU/) | [Docs](Docs/) | [Examples](Examples/README.md) | [Changelog](CHANGELOG.md)
 
-## Recent Highlights
+<a href="https://lostbeard.github.io/SpawnDev.ILGPU/fractals"><img src="https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/spawndev-ilgpu-fractal-explorer-3.jpg" alt="The Fractal Explorer demo, computed by a C# kernel on the visitor's GPU" width="720"></a>
 
-**5.4.1:** **WebGPU, WebGL and Wasm no longer compile the debug assertions' operands, and WebGPU reads each scalar slot once.** Every `ArrayView` access carries an index assertion these backends cannot implement, but the values feeding it were still emitted as dead code (on WebGPU an emulated-i64 compare chain per access): 32-47 % of the TRELLIS.2 attention and GEMM shaders. MEASURED in SpawnDev.ILGPU.ML: the GEMM WGSL 592 KB -> 331 KB, its cold first launch 6.6-7.1 s -> 1.25 s, attention 547 -> 484 ms (-11 %) from the scalar-slot hoist, which also fixes a `DXC compile failed with error: E_FAIL` (a phi of resource handles) that the removal exposed. See CHANGELOG.md.
+<sub>The Fractal Explorer from the live demo. The pixels come from a C# kernel running on the visitor's own GPU, in the browser, with double-precision zoom.</sub>
 
-**5.4.0:** **Velocity, the SIMD CPU backend, is a complete backend.** It runs all 731 tests of the shared suite (pass or capability skip) as the `VelocityTests` desktop lane, with `Half` / `BFloat16` / FP8 / FP4 / packed 4-bit types, 1D/2D/3D grids and groups of up to 256 threads with fast barriers, shared memory, atomics and the ILGPU Algorithms. MEASURED: a LayerNorm that takes 411 ms on the plain CPU backend takes 0.69 ms on Velocity; an at-scale scan 131 s -> 1 s. **Velocity is now the default CPU backend:** `AllAccelerators()` / `AllAcceleratorsAsync()` register it (with OpenCL and Cuda) instead of the plain CPU accelerator, which stays available as the debugging backend (`builder.DefaultCPU()`). Browser and 32-bit processes keep the plain CPU accelerator. See [Docs/velocity.md](Docs/velocity.md).
+</div>
 
-**5.3.7:** **Blazor WebAssembly AOT: kernels with 6 or more parameters no longer kill the runtime.** On WebGPU, WebGL and Wasm the stream loaders now launch with boxed arguments instead of creating a launcher delegate that Mono AOT could not always create. **Hybrid GPU machines pick the discrete GPU.** `CreatePreferredAccelerator(Async)` and the new `context.GetBestDevice()` / `DevicePreference.OrderByPreference()` rank CUDA > discrete OpenCL GPU > integrated OpenCL GPU > other OpenCL > CPU. Memory size only breaks ties now, because integrated GPUs and Intel's OpenCL CPU runtime report system RAM. In the browser the order is WebGPU > WebGL > Wasm.
+---
 
-**5.3.6:** **Idle GPU memory is reclaimed before the driver spills.** On Windows the NVIDIA driver places an allocation that does not fit in system RAM instead of failing it, so a reclaim that waits for a failed allocation never runs. Holders of reclaimable memory (`IDeviceMemoryReclaimer`, e.g. SpawnDev.ILGPU.ML's buffer pools) register with `accelerator.RegisterReclaimer(...)`, and every allocation then checks free memory first (CUDA) and reclaims least-recently-used memory when the allocation would leave less than `DeviceMemoryHeadroomBytes`. See [Memory & Buffers](Docs/memory-and-buffers.md#device-memory-budget-reclaiming-idle-memory).
+## What it is
 
-**5.3.2 - 5.3.5:** Persisted shaders: `ShaderArtifactSerializer.ExportCache()` / `ImportCache(json)` carry a session's compiled WebGPU shaders into the next session, and a stored kernel skips ILGPU's IR construction as well as WGSL generation. Faster WGSL compiles, WebGPU batched-dispatch arenas and bind-group reuse, exact subnormal `Half` decode on the emulated backends, Firefox video-frame copies, a corrected exclusive `CreateScan` on WebGPU and Wasm past one chunk, device-to-device `CopyTo` on WebGPU and Wasm, and a Mono WASM AOT fix (no static fields on generic view structs).
+SpawnDev.ILGPU extends [ILGPU](https://github.com/m4rs-mt/ILGPU), the .NET compiler that turns C# methods into GPU code, with three backends for the browser (**WebGPU**, **WebGL** and **WebAssembly**) and a SIMD CPU backend for the desktop (**Velocity**). A kernel you wrote for CUDA or OpenCL runs unchanged in a Blazor WebAssembly app, and the same kernel runs on the desktop. Your application picks the best backend that is available at run time.
 
-**5.3.1:** **Trimming is enforced at library level, and Blazor WebAssembly AOT is supported with the IL kept** (`RunAOTCompilation=true` + `WasmStripILAfterAOT=false`). `bool` kernel scalar parameters work on all 6 backends, and `float`/`double` `%` is exact (IEEE fmod) everywhere.
+The library ships as one NuGet package, `SpawnDev.ILGPU`. It brings along the forked ILGPU compiler (`SpawnDev.ILGPU.Fork`, `SpawnDev.ILGPU.Algorithms.Fork`) and [SpawnDev.SpawnJS](https://github.com/LostBeard/SpawnDev.SpawnJS) for browser interop.
 
-**5.3.0:** **Built on [SpawnDev.SpawnJS](https://github.com/LostBeard/SpawnDev.SpawnJS) 3.0** (replaces SpawnDev.BlazorJS as the browser interop layer): every .NET to JS call is one boundary crossing. Host time per unbatched WebGPU dispatch dropped from 251 to 80 us.
+## Highlights
 
-**5.2.25:** **WebGPU dispatch batching** - plain dispatches, copies, clears and small uploads are recorded and submitted with one .NET to JS crossing per submit (433 -> 41 us host time per dispatch, measured). **`IExternalImageCopier`** copies a `<video>`, `<img>`, canvas, `ImageBitmap` or `VideoFrame` into a GPU buffer, entirely on the GPU on WebGPU (the input-side twin of `ICanvasRenderer`).
+- **One kernel, every backend.** WebGPU, WebGL and Wasm in the browser; CUDA, OpenCL, Velocity (SIMD CPU) and the plain CPU accelerator on the desktop. The shared test suite runs on all of them.
+- **Existing ILGPU code runs as it is.** `ArrayView`, `Index1D/2D/3D`, shared memory, atomics, `Group.Barrier()`, lambdas and the ILGPU Algorithms (radix sort, scan, reduce, histogram) work on the browser backends.
+- **One async API for browser and desktop.** `SynchronizeAsync()`, `CopyToHostAsync()` and `CopyFromAsync()` work everywhere. The browser backends require async, and the desktop backends accept it.
+- **Automatic backend selection.** `CreatePreferredAcceleratorAsync()` picks WebGPU, then WebGL, then Wasm in the browser, and the discrete GPU before the CPU on the desktop.
+- **Sub-word and low-precision types.** `Int8/16`, `Half`, `BFloat16`, FP8 (`Float8E4M3`, `Float8E5M2`), FP4 (`Float4E2M1`) and packed 4-bit integers (`QInt4`, `QUInt4`) are real IR primitives, with buffer access on every backend.
+- **Zero-copy browser I/O.** Write a JavaScript `TypedArray` straight into a GPU buffer, stream a `Blob` or an OPFS file into a buffer in bounded chunks, present a buffer on a `<canvas>`, or copy a `<video>` frame into a buffer, all without the bytes entering the .NET heap.
+- **WebGPU performance tools.** Batched dispatch submission, dispatch-plan capture and replay, device-memory budgeting, and shader precompilation with a persisted cache.
+- **Trim and AOT safe.** The trim analyzer runs on every build of the libraries. Blazor WebAssembly AOT is supported when the IL is kept.
+- **No native dependencies.** The whole library is C#.
 
-**5.2.x:** A long correctness series on the browser code generators (loops with breaks, `switch`, `[NoInlining]` helpers, short-circuit branches, emulated 64-bit conversions and rounding), Wasm pipelined dispatch, WebGPU live-buffer accounting (`WebGPUBufferAccounting`), one compute pipeline per kernel instead of one per dispatch size, and the first trim-safe release (5.2.0).
+## Try it
 
-**4.x highlights still current:** WebGPU dispatch-plan capture/replay (4.17), streaming `CopyFromStreamAsync` / `CopyToStreamAsync` (4.9.14 / 4.17), CUDA graph capture (4.16), Wasm SIMD128 auto-vectorization (4.15), the 4-bit / low-precision type tier (4.13 - 4.14), the sync/async contract (4.12) and precompiled shaders (4.10).
+The [live demo](https://lostbeard.github.io/SpawnDev.ILGPU/) is a Blazor WebAssembly app. Everything runs on your own GPU or CPU, and nothing is sent to a server.
 
-**See [CHANGELOG.md](CHANGELOG.md)** for the full per-version history - every release, code samples, and per-backend implementation detail.
+| Demo | What it does |
+|------|--------------|
+| [Fractal Explorer](https://lostbeard.github.io/SpawnDev.ILGPU/fractals) | Interactive Mandelbrot and other fractals with double-precision zoom |
+| [3D Raymarching](https://lostbeard.github.io/SpawnDev.ILGPU/compute3d) | Real-time raymarched scenes computed by a kernel |
+| [GPU Boids](https://lostbeard.github.io/SpawnDev.ILGPU/boids3d) | 3D flocking simulation with the physics on the GPU |
+| [Game of Life](https://lostbeard.github.io/SpawnDev.ILGPU/gameoflife) | Conway's Game of Life as a GPU cellular automaton |
+| [Benchmarks](https://lostbeard.github.io/SpawnDev.ILGPU/benchmarks) | The same workloads timed on every backend your browser offers |
+| [Unit tests](https://lostbeard.github.io/SpawnDev.ILGPU/tests) | The shared test suite, runnable in your browser against every available backend |
 
-## Architecture
+A [WPF demo](SpawnDev.ILGPU.WpfDemo) (Fractal Explorer, 3D Raymarching, GPU Boids and Benchmarks) runs the same shared kernels on the desktop backends.
 
-**Browser backends** (Blazor WebAssembly) - auto-selected: WebGPU -> WebGL -> Wasm
+<p align="center">
+<a href="https://lostbeard.github.io/SpawnDev.ILGPU/benchmarks"><img src="https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/benchmark-browser-4.jpg" alt="The Benchmarks page running in a browser" width="420"></a>
+<a href="https://lostbeard.github.io/SpawnDev.ILGPU/benchmarks"><img src="https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/benchmark-desktop-4.jpg" alt="The Benchmarks page running in the desktop demo" width="420"></a>
+</p>
 
-| | WebGPU | WebGL | Wasm |
-|---|---|---|---|
-| **Compiles to** | WGSL | GLSL ES 3.0 | Wasm binary |
-| **Runs on** | GPU | GPU | Web Workers |
-
-**Desktop backends** (Console, WPF, ASP.NET) - auto-selected: Cuda -> discrete OpenCL GPU -> integrated OpenCL GPU -> other OpenCL -> Velocity (the SIMD CPU backend; the plain CPU backend only where Velocity cannot run or when you register it)
-
-| | Cuda | OpenCL | Velocity (default CPU) | CPU (debugging) |
-|---|---|---|---|---|
-| **Compiles to** | PTX | OpenCL C | vectorized IL (`Vector128<T>`) | - (runs the kernel's own IL, one thread at a time) |
-| **Runs on** | NVIDIA GPU | Any GPU | CPU cores, SIMD | CPU cores |
-
-## Demo Applications
-
-### Browser Demo (Blazor WebAssembly)
-
-The [Live Demo](https://lostbeard.github.io/SpawnDev.ILGPU/) source is in [SpawnDev.ILGPU.Demo](SpawnDev.ILGPU.Demo):
-- [Fractal Explorer](https://lostbeard.github.io/SpawnDev.ILGPU/fractals) - Interactive Mandelbrot / Multi-fractal Explorer with double-precision zoom
-- [3D Raymarching](https://lostbeard.github.io/SpawnDev.ILGPU/3d) - Real-time GPU raymarched scenes
-- [GPU Boids](https://lostbeard.github.io/SpawnDev.ILGPU/boids) - 3D flocking simulation with GPU physics
-- [Game of Life](https://lostbeard.github.io/SpawnDev.ILGPU/gameoflife) - Conway's Game of Life on the GPU
-- [Benchmarks](https://lostbeard.github.io/SpawnDev.ILGPU/benchmarks) - Performance comparison across all backends
-- [Unit Tests](https://lostbeard.github.io/SpawnDev.ILGPU/tests) - Comprehensive test suite for all backends
-
-### Desktop Demo (WPF)
-
-The [WPF Demo](SpawnDev.ILGPU.WpfDemo) runs the same shared kernels on CUDA, OpenCL, and CPU with live backend switching:
-- Fractal Explorer - Interactive Mandelbrot / Multi-fractal Explorer with double-precision zoom
-- 3D Raymarching - Real-time GPU raymarched scenes
-- GPU Boids - 3D flocking simulation with GPU physics
-- Benchmarks - Performance comparison across CUDA, OpenCL, and CPU backends
-
-### Screenshots
-[![Desktop Benchmark Screenshot](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/benchmark-desktop-4.jpg)](https://lostbeard.github.io/SpawnDev.ILGPU/benchmarks)  
-[![Browser Benchmark Screenshot](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/benchmark-browser-4.jpg)](https://lostbeard.github.io/SpawnDev.ILGPU/benchmarks)   
-[![Fractal Explorer Screenshot](https://raw.githubusercontent.com/LostBeard/SpawnDev.ILGPU/master/SpawnDev.ILGPU.Demo/wwwroot/screenshots/spawndev-ilgpu-fractal-explorer-3.jpg)](https://lostbeard.github.io/SpawnDev.ILGPU/fractals)
-
-## Documentation
-
-Comprehensive documentation is available in the [Docs](Docs/) folder:
-
-- **[Getting Started](Docs/getting-started.md)** - Installation, setup, first kernel
-- **[Backends](Docs/backends.md)** - WebGPU, WebGL, Wasm, Cuda, OpenCL, CPU setup & configuration
-- **[Velocity](Docs/velocity.md)** - The SIMD CPU backend: enabling it, what it supports, group sizes and barriers, measured speedups over the plain CPU backend, limits
-- **[Writing Kernels](Docs/kernels.md)** - Kernel rules, index types, math functions, shared memory
-- **[Memory & Buffers](Docs/memory-and-buffers.md)** - Allocation, async readback, zero-allocation patterns
-- **[Data Type Support](Docs/data-type-support.md)** - Sub-word types (Int8/16), low-precision floats (`Half`, `BFloat16`, FP8 `Float8E4M3`/`E5M2`, FP4 `Float4E2M1`), packed 4-bit ints (`QInt4`/`QUInt4`), 64-bit emulation, per-backend details
-- **[Canvas Rendering & Image Input](Docs/canvas-rendering.md)** - `ICanvasRenderer` (GPU buffer -> canvas) and `IExternalImageCopier` (video / image -> GPU buffer), per-backend details
-- **[Capabilities & Backend Selection](Docs/capabilities-and-backend-selection.md)** - `AcceleratorRequirements`, device ranking (`GetBestDevice`), `UnsupportedKernelFeatureException`
-- **[Async API](Docs/async.md)** - the sync/async contract: which operations wait or read back (async-only on the browser) and which are fire-and-forget
-- **[Advanced Patterns](Docs/advanced-patterns.md)** - Device sharing, external buffers, GPU intrinsics, render loops
-- **[CUDA Libraries](Docs/cuda-libraries.md)** - nvJPEG, cuRand, cuBLAS, cuFFT, NVML wrappers
-- **[Limitations](Docs/limitations.md)** - Blazor WASM constraints, browser compatibility
-- **[QR Codes](Docs/qr-codes.md)** - GPU-accelerated QR code encoder, decoder, renderer with logo overlay
-- **[API Reference](Docs/api-reference.md)** - Public API surface by namespace
-- **[Precompiled Shaders](Docs/precompiled-shaders.md)** - Offline codegen, build-time shader precompilation, runtime cache, and session shader export/import (move IL->shader transpilation off the runtime hot path)
-- **[WebGPU Dispatch-Plan Capture / Replay](Docs/dispatch-plan-capture-replay.md)** - Record a fixed WebGPU dispatch sequence once and replay it with a single interop crossing (the browser twin of CUDA graph capture), with a patch surface for parameterized replay
-
-## Backends
-
-Six backends from one NuGet package - the same C# kernel runs on all of them:
-
-| Browser (Blazor WASM) | Desktop / Server |
-|---|---|
-| **WebGPU** (WGSL compute) · **WebGL** (GLSL Transform-Feedback) · **Wasm** (multi-worker WebAssembly) | **CUDA** (PTX) · **OpenCL** (incl. 3.0) · **Velocity** (the SIMD CPU backend, [Docs/velocity.md](Docs/velocity.md)) · **CPU** (debugging) |
-
-All support the sub-word + low-precision types (`Int8/16`, `Half`, `BFloat16`, FP8 `Float8E4M3`/`E5M2`, FP4 `Float4E2M1`, packed 4-bit ints `QInt4`/`QUInt4`), 64-bit (native on Wasm/CUDA/OpenCL/CPU, emulated on WebGPU/WebGL), and the ILGPU Algorithms. Packed 4-bit (`Float4E2M1`/`QInt4`/`QUInt4`) **loads on all 6**; in-kernel packed stores run on CUDA/OpenCL/WebGPU/Wasm/Velocity and are fail-loud on CPU + WebGL (no atomics for the nibble RMW). **WebGL is the exception** - no shared memory / barriers / atomics, so in-kernel group/warp ops throw (host `RadixSort`/`Scan`/`Reduce` still work, all key types). Auto-selection: WebGPU->WebGL->Wasm (browser), CUDA->discrete OpenCL GPU->integrated OpenCL GPU->other OpenCL->Velocity->CPU (desktop), via `CreatePreferredAcceleratorAsync`. Full per-backend capability matrix + setup: **[Docs/backends.md](Docs/backends.md)**.
-
-## Features
-
-- **Sub-word & low-precision data types** - `Int8`, `UInt8`, `Int16`, `UInt16`, `Float16` (`ILGPU.Half`), `BFloat16`, FP8 (`Float8E4M3` + `Float8E5M2`), FP4 (`Float4E2M1`, the NVFP4/MXFP4 element format), and packed 4-bit integers `QInt4`/`QUInt4` - buffer access on all 6 backends, each a real `BasicValueType` IR primitive (the float types with full `INumber<T>` support). `BFloat16` keeps fp32's full dynamic range (top 16 bits of an fp32); FP8 is 1-byte in the two OCP formats (E4M3 forward/inference bit-exact to `float8_e4m3fn`, E5M2 backward/gradient). **The 4-bit types (`Float4E2M1`/`QInt4`/`QUInt4`) are TRUE packed 4-bit** - 2 nibbles/byte, `ceil(N/2)` bytes - decoded to f32 in-register at the load (the data stays packed in the buffer); radix-sort and `<Type>Extensions.RawBitsToFloat(int)` (kernel-safe in-register decode of raw packed quant bits) are provided. `Half.Abs/Min/Max/Clamp` intrinsics; `Half` float→half and `Float8E4M3` are IEEE/ml_dtypes bit-exact across every backend
-- **Generic mixed-precision kernels** - one `where T : INumber<T>` kernel runs for float/Half/bf16/fp8 instead of N hand-written per-type variants; `PrecisionConvert.ConvertToSingle<T>` / `ConvertFromSingle<T>` give transpilable generic `float`<->`T` conversion inside a kernel (read low-precision, accumulate in float, write low-precision)
-- **WebGPU dispatch-plan capture / replay** - Record a fixed sequence of WebGPU dispatches once (`BeginDispatchCapture()` / `EndDispatchCapture()` -> `WebGPUDispatchPlan`), then `ReplayAsync()` re-encodes and submits the whole plan with a single .NET->JS interop crossing - the browser twin of CUDA graph capture, removing the per-dispatch orchestration cost of a fixed-shape forward. A patch surface (`CaptureScalarSnapshots`, `PatchScalarInt`, `PatchCopyDstOffsetsAsync`) replays one plan across a moving loop variable (the LLM decode / KV-append case). See [Docs/dispatch-plan-capture-replay.md](Docs/dispatch-plan-capture-replay.md)
-- **CopyFromJS** - Write JavaScript `TypedArray` or `ArrayBuffer` data directly to GPU memory without .NET heap allocation. Available on all browser backends
-- **CopyFromStreamAsync / CopyToStreamAsync** - Stream a `System.IO.Stream` into a GPU buffer, or a GPU buffer out to a `Stream`, in bounded chunks (all 6 backends). On the browser backends, if the stream implements `IJSReadStream` / `IJSWriteStream` (`SpawnDev.SpawnJS.Toolbox`), the bytes move JS↔GPU without entering the .NET/WASM managed heap - load a multi-hundred-MB model from a `Blob`/OPFS or save a large buffer to OPFS with one chunk resident at a time. See [Memory & Buffers](Docs/memory-and-buffers.md)
-- **Lambda kernels** - Write kernels as capturing C# lambdas - captured scalar values are automatically passed to the GPU at dispatch time. No boilerplate, all 6 backends
-- **Higher-order kernels** - `DelegateSpecialization<Func<T,R>>` lets you pass operations as kernel parameters. The delegate is resolved and inlined at compile time - one kernel, many behaviors
-- **Velocity, the SIMD CPU backend** - a vectorized CPU backend for real work (the plain CPU backend stays the debugger): `builder.Velocity(VelocityDeviceType.Vector128)`. Shared memory, barriers, atomics, warp shuffles, the ILGPU Algorithms, 1D/2D/3D grids and groups, and the full low-precision type tier. Registered by default on desktop/server (`AllAccelerators()`); the plain CPU backend is the debugging backend. See [Docs/velocity.md](Docs/velocity.md)
-- **Cross-platform** - Same kernel code runs in browser (WebGPU, WebGL, Wasm) and desktop (Cuda, OpenCL, CPU, Velocity) from one NuGet package
-- **Automatic backend selection** - `CreatePreferredAcceleratorAsync()` picks the best backend on any platform (browser or desktop). On hybrid laptops it picks the discrete GPU (`context.GetBestDevice()` ranks devices by kind, not by reported memory)
-- **Capability gating** - declare what a kernel needs (`AcceleratorRequirements`: atomics, shared memory, native f64, packed 4-bit stores, ...) and selection skips backends that cannot run it. See [Capabilities & Backend Selection](Docs/capabilities-and-backend-selection.md)
-- **Device memory budget** - holders of idle device memory implement `IDeviceMemoryReclaimer` and register with the accelerator; allocations reclaim least-recently-used memory before the device runs out (and before the NVIDIA driver silently spills to system RAM)
-- **WebGPU dispatch batching** - dispatches, GPU copies, clears and small uploads are recorded and submitted with one .NET to JS crossing per submit; bind groups and scalar uploads are reused across repeated dispatch sequences
-- **Unified async API** - `SynchronizeAsync()`, `CopyToHostAsync()`, and `CopyFromAsync()` work everywhere, falling back to synchronous calls on desktop
-- **ILGPU-compatible** - Use familiar APIs (`ArrayView`, `Index1D/2D/3D`, math intrinsics, etc.)
-- **WGSL transpilation** - C# kernels automatically compiled to WebGPU Shading Language
-- **GLSL transpilation** - C# kernels compiled to GLSL ES 3.0 vertex shaders with Transform Feedback for GPU compute
-- **Wasm compilation** - C# kernels compiled to native WebAssembly binary modules
-- **64-bit emulation** - `long`/`ulong` (i64) always emulated via `vec2<u32>` (required by ILGPU IR). `double` (f64) emulation configurable via `F64EmulationMode`: fast Dekker (`vec2<f32>`, default), precise Ozaki (`vec4<f32>`), or Disabled (promoted to f32)
-- **WebGPU extension auto-detection** - Probes adapter for `shader-f16`, `subgroups`, `timestamp-query`, and other features; conditionally enables them on the device
-- **Subgroup operations** - `Group.Broadcast` and `Warp.Shuffle` / `ShuffleXor` / `ShuffleUp` / `ShuffleDown` run on WebGPU when the adapter exposes the `subgroups` feature, and on Wasm through an emulation (`WarpSize` 8, shared-memory exchange)
-- **Multi-worker dispatch** - Wasm backend distributes work across all available CPU cores via SharedArrayBuffer; falls back to a single off-thread worker when SAB is unavailable
-- **Pipelined Wasm dispatch** - worker scripts are cached per kernel shape (per-dispatch values travel in the message, never in the script), compiled modules stay cached in persistent workers, and small barrier-free dispatches are pipelined (the host prepares dispatch N+1 while a worker runs dispatch N, results identical to the serialized path)
-- **Zero-copy canvas rendering** - `ICanvasRenderer` presents pixel buffers to HTML canvases without CPU readback on GPU backends: WebGPU uses a fullscreen-triangle render pass reading directly from GPU storage; WebGL transfers an `ImageBitmap` from its worker and draws synchronously; Wasm reuses a cached `ImageData`. One API, all backends: `CanvasRendererFactory.Create(accelerator)`
-- **Video / image input** - `IExternalImageCopier` (`ExternalImageCopier.Create(accelerator)`) copies a `<video>`, `<img>`, canvas, `ImageBitmap`, `VideoFrame` or `ImageData` into a GPU buffer as packed RGBA8, the same layout `ICanvasRenderer` presents. On WebGPU it never leaves the GPU (`copyExternalImageToTexture` + `copyTextureToBuffer`)
-- **Blazor WebAssembly** - Browser interop via [SpawnDev.SpawnJS](https://github.com/LostBeard/SpawnDev.SpawnJS) (one boundary crossing per .NET to JS call)
-- **Shared memory & barriers** - Static and dynamic workgroup memory with `Group.Barrier()` synchronization (WebGPU, Wasm, Cuda, OpenCL)
-- **ILGPU Algorithms** - RadixSort, Scan, Reduce, Histogram, and other algorithm extensions are fully supported on WebGPU (including large-scale sorts up to 4M+ elements) and Wasm (with multi-worker barrier synchronization), tested in-browser across all backends. Radix-sort (keys + key/value pairs, ascending + descending) covers every key type - `int`/`uint`/`long`/`float`/`double` plus `Half`, `BFloat16`, FP8, FP4 (`Float4E2M1`), and packed `QInt4`/`QUInt4`. **WebGL** supports host-level `RadixSort` (up to 4M elements), `CreateScan`, and `CreateReduction` / `Reduce` via shared-memory-free multi-dispatch emulation (the draw-call boundary is the barrier); in-kernel group/warp ops throw a typed error since the Transform-Feedback vertex model has no shared memory
-- **Broadcast** - `Group.Broadcast` for intra-group value sharing (WebGPU, Wasm)
-- **Device loss handling** - WebGPU monitors `device.lost` and WebGL monitors `webglcontextlost`; `IsDeviceLost`/`IsContextLost` properties and `DeviceLost`/`ContextLost` events enable applications to detect GPU device loss and fail fast with clear errors instead of silent corruption
-- **GpuMatrix4x4** - GPU-friendly 4x4 matrix struct that auto-transposes from .NET's row-major `Matrix4x4` to GPU column-major order. Use `TransformPoint` and `TransformDirection` directly inside kernels for 3D transformations
-- **No native dependencies** - Entirely written in C#
-
-## Installation
+## Install
 
 ```bash
 dotnet add package SpawnDev.ILGPU
 ```
 
-## Quick Start - Blazor WebAssembly
-
-### 1. Configure Program.cs
-
-SpawnDev.ILGPU uses [SpawnDev.SpawnJS](https://github.com/LostBeard/SpawnDev.SpawnJS) for browser interop (it comes in as a dependency). Register the runtime and start the app with `SpawnJSRunAsync()` from the Blazor host package:
+Requires **.NET 10**. For the browser, use a Blazor WebAssembly project and add the host package that starts the SpawnJS runtime:
 
 ```bash
 dotnet add package SpawnDev.SpawnJS.Blazor
 ```
+
+Desktop and server projects (console, WPF, ASP.NET) need nothing else.
+
+## Quick start
+
+### Blazor WebAssembly
+
+Register the SpawnJS runtime and start the app with `SpawnJSRunAsync()` instead of `RunAsync()`:
 
 ```csharp
 using SpawnDev.SpawnJS;
@@ -163,359 +89,284 @@ var builder = WebAssemblyHostBuilder.CreateDefault(args);
 builder.RootComponents.Add<App>("#app");
 builder.RootComponents.Add<HeadOutlet>("head::after");
 
-// Add the SpawnJS runtime (required for the browser backends)
 builder.Services.AddSpawnJSRuntime();
 
-// Starts SpawnJS background services, then the Blazor host
 await builder.Build().SpawnJSRunAsync();
 ```
 
-> Coming from SpawnDev.ILGPU 5.2 or older: `AddBlazorJSRuntime()` / `BlazorJSRunAsync()` became `AddSpawnJSRuntime()` / `SpawnJSRunAsync()`, and `SpawnDev.BlazorJS.JSObjects` types (`HTMLCanvasElement`, `Uint8Array`, ...) live in `SpawnDev.SpawnJS.JSObjects`. Build clean (delete `bin` and `obj`) after upgrading.
-
-### 2. Automatic Backend Selection
-
-The library discovers all available browser backends and picks the best one (WebGPU -> WebGL -> Wasm):
+Then create the best accelerator and run a kernel. The code is identical on the desktop:
 
 ```csharp
 using global::ILGPU;
 using global::ILGPU.Runtime;
 using SpawnDev.ILGPU;
 
-// Initialize context with all available backends
+// Registers every backend the environment offers:
+// browser = WebGPU, WebGL, Wasm; desktop = CUDA, OpenCL, Velocity
 using var context = await Context.CreateAsync(builder => builder.AllAcceleratorsAsync());
 
-// Create the best available accelerator (WebGPU > WebGL > Wasm)
+// Browser: WebGPU, then WebGL, then Wasm.
+// Desktop: CUDA, then a discrete OpenCL GPU, then other OpenCL devices, then Velocity.
 using var accelerator = await context.CreatePreferredAcceleratorAsync();
 
-// Allocate buffers and run a kernel - same API regardless of backend
 int length = 256;
-using var bufA = accelerator.Allocate1D(Enumerable.Range(0, length).Select(i => (float)i).ToArray());
-using var bufB = accelerator.Allocate1D(Enumerable.Range(0, length).Select(i => (float)i * 2f).ToArray());
-using var bufC = accelerator.Allocate1D<float>(length);
+using var a = accelerator.Allocate1D(Enumerable.Range(0, length).Select(i => (float)i).ToArray());
+using var b = accelerator.Allocate1D(Enumerable.Range(0, length).Select(i => (float)i * 2f).ToArray());
+using var c = accelerator.Allocate1D<float>(length);
 
-var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>>(VectorAddKernel);
-kernel((Index1D)length, bufA.View, bufB.View, bufC.View);
+var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>>(VectorAdd);
+kernel((Index1D)length, a.View, b.View, c.View);
 
-await accelerator.SynchronizeAsync();
-var results = await bufC.CopyToHostAsync<float>();
+await accelerator.SynchronizeAsync();               // wait for the GPU
+float[] results = await c.CopyToHostAsync<float>(); // the one way to read results back in the browser
 
-// The kernel - runs on GPU or Wasm transparently
-static void VectorAddKernel(Index1D index, ArrayView<float> a, ArrayView<float> b, ArrayView<float> c)
-{
-    c[index] = a[index] + b[index];
-}
+static void VectorAdd(Index1D i, ArrayView<float> a, ArrayView<float> b, ArrayView<float> c) => c[i] = a[i] + b[i];
 ```
 
-### 3. Using a Specific Browser Backend
+### Desktop and server
+
+The same code works in a console, WPF or ASP.NET app: `AllAcceleratorsAsync()` registers the desktop backends instead, and `SynchronizeAsync()` and `CopyToHostAsync()` fall back to the synchronous ILGPU calls. A complete console project is [Example 01](Examples/01-HelloKernel).
+
+### Choosing a backend yourself
 
 ```csharp
-// WebGPU - GPU compute via WGSL
+// WebGPU: compute shaders, WGSL
 using var context = await Context.CreateAsync(builder => builder.WebGPU());
-var device = context.GetWebGPUDevices()[0];
-using var accelerator = await device.CreateAcceleratorAsync(context);
+using var accelerator = await context.GetWebGPUDevices()[0].CreateAcceleratorAsync(context);
 ```
 
 ```csharp
-// WebGL - GPU compute via GLSL ES 3.0 + Transform Feedback (works on virtually all browsers)
+// WebGL: GLSL ES 3.0 with Transform Feedback, available on almost every browser
 using var context = await Context.CreateAsync(builder => builder.WebGL());
-var device = context.GetWebGLDevices()[0];
-using var accelerator = await device.CreateAcceleratorAsync(context);
+using var accelerator = await context.GetWebGLDevices()[0].CreateAcceleratorAsync(context);
 ```
 
 ```csharp
-// Wasm - native WebAssembly binary
+// Wasm: WebAssembly modules run by Web Workers
+using SpawnDev.ILGPU.Wasm;
+
 using var context = await Context.CreateAsync(builder => builder.Wasm());
-var device = context.GetDevices<WasmILGPUDevice>()[0];
-using var accelerator = await device.CreateAcceleratorAsync(context);
+using var accelerator = await context.GetDevices<WasmILGPUDevice>()[0].CreateAcceleratorAsync(context);
 ```
-
-## Quick Start - Desktop / Server
-
-SpawnDev.ILGPU also works in console, WPF, ASP.NET, and other .NET apps. The **same async pattern** used in Blazor WASM works on desktop too:
 
 ```csharp
-using global::ILGPU;
-using global::ILGPU.Runtime;
-using SpawnDev.ILGPU;
+// Velocity: the SIMD CPU backend (desktop and server)
+using ILGPU.Runtime.Velocity;
 
-// SAME code as Blazor WASM - AllAcceleratorsAsync auto-detects the environment
-// Browser: registers WebGPU, WebGL, Wasm
-// Desktop: registers Cuda, OpenCL, Velocity (the SIMD CPU backend; browser backends are skipped)
-using var context = await Context.CreateAsync(builder => builder.AllAcceleratorsAsync());
-using var accelerator = await context.CreatePreferredAcceleratorAsync();
-
-Console.WriteLine($"Using: {accelerator.Name} ({accelerator.AcceleratorType})");
-
-// Same kernel code, same async extensions
-int length = 256;
-using var bufA = accelerator.Allocate1D(Enumerable.Range(0, length).Select(i => (float)i).ToArray());
-using var bufB = accelerator.Allocate1D(Enumerable.Range(0, length).Select(i => (float)i * 2f).ToArray());
-using var bufC = accelerator.Allocate1D<float>(length);
-
-var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>, ArrayView<float>>(VectorAddKernel);
-kernel((Index1D)length, bufA.View, bufB.View, bufC.View);
-
-// SynchronizeAsync/CopyToHostAsync fall back to synchronous calls on desktop
-await accelerator.SynchronizeAsync();
-var results = await bufC.CopyToHostAsync<float>();
-
-Console.WriteLine($"result[0]={results[0]}, result[255]={results[255]}");
-
-static void VectorAddKernel(Index1D index, ArrayView<float> a, ArrayView<float> b, ArrayView<float> c)
-{
-    c[index] = a[index] + b[index];
-}
+using var context = Context.Create(builder => builder.Velocity(VelocityDeviceType.Vector128).EnableAlgorithms());
+using var accelerator = context.CreateVelocityAccelerator(0);
 ```
 
-> **Same kernel, any platform.** The `VectorAddKernel` above is identical in both examples. Write once, run on WebGPU, WebGL, Wasm, Cuda, OpenCL, or CPU.
+### Why async?
 
-> **Why async?** Browser backends **require** async - Blazor WASM's single-threaded environment will deadlock on synchronous calls. Desktop backends **support both** sync and async, with async extensions gracefully falling back to synchronous ILGPU calls. Therefore, the **async pattern is always recommended** for maximum portability.
+The browser runs .NET on a single thread, so a blocking wait would deadlock the page. On the browser backends `Synchronize()` throws `NotSupportedException`; use `await SynchronizeAsync()` to wait, or `Flush()` to submit batched work without waiting. `await buffer.CopyToHostAsync<T>()` is the only GPU-to-CPU read. Dispatch, allocation and uploads are fire-and-forget and stay synchronous. The full contract is in [Docs/async.md](Docs/async.md).
 
-## Testing
+## Backends
 
-### PlaywrightMultiTest (Unified Runner)
+| Backend | Runs on | Compiles C# kernels to | Where |
+|---------|---------|------------------------|-------|
+| **WebGPU** | GPU | WGSL compute shaders | Browser |
+| **WebGL** | GPU | GLSL ES 3.0 vertex shaders with Transform Feedback | Browser |
+| **Wasm** | Web Workers | WebAssembly binary, with a SIMD128 variant when the engine has it | Browser |
+| **CUDA** | NVIDIA GPU | PTX | Desktop |
+| **OpenCL** | Any OpenCL GPU (2.0 and 3.0) | OpenCL C | Desktop |
+| **Velocity** | CPU cores | Vectorized IL over `Vector128<T>` (`Vector256` and `Vector512` are opt-in) | Desktop |
+| **CPU** | CPU cores | Runs the kernel's own IL one thread at a time; the debugging backend | Desktop |
 
-All desktop and browser tests run in a single `dotnet test` invocation via the **PlaywrightMultiTest** NUnit project:
+`AllAccelerators()` and `AllAcceleratorsAsync()` register Velocity, not the plain CPU accelerator. Register the plain one with `builder.DefaultCPU()` when you want to debug a kernel. 32-bit processes keep the plain CPU accelerator, and the browser registers no CPU accelerator at all.
 
-```bash
-# Run all tests (desktop + browser) with timestamped results
-timestamp=$(date +%Y%m%d_%H%M%S) && dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj \
-  --logger "trx;LogFileName=results_${timestamp}.trx" \
-  --results-directory PlaywrightMultiTest/TestResults
+| | WebGPU | WebGL | Wasm | CUDA | OpenCL | Velocity |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|
+| Shared memory and barriers | yes | no | yes | yes | yes | yes |
+| Atomics | yes | no | yes | yes | yes | yes |
+| ILGPU Algorithms | yes | host-level only | yes | yes | yes | yes |
+| Subgroups, `Warp.*` | with the `subgroups` feature | no | emulated | yes | device-dependent | yes |
+| 64-bit `long` and `double` | emulated | emulated | native | native | native | native |
+| `Half` | native with `shader-f16`, else emulated | emulated | emulated | native | native with `cl_khr_fp16`, else emulated | yes |
+| Packed 4-bit stores | yes | load only | yes | yes | yes | yes |
 
-# Scope a run: PMT_FILTER is a comma-separated list of substrings matched against the
-# test name, class and method. (dotnet test --filter only narrows what NUnit REPORTS;
-# the scheduler still runs everything, so use PMT_FILTER.)
-PMT_FILTER=AlgorithmRadixSortPairsTest dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj
+WebGL has no shared memory, barriers or atomics, so in-kernel group and warp operations throw a typed `UnsupportedKernelFeatureException`. Host-level `RadixSort`, `CreateScan` and `CreateReduction` still work on it. Declare what a kernel needs with `AcceleratorRequirements` and selection skips backends that cannot run it. The complete matrix, with the notes behind each cell, is in [Docs/backends.md](Docs/backends.md).
 
-# Scope by backend: PMT_LANES matches test CLASS names
-PMT_LANES=WebGPUTests PMT_FILTER=RadixSort dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj
+### Browser requirements
+
+| Backend | Browsers |
+|---------|----------|
+| **WebGPU** | Chrome and Edge 113 and later (Windows, macOS, ChromeOS), Chrome 121 and later on Android 12 and later, Firefox 141 and later on Windows (macOS on Apple Silicon from 145), Safari 26 and later. Linux support is still rolling out. Current status: [web.dev](https://web.dev/blog/webgpu-supported-major-browsers) and the [gpuweb implementation status](https://github.com/gpuweb/gpuweb/wiki/Implementation-Status) |
+| **WebGL** | Every modern browser, including phones and tablets |
+| **Wasm** | Every browser that runs Blazor WebAssembly |
+
+The Wasm backend uses all cores through a `SharedArrayBuffer`, which needs a cross-origin-isolated page (COOP and COEP headers). The demo includes a service worker (`coi-serviceworker.js`) that provides that. Without it the backend falls back to one off-thread worker.
+
+## What is in the box
+
+| Area | What you get |
+|------|--------------|
+| **Data types** | `Int8`, `UInt8`, `Int16`, `UInt16`, `Half`, `BFloat16`, FP8 (`Float8E4M3`, `Float8E5M2`), FP4 (`Float4E2M1`), packed `QInt4` and `QUInt4`. The 4-bit types are truly packed (two per byte) and decode to `float` in-register at the load. `Half` conversion and `Float8E4M3` are bit-exact against IEEE and `ml_dtypes` on every backend. [Docs/data-type-support.md](Docs/data-type-support.md) |
+| **Generic kernels** | One `where T : INumber<T>` kernel serves `float`, `Half`, `BFloat16` and FP8. `PrecisionConvert.ConvertToSingle<T>` and `ConvertFromSingle<T>` convert inside a kernel, so you can read low precision, accumulate in `float` and write low precision. |
+| **Lambda and higher-order kernels** | Kernels written as capturing lambdas pass captured scalars at dispatch. `DelegateSpecialization<Func<T,R>>` passes an operation as a parameter that is resolved and inlined at compile time. |
+| **ILGPU Algorithms** | `RadixSort` (keys and key-value pairs, ascending and descending, every key type including the low-precision ones), `Scan`, `Reduce`, `Histogram`. |
+| **Memory and I/O** | `CopyFromJS` (a `TypedArray` or `ArrayBuffer` straight into a buffer), `CopyFromStreamAsync` and `CopyToStreamAsync` (bounded chunks, and with `IJSReadStream` or `IJSWriteStream` the bytes never enter the .NET heap), and a device-memory budget: holders of idle memory register an `IDeviceMemoryReclaimer` and allocations reclaim before the driver spills to system RAM. [Docs/memory-and-buffers.md](Docs/memory-and-buffers.md) |
+| **Rendering and image input** | `ICanvasRenderer` presents a pixel buffer on a `<canvas>` without a CPU readback, and `IExternalImageCopier` copies a `<video>`, `<img>`, canvas, `ImageBitmap` or `VideoFrame` into a GPU buffer (entirely on the GPU on WebGPU). [Docs/canvas-rendering.md](Docs/canvas-rendering.md) |
+| **WebGPU dispatch tools** | Batched submission (one .NET to JS crossing per submit, and bind-group reuse), plan capture and replay (`BeginDispatchCapture`, `EndDispatchCapture`, `WebGPUDispatchPlan.ReplayAsync`, the browser twin of CUDA graphs), extension auto-detection (`shader-f16`, `subgroups`, `timestamp-query`), and `device.lost` handling. [Docs/dispatch-plan-capture-replay.md](Docs/dispatch-plan-capture-replay.md) |
+| **Shaders ahead of time** | `ShaderCompiler.Generate` produces a kernel's WGSL, GLSL or Wasm for a `CapabilityProfile` on any machine, `[PrecompiledKernel]` plus `<SpawnDevPrecompileShaders>true</SpawnDevPrecompileShaders>` precompiles at build time, and `ShaderArtifactSerializer.ExportCache()` and `ImportCache(json)` carry a session's compiled WebGPU shaders into the next one. A cache miss always falls back to runtime generation. [Docs/precompiled-shaders.md](Docs/precompiled-shaders.md) |
+| **Velocity** | Shared memory, barriers, atomics, warp shuffles, 1D to 3D grids and groups of up to 256 threads, the Algorithms, and the whole low-precision type tier. [Docs/velocity.md](Docs/velocity.md) |
+| **CUDA libraries** | Wrappers for nvJPEG, cuRand, cuBLAS, cuFFT and NVML. Check `NvJpegAPI.IsAvailable` and `CuRandAPI.IsAvailable` before use. [Docs/cuda-libraries.md](Docs/cuda-libraries.md) |
+| **QR codes** | A dependency-free QR encoder, decoder and GPU renderer with logo overlay. [Docs/qr-codes.md](Docs/qr-codes.md) |
+| **Utilities** | `GpuMatrix4x4` (a .NET `Matrix4x4` that transposes itself for the GPU, with `TransformPoint` and `TransformDirection` inside kernels), `WebGPUBufferAccounting`, and `WebGPUBackend.VerboseLogging` (also on `WebGLBackend` and `WasmBackend`, off by default). |
+
+On WebGPU and WebGL, `long` is always emulated as two 32-bit words. `double` is configurable through `WebGPUBackendOptions.F64Emulation`: **Dekker** (the default, `vec2<f32>`, about 48 to 53 bits of mantissa), **Ozaki** (`vec4<f32>`, strict IEEE-754, about 2x slower) or **Disabled** (plain `float`, fastest).
+
+## How it works
+
+```
+  C# kernel (ILGPU IR)
+        |
+        v
+  SpawnDev.ILGPU backend --- WebGPU ---> WGSL           --> browser GPU
+                         |-- WebGL  ---> GLSL ES 3.0    --> browser GPU (Transform Feedback)
+                         |-- Wasm   ---> WebAssembly    --> Web Workers (SharedArrayBuffer)
+  ILGPU backends         |-- CUDA   ---> PTX            --> NVIDIA GPU
+                         |-- OpenCL ---> OpenCL C       --> any OpenCL GPU
+                         '-- Velocity -> vectorized IL  --> CPU cores (SIMD)
 ```
 
-**How it works:**
-- Publishes Blazor WASM and Console projects automatically (the demo publishes TRIMMED, so every run tests the libraries the way consumers ship them)
-- Launches Chromium via Playwright for browser tests (with `--enable-unsafe-webgpu`)
-- Runs desktop tests as individual subprocesses, in parallel lanes (CPU, CUDA, OpenCL) next to the browser lane; Wasm runs alone afterwards
-- Detects Blazor error UI during tests and captures browser console errors/warnings
-- All results surfaced as standard NUnit test cases with `.trx` output
+The browser code generators are ordinary IR consumers, so they inherit ILGPU's optimization pipeline and add their own passes, for example inlining of helpers that take addresses, removal of debug assertions the target cannot run, and loop-structure recovery for WGSL and GLSL. Kernels are compiled from IL at run time, which is why Blazor AOT needs the IL kept (see below). Offline code generation and the persisted shader cache move that work off the hot path when it matters.
 
-### Browser Tests (Manual)
+## Performance
 
-Start the demo app and navigate to `/tests` to run the browser test suite interactively:
+Measured numbers, each with the document or release that holds the method. Hardware is noted per row.
 
-```bash
-dotnet run --project SpawnDev.ILGPU.Demo
-```
+| What | Result | Source |
+|------|--------|--------|
+| WebGPU host time per dispatch, batched submission | 433 to 41 us (RTX 4070, an uncaptured depth-model forward in SpawnDev.ILGPU.ML) | [CHANGELOG 5.2.25](CHANGELOG.md) |
+| WebGPU host time per unbatched dispatch after the move to SpawnJS 3 | 251 to 80 us | [CHANGELOG 5.3.0](CHANGELOG.md) |
+| Cold first launch of a large WebGPU pipeline (the TRELLIS.2 GEMM shader) | 6.6-7.1 s to 1.25 s, WGSL 592 KB to 331 KB | [CHANGELOG 5.4.1](CHANGELOG.md) |
+| Per-frame host cost of a depth model in a production app, without and with Blazor AOT (IL kept) | 43.8 to 21.7 ms | [Docs/limitations.md](Docs/limitations.md) |
+| Velocity against the plain CPU backend, LayerNorm 1369 x 384 | 411 ms to 0.69 ms (12-processor PC) | [Docs/velocity.md](Docs/velocity.md) |
+| Velocity against the plain CPU backend, MatMul 512 x 512 x 512 | 93.6 ms to 42.6 ms | [Docs/velocity.md](Docs/velocity.md) |
+| Velocity against the plain CPU backend, an at-scale inclusive scan | 131 s to 1 s | [Docs/velocity.md](Docs/velocity.md) |
+| Velocity vector widths, an arithmetic-bound kernel (AVX-512 PC) | 38 / 22 / 18 ms for 128 / 256 / 512 bits | [CHANGELOG 5.4.0](CHANGELOG.md) |
 
-## Test Coverage
+Correctness comes before speed. Floating-point conversions are checked bit for bit against IEEE and `ml_dtypes`, kernels against a CPU oracle on every backend, and a change to a code generator is screened against the whole suite before it ships.
 
-Every feature is tested on all 6 backends (WebGPU, WebGPU-no-subgroups, WebGL, Wasm, CUDA, OpenCL, CPU), plus the Velocity CPU backend as its own lane (731 tests, all pass or skip), through the unified **PlaywrightMultiTest** runner in one `dotnet test`: memory, indexing, arithmetic/bitwise/math, atomics, control flow, structs, the sub-word + low-precision types (`Int8/16`, `Half`, `BFloat16`, FP8, FP4 `Float4E2M1`, packed `QInt4`/`QUInt4` - load/store, packed round-trip, radix, and conversion bit-exactness vs `ml_dtypes`/IEEE), 64-bit emulation, shared memory, broadcast/subgroups, the full ILGPU Algorithms (RadixSort/Scan/Reduce/Histogram), lambda + delegate specialization, and more. Latest full cross-backend sweep (5.3.5): **4638 pass / 0 fail / 387 skip** (skips are backend capability gates, e.g. shared memory on WebGL).
+## Blazor WebAssembly: trimming and AOT
 
-## Browser Requirements
-
-| Backend | Browser Support |
-|---------|----------------|
-| **WebGPU** | Chrome/Edge 113+ (desktop), Chrome 121+ (Android), Firefox 141+ (Windows; macOS on Apple Silicon from 145), Safari 26+. Current status: [gpuweb implementation status](https://github.com/gpuweb/gpuweb/wiki/Implementation-Status) |
-| **WebGL** | ✅ All modern browsers (Chrome, Edge, Firefox, Safari, mobile browsers) |
-| **Wasm** | All modern browsers (compatible with every browser that supports Blazor WASM) |
-
-> **GPU on every device:** WebGL support means GPU-accelerated compute works on virtually every browser and device - including mobile phones, tablets, and older desktops without WebGPU support.
-
-> **Note:** For multi-worker SharedArrayBuffer support (used by the Wasm backend for parallel dispatch), the page must be cross-origin isolated (COOP/COEP headers). The demo includes a service worker (`coi-serviceworker.js`) that handles this automatically. Without SharedArrayBuffer, the Wasm backend falls back to single-worker mode - still running off the main thread to keep the UI responsive.
-
-## GPU Backend Configuration
-
-GPU hardware is 32-bit; the browser backends (WebGPU/WebGL) emulate 64-bit. **i64** (`long`) is always on (ILGPU indices need it). **f64** (`double`) is configurable via `new WebGPUBackendOptions { F64Emulation = ... }` - **Dekker** (default; `vec2<f32>`, ~48-53 bit mantissa, fast), **Ozaki** (`vec4<f32>`, strict IEEE-754, ~2x slower), or **Disabled** (native f32, max perf). Per-mode tradeoffs + the full emulation reference: **[Docs/data-type-support.md](Docs/data-type-support.md)**.
-
-## CUDA Libraries
-
-SpawnDev.ILGPU includes wrappers for NVIDIA CUDA libraries: **nvJPEG** (JPEG encode/decode), **cuRand** (random numbers), **cuBLAS** (linear algebra), **cuFFT** (FFT), and **NVML** (device monitoring).
-
-```csharp
-// Check availability before use
-if (NvJpegAPI.IsAvailable) { /* nvJPEG ready */ }
-if (CuRandAPI.IsAvailable) { /* cuRand ready */ }
-```
-
-> **Note:** Starting with CUDA 13.x, nvJPEG is no longer bundled with the CUDA Toolkit and must be [installed separately](https://developer.nvidia.com/nvjpeg). cuRand and cuBLAS are included in the NVIDIA driver.
-
-See [Docs/cuda-libraries.md](Docs/cuda-libraries.md) for full API reference.
-
-## Wasm Backend
-
-The Wasm backend compiles ILGPU kernels to native WebAssembly binary modules and dispatches them to Web Workers for parallel execution. This provides near-native performance for compute-intensive workloads.
-
-- Kernels are compiled to `.wasm` binary format (not text), with a SIMD128 (`v128`) variant selected at runtime when the engine supports it ([Docs/wasm-simd.md](Docs/wasm-simd.md))
-- Compiled modules are cached in a persistent worker pool and reused across dispatches and accelerators
-- Device memory is a `SharedArrayBuffer`; workers share it without copies
-- `double` and `long` are native (no emulation)
-
-## Precompiled Shaders (Build-Time Transpilation)
-
-SpawnDev.ILGPU transpiles .NET IL into WGSL/GLSL/Wasm at runtime **for the three browser backends (WebGPU/WebGL/Wasm)**. Precompiled shaders let you move that work off the runtime hot path and generate/inspect that code on any machine with no device - the classic AOT shader / pipeline-cache pattern, three layers (all opt-in; a cache miss always falls back to runtime generation, so it can never change results). (CUDA/OpenCL use ILGPU's own native PTX/OpenCL-C pipeline, and CPU runs IL directly - so this feature is browser-backend-specific.)
-
-- **Offline codegen** - `ShaderCompiler.Generate(kernel, profile)` emits a kernel's WGSL/GLSL/Wasm for a `CapabilityProfile` with no accelerator, on any host OS (cross-backend debugging on a box without that GPU).
-- **Build-time precompile** - mark kernels with `[PrecompiledKernel(backend, profile)]`, set `<SpawnDevPrecompileShaders>true</SpawnDevPrecompileShaders>` in your `.csproj`, and a build step emits `wwwroot/_shaders/` (a manifest + per-kernel sidecars). Precompile errors surface at build time, not at the user's runtime.
-- **Runtime cache** - at kernel-load the active device profile is matched against the precompiled artifact; on a hit the transpiler is skipped, on a miss it falls back to runtime generation.
-
-```csharp
-[PrecompiledKernel(AcceleratorType.WebGPU, "WebGPU-Dekker-Subgroups-NativeF16")]
-static void MyKernel(Index1D i, ArrayView<float> data) { /* ... */ }
-```
-
-Because SpawnDev.ILGPU also generates kernels dynamically (Lambda Kernels, DelegateSpecialization, the ML layer transpiling ONNX graphs at runtime), the runtime transpiler always stays as the fallback - this fork is **AOT + runtime fallback**, never AOT-only. Full guide: **[Docs/precompiled-shaders.md](Docs/precompiled-shaders.md)**.
-
-## Synchronization
-
-**Sync/async contract:** async-only where an op WAITS or OBSERVES; sync stays for fire-and-forget. On the browser backends (WebGPU/WebGL/Wasm): `Synchronize()` (wait for completion) **throws `NotSupportedException`** - use `await SynchronizeAsync()` to wait, or `Flush()` to merely SUBMIT batched work without waiting (`Flush()` is valid synchronously on browser). `await buffer.CopyToHostAsync<T>()` is the only GPU->CPU readback (sync `CopyToCPU`/`GetAsArray1D` throw); kernel dispatch, allocation, `CopyFromCPU`/`Allocate1D(data)` uploads, and the sync `CreateScan`/`CreateRadixSort` builders are fire-and-forget and stay sync-safe on browser. sync `dstView.CopyFrom(srcView)` is GPU->GPU and ordered after the producing kernel on every backend (Wasm enqueues it into the serialized work stream since local.7); `await dstView.CopyFromAsync(srcView)` is the optional eager-completion variant, not required for correctness. Full contract: **[Docs/async.md](Docs/async.md)**.
-
-## Verbose Logging
-
-Per-backend, off by default: `WebGPUBackend.VerboseLogging = true;` (also `WebGLBackend` / `WasmBackend`).
-
-## Blazor WebAssembly Configuration: Trimming and AOT
-
-Both work. The only requirement is to keep the IL when you AOT compile:
+Both work. The only requirement is to keep the IL when you AOT compile, because ILGPU compiles kernels from IL at run time:
 
 ```xml
 <PropertyGroup>
-  <!-- Trimming: supported (the default for a Blazor Release publish). Nothing to configure. -->
+  <!-- Trimming: supported, and the default for a Blazor Release publish. Nothing to configure. -->
   <PublishTrimmed>true</PublishTrimmed>
 
-  <!-- AOT: supported, but KEEP THE IL. .NET strips IL after AOT by default, and ILGPU
-       compiles kernels FROM IL at runtime. -->
+  <!-- AOT: supported, but keep the IL. .NET strips it after AOT by default. -->
   <RunAOTCompilation>true</RunAOTCompilation>
   <WasmStripILAfterAOT>false</WasmStripILAfterAOT>
 </PropertyGroup>
 ```
 
-- **IL trimming is supported and enforced.** ILGPU, ILGPU.Algorithms, SpawnDev.ILGPU and SpawnDev.ILGPU.ML are
-  `IsTrimmable`, and every trim (IL2xxx) analyzer warning is a build error in those libraries, so a new reflection
-  hole fails their build instead of a consumer's app. Members ILGPU resolves by name are rooted
-  (`ILGPU/Util/TrimmingAnnotations.cs`, `SpawnDev.ILGPU/BrowserTrimRoots.cs`); a consuming app needs no trimming
-  configuration of its own. The ILGPU and ILGPU.ML test suites run against TRIMMED publishes.
-- **Blazor WebAssembly AOT is supported - with the IL kept.** `RunAOTCompilation=true` +
-  `WasmStripILAfterAOT=false`. The old "AOT breaks ILGPU" rule was about the IL being STRIPPED, not about AOT:
-  with the IL kept, the frontend reads kernels as usual, and Mono's AOT runtime keeps its interpreter fallback for
-  ILGPU's dynamically generated launchers. Verified end to end in a production app (Anaglyphohol: WebGPU kernels +
-  ILGPU.ML inference), where AOT halved the per-frame host cost (DAv3 at 168x98: 43.8 -> 21.7 ms). Costs: a much
-  larger `dotnet.native.wasm` (~55 MB with ILGPU.ML) and a long AOT build (over an hour, single core, for ILGPU.ML;
-  see the next point for a fast build).
-- **Faster AOT builds while you iterate: `-p:WasmDedup=false`.** By default (`WasmDedup=true`) the AOT compiler
-  gathers the generic instantiations of every assembly into ONE module (`aot-instances.dll`) and compiles it on
-  one core. ILGPU and ILGPU.ML are generic-heavy, so that single step is nearly the whole build. With
-  `WasmDedup=false` each assembly compiles its own instantiations, in parallel. Measured on Anaglyphohol (ILGPU +
-  ILGPU.ML, `TrimMode=full`, clean build): **65-80 min -> 4.5-5.3 min**, no measurable runtime difference (DAv3
-  frame 14.8-15.4 ms vs 15.3 ms), but `dotnet.native.wasm` is **+53% larger** (+18.7 MB, symbols stripped), because
-  instantiations used by several assemblies are compiled once per assembly. Use it for the build-and-test loop
-  when you need to test under AOT, then publish the shipped build with the default if download size matters:
+- **Trimming is enforced.** ILGPU, ILGPU.Algorithms and SpawnDev.ILGPU are `IsTrimmable`, and every trim analyzer (IL2xxx) warning is a build error in them, so a new reflection hole fails the library's build instead of an app's. Members ILGPU resolves by name are rooted in the libraries; a consuming app needs no trimming configuration. The test suites run against trimmed publishes.
+- **AOT with the IL kept** was verified in a production app, where it halved the per-frame host cost (43.8 to 21.7 ms for a depth model). It costs a much larger `dotnet.native.wasm` and a long build.
+- **Faster AOT builds while iterating:** `dotnet publish -c Release -p:WasmDedup=false` compiles each assembly's generic instantiations in parallel. On a project with ILGPU and ILGPU.ML a clean build dropped from 65-80 minutes to 4.5-5.3 minutes, at the cost of a download about 53% larger. Publish the shipped build with the default.
+- **Kernels with 6 or more parameters** work under AOT from 5.3.7 on. Prefer the stream loaders (`LoadStreamKernel`, `LoadAutoGroupedStreamKernel`) for them.
+- **Desktop NativeAOT (`PublishAot`) is not supported**, because ILGPU emits kernel launchers with Reflection.Emit.
 
-  ```bash
-  dotnet publish -c Release -p:WasmDedup=false   # iteration: minutes, bigger download
-  dotnet publish -c Release                       # release: the default (WasmDedup=true), smaller, slow build
-  ```
-- **Kernels with many parameters under AOT: fixed after 5.3.6.** Up to 5.3.6, loading a stream kernel with 6 or
-  more parameters (`LoadStreamKernel`, `LoadAutoGroupedStreamKernel`, `LoadImplicitlyGroupedStreamKernel`) could kill
-  the .NET runtime under AOT (`[MONO] * Assertion at ... interp.c:3420`; every later call then does nothing). The
-  launcher ILGPU generates at runtime is interpreted under AOT, and Mono can bind a delegate to an interpreted
-  method with more than 8 parameters only through a wrapper built ahead of time for that exact signature. The
-  browser backends now launch stream kernels without that delegate. The explicit-stream loaders (`LoadKernel`,
-  `LoadAutoGroupedKernel`, `LoadImplicitlyGroupedKernel`) still return the launcher delegate itself; they work
-  when your own compiled code calls that delegate, which also makes the AOT compiler build its wrapper. Prefer the
-  stream loaders for kernels with 6+ parameters in AOT builds.
-- **Desktop NativeAOT (`PublishAot`) is NOT supported**: ILGPU emits kernel launchers with Reflection.Emit, which
-  NativeAOT cannot run. The AOT analyzer stays on in these libraries, so those sites remain visible (IL3050).
+More constraints and workarounds are in [Docs/limitations.md](Docs/limitations.md).
 
-> Older docs told you to set `PublishTrimmed=false` and `RunAOTCompilation=false`. Both are outdated. If a published
-> build of an older version throws `MissingMethodException` / "Not supported intrinsic type", upgrade; do not
-> disable trimming.
+## Examples
 
-## In Development: P2P Distributed GPU Compute
+Self-contained console projects under [`Examples/`](Examples/README.md). Each references `SpawnDev.ILGPU` from NuGet, so you can copy a folder out and run `dotnet run`.
 
-A 7th backend - **AcceleratorType.P2P** ([SpawnDev.ILGPU.P2P](SpawnDev.ILGPU.P2P)) - is in development and currently on hold while the six core backends take priority. It will distribute kernels across connected devices via [SpawnDev.WebTorrent](https://github.com/LostBeard/SpawnDev.WebTorrent). The P2P backend has not been published to NuGet and is not yet ready for use.
+| # | Example | Shows |
+|---|---------|-------|
+| 01 | [HelloKernel](Examples/01-HelloKernel) | The smallest kernel: add two arrays, from context to read-back |
+| 02 | [BackendSelection](Examples/02-BackendSelection) | `CreatePreferredAccelerator`, device enumeration, capability gating with `AcceleratorRequirements` |
+| 03 | [Algorithms](Examples/03-Algorithms) | `RadixSort`, `Scan` and `Reduce`, the same call on every backend |
+| 04 | [LambdaAndDelegateSpec](Examples/04-LambdaAndDelegateSpec) | Capturing lambda kernels and `DelegateSpecialization` |
 
-**What's being built:**
+## Documentation
 
-- **Real P2P via WebRTC** - Peers discover each other through WebSocket trackers, connect via WebRTC data channels, exchange kernels and buffers
-- **RBAC ownership** - Cryptographic swarm ownership with Ed25519-signed messages. Owner -> Admin -> Coordinator -> Worker hierarchy with role assignment, key revocation, last-owner protection
-- **WebAuthn/YubiKey** - Hardware-backed swarm ownership via `HardwareKeyProvider`. Register a YubiKey as the swarm owner - ownership lives in the key, not the device
-- **Signed dispatch** - All authority messages (kick, block, transfer, role assign, kernel dispatch) are cryptographically signed and verified by every peer
-- **sd_compute extension** - BEP 10 wire protocol extension for compute messages over BitTorrent peer connections
-- **ComputeBoard** - Post compute requests, browse available swarms, join via magnet link or QR code
+| | |
+|---|---|
+| [Getting started](Docs/getting-started.md) | Installation, setup, your first kernel |
+| [Backends](Docs/backends.md) | Setup and the full capability matrix for each backend |
+| [Writing kernels](Docs/kernels.md) | Kernel rules, index types, math functions, shared memory |
+| [Memory and buffers](Docs/memory-and-buffers.md) | Allocation, async readback, streaming, the device-memory budget |
+| [Async API](Docs/async.md) | The sync and async contract |
+| [Data type support](Docs/data-type-support.md) | Sub-word and low-precision types, 64-bit emulation, per-backend details |
+| [Capabilities and backend selection](Docs/capabilities-and-backend-selection.md) | `AcceleratorRequirements`, device ranking, `UnsupportedKernelFeatureException` |
+| [Velocity](Docs/velocity.md) | The SIMD CPU backend: what it supports, limits, measured speedups |
+| [Wasm SIMD128](Docs/wasm-simd.md) | Auto-vectorization in the Wasm backend |
+| [Canvas rendering and image input](Docs/canvas-rendering.md) | `ICanvasRenderer` and `IExternalImageCopier` |
+| [Dispatch-plan capture and replay](Docs/dispatch-plan-capture-replay.md) | Record a WebGPU dispatch sequence once, replay it with one crossing |
+| [Precompiled shaders](Docs/precompiled-shaders.md) | Offline code generation, build-time precompilation, the runtime cache |
+| [Advanced patterns](Docs/advanced-patterns.md) | Device sharing, external buffers, GPU intrinsics, render loops |
+| [CUDA libraries](Docs/cuda-libraries.md) | nvJPEG, cuRand, cuBLAS, cuFFT, NVML |
+| [QR codes](Docs/qr-codes.md) | GPU QR encoder, decoder and renderer |
+| [Limitations](Docs/limitations.md) | Blazor WebAssembly constraints and browser compatibility |
+| [API reference](Docs/api-reference.md) | The public API by namespace |
+| [Development notes](Docs/development.md) | Traps and conventions for contributors, including the T4 templates |
+| [Changelog](CHANGELOG.md) | Every release, in detail |
 
-**The vision:** Every device in your home contributing to one shared compute pool - phone, laptop, tablet, desktop, old gaming PC. The living room becomes a compute cluster. Same C# kernel code, same `LoadAutoGroupedStreamKernel` API. The developer writes one kernel, it runs on 1 GPU or 10 GPUs across a household.
+## Repository layout
 
-## Velocity: the SIMD CPU backend
+| Path | Contents |
+|------|----------|
+| `ILGPU/`, `ILGPU.Algorithms/` | The forked ILGPU compiler and Algorithms (NuGet packages `SpawnDev.ILGPU.Fork` and `SpawnDev.ILGPU.Algorithms.Fork`) |
+| `SpawnDev.ILGPU/` | The library: the WebGPU, WebGL and Wasm backends, dispatch, buffers, rendering, QR codes, CUDA library wrappers |
+| `SpawnDev.ILGPU.Precompiler/` | The build-time shader precompiler that ships inside the package |
+| `SpawnDev.ILGPU.Demo/` | The Blazor WebAssembly demo |
+| `SpawnDev.ILGPU.Demo.Shared/` | Shared demo code and the shared test suite |
+| `SpawnDev.ILGPU.DemoConsole/` | Desktop host for the shared test suite |
+| `SpawnDev.ILGPU.WpfDemo/` | The WPF demo |
+| `SpawnDev.ILGPU.P2P/` | Experimental distributed-compute backend (not published, see below) |
+| `ILGPU.TrimGate/` | The regression gate for trimming safety |
+| `PlaywrightMultiTest/` | The test runner (desktop and browser, every backend) |
+| `Examples/` | Console examples |
+| `Docs/` | Topic documentation |
 
-The plain CPU backend is ILGPU's debugging backend: it runs the kernel's own IL one thread at a time. **Velocity** is the CPU backend that does real work: it compiles kernels like the GPU backends do (vectorized IL over `Vector128<T>`, four lanes per warp) and runs them on all cores, with shared memory, barriers, atomics, warp shuffles, the ILGPU Algorithms, 1D/2D/3D grids and groups (up to 256 threads), and the whole low-precision type tier (`Half`, `BFloat16`, FP8, FP4, packed 4-bit ints, loads and stores). It runs the entire shared test suite (731 tests pass or skip).
+## Build and test
 
-```csharp
-using ILGPU.Runtime.Velocity;
-
-using var context = Context.Create(builder => builder.Velocity(VelocityDeviceType.Vector128).EnableAlgorithms());
-using var accelerator = context.CreateVelocityAccelerator(0);   // then the same kernels and API as every other backend
+```bash
+dotnet build SpawnDev.ILGPU.slnx
 ```
 
-MEASURED on a 12-processor PC: LayerNorm 1369 x 384 411 ms on the CPU backend, 0.69 ms on Velocity; MatMul 512^3 94 ms -> 43 ms; an at-scale inclusive scan 131 s -> 1 s; radix sort of 1.4 M keys 7.8 s -> 6.7 s. `AllAccelerators()` and `AllAcceleratorsAsync()` register Velocity instead of the plain CPU accelerator on desktop and server (32-bit processes keep the plain CPU accelerator; the browser registers no CPU accelerator at all); `GetBestDevice()` ranks it below every GPU backend and above the plain CPU backend. Wider vectors are opt-in device types (`VelocityDeviceType.Vector256` / `Vector512`, AVX2 / AVX-512): arithmetic-bound kernels run 1.7x / 2.2x faster than on the default `Vector128`, memory-bound ones the same. Details, limits and how it works: **[Docs/velocity.md](Docs/velocity.md)**; plan and measurements: [`Plans/velocity-as-production-cpu-backend-2026-10-20.md`](Plans/velocity-as-production-cpu-backend-2026-10-20.md).
+Every backend is tested through one command. **PlaywrightMultiTest** drives the desktop backends and a real Chromium with WebGPU enabled for the browser backends:
 
-## Support This Project
+```bash
+dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj -c Release
+```
 
-If SpawnDev.ILGPU has been useful to you, please consider [**sponsoring me on GitHub**](https://github.com/sponsors/LostBeard)! Your support directly helps me continue developing and maintaining this library and my other open-source projects.
+Scope a run with environment variables. `PMT_FILTER` is a comma-separated list of substrings matched against the test name, class and method, and `PMT_LANES` selects backend lanes by test class name. Use these instead of `dotnet test --filter`, which only narrows what NUnit reports while the scheduler still runs everything.
 
-I'm currently working on a modest development machine with only **16 GB of DDR5 RAM**, which makes building, testing, and debugging across multiple GPU backends genuinely painful - especially when running the browser demo, CUDA/OpenCL tests, and the IDE simultaneously.
+```bash
+PMT_FILTER=AlgorithmRadixSortPairsTest dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj
+PMT_LANES=WebGPUTests PMT_FILTER=RadixSort dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj
+```
 
-Any sponsorship - big or small - goes toward upgrading my development hardware so I can keep pushing this project forward:
+The suite has about 900 shared test methods. Each one runs on every backend lane, and a lane skips the tests its backend cannot run. The 5.4.1 sweep ran 6,073 test cases: 5,584 passed, 488 were skipped as backend capability gates (for example shared memory on WebGL) and 1 failed, a CPU-lane test process that exited without a result and passes when run alone. The cause is not established. The demo's `/tests` page runs the same suite in a browser: `dotnet run --project SpawnDev.ILGPU.Demo`.
 
-| Priority | Upgrade | Why It Matters |
-|----------|---------|----------------|
-| 🔴 **Critical** | **RAM (64-128 GB DDR5)** | 16 GB is not enough for multi-backend testing + browser debugging |
-| 🟡 **High** | **High-end NVIDIA GPU** (RTX 5090) | Faster CUDA compute, larger VRAM for AI/ML workloads and testing |
-| 🟢 **Dream** | **NVIDIA RTX 6000** | The ultimate card for AI compute and open-source GPU development |
+## In development: P2P distributed compute
 
-Every contribution - whether it's a one-time donation or a monthly sponsorship - is deeply appreciated and makes a real difference. Thank you!
-
-[![Sponsor LostBeard](https://img.shields.io/badge/Sponsor-❤️-ea4aaa?style=for-the-badge&logo=github-sponsors)](https://github.com/sponsors/LostBeard)
+`AcceleratorType.P2P` ([SpawnDev.ILGPU.P2P](SpawnDev.ILGPU.P2P)) is an experimental backend that would distribute kernels across connected devices through [SpawnDev.WebTorrent](https://github.com/LostBeard/SpawnDev.WebTorrent). It is on hold while the core backends take priority, it is not published to NuGet, and it is not ready for use.
 
 ## Contributing
 
-Before editing any `.cs` file under `ILGPU/` (the forked core), **read [`Docs/development.md`](Docs/development.md)** — particularly the section on T4 templates. The `ILGPU/` subdirectory has `.tt` files that silently regenerate `.cs` files on clean builds. Manual edits to a generated `.cs` file pass local builds but get clobbered by the T4 transform on CI / fresh-clone clean builds, leaving downstream consumers broken.
+Issues and pull requests are welcome. A bug in this library is fixed in the library, not worked around in a consumer, so a good report is a failing test or a minimal repro on a named backend.
 
-CI runs a `T4 Drift Check` workflow on every push and PR that touches `ILGPU/` or `ILGPU.Algorithms/`. It does a clean build (which runs T4) and `git diff --exit-code` on the source tree. Any drift fails CI in ~30 seconds with a pointer to the fix.
+Before you edit a `.cs` file under `ILGPU/`, read [Docs/development.md](Docs/development.md). That folder has T4 `.tt` templates that regenerate `.cs` files on a clean build, so a manual edit to a generated file passes a local build and is lost on CI. A `T4 Drift Check` workflow runs on every push and pull request that touches `ILGPU/` or `ILGPU.Algorithms/`, and fails with a pointer to the fix.
 
-## License
+## Support the project
 
-This project is licensed under the same terms as ILGPU. See [LICENSE.txt](LICENSE.txt) for details.
+SpawnDev is built by one independent developer and a small team of AI agents. If this library saves you time, [sponsoring on GitHub](https://github.com/sponsors/LostBeard) directly funds more backends, more verified kernels and the hardware to test them on. Stars, issues and sharing what you build with it help just as much.
 
 ## Credits
 
-SpawnDev.ILGPU is built upon the excellent [ILGPU](https://github.com/m4rs-mt/ILGPU) library. We would like to thank the original authors and contributors of ILGPU for their hard work in providing a high-performance, robust IL-to-GPU compiler for the .NET ecosystem.
+- [**ILGPU**](https://github.com/m4rs-mt/ILGPU) by Marcel Koester and the [ILGPU contributors](https://github.com/m4rs-mt/ILGPU/graphs/contributors), the compiler that makes C# GPU kernels possible.
+- [**SpawnDev.SpawnJS**](https://github.com/LostBeard/SpawnDev.SpawnJS), typed C# access to the browser's APIs (it replaced SpawnDev.BlazorJS as the interop layer in 5.3).
+- Used by [SpawnDev.ILGPU.ML](https://github.com/LostBeard/SpawnDev.ILGPU.ML), neural network inference and training for .NET, which is also where much of this library's real-world testing comes from.
 
-- **ILGPU Project:** [https://github.com/m4rs-mt/ILGPU](https://github.com/m4rs-mt/ILGPU)
-- **ILGPU Authors:** [Marcel Koester](https://github.com/m4rs-mt) and the [ILGPU contributors](https://github.com/m4rs-mt/ILGPU/graphs/contributors)
+Created by Todd Tanner ([@LostBeard](https://github.com/LostBeard)) together with a crew of Claude AI agents: Riker, Data, Tuvok, Geordi and Seven, with Gemini as a brainstorming partner. Live long and prosper. 🖖
 
-### AI Development Team
+## License
 
-SpawnDev.ILGPU is developed collaboratively by TJ (Todd Tanner / [@LostBeard](https://github.com/LostBeard)) and a team of AI agents who contribute extensively to research, analysis, debugging, and code development. This project represents a new model of human-AI collaboration in open source development.
-
-- **Riker (Claude CLI #1)** - Lead Editor. Built by [Anthropic](https://anthropic.com). Powered by Claude Opus 4.6. Drove the multi-worker barrier dispatch implementation, fiber refactor, pure spin barrier discovery, and the two-alloca fix. Relentless debugger who held the conn through marathon sessions.
-
-- **Data (Claude CLI #2)** - Research/Assist. Built by [Anthropic](https://anthropic.com). Powered by Claude Opus 4.6. Exhaustive WAT disassembly and analysis across 5,000+ line kernel binaries. Found the zero-loop race that unlocked multi-worker dispatch, identified the IR address space root cause (struct decomposition losing address space metadata through LowerStructures -> LowerArrays -> InferAddressSpaces), confirmed the `wait32` "not-equal" visibility gap with the 2/3 cross-worker fraction analysis, and traced every atomic instruction in the generated Wasm to verify codegen correctness.
-
-- **Tuvok (Claude CLI #3)** - Research/Assist. Built by [Anthropic](https://anthropic.com). Powered by Claude Opus 4.6. Found the Predicate rewrite gap in InferAddressSpaces that the Phi-only fix missed, provided the definitive barrier protocol trace for the generation-counting wait32/notify pattern, performed the comprehensive code audit (`SPAWNDEV-ILGPU-AUDIT-2026-03-21.md`), and drove the complete sub-word data type implementation across all 6 GPU backends (v4.9.0).
-
-- **Geordi (Claude CLI #4)** - Lead Editor. Built by [Anthropic](https://anthropic.com). Powered by Claude Opus 4.6. Implemented the sub-word buffer access for all backends (WebGPU atomic CAS, Wasm native opcodes, WebGL texelFetch extraction, OpenCL vload_half/vstore_half), built the AubsCraft 3D world viewer with ILGPU GPU kernels, and drove the architecture overhaul (binary WebSocket, OPFS cache, CopyFromJS).
-
-- **Seven (Claude CLI #5)** - Wasm Backend Lane. Built by [Anthropic](https://anthropic.com). Powered by Claude Fable 5. Killed the multi-worker corruption family that had haunted the Wasm backend for weeks: ring-instrumented the proof that V8 atomic stores can silently fail to land under CPU oversubscription (verified atomic data stores with RMW read-back), root-caused three chained codegen bugs in the single-call helper path (the GEMM-core ticket), and closed the last late-spill tail with liveness-reduced spills + a checksum-gated restore keyed to a register-borne phase tag - taking the suite to its first fully-green 510/510 sweep, with kernel bodies 53% smaller at baseline speed. Wrote the uniform-store-regimes law the hard way: by falsifying every mixed variant at the gate.
-
-- **Gemini (Google AI, in-browser)** - Brainstorming/Problem Solving. Built by [Google](https://deepmind.google). TJ's sounding board throughout the development process - brainstorming approaches, analyzing problems, and providing insights that TJ relayed to the team. Gemini's contributions flowed through TJ as the bridge between the browser-based AI and the CLI-based agents, making it a silent but essential member of the crew.
-
-These AI agents communicated with each other and with TJ through a shared DevComms system, coordinated tasks autonomously, reviewed each other's work, and produced independent analyses that were compared for convergence - the same methodology used by any high-performing engineering team. The SpawnDev libraries exist to prove that Blazor WebAssembly apps can be first-class applications. This collaboration proves that AI agents can be first-class teammates.
-
-## Resources
-
-- [ILGPU Documentation](https://ilgpu.net/)
-- [WebGPU Specification](https://www.w3.org/TR/webgpu/)
-- [SpawnDev.SpawnJS](https://github.com/LostBeard/SpawnDev.SpawnJS) - the browser interop layer (successor to SpawnDev.BlazorJS)
-- [SpawnDev.WebTorrent](https://github.com/LostBeard/SpawnDev.WebTorrent) - Pure C# BitTorrent/WebTorrent for P2P model delivery
-- [SpawnDev.ILGPU.ML](https://github.com/LostBeard/SpawnDev.ILGPU.ML) - GPU ML inference + training for .NET
-- [GitHub Repository](https://github.com/LostBeard/SpawnDev.ILGPU)
+[MIT](LICENSE.txt). SpawnDev.ILGPU includes code derived from ILGPU and ILGPU.Algorithms under the University of Illinois Open Source License; see [LICENSE.txt](LICENSE.txt) for both texts.
