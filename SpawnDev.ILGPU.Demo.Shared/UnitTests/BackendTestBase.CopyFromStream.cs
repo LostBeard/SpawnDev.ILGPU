@@ -66,6 +66,39 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     throw new Exception($"CopyFromStream multi-chunk mismatch at [{i}]: expected {expected[i]}, got {got[i]}");
         });
 
+        /// <summary>
+        /// A buffer big enough for several chunks, every element unique: each element must land at its own index.
+        /// The chunk loop reads each chunk into ONE reused host array while the host-to-device copy of the previous
+        /// chunk may still be in flight (OpenCL enqueues a NON-blocking write). A driver that reads the host memory late
+        /// then puts later chunks' data into earlier places. MEASURED 2026-10-22 on an AMD RX 590 (Ellesmere, OpenCL 2.0)
+        /// with SpawnDev.ILGPU 5.4.1: a 202 MB table uploaded this way came back shifted (element 0 held the first element of
+        /// chunk 1; with 16 MiB chunks chunk 6's data sat in chunk 0), which turned an SD-Turbo text encoder into noise.
+        /// NVIDIA's OpenCL copies at enqueue time, so this passes on an RTX 4070 WITHOUT the fix: its red-check needs a
+        /// driver that reads late. The earlier multi-chunk test above moves 16 KiB, too little for any driver to lag.
+        /// </summary>
+        [TestMethod]
+        public async Task CopyFromStreamLargeMultiChunk_EveryElementLandsInPlace() => await RunTest(async accelerator =>
+        {
+            const int n = 4 * 1024 * 1024;                      // 16 MiB of uint
+            var expected = new uint[n];
+            for (int i = 0; i < n; i++)
+                expected[i] = (uint)i * 2654435761u + 12345u;    // unique, so any shifted chunk shows
+
+            using var buf = accelerator.Allocate1D<uint>(n);
+            var bytes = new byte[n * sizeof(uint)];
+            Buffer.BlockCopy(expected, 0, bytes, 0, bytes.Length);
+            using var ms = new MemoryStream(bytes);
+            await buf.View.CopyFromStreamAsync(ms, chunkSizeInBytes: 1024 * 1024);   // 16 chunks
+            await accelerator.SynchronizeAsync();
+
+            var got = await buf.CopyToHostAsync<uint>();
+            int bad = 0, first = -1;
+            for (int i = 0; i < n; i++)
+                if (got[i] != expected[i]) { if (first < 0) first = i; bad++; }
+            if (bad != 0)
+                throw new Exception($"CopyFromStream large multi-chunk: {bad} of {n} elements wrong, first at [{first}] (got {got[first]}, expected {expected[first]})");
+        });
+
         /// <summary>Upload into a sub-range (non-zero target offset) leaves the rest untouched.</summary>
         [TestMethod]
         public async Task CopyFromStreamSubViewTest() => await RunTest(async accelerator =>

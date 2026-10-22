@@ -339,6 +339,12 @@ namespace ILGPU.Runtime
             long destOffset = targetOffsetInBytes;
             int bufferSize = (int)Math.Min((long)chunkSizeInBytes, remaining);
             byte[] chunk = ArrayPool<byte>.Shared.Rent(bufferSize);
+            // Pinned for the whole upload: `CPUMemoryBuffer.Create(Accelerator, ref chunk[0], ...)` takes the address with
+            // Unsafe.AsPointer, which does not pin, and the chunk is a movable array when it is small (see the readback
+            // in CopyToRawAsync above for the same hazard measured).
+            var pin = System.Runtime.InteropServices.GCHandle.Alloc(
+                chunk,
+                System.Runtime.InteropServices.GCHandleType.Pinned);
             try
             {
                 while (remaining > 0)
@@ -350,15 +356,22 @@ namespace ILGPU.Runtime
                         .ConfigureAwait(false);
                     using var cpuBuffer = CPUMemoryBuffer.Create(
                         Accelerator,
-                        ref chunk[0],
-                        want);
+                        pin.AddrOfPinnedObject(),
+                        (long)want,
+                        sizeof(byte));
                     CopyFrom(stream, cpuBuffer.AsRawArrayView(), destOffset);
+                    // `chunk` is reused for the next read. A host-to-device copy may still be in flight (OpenCL enqueues a
+                    // NON-blocking write; its spec requires the host memory to stay unchanged until it completes): without
+                    // this wait a driver that reads late (AMD's, MEASURED on an RX 590 with 5.4.1) put later chunks' data
+                    // into earlier places. No-op on the browser backends, which consume the host bytes immediately.
+                    stream.EnsureHostCopyConsumed();
                     destOffset += want;
                     remaining -= want;
                 }
             }
             finally
             {
+                pin.Free();
                 ArrayPool<byte>.Shared.Return(chunk);
             }
         }
