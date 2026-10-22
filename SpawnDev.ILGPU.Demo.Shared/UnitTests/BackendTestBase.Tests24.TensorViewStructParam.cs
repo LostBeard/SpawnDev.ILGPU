@@ -89,9 +89,12 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             float v = src[idx];
             float t = (v - scaleA) / (scaleB - scaleA);
             // Branchy logic so the helper isn't trivially inlined.
+            // mode 0 ROUNDS (+ 0.5f): with src[i] = i and scale 0..15, t * 255 is an exact integer (17 * i) for
+            // every element, so truncation sits on the boundary and a 1-ULP-low division (WGSL allows 2.5 ULP;
+            // Intel HD 620 gives 1016 for 1017) lands one lower. Rounding keeps the test about INDEXING.
             int result;
             if (mode == 0)
-                result = (int)(t * 255f);
+                result = (int)(t * 255f + 0.5f);
             else if (mode == 1)
                 result = (int)((1f - t) * 255f);
             else
@@ -148,7 +151,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             for (int i = 0; i < N; i++)
             {
                 float t = (i - 0f) / (15f - 0f);
-                int expected = 1000 + (int)(t * 255f);
+                int expected = 1000 + (int)(t * 255f + 0.5f);
                 if (actual[i] != expected) diffs++;
             }
             if (diffs > 0)
@@ -210,7 +213,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             for (int i = 0; i < N; i++)
             {
                 float t = (i - 0f) / (15f - 0f);
-                int expected = 1000 + (int)(t * 255f);
+                int expected = 1000 + (int)(t * 255f + 0.5f);
                 if (actual[i] != expected)
                 {
                     diffs++;
@@ -249,7 +252,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     float v = src.Data[idx];
                     float t = (v - scaleA) / (scaleB - scaleA);
                     int result;
-                    if (mode == 0) result = (int)(t * 255f);
+                    if (mode == 0) result = (int)(t * 255f + 0.5f);
                     else if (mode == 1) result = (int)((1f - t) * 255f);
                     else result = (int)(t * 128f) + 64;
                     dst.Data[idx] = 1000 + result;
@@ -267,7 +270,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             for (int i = 0; i < N; i++)
             {
                 float t = (i - 0f) / (15f - 0f);
-                int expected = 1000 + (int)(t * 255f);
+                int expected = 1000 + (int)(t * 255f + 0.5f);
                 if (actual[i] != expected)
                 {
                     diffs++;
@@ -314,7 +317,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             for (int i = 0; i < N; i++)
             {
                 float t = (i - 0f) / (15f - 0f);
-                int expected = 1000 + (int)(t * 255f);
+                int expected = 1000 + (int)(t * 255f + 0.5f);
                 if (actual[i] != expected)
                 {
                     diffs++;
@@ -508,7 +511,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             float v = src[idx];
             float t = (v - minVal) / (maxVal - minVal);
             int result;
-            if (palette == 0) result = (int)(t * 255f);
+            if (palette == 0) result = (int)(t * 255f + 0.5f);
             else if (palette == 1) result = (int)((1f - t) * 255f);
             else result = (int)(t * 128f) + 64;
             dst[idx] = 2000 + result;
@@ -548,7 +551,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             for (int i = 0; i < N; i++)
             {
                 float t = (i - 0f) / (15f - 0f);
-                int expected = 2000 + (int)(t * 255f);
+                int expected = 2000 + (int)(t * 255f + 0.5f);
                 if (actual[i] != expected)
                 {
                     diffs++;

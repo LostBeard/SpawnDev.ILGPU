@@ -397,8 +397,10 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
 
         protected override void RequireFeature(Accelerator accelerator, string featureName, string? reason = null)
         {
-            // Subgroups are force-disabled in this test class — skip subgroup-dependent tests
-            if (featureName is "subgroup_shuffle" or "subgroups")
+            // Subgroups are force-disabled in this test class - skip tests that need the hardware feature.
+            // "subgroup_shuffle" is NOT skipped: Warp.Shuffle has a shared-memory emulation on this path and
+            // a device with no subgroups (Intel HD 620 on Chrome 155) takes it in the WebGPUTests lane.
+            if (featureName is "subgroups")
                 throw new UnsupportedTestException(reason ?? $"Feature '{featureName}' not available (subgroups force-disabled)");
         }
 

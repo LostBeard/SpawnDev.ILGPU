@@ -1539,6 +1539,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 wgslSource = wgslSource.Replace("/*__WGSL_CONST_WORKGROUP_SIZE_PLACEHOLDER__*/", wgConst);
             }
 
+            // Resolve the uniform-break flag placeholder: declare the workgroup variable only when a loop break
+            // actually broadcasts through it (see WGSLKernelFunctionGenerator.BeginNonUniformBreak).
+            const string UniformBreakFlagPlaceholder = "/*__WGSL_UNIFORM_BREAK_FLAG_PLACEHOLDER__*/";
+            if (wgslSource.Contains(UniformBreakFlagPlaceholder))
+                wgslSource = wgslSource.Replace(UniformBreakFlagPlaceholder,
+                    wgslSource.Contains("_uf_break_flag") ? "var<workgroup> _uf_break_flag : u32;" : "");
+
             // Prepend kernel method name as a comment for identification
             var methodName = entryPoint.MethodInfo?.Name ?? "unknown";
             wgslSource = $"// Kernel: {methodName}\n" + wgslSource;

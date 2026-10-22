@@ -714,16 +714,18 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         // (in-kernel group scan) is separate and still unsupported on WebGL.
         // RadixSortBoundary16KTest / 20KTest now RUN on WebGL (int+int scatter-based pairs sort).
 
-        [TestMethod]
+        // Timeout 240000: five ~262K-270K-pair multi-pass sorts take over the 30 s default on an integrated GPU
+        // (Intel HD 620: every test below timed out at 30 s and passed with a longer limit, 2026-10-22).
+        [TestMethod(Timeout = 240000)]
         public new async Task RadixSortThresholdProbeTest() =>
             await base.RadixSortThresholdProbeTest();
 
         // --- Tests9: Large-scale RadixSort stress tests ---
         // RadixSortDescending1_4MTest now RUNS on WebGL (int+int scatter-based pairs sort, n=1.39M).
-        [TestMethod]
+        [TestMethod(Timeout = 240000)]
         public new async Task RadixSortDescendingWithSentinelsTest() =>
             await base.RadixSortDescendingWithSentinelsTest();
-        [TestMethod]
+        [TestMethod(Timeout = 240000)]
         public new async Task RadixSortRepeatedResortTest() =>
             await base.RadixSortRepeatedResortTest();
         // RadixSortDescending2MTest now RUNS on WebGL (int+int scatter-based pairs sort, n=2^21).
@@ -731,10 +733,10 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         // the test's GPU verify falls back to a CPU verify on WebGL since WebGL has no atomics).
         // RadixSortDescending4MTest now RUNS on WebGL: the base test carries [TestMethod(Timeout=240000)]
         // (the large 4M sort needs more than the 30s default, like Wasm), so no WebGL override is needed.
-        [TestMethod]
+        [TestMethod(Timeout = 240000)]
         public new async Task RadixSortHeavyDuplicateKeysTest() =>
             await base.RadixSortHeavyDuplicateKeysTest();
-        [TestMethod]
+        [TestMethod(Timeout = 240000)]
         public new async Task RadixSortDescendingOddCountTest() =>
             await base.RadixSortDescendingOddCountTest();
         // RadixSortAscending1_4MTest + RadixSortSpawnSceneSimulationTest now RUN on WebGL via the base

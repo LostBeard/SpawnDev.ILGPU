@@ -118,7 +118,8 @@ public abstract partial class BackendTestBase
         outWords[i * 4 + 3] = e3;
     }
 
-    [TestMethod]
+    // Timeout 240000: ~30-40 s on an Intel HD 620 WebGL context (the 30 s default timed out there, 2026-10-22).
+    [TestMethod(Timeout = 240000)]
     public async Task Autolykos2_DatasetElement_KnownVectors() => await RunTest(async accelerator =>
     {
         var vs = DatasetElementVectors;
@@ -351,7 +352,7 @@ public abstract partial class BackendTestBase
     // the bound is the u_loopLimit uniform); and Compress's 96 straight-line G mixes, inlined by FXC
     // at three call sites. Compress is now a 12-round loop and the element one 65-block loop with a
     // single Compress call: the kernel links in 0.6 s.
-    [TestMethod]
+    [TestMethod(Timeout = 240000)]
     public async Task Autolykos2_DatasetGeneration_SmallN_GPU_CPUMatch() => await RunTest(async accelerator =>
     {
         const int n = 2000; // small N for fast cross-backend iteration, not real mainnet scale (tier 2)

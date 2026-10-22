@@ -28,7 +28,16 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             var scan = accelerator.CreateScan<int, Stride1D.Dense, Stride1D.Dense, AddInt32>(kind);
             var rng = new Random(20261005);
             var failures = new List<string>();
-            foreach (int n in new[] { 4_097, 70_000, 615_764, 1_600_003 })
+            // The plain CPU accelerator (ILGPU's debugging backend) runs every GPU thread as an OS thread and a scan of
+            // 1.6M elements took 495.8 s ALONE on a quiet machine (measured 2026-10-22, 779 threads, one test process);
+            // the harness kills a test process at 600 s, and four parallel CPU test processes pushed it past that - the
+            // sweep reported "the test process exited with code -1 ... without reporting a result" (the 5.4.1 sweep and
+            // the 2026-10-22 CPU lane, both this test). Velocity (the production CPU backend) and every GPU/browser backend still run
+            // the 1.6M case; the plain CPU keeps 615,764, the size that exposed the WebGPU bug.
+            var sizes = accelerator.AcceleratorType == AcceleratorType.CPU
+                ? new[] { 4_097, 70_000, 615_764 }
+                : new[] { 4_097, 70_000, 615_764, 1_600_003 };
+            foreach (int n in sizes)
             {
                 foreach (double density in new[] { 0.02, 0.97 })
                 {

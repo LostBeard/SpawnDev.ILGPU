@@ -20,6 +20,10 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
     //      2026-06-23 (WGSLCodeGenerator SubgroupShuffleBuiltin + per-kind emulation source lane).
     //  (2) the pipeline validity itself on Dawn (if subgroup uniformity ever regresses, the
     //      WebGPU lane fails here at pipeline creation with Dawn's actual validation error).
+    //  (3) the shared-memory shuffle EMULATION (a device with no subgroups: Intel HD 620 on Chrome 155, or the
+    //      WebGPUNoSubgroups lane) puts workgroupBarrier() in the butterfly loop, whose bound is read from a
+    //      storage buffer - WGSL calls that non-uniform and rejected the shader until the loop break was
+    //      broadcast through workgroupUniformLoad (found by the laptop run 2026-10-22).
     public abstract partial class BackendTestBase
     {
         private const int RAS_WARP = 32;   // one warp = block
@@ -106,6 +110,61 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                             $"(ShuffleXor butterfly + const-16 register accumulator.)");
                 }
             }
+        });
+
+        private const int LBB_THREADS = 64;
+
+        // A user-written Group.Barrier() inside a loop whose trip count is READ FROM A BUFFER (not a scalar
+        // parameter). Every kernel view is bound read_write, so WGSL treats that load as non-uniform and rejected
+        // the barrier ("must only be called from uniform control flow"); the same class as the shuffle emulation.
+        private static void LoopBarrierBufferBoundKernel(
+            Index1D _, ArrayView<int> input, ArrayView<int> output, ArrayView<int> p)
+        {
+            var shared = SharedMemory.Allocate<int>(LBB_THREADS);
+            int t = Group.IdxX;
+            shared[t] = input[t];
+            Group.Barrier();
+            int rounds = p[0];
+            for (int r = 0; r < rounds; r++)
+            {
+                int next = shared[(t + 1) % LBB_THREADS] + r;
+                Group.Barrier();
+                shared[t] = next;
+                Group.Barrier();
+            }
+            output[t] = shared[t];
+        }
+
+        [TestMethod]
+        public async Task LoopBarrier_BoundReadFromBuffer_MatchesCpuOracle() => await RunTest(async accelerator =>
+        {
+            if (accelerator.AcceleratorType == AcceleratorType.WebGL)
+                throw new UnsupportedTestException("WebGL has no shared memory or barriers.");
+
+            const int Rounds = 5;
+            var input = new int[LBB_THREADS];
+            for (int i = 0; i < LBB_THREADS; i++) input[i] = i * 3 + 1;
+
+            using var inBuf = accelerator.Allocate1D(input);
+            using var outBuf = accelerator.Allocate1D<int>(LBB_THREADS);
+            using var pBuf = accelerator.Allocate1D(new int[] { Rounds });
+
+            var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>, ArrayView<int>, ArrayView<int>>(
+                LoopBarrierBufferBoundKernel);
+            kernel(new KernelConfig(1, LBB_THREADS), (Index1D)LBB_THREADS, inBuf.View, outBuf.View, pBuf.View);
+            await accelerator.SynchronizeAsync();
+            var result = await outBuf.CopyToHostAsync<int>();
+
+            var cur = (int[])input.Clone();
+            for (int r = 0; r < Rounds; r++)
+            {
+                var nxt = new int[LBB_THREADS];
+                for (int t = 0; t < LBB_THREADS; t++) nxt[t] = cur[(t + 1) % LBB_THREADS] + r;
+                cur = nxt;
+            }
+            for (int t = 0; t < LBB_THREADS; t++)
+                if (result[t] != cur[t])
+                    throw new Exception($"LoopBarrier mismatch at thread {t}: expected {cur[t]}, got {result[t]}.");
         });
     }
 }

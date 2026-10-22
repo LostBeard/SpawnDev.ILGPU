@@ -52,6 +52,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         [System.Text.RegularExpressions.GeneratedRegex(@"(?m)^\s*(v_\w+)\s*=\s*([^;]+);")]
         private static partial System.Text.RegularExpressions.Regex AssignPattern();
 
+        // "var v_N : type" declarations, with or without an initializer (group 1 = name, group 2 set when the type is an array)
+        [System.Text.RegularExpressions.GeneratedRegex(@"\bvar\s+(v_\w+)\s*:\s*(array<)?")]
+        private static partial System.Text.RegularExpressions.Regex VarDeclAnyPattern();
+
+        // "let v_N = &...;" pointer-alias bindings (group 1 = name, group 2 = the &-expression)
+        [System.Text.RegularExpressions.GeneratedRegex(@"(?m)^\s*let\s+(v_\w+)\s*=\s*(&[^;]+);")]
+        private static partial System.Text.RegularExpressions.Regex PointerLetPattern();
+
         #endregion
 
         #region Instance
@@ -2822,6 +2830,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // GenerateCode() AFTER shared memory allocations are known (needed for inference).
             // Both @workgroup_size and the const workgroup_size variable MUST agree.
             builder.AppendLine("/*__WGSL_CONST_WORKGROUP_SIZE_PLACEHOLDER__*/");
+            // Declaration of _uf_break_flag (the workgroupUniformLoad carrier of a non-uniform loop break) is only known
+            // to be needed after the body is generated; WebGPUBackend resolves this placeholder.
+            builder.AppendLine("/*__WGSL_UNIFORM_BREAK_FLAG_PLACEHOLDER__*/");
 
             builder.AppendLine();
         }
@@ -3665,6 +3676,37 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     missingDeclInferredTypes[dm.Groups[1].Value] = dm.Groups[2].Value;
                 }
+                // Every name bound as a pointer alias (`let v_N = &x;`) anywhere in the body. A later `let v_M = v_N;`
+                // (a SubView of a view parameter, a plain alias of a view) copies a POINTER, which WGSL cannot assign to
+                // a `var`, so it must stay a `let`. _viewPointerVarNames only knows the struct-field view pointers: the
+                // view PARAMETER alias `let v_2487 = &param8;` was missed, so `let v_2491 = v_2487;` became an assignment
+                // to a variable nothing declared - Tint: "unresolved value 'v_2491'" (SpawnDev.Codecs
+                // Av1CoefRoundTripKernel, which passes encDecInfo.SubView(2, 1); the SubView registers its target in
+                // declaredVariables, so the missing-declaration step below never adds a `var` either).
+                // simple = `&identifier` (hoistable to function scope); blockLocal = `&identifier[index]` etc. (depends
+                // on block-local values, stays in its block, and so must anything that copies it).
+                var simplePtrAliases = new HashSet<string>(_viewPointerVarNames, System.StringComparer.Ordinal);
+                var blockLocalPtrAliases = new HashSet<string>(System.StringComparer.Ordinal);
+                // The scan covers everything emitted so far, not just the body after codeGenStartPosition: the view
+                // parameter aliases (`let v_2487 = &param8;`) are emitted ahead of it.
+                foreach (System.Text.RegularExpressions.Match pm in PointerLetPattern().Matches(Builder.ToString()))
+                {
+                    if (IsAmpersandWordChars(pm.Groups[2].Value.Trim()))
+                        simplePtrAliases.Add(pm.Groups[1].Value);
+                    else
+                        blockLocalPtrAliases.Add(pm.Groups[1].Value);
+                }
+                // Names that already have a `var v_N : type` declaration in the text, and the subset that are local
+                // arrays. A SubView of a LOCAL array (`view.SubView(...)` on a LocalMemory/stackalloc view) registers its
+                // target in declaredVariables but has no declaration; see the safety net below.
+                var declaredByText = new HashSet<string>(System.StringComparer.Ordinal);
+                var localArrayVars = new HashSet<string>(System.StringComparer.Ordinal);
+                foreach (System.Text.RegularExpressions.Match vm in VarDeclAnyPattern().Matches(Builder.ToString()))
+                {
+                    declaredByText.Add(vm.Groups[1].Value);
+                    if (vm.Groups[2].Success)
+                        localArrayVars.Add(vm.Groups[1].Value);
+                }
                 bool anyReplacements = false;
                 string processed = s_inlineLetPattern.Replace(generatedCode, match =>
                 {
@@ -3672,21 +3714,29 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     string varName = match.Groups[2].Value;
                     string expr = match.Groups[3].Value;
 
+                    // A copy of a pointer into block-local state must stay where its source is.
+                    if (blockLocalPtrAliases.Contains(expr.Trim()))
+                    {
+                        blockLocalPtrAliases.Add(varName);
+                        return match.Value;
+                    }
+
                     // Pointer aliases (expressions starting with '&') can't be declared as 'var'
                     // in WGSL — they must remain as 'let'. But 'let' has block scope, so if they're
                     // inside a case block and used from other case blocks, we must hoist them to
                     // function scope. ONLY hoist simple pointer aliases like &v_67 (references to
                     // module-scope shared memory). DO NOT hoist indexed expressions like &v_66[v_82]
                     // since those depend on block-local variables.
-                    if (expr.TrimStart().StartsWith("&") || _viewPointerVarNames.Contains(expr.Trim()))
+                    if (expr.TrimStart().StartsWith("&") || simplePtrAliases.Contains(expr.Trim()))
                     {
                         var trimmed = expr.TrimStart();
-                        if (_viewPointerVarNames.Contains(expr.Trim()))
+                        if (simplePtrAliases.Contains(expr.Trim()))
                         {
                             // The RHS is a pointer alias variable (e.g. v_27_f0, which is 'let v_27_f0 = &param1_f0;').
                             // WGSL cannot assign pointers to 'var' variables — keep as 'let' and hoist to function scope.
                             hoistedLetDeclarations.Add($"    let {varName} = {trimmed};");
                             _viewPointerVarNames.Add(varName); // Also track v_28 as a pointer alias
+                            simplePtrAliases.Add(varName);
                             anyReplacements = true;
                             return ""; // Remove from case block; will be emitted at function scope
                         }
@@ -3701,6 +3751,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         }
                         // Complex pointer expression (e.g. &v_66[v_82]) — keep as-is in block
                         return match.Value;
+                    }
+
+                    // Safety net: a name registered in declaredVariables WITHOUT a declaration anywhere in the text
+                    // (GenerateCode(SubViewValue) registers its target and emits only a `let`). Turning that `let` into an
+                    // assignment leaves the name undeclared - Tint: "unresolved value" (SpawnDev.Codecs
+                    // Vp9FrameSequentialEncodeKernel.EncodeWavefrontBatchKernel: SubView of a local array). The source is
+                    // a function-scope local array, so the alias is its address; hoisted like the other pointer aliases.
+                    if (declaredVariables.Contains(varName) && !declaredByText.Contains(varName)
+                        && localArrayVars.Contains(expr.Trim()))
+                    {
+                        hoistedLetDeclarations.Add($"    let {varName} = &{expr.Trim()};");
+                        _viewPointerVarNames.Add(varName);
+                        simplePtrAliases.Add(varName);
+                        anyReplacements = true;
+                        return ""; // Remove from case block; will be emitted at function scope
                     }
 
                     anyReplacements = true;
@@ -9212,6 +9277,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             string _ufBreakSentinel = null;
             string _ufUniformBreak = null;
             string _ufNaturalBreak = null;
+            // Non-uniform natural break (no thread-counter replacement exists): the line the broadcast store goes on.
+            string _ufPreSentinelLine = null;
 
             // Emit the header block's body (instructions)
             GenerateBasicBlockCode(headerBlock);
@@ -9337,6 +9404,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         _ufNaturalBreak = _natCond;
                         condExpr = _ufBreakSentinel;
                     }
+                    else if (UniformityAnalyzer.DependsOnNonUniformMemory(headerBranch.Condition))
+                    {
+                        condExpr = BeginNonUniformBreak(out _ufBreakSentinel, out _ufPreSentinelLine);
+                        _ufNaturalBreak = _natCond;
+                    }
                     else condExpr = _natCond;
                     AppendLine($"if ({condExpr}) {{");
                     PushIndent();
@@ -9360,6 +9432,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         _ufUniformBreak = $"!{breakConditionExpr}";
                         _ufNaturalBreak = _natCond;
                         condExpr = _ufBreakSentinel;
+                    }
+                    else if (UniformityAnalyzer.DependsOnNonUniformMemory(headerBranch.Condition))
+                    {
+                        condExpr = BeginNonUniformBreak(out _ufBreakSentinel, out _ufPreSentinelLine);
+                        _ufNaturalBreak = _natCond;
                     }
                     else condExpr = _natCond;
                     AppendLine($"if ({condExpr}) {{");
@@ -9430,7 +9507,27 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 string _ufBody = Builder.ToString(_ufBodyStartPos, Builder.Length - _ufBodyStartPos);
                 bool _ufLoopHasBarrier = _ufBody.Contains("workgroupBarrier(", StringComparison.Ordinal)
                     || _ufBody.Contains("storageBarrier(", StringComparison.Ordinal);
-                Builder.Replace(_ufBreakSentinel, _ufLoopHasBarrier ? _ufUniformBreak : _ufNaturalBreak);
+                if (_ufPreSentinelLine != null)
+                {
+                    // No thread-counter replacement exists and the break depends on a memory load or shuffle, which the
+                    // validator treats as non-uniform. With a barrier in the body (incl. the shared-memory warp-shuffle
+                    // emulation's) take the decision from invocation 0 through workgroupUniformLoad: the barriers then
+                    // sit in uniform control flow. A loop that needs a barrier already has to leave the loop together.
+                    if (_ufLoopHasBarrier)
+                    {
+                        string indent = new string(' ', _ufPreSentinelLine.Length - _ufPreSentinelLine.TrimStart(' ').Length);
+                        Builder.Replace(_ufPreSentinelLine,
+                            indent + $"if (local_index == 0u) {{ _uf_break_flag = select(0u, 1u, {_ufNaturalBreak}); }}" + Environment.NewLine);
+                        Builder.Replace(_ufBreakSentinel, "workgroupUniformLoad(&_uf_break_flag) != 0u");
+                    }
+                    else
+                    {
+                        Builder.Replace(_ufPreSentinelLine, "");
+                        Builder.Replace(_ufBreakSentinel, _ufNaturalBreak);
+                    }
+                }
+                else
+                    Builder.Replace(_ufBreakSentinel, _ufLoopHasBarrier ? _ufUniformBreak : _ufNaturalBreak);
             }
 
             // Divergent exits: declare the flag in the scope enclosing the loop (the post-loop dispatch reads it);
@@ -9444,6 +9541,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             return headerExitTarget;
         }
 
+
+        /// <summary>
+        /// Starts a loop break whose condition WGSL cannot prove uniform and the thread-counter transforms did not
+        /// replace: emits a placeholder line (the broadcast store of invocation 0's decision goes there) and returns
+        /// the sentinel for the condition. <c>GenerateLoopConstruct</c> resolves both once the body shows whether the
+        /// loop contains a barrier.
+        /// </summary>
+        private string BeginNonUniformBreak(out string breakSentinel, out string preSentinelLine)
+        {
+            string id = (_ufBreakSentinelCounter++).ToString();
+            breakSentinel = $"/*__UFBRK{id}__*/";
+            string pre = $"/*__UFPRE{id}__*/";
+            preSentinelLine = new string(' ', IndentLevel * 4) + pre + Environment.NewLine;
+            AppendLine(pre);
+            return breakSentinel;
+        }
 
         // Uniformity analysis methods extracted to UniformityAnalyzer.cs (Phase 1.3)
 

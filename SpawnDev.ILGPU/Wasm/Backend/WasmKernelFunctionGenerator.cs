@@ -2420,7 +2420,24 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// <exception cref="UnsupportedKernelFeatureException">
         /// A packed 4-bit view is reached through a structure parameter.
         /// </exception>
-        public override void GenerateCode(LoadElementAddress value)
+        public override void GenerateCode(LoadElementAddress value) =>
+            EmitElementAddress(value, value.Source, value.Offset);
+
+        /// <summary>
+        /// A sub-view's base address is the element address of its source at the sub-view's offset:
+        /// <c>sourceBase + offset * elementSize</c>, exactly a <see cref="LoadElementAddress"/>. Before
+        /// this handler the dispatcher logged "UNHANDLED IR VALUE: SubViewValue" (only under verbose
+        /// logging) and emitted NOTHING, so the sub-view's local stayed 0 and every load/store through
+        /// it hit linear-memory address 0: <c>view.SubView(2, 1)</c> passed to a helper wrote its
+        /// results into the first bytes of the heap and the real buffer kept its old contents
+        /// (found 2026-10-22 by SubViewOfViewParam_PassedToMultiBlockHelper_MatchesCpuOracle, info =
+        /// 7,0,0,0; the WebGPU twin of the same kernel shape was the "unresolved value" bug).
+        /// </summary>
+        /// <param name="value">The sub-view value.</param>
+        public override void GenerateCode(SubViewValue value) =>
+            EmitElementAddress(value, value.Source, value.Offset);
+
+        private void EmitElementAddress(Value value, Value sourceValue, Value offsetValue)
         {
             // Packed 4-bit (QInt4): the buffer is 2 nibbles/byte. The DIRECT-param path below encodes a
             // NIBBLE ADDRESS = 2*base + index (so the Load/Store recover byte=addr>>1, nibble=addr&1
@@ -2440,8 +2457,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             bool isPacked4View = isQInt4View || isFloat4View;
 
             var target = AllocateLocal(value);
-            var source = value.Source.Resolve();
-            var index = value.Offset.Resolve();
+            var source = sourceValue.Resolve();
+            var index = offsetValue.Resolve();
 
             {
                 Value? leaSrc = source;
@@ -4509,6 +4526,32 @@ EmitSaveAllLocals();
         }
 
         /// <summary>
+        /// Finds the <see cref="SubViewValue"/> a view value is (through inlined-helper parameter aliases
+        /// and address-space casts), if it is one.
+        /// </summary>
+        private bool TryResolveSubView(Value view, out SubViewValue subView)
+        {
+            var current = view.Resolve();
+            for (int i = 0; i < 20 && current != null; i++)
+            {
+                if (current is SubViewValue sv)
+                {
+                    subView = sv;
+                    return true;
+                }
+                if (current is global::ILGPU.IR.Values.Parameter p
+                    && _inlineParamAliases.TryGetValue(p, out var aliased))
+                    current = aliased.Resolve();
+                else if (current is AddressSpaceCast asc)
+                    current = asc.Value.Resolve();
+                else
+                    break;
+            }
+            subView = null!;
+            return false;
+        }
+
+        /// <summary>
         /// Handles ArrayView.Length: traces the view back to its kernel parameter
         /// and reads the pre-stored length local (locals[1]).
         /// This is the correct cross-backend approach — the length is already passed
@@ -4526,6 +4569,20 @@ EmitSaveAllLocals();
             // (to extract BaseView from the struct) — we must trace through the
             // chain of operations to find the original Parameter.
             var viewSource = value.View.Resolve();
+
+            // A sub-view's length is its OWN length, not the length of the parameter it was cut from
+            // (TraceToParameter does not walk SubViewValue - see its doc - so without this a sub-view of a
+            // 4-element buffer reported 4 instead of its requested length).
+            if (TryResolveSubView(viewSource, out var subView))
+            {
+                var subLength = subView.Length.Resolve();
+                EmitGetLocal(subLength);
+                if (GetWasmTypeFromIR(subLength.Type) != WasmOpCodes.I64)
+                    Code.Add(WasmOpCodes.I64ExtendI32S);
+                WasmModuleBuilder.EmitLocalSet(Code, target);
+                return;
+            }
+
             int paramIdx = TraceToParameter(viewSource);
 
             if (paramIdx >= 0 && _paramLocals.TryGetValue(paramIdx, out var locals) && locals.Length > 1)

@@ -277,6 +277,43 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
         /// <summary>
+        /// True when <paramref name="value"/> depends on something WGSL's uniformity analysis cannot prove uniform
+        /// and the thread-counter transforms did not already replace: a load from global or shared memory (every
+        /// kernel view is bound <c>read_write</c>, so its loads are non-uniform to the validator even when all
+        /// threads read the same element), a warp shuffle, or an atomic. A loop whose break depends on such a value
+        /// and that contains a barrier is rejected ("'workgroupBarrier' must only be called from uniform control
+        /// flow"). Loads from the thread's own local (private) memory are tracked through assignments by the
+        /// validator and are not counted. Scalar kernel parameters are not IR loads (read-only storage, uniform).
+        /// </summary>
+        /// <param name="value">The break condition.</param>
+        /// <returns>True if the value may be non-uniform.</returns>
+        public static bool DependsOnNonUniformMemory(Value value)
+        {
+            var visited = new HashSet<Value>();
+            var stack = new Stack<Value>();
+            stack.Push(value);
+            while (stack.Count > 0 && visited.Count < 512)
+            {
+                var current = stack.Pop().Resolve();
+                if (!visited.Add(current)) continue;
+                switch (current)
+                {
+                    case Load load:
+                        if (load.SourceAddressSpace == MemoryAddressSpace.Local)
+                            break;   // the thread's own private memory: the validator follows its assignments
+                        return true;
+                    case WarpShuffle:
+                    case SubWarpShuffle:
+                    case AtomicValue:
+                        return true;
+                }
+                foreach (var node in current.Nodes)
+                    stack.Push(node.Resolve());
+            }
+            return false;
+        }
+
+        /// <summary>
         /// Checks if any block within a loop node contains a memory barrier instruction.
         /// This is used to determine if a loop needs uniformity analysis for its break condition.
         /// </summary>

@@ -60,6 +60,23 @@ namespace ILGPU.Runtime.Cuda
                     Trace.WriteLine(">> No error information available");
                 else
                     Trace.WriteLine(errorLog);
+
+                // Put the reason IN the exception (a Trace listener is rarely attached).
+                var ptxHeader = new System.Text.StringBuilder();
+                foreach (var line in kernel.PTXAssembly.Split('\n'))
+                {
+                    var t = line.Trim();
+                    if (t.StartsWith(".version", StringComparison.Ordinal)
+                        || t.StartsWith(".target", StringComparison.Ordinal)
+                        || t.StartsWith(".address_size", StringComparison.Ordinal))
+                    {
+                        if (ptxHeader.Length > 0) ptxHeader.Append(' ');
+                        ptxHeader.Append(t);
+                    }
+                    if (ptxHeader.Length > 200) break;
+                }
+                throw new CudaException(
+                    kernelLoaded, kernel.Name, errorLog, ptxHeader.ToString());
             }
             else if (CudaAccelerator.VerboseModuleLoad
                 && !string.IsNullOrWhiteSpace(errorLog))

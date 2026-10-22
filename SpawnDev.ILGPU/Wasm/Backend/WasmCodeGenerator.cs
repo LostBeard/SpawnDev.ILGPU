@@ -1578,6 +1578,31 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         }
 
         /// <summary>
+        /// A sub-view's base address: <c>source + offset * elementSize</c> (a view is its base address
+        /// in the flat Wasm memory model). The dispatcher used to skip this node, leaving the
+        /// sub-view's local at 0 so everything through it read/wrote linear-memory address 0.
+        /// </summary>
+        /// <param name="value">The sub-view value.</param>
+        public virtual void GenerateCode(SubViewValue value)
+        {
+            var target = AllocateLocal(value);
+            EmitGetLocal(value.Source.Resolve());
+            EmitGetLocal(value.Offset.Resolve());
+            int elemSize = 4;
+            if (value.Type is AddressSpaceType addrType)
+            {
+                if (addrType.ElementType is PrimitiveType pt)
+                    elemSize = GetElementSize(pt.BasicValueType);
+                else if (addrType.ElementType is StructureType st)
+                    elemSize = st.Size;
+            }
+            WasmModuleBuilder.EmitI32Const(Code, elemSize);
+            Code.Add(WasmOpCodes.I32Mul);
+            Code.Add(WasmOpCodes.I32Add);
+            WasmModuleBuilder.EmitLocalSet(Code, target);
+        }
+
+        /// <summary>
         /// Computes a field address as the source address plus the field's byte offset within the
         /// structure. If the structure type cannot be resolved, the source address is used unchanged.
         /// </summary>
@@ -2429,6 +2454,9 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     GenerateCode(v);
                     break;
                 case global::ILGPU.IR.Values.LoadElementAddress v:
+                    GenerateCode(v);
+                    break;
+                case global::ILGPU.IR.Values.SubViewValue v:
                     GenerateCode(v);
                     break;
                 case global::ILGPU.IR.Values.LoadFieldAddress v:

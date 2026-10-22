@@ -47,6 +47,30 @@ namespace ILGPU.Runtime.Cuda
         }
 
         /// <summary>
+        /// A module (PTX) load failure that carries the driver's JIT log and the PTX
+        /// header. The log used to go only to <c>Trace</c>, so the exception read
+        /// "a PTX JIT compilation failed at kernelLoaded" with no reason - on a laptop
+        /// with a 2019 driver (940MX, driver 430.63) 621 tests failed that way and the
+        /// cause (the PTX ISA <c>.version</c> / <c>.target</c> the driver rejects, or
+        /// an instruction it lacks) was invisible.
+        /// </summary>
+        internal CudaException(
+            CudaError error,
+            string kernelName,
+            string? jitLog,
+            string ptxHeader)
+            : base(
+                CurrentAPI.GetErrorString(error)
+                + " while loading kernel '" + kernelName + "'"
+                + (string.IsNullOrWhiteSpace(jitLog)
+                    ? "; the driver returned no JIT log"
+                    : "; driver JIT log: " + jitLog)
+                + "; PTX header: " + ptxHeader)
+        {
+            Error = error.ToString();
+        }
+
+        /// <summary>
         /// Constructs a new Cuda exception.
         /// </summary>
         /// <param name="message">The message that describes the error.</param>

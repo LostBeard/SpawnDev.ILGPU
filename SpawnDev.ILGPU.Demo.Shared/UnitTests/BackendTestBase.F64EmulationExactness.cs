@@ -729,7 +729,10 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     for (int c = 0; c < 5; c++)
                     {
                         double got = g[i * 5 + c];
-                        if (Math.Abs(got - e[c]) > 2e-6 * Math.Max(1.0, Math.Abs(e[c])))
+                        // Sin/Cos run on the hardware f32 builtin. The WGSL spec only guarantees an absolute error
+                        // of 2^-11 (4.9e-4) there; NVIDIA is far tighter, Intel HD 620 gave 1.5e-5 for Cos(0.5).
+                        double tol = c <= 1 ? 4.9e-4 : 2e-6 * Math.Max(1.0, Math.Abs(e[c]));
+                        if (Math.Abs(got - e[c]) > tol)
                             throw new Exception($"[{mode}] {names[c]}({x:R}) = {got:R}, expected {e[c]:R}");
                     }
                 }
