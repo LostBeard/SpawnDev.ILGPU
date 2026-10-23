@@ -161,6 +161,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         // Maps cross-block pointer variable names to inline expressions (e.g. "param1[v_3_idx]")
         // This fixes WGSL scoping: pointers declared in one switch case are not visible in another.
         private Dictionary<string, string> _crossBlockPointerExprs = new Dictionary<string, string>();
+        // The _crossBlockPointerExprs entries that are an array ELEMENT (`binding[offset]`, an lvalue) rather than an
+        // already-loaded value (the sub-word / FP8 / FP4 extract expressions). Load and Store must go through
+        // atomicLoad / atomicStore when that element's buffer is array<atomic<T>> (a view used by an Atomic.* op AND
+        // read or written plainly): substituting the bare element gave "cannot assign 'atomic<i32>' to 'i32'"
+        // (SpawnDev.Codecs ExactPaletteBuilder.InsertKernel, VP8/VP9/AV1 encoders, 2026-10-23).
+        private HashSet<string> _crossBlockElementPointers = new HashSet<string>();
         // Set of LoadElementAddress Values that cross block boundaries
         private HashSet<Value> _crossBlockPointers = new HashSet<Value>();
         // Tracks `let` bindings already emitted (e.g. shared memory pointers from NewView).
@@ -5059,6 +5065,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             _hoistedPrimitives.Clear(); // Initialize the restored set
             _crossBlockPointers.Clear();
             _crossBlockPointerExprs.Clear();
+            _crossBlockElementPointers.Clear();
 
             foreach (var block in Method.Blocks)
                 foreach (var value in block)
@@ -5122,7 +5129,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
 
                 string init = " = 0";
-                if (basicType == BasicValueType.Int1) init = " = false";
+                // A structure (or any non-scalar) has no literal zero: `var v : struct_N = 0;` fails shader creation
+                // ("expected struct_N, got AbstractInt" - SpawnDev.Codecs WebPLossyEncodeRowKernel, 2026-10-23).
+                // WGSL zero-initializes a function-scope var without an initializer.
+                if (basicType == BasicValueType.None) init = "";
+                else if (basicType == BasicValueType.Int1) init = " = false";
                 else if (basicType == BasicValueType.Float16 || basicType == BasicValueType.Float32) init = " = 0.0";
                 else if (basicType == BasicValueType.Float64)
                 {
@@ -5681,19 +5692,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // node aliases its source view's pointer (see WGSLCodeGenerator
             // GenerateCode(SubViewValue)) and the actual offset is accumulated
             // here at the use site. Walk the chain, accumulate every SubView's
-            // offset into offsetExpr, and emit `let target = &underlyingSource[
-            // (svOffset1 + svOffset2 + ... + leaOffset)];`. This bypasses the
-            // body-struct / sub-word / packed-struct branches below — those paths
-            // are for direct kernel-parameter view access; SubView results in
-            // codecs kernels are always derived from a plain ArrayView<T> source.
-            // If a future codecs kernel calls `someBodyStructField.SubView(...)`,
-            // extend this walk to delegate back into the special-case paths after
-            // resolving to the underlying source.
+            // offset into offsetExpr, and continue below with the UNDERLYING source,
+            // so a sub-view gets exactly the handling of the view it was cut from:
+            // the view's own offset slot, sub-word (byte/short/Half/FP8/FP4) packing,
+            // body-struct and packed-struct fields, atomic buffers.
+            // (Until 2026-10-23 this emitted `let t = &source[offset];` and returned, on the
+            // assumption that a sub-view always comes from a plain 32-bit view. For a byte
+            // view that indexed the packed array<atomic<u32>> WORDS with a byte index and
+            // read them as plain values - "cannot assign 'atomic<u32>' to 'i32'" in
+            // SpawnDev.Codecs' VP8/VP9/AV1 encoders and VP8 decoder - and it dropped the
+            // view's offset slot for a kernel argument that is itself a sub-view.)
             var effectiveSourceValue = value.Source.Resolve();
-            bool wentThroughSubView = false;
             while (effectiveSourceValue is global::ILGPU.IR.Values.SubViewValue sv)
             {
-                wentThroughSubView = true;
                 var svOffsetVar = Load(sv.Offset);
                 bool svOffsetIsEmuI64 = Backend.EnableI64Emulation
                     && sv.Offset.Resolve().BasicValueType == BasicValueType.Int64;
@@ -5701,18 +5712,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 offsetExpr = $"(({svOffsetExpr}) + ({offsetExpr}))";
                 effectiveSourceValue = sv.Source.Resolve();
             }
-            if (wentThroughSubView)
-            {
-                var effectiveSource = Load(effectiveSourceValue);
-                AppendLine($"let {target.Name} = &{effectiveSource.Name}[{offsetExpr}];");
-                return;
-            }
 
             // --- BODY STRUCT VIEW FIELD ACCESS ---
             // When LoadElementAddress is called on a GetField result from a body struct parameter,
             // redirect to the correct per-field binding (e.g. param1_f0[offset]).
             // This handles: GetField(bodyStruct, viewFieldIdx) → LoadElementAddress(viewField, offset)
-            if (value.Source.Resolve() is global::ILGPU.IR.Values.GetField gf
+            if (effectiveSourceValue is global::ILGPU.IR.Values.GetField gf
                 && gf.ObjectValue.Resolve() is global::ILGPU.IR.Values.Parameter bsParam
                 && _bodyStructParams.TryGetValue(bsParam.Index, out var bsFields))
             {
@@ -5896,6 +5901,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (_crossBlockPointers.Contains(value))
                     {
                         _crossBlockPointerExprs[target.Name] = $"{bindingName}[{adjustedOffsetExprBS}]";
+                        _crossBlockElementPointers.Add(target.Name);
                         AppendLine($"let {target.Name} = &{bindingName}[{adjustedOffsetExprBS}];");
                     }
                     else
@@ -5905,7 +5911,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     return;
                 }
             }
-            if (ResolveToParameter(value.Source) is global::ILGPU.IR.Values.Parameter param)
+            if (ResolveToParameter(effectiveSourceValue) is global::ILGPU.IR.Values.Parameter param)
             {
                 int paramOffset = KernelParamOffset;
                 if (param.Index >= paramOffset)
@@ -5929,6 +5935,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         if (_crossBlockPointers.Contains(value))
                         {
                             _crossBlockPointerExprs[target.Name] = $"{dpGroup.BindingName}[{dpAdjustedOffsetExpr}]";
+                            _crossBlockElementPointers.Add(target.Name);
                         }
                         AppendIndent();
                         Builder.Append($"let {target.Name} = &{dpGroup.BindingName}[{dpAdjustedOffsetExpr}];");
@@ -6132,6 +6139,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     {
                         // Register the inline array access expression
                         _crossBlockPointerExprs[target.Name] = $"param{param.Index}[{adjustedOffsetExpr}]";
+                        _crossBlockElementPointers.Add(target.Name);
                         // Still emit a local declaration for same-block uses
                         AppendIndent();
                         Builder.Append($"let {target.Name} = &param{param.Index}[{adjustedOffsetExpr}];");
@@ -6146,7 +6154,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
             }
 
-            var sourceVal = Load(value.Source);
+            var sourceVal = Load(effectiveSourceValue);
             if (WebGPU.Backend.WebGPUBackend.VerboseLogging)
             {
                 var _leaKernelName = Method.Handle.Name ?? "";
@@ -6170,7 +6178,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // user-array allocations and the NewView fix above emits `&v_alloca`
             // (yielding `ptr<function, array<T, 1>>`), so `&(*v)[idx]` produces
             // the right `ptr<function, T>` for the element address.
-            if (value.Source.Resolve() is global::ILGPU.IR.Values.NewView || value.Source.Type.IsPointerType)
+            if (effectiveSourceValue is global::ILGPU.IR.Values.NewView || effectiveSourceValue.Type.IsPointerType)
             {
                 Builder.Append($"&(*{sourceVal})[{offsetExpr}];");
             }
@@ -6412,6 +6420,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // CROSS-BLOCK POINTER FIX: Use inline expression instead of out-of-scope pointer
             if (_crossBlockPointerExprs.TryGetValue(source.ToString(), out var inlineExpr))
             {
+                if (_crossBlockElementPointers.Contains(source.ToString()) && IsAtomicPointer(loadVal.Source))
+                    inlineExpr = $"atomicLoad(&{inlineExpr})";
                 if (_hoistedPrimitives.Contains(loadVal))
                 {
                     AppendLine($"{target} = {inlineExpr};");
@@ -6637,7 +6647,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // CROSS-BLOCK POINTER FIX: Use inline expression instead of out-of-scope pointer
             if (_crossBlockPointerExprs.TryGetValue(address.ToString(), out var inlineExpr))
             {
-                AppendLine($"{inlineExpr} = {val};");
+                if (_crossBlockElementPointers.Contains(address.ToString()) && IsAtomicPointer(storeVal.Target))
+                    AppendLine($"atomicStore(&{inlineExpr}, {val});");
+                else
+                    AppendLine($"{inlineExpr} = {val};");
                 return;
             }
 
@@ -8032,15 +8045,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // We don't emit code here, but the values will be pulled by the branching logic.
         }
 
-        private global::ILGPU.IR.Values.Parameter? ResolveToParameter(global::ILGPU.IR.Value value)
+        /// <param name="value">The value to resolve.</param>
+        /// <param name="throughSubViews">Also resolve through <c>SubViewValue</c> nodes (which parameter a pointer belongs
+        /// to). Off by default: callers such as GetViewLength must not treat a sub-view as the whole parameter.</param>
+        private global::ILGPU.IR.Values.Parameter? ResolveToParameter(global::ILGPU.IR.Value value, bool throughSubViews = false)
         {
             if (value is global::ILGPU.IR.Values.Parameter p) return p;
-            if (value is GetField gf) return ResolveToParameter(gf.ObjectValue);
+            if (value is GetField gf) return ResolveToParameter(gf.ObjectValue, throughSubViews);
 
-            if (value is global::ILGPU.IR.Values.Load load) return ResolveToParameter(load.Source);
-            if (value is LoadElementAddress lea) return ResolveToParameter(lea.Source);
-            if (value is LoadFieldAddress lfa) return ResolveToParameter(lfa.Source);
-            if (value is global::ILGPU.IR.Values.NewView nv) return ResolveToParameter(nv.Pointer);
+            if (value is global::ILGPU.IR.Values.Load load) return ResolveToParameter(load.Source, throughSubViews);
+            if (value is LoadElementAddress lea) return ResolveToParameter(lea.Source, throughSubViews);
+            if (value is LoadFieldAddress lfa) return ResolveToParameter(lfa.Source, throughSubViews);
+            if (value is global::ILGPU.IR.Values.NewView nv) return ResolveToParameter(nv.Pointer, throughSubViews);
+            if (throughSubViews && value is global::ILGPU.IR.Values.SubViewValue sv) return ResolveToParameter(sv.Source, throughSubViews);
 
             if (_indexParameterAddress != null && value == _indexParameterAddress)
             {
@@ -8126,7 +8143,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         protected override bool IsAtomicPointer(Value ptr)
         {
-            if (ResolveToParameter(ptr) is global::ILGPU.IR.Values.Parameter param)
+            // A pointer into a sub-view belongs to the parameter the sub-view was cut from.
+            if (ResolveToParameter(ptr, throughSubViews: true) is global::ILGPU.IR.Values.Parameter param)
             {
                 return _atomicParameters.Contains(param.Index);
             }
