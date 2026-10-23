@@ -343,7 +343,7 @@ namespace ILGPU.IR.Construction
                     // Let the phi point to the beginning of the current block
                     var phiBuilder = Builder.CreatePhi(
                         Builder.BasicBlock.Location,
-                        peekedValue.Type);
+                        GetPhiType(var, peekedValue, ref markerProvider));
                     value = phiBuilder.PhiValue;
 
                     var incompletePhi = new IncompletePhi(var, phiBuilder);
@@ -359,6 +359,51 @@ namespace ILGPU.IR.Construction
                 }
                 SetValue(var, value);
                 return value;
+            }
+
+            /// <summary>
+            /// The type of a new phi for <paramref name="var"/>. Normally the type of the
+            /// first value found in a predecessor (<paramref name="peekedValue"/>); every
+            /// argument is converted to it. A comparison result is an Int1 here but an int32
+            /// on the IL evaluation stack, so when the first value found is an Int1 and
+            /// another predecessor carries a wider integer, the phi takes the integer type:
+            /// Roslyn compiles `v >= 40 ? 2 : (v >= 15 ? 1 : 0)` to a stack slot that merges
+            /// the constant 2 with `!(v &lt; 15)`, and an Int1 phi turned the 2 into `true`
+            /// (stored as 1) on every GPU backend (SpawnDev.Codecs VP8 loop filter,
+            /// 2026-10-22). Which value is found first depends on predecessor order, so the
+            /// same shape compiled correctly in other kernels.
+            /// </summary>
+            private TypeNode GetPhiType(
+                TVariable var,
+                Value peekedValue,
+                ref MarkerProvider markerProvider)
+            {
+                if (peekedValue.BasicValueType != BasicValueType.Int1)
+                    return peekedValue.Type;
+
+                var widest = BasicValueType.Int1;
+                foreach (var predecessor in Block.Predecessors)
+                {
+                    var other = Parent[predecessor].PeekValue(
+                        var,
+                        markerProvider.CreateMarker());
+                    if (other is null)
+                        continue;
+                    var otherType = other.BasicValueType;
+                    if (otherType >= BasicValueType.Int8 &&
+                        otherType <= BasicValueType.Int64 &&
+                        otherType > widest)
+                    {
+                        widest = otherType;
+                    }
+                }
+                if (widest == BasicValueType.Int1)
+                    return peekedValue.Type;
+
+                // IL stack semantics: Int8/Int16 are int32 on the evaluation stack.
+                if (widest < BasicValueType.Int32)
+                    widest = BasicValueType.Int32;
+                return Builder.GetPrimitiveType(widest);
             }
 
             /// <summary>

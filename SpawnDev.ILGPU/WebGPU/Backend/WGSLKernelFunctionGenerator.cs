@@ -8341,40 +8341,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     }
 
                     // Standard if/else handling (no loop break/continue)
-                    BasicBlock? mergeNode = pd.GetImmediateDominator(block);
-                    if (mergeNode == block) mergeNode = null;
-
-                    // If the post-dominator-computed merge node is outside the current
-                    // loop, clamp it to stopBlock. The post-dominator tree is computed
-                    // over the full CFG and can cross loop boundaries. If unclamped,
-                    // the recursive if/else calls would process blocks beyond the loop,
-                    // then set block=mergeNode (outside), causing the outer while loop's
-                    // currentLoop.Contains check to break — skipping remaining loop body.
-                    if (currentLoop != null && mergeNode != null && !currentLoop.Contains(mergeNode))
-                    {
-                        if (WebGPU.Backend.WebGPUBackend.VerboseLogging && _isScanKernel)
-                            WebGPUBackend.Log($"[CODEGEN] CLAMP mergeNode B{mergeNode.Id} (outside loop) → searching for in-loop merge");
-
-                        // FIX: When the post-dominator is outside the loop (due to a break-exit
-                        // path), find the actual in-loop convergence point. If one branch target
-                        // is a back-edge block (reaches the loop header through a UB chain),
-                        // it's the in-loop merge — both branches converge there before back-edging.
-                        // Without this, the continuation code (sum += val; i++) gets placed inside
-                        // one branch and the other branch's non-exit paths can't reach it.
-                        // The first block BOTH arms reach in the loop (StructuredLoopMerge). The old guess - a target that
-                        // reaches the header through unconditional branches - can be one arm's own block; the other arm
-                        // then walked through the latch and this arm never reached it (infinite loop, 2026-09-28).
-                        BasicBlock? inLoopMerge = SpawnDev.ILGPU.CodeGen.StructuredLoopMerge.FindInLoopMerge(trueTarget, falseTarget, currentLoop);
-                        if (inLoopMerge == null)
-                        {
-                            if (currentLoop.Contains(trueTarget) && ReachesHeaderThroughUBChain(trueTarget, currentLoop))
-                                inLoopMerge = trueTarget;
-                            else if (currentLoop.Contains(falseTarget) && ReachesHeaderThroughUBChain(falseTarget, currentLoop))
-                                inLoopMerge = falseTarget;
-                        }
-
-                        mergeNode = inLoopMerge ?? stopBlock;
-                    }
+                    BasicBlock? mergeNode = ComputeIfMergeNode(block, trueTarget, falseTarget, stopBlock, pd, currentLoop);
 
                     // An early `return` in an arm makes the function's exit the post-dominator; merging there emits the
                     // rest of the function inside every arm (3^N for N `if (a || b) { ..; if (full) return; .. }` blocks:
@@ -8411,75 +8378,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         }
                     }
 
-                    if (WebGPU.Backend.WebGPUBackend.VerboseLogging && _isScanKernel)
-                    {
-                        AppendLine($"// IF from BB_{block.Id}: merge=BB_{mergeNode?.Id.ToString() ?? "null"} true=BB_{trueTarget.Id} false=BB_{falseTarget.Id}");
-                        WebGPUBackend.Log($"[CODEGEN] IF BB_{block.Id}: merge=B{mergeNode?.Id.ToString() ?? "null"} true=B{trueTarget.Id} false=B{falseTarget.Id}");
-                    }
-
-                    if (falseTarget == mergeNode)
-                    {
-                        AppendLine($"if ({Load(branch.Condition)}) {{");
-                        PushIndent();
-                        PushPhiValues(trueTarget, block);
-                        GenerateStructuredCodeRecursive(trueTarget, mergeNode, pd, visited, currentLoop);
-                        PopIndent();
-                        // When falseTarget == merge, the false path goes directly to merge.
-                        // We must still push the merge's phi values for this path, otherwise
-                        // variables that should retain their pre-branch values will stay at
-                        // their hoisted defaults (e.g., 0.0 instead of pixel coordinates).
-                        AppendLine("} else {");
-                        PushIndent();
-                        PushPhiValues(mergeNode, block);
-                        PopIndent();
-                        AppendLine("}");
-                    }
-                    else if (trueTarget == mergeNode)
-                    {
-                        AppendLine($"if (!{Load(branch.Condition)}) {{");
-                        PushIndent();
-                        PushPhiValues(falseTarget, block);
-                        GenerateStructuredCodeRecursive(falseTarget, mergeNode, pd, visited, currentLoop);
-                        PopIndent();
-                        // When trueTarget == merge, the true path goes directly to merge.
-                        // Push the merge's phi values for the true-path (condition was true
-                        // but negated above, so this else is the "original true" path).
-                        AppendLine("} else {");
-                        PushIndent();
-                        PushPhiValues(mergeNode, block);
-                        PopIndent();
-                        AppendLine("}");
-                    }
-                    else
-                    {
-                        // SHORT-CIRCUIT FIX: For || short-circuit patterns where both
-                        // branches converge on a shared body block (e.g. if (a || b) { body }),
-                        // we need to allow the false branch to re-visit blocks that were
-                        // visited by the true branch. However, we must NOT blindly restore
-                        // all visited state, as that would cause duplicate code emission in
-                        // normal if-else branches (breaking the f64 emulation library etc).
-                        //
-                        // Strategy: After the true branch, check if the false target has a
-                        // direct branch to the same block as trueTarget. If so, un-visit
-                        // that shared target so the false path can emit it too.
-                        var visitedBeforeTrueBranch = new HashSet<BasicBlock>(visited);
-
-                        AppendLine($"if ({Load(branch.Condition)}) {{");
-                        PushIndent();
-                        PushPhiValues(trueTarget, block);
-                        GenerateStructuredCodeRecursive(trueTarget, mergeNode, pd, visited, currentLoop);
-                        PopIndent();
-                        AppendLine("} else {");
-                        PushIndent();
-                        PushPhiValues(falseTarget, block);
-                        // Targeted restore: only un-visit blocks that are shared convergence
-                        // targets reachable from the false branch. This handles || patterns
-                        // without duplicating code in normal if-else branches.
-                        UnvisitSharedTargets(falseTarget, mergeNode, visitedBeforeTrueBranch, visited);
-                        GenerateStructuredCodeRecursive(falseTarget, mergeNode, pd, visited, currentLoop);
-                        PopIndent();
-                        AppendLine("}");
-                    }
+                    EmitIfElseArms(block, branch, mergeNode, pd, visited, currentLoop);
 
                     if (WebGPU.Backend.WebGPUBackend.VerboseLogging && _isScanKernel && mergeNode != null)
                         AppendLine($"// MERGE → BB_{mergeNode.Id}");
@@ -8513,6 +8412,141 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     throw new NotSupportedException($"WGSL structured codegen: unhandled terminator {terminator?.GetType().Name ?? "null"} in {Method.Name}.");
                 }
+            }
+        }
+
+        /// <summary>
+        /// The block where the two arms of the if-branch at <paramref name="block"/> rejoin: the post-dominator,
+        /// clamped to the enclosing loop. The post-dominator tree is computed over the full CFG and can cross
+        /// loop boundaries; unclamped, the recursive if/else calls would process blocks beyond the loop, then set
+        /// block=mergeNode (outside), making the walker's currentLoop.Contains check break and skip the rest of the
+        /// loop body. (Extracted unchanged from <see cref="GenerateStructuredCodeRecursive"/> so the loop header,
+        /// whose branch has both targets inside the loop, can use it too.)
+        /// </summary>
+        private BasicBlock? ComputeIfMergeNode(
+            BasicBlock block,
+            BasicBlock trueTarget,
+            BasicBlock falseTarget,
+            BasicBlock? stopBlock,
+            global::ILGPU.IR.Analyses.Dominators<global::ILGPU.IR.Analyses.ControlFlowDirection.Backwards> pd,
+            Loops<ReversePostOrder, Forwards>.Node? currentLoop)
+        {
+            BasicBlock? mergeNode = pd.GetImmediateDominator(block);
+            if (mergeNode == block) mergeNode = null;
+
+            if (currentLoop != null && mergeNode != null && !currentLoop.Contains(mergeNode))
+            {
+                if (WebGPU.Backend.WebGPUBackend.VerboseLogging && _isScanKernel)
+                    WebGPUBackend.Log($"[CODEGEN] CLAMP mergeNode B{mergeNode.Id} (outside loop) → searching for in-loop merge");
+
+                // FIX: When the post-dominator is outside the loop (due to a break-exit
+                // path), find the actual in-loop convergence point. If one branch target
+                // is a back-edge block (reaches the loop header through a UB chain),
+                // it's the in-loop merge — both branches converge there before back-edging.
+                // Without this, the continuation code (sum += val; i++) gets placed inside
+                // one branch and the other branch's non-exit paths can't reach it.
+                // The first block BOTH arms reach in the loop (StructuredLoopMerge). The old guess - a target that
+                // reaches the header through unconditional branches - can be one arm's own block; the other arm
+                // then walked through the latch and this arm never reached it (infinite loop, 2026-09-28).
+                BasicBlock? inLoopMerge = SpawnDev.ILGPU.CodeGen.StructuredLoopMerge.FindInLoopMerge(trueTarget, falseTarget, currentLoop);
+                if (inLoopMerge == null)
+                {
+                    if (currentLoop.Contains(trueTarget) && ReachesHeaderThroughUBChain(trueTarget, currentLoop))
+                        inLoopMerge = trueTarget;
+                    else if (currentLoop.Contains(falseTarget) && ReachesHeaderThroughUBChain(falseTarget, currentLoop))
+                        inLoopMerge = falseTarget;
+                }
+
+                mergeNode = inLoopMerge ?? stopBlock;
+            }
+
+            return mergeNode;
+        }
+
+        /// <summary>
+        /// Emits <c>if (cond) { true arm } else { false arm }</c> for the if-branch at <paramref name="block"/>, each
+        /// arm running up to <paramref name="mergeNode"/>; the caller continues the walk at the merge. (Extracted
+        /// unchanged from <see cref="GenerateStructuredCodeRecursive"/>.)
+        /// </summary>
+        private void EmitIfElseArms(
+            BasicBlock block,
+            global::ILGPU.IR.Values.IfBranch branch,
+            BasicBlock? mergeNode,
+            global::ILGPU.IR.Analyses.Dominators<global::ILGPU.IR.Analyses.ControlFlowDirection.Backwards> pd,
+            HashSet<BasicBlock> visited,
+            Loops<ReversePostOrder, Forwards>.Node? currentLoop)
+        {
+            var trueTarget = branch.TrueTarget;
+            var falseTarget = branch.FalseTarget;
+
+            if (WebGPU.Backend.WebGPUBackend.VerboseLogging && _isScanKernel)
+            {
+                AppendLine($"// IF from BB_{block.Id}: merge=BB_{mergeNode?.Id.ToString() ?? "null"} true=BB_{trueTarget.Id} false=BB_{falseTarget.Id}");
+                WebGPUBackend.Log($"[CODEGEN] IF BB_{block.Id}: merge=B{mergeNode?.Id.ToString() ?? "null"} true=B{trueTarget.Id} false=B{falseTarget.Id}");
+            }
+
+            if (falseTarget == mergeNode)
+            {
+                AppendLine($"if ({Load(branch.Condition)}) {{");
+                PushIndent();
+                PushPhiValues(trueTarget, block);
+                GenerateStructuredCodeRecursive(trueTarget, mergeNode, pd, visited, currentLoop);
+                PopIndent();
+                // When falseTarget == merge, the false path goes directly to merge.
+                // We must still push the merge's phi values for this path, otherwise
+                // variables that should retain their pre-branch values will stay at
+                // their hoisted defaults (e.g., 0.0 instead of pixel coordinates).
+                AppendLine("} else {");
+                PushIndent();
+                PushPhiValues(mergeNode, block);
+                PopIndent();
+                AppendLine("}");
+            }
+            else if (trueTarget == mergeNode)
+            {
+                AppendLine($"if (!{Load(branch.Condition)}) {{");
+                PushIndent();
+                PushPhiValues(falseTarget, block);
+                GenerateStructuredCodeRecursive(falseTarget, mergeNode, pd, visited, currentLoop);
+                PopIndent();
+                // When trueTarget == merge, the true path goes directly to merge.
+                // Push the merge's phi values for the true-path (condition was true
+                // but negated above, so this else is the "original true" path).
+                AppendLine("} else {");
+                PushIndent();
+                PushPhiValues(mergeNode, block);
+                PopIndent();
+                AppendLine("}");
+            }
+            else
+            {
+                // SHORT-CIRCUIT FIX: For || short-circuit patterns where both
+                // branches converge on a shared body block (e.g. if (a || b) { body }),
+                // we need to allow the false branch to re-visit blocks that were
+                // visited by the true branch. However, we must NOT blindly restore
+                // all visited state, as that would cause duplicate code emission in
+                // normal if-else branches (breaking the f64 emulation library etc).
+                //
+                // Strategy: After the true branch, check if the false target has a
+                // direct branch to the same block as trueTarget. If so, un-visit
+                // that shared target so the false path can emit it too.
+                var visitedBeforeTrueBranch = new HashSet<BasicBlock>(visited);
+
+                AppendLine($"if ({Load(branch.Condition)}) {{");
+                PushIndent();
+                PushPhiValues(trueTarget, block);
+                GenerateStructuredCodeRecursive(trueTarget, mergeNode, pd, visited, currentLoop);
+                PopIndent();
+                AppendLine("} else {");
+                PushIndent();
+                PushPhiValues(falseTarget, block);
+                // Targeted restore: only un-visit blocks that are shared convergence
+                // targets reachable from the false branch. This handles || patterns
+                // without duplicating code in normal if-else branches.
+                UnvisitSharedTargets(falseTarget, mergeNode, visitedBeforeTrueBranch, visited);
+                GenerateStructuredCodeRecursive(falseTarget, mergeNode, pd, visited, currentLoop);
+                PopIndent();
+                AppendLine("}");
             }
         }
 
@@ -9452,18 +9486,35 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
                 else
                 {
-                    // Both branches stay in the loop — emit if/else inside loop
-                    AppendLine($"if ({Load(headerBranch.Condition)}) {{");
-                    PushIndent();
-                    PushPhiValues(trueTarget, headerBlock);
-                    GenerateStructuredCodeRecursive(trueTarget, headerBlock, pd, visited, loopNode);
-                    PopIndent();
-                    AppendLine("} else {");
-                    PushIndent();
-                    PushPhiValues(falseTarget, headerBlock);
-                    GenerateStructuredCodeRecursive(falseTarget, headerBlock, pd, visited, loopNode);
-                    PopIndent();
-                    AppendLine("}");
+                    // Both branches stay in the loop — emit if/else inside loop.
+                    // When the two arms REJOIN inside the loop (a diamond at the top of the body, for example the
+                    // `if (state.Count < 0) Fill(...)` at the start of every Vp8 BoolDecoder.DecodeBool in a
+                    // `while (true)`), they must be emitted like any other if/else: arms up to the merge, then the
+                    // merge once. Emitting each arm as an independent subtree gave the arm walked FIRST the whole
+                    // shared tail (the decode math and the rest of the body) and the other arm nothing: the shared
+                    // blocks were already visited, so the refill arm ended the loop body without the tail and the
+                    // next iteration took the same refill path with unchanged state - an infinite loop, which the
+                    // browser reports as DXGI_ERROR_DEVICE_HUNG (SpawnDev.Codecs Vp8CoefBlockDecoderGpu, 2026-10-22).
+                    var headerMerge = ComputeIfMergeNode(headerBlock, trueTarget, falseTarget, headerBlock, pd, loopNode);
+                    if (headerMerge != null && headerMerge != headerBlock && loopNode.Contains(headerMerge))
+                    {
+                        EmitIfElseArms(headerBlock, headerBranch, headerMerge, pd, visited, loopNode);
+                        GenerateStructuredCodeRecursive(headerMerge, headerBlock, pd, visited, loopNode);
+                    }
+                    else
+                    {
+                        AppendLine($"if ({Load(headerBranch.Condition)}) {{");
+                        PushIndent();
+                        PushPhiValues(trueTarget, headerBlock);
+                        GenerateStructuredCodeRecursive(trueTarget, headerBlock, pd, visited, loopNode);
+                        PopIndent();
+                        AppendLine("} else {");
+                        PushIndent();
+                        PushPhiValues(falseTarget, headerBlock);
+                        GenerateStructuredCodeRecursive(falseTarget, headerBlock, pd, visited, loopNode);
+                        PopIndent();
+                        AppendLine("}");
+                    }
                 }
             }
             else if (terminator is global::ILGPU.IR.Values.UnconditionalBranch uBranch)
