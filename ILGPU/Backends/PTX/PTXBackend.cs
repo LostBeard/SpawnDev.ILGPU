@@ -298,6 +298,8 @@ namespace ILGPU.Backends.PTX
             data.DebugInfoGenerator.GenerateDebugSections(builder);
 
             var ptxAssembly = builder.ToString();
+            if (!Capabilities.Float16Native)
+                ptxAssembly = PTXFloat16Emulation.Rewrite(ptxAssembly);
             return new PTXCompiledKernel(
                 Context,
                 entryPoint,

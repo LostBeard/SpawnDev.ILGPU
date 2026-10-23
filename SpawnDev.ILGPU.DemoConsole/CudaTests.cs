@@ -46,6 +46,101 @@ public class CudaTests : BackendTestBase
         await Task.CompletedTask;
     });
 
+    // Half arithmetic and compares on hostile bit patterns against System.Half (IEEE, RNE).
+    // Devices below sm_53 have no f16 arithmetic and run this through PTXFloat16Emulation;
+    // native devices run the same kernel on the real instructions.
+    static void HalfHostileOpsKernel(
+        Index1D idx,
+        ArrayView<global::ILGPU.Half> a,
+        ArrayView<global::ILGPU.Half> b,
+        ArrayView<global::ILGPU.Half> sum,
+        ArrayView<global::ILGPU.Half> difference,
+        ArrayView<global::ILGPU.Half> product,
+        ArrayView<int> flags)
+    {
+        var x = a[idx];
+        var y = b[idx];
+        sum[idx] = x + y;
+        difference[idx] = x - y;
+        product[idx] = x * y;
+        int f = 0;
+        if (x < y) f |= 1;
+        if (x <= y) f |= 2;
+        if (x == y) f |= 4;
+        if (x != y) f |= 8;
+        flags[idx] = f;
+    }
+
+    [TestMethod]
+    public async Task Tests_PTX_Float16_ArithmeticAndCompare_MatchCpuOracle() =>
+        await RunTest(async accelerator =>
+    {
+        // +0, -0, min/max subnormal, min normal, 1, -1, 1+2^-10, 2^-11 (exact tie against 1),
+        // 2^-24 (below the tie), max finite, +inf, -inf, two NaNs, 1/3, 2048.
+        ushort[] patterns =
+        {
+            0x0000, 0x8000, 0x0001, 0x03FF, 0x0400, 0x3C00, 0xBC00, 0x3C01,
+            0x1000, 0x0100, 0x7BFF, 0x7C00, 0xFC00, 0x7E00, 0xFE01, 0x3555, 0x6800,
+        };
+        int n = patterns.Length * patterns.Length;
+        var left = new global::ILGPU.Half[n];
+        var right = new global::ILGPU.Half[n];
+        for (int i = 0; i < patterns.Length; i++)
+        for (int j = 0; j < patterns.Length; j++)
+        {
+            left[i * patterns.Length + j] = global::ILGPU.Half.FromRawBits(patterns[i]);
+            right[i * patterns.Length + j] = global::ILGPU.Half.FromRawBits(patterns[j]);
+        }
+        using var aBuf = accelerator.Allocate1D(left);
+        using var bBuf = accelerator.Allocate1D(right);
+        using var sumBuf = accelerator.Allocate1D<global::ILGPU.Half>(n);
+        using var diffBuf = accelerator.Allocate1D<global::ILGPU.Half>(n);
+        using var prodBuf = accelerator.Allocate1D<global::ILGPU.Half>(n);
+        using var flagBuf = accelerator.Allocate1D<int>(n);
+        var kernel = accelerator.LoadAutoGroupedStreamKernel<
+            Index1D,
+            ArrayView<global::ILGPU.Half>, ArrayView<global::ILGPU.Half>,
+            ArrayView<global::ILGPU.Half>, ArrayView<global::ILGPU.Half>,
+            ArrayView<global::ILGPU.Half>, ArrayView<int>>(HalfHostileOpsKernel);
+        kernel((Index1D)n, aBuf.View, bBuf.View, sumBuf.View, diffBuf.View, prodBuf.View,
+            flagBuf.View);
+        await accelerator.SynchronizeAsync();
+        var sum = await sumBuf.CopyToHostAsync<global::ILGPU.Half>();
+        var diff = await diffBuf.CopyToHostAsync<global::ILGPU.Half>();
+        var prod = await prodBuf.CopyToHostAsync<global::ILGPU.Half>();
+        var flags = await flagBuf.CopyToHostAsync<int>();
+
+        var errors = new List<string>();
+        void Check(string op, int k, System.Half expected, global::ILGPU.Half actual)
+        {
+            // Any NaN matches any NaN; everything else must match bit for bit (incl. -0).
+            bool ok = System.Half.IsNaN(expected)
+                ? (actual.RawValue & 0x7FFF) > 0x7C00
+                : actual.RawValue == BitConverter.HalfToUInt16Bits(expected);
+            if (!ok && errors.Count < 8)
+                errors.Add($"{op}(0x{patterns[k / patterns.Length]:X4}, " +
+                    $"0x{patterns[k % patterns.Length]:X4}): expected " +
+                    $"0x{BitConverter.HalfToUInt16Bits(expected):X4}, got 0x{actual.RawValue:X4}");
+        }
+        for (int k = 0; k < n; k++)
+        {
+            var x = BitConverter.UInt16BitsToHalf(patterns[k / patterns.Length]);
+            var y = BitConverter.UInt16BitsToHalf(patterns[k % patterns.Length]);
+            Check("add", k, x + y, sum[k]);
+            Check("sub", k, x - y, diff[k]);
+            Check("mul", k, x * y, prod[k]);
+            int expectedFlags = (x < y ? 1 : 0) | (x <= y ? 2 : 0) | (x == y ? 4 : 0)
+                | (x != y ? 8 : 0);
+            if (flags[k] != expectedFlags && errors.Count < 8)
+                errors.Add($"compare(0x{patterns[k / patterns.Length]:X4}, " +
+                    $"0x{patterns[k % patterns.Length]:X4}): expected flags {expectedFlags}, " +
+                    $"got {flags[k]}");
+        }
+        if (errors.Count > 0)
+            throw new Exception("Half ops differ from the CPU oracle: " +
+                string.Join("; ", errors));
+    });
+
     // PTX vector memory intrinsics (Discussion #5 / PR #4 additions)
     // ld.v2.f32 vectorized load + st.v2.f32 vectorized store
     static void PTXVecF32x2CopyKernel(

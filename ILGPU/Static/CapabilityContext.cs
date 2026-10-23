@@ -124,9 +124,12 @@ namespace ILGPU.Runtime.Cuda
         /// </summary>
         public CudaCapabilityContext(CudaArchitecture arch)
         {
-            Float16 = arch >= CudaArchitecture.SM_53;
-            Float16_Min = arch >= CudaArchitecture.SM_75;
-            Float16_Max = arch >= CudaArchitecture.SM_80;
+            // Below sm_53 the PTX backend emulates f16 arithmetic through f32 (see
+            // PTXFloat16Emulation): Float16 stays true, Float16Native tells the paths apart.
+            Float16 = true;
+            Float16Native = arch >= CudaArchitecture.SM_53;
+            Float16_Min = !Float16Native || arch >= CudaArchitecture.SM_75;
+            Float16_Max = !Float16Native || arch >= CudaArchitecture.SM_80;
             Float16_TanH = arch >= CudaArchitecture.SM_80;
             Float32_TanH = arch >= CudaArchitecture.SM_75;
         }
@@ -134,6 +137,12 @@ namespace ILGPU.Runtime.Cuda
         #endregion
 
         #region Properties
+
+        /// <summary>
+        /// True if the device has native f16 arithmetic (sm_53+). If false, Float16 is
+        /// still supported, but its arithmetic is emulated through f32.
+        /// </summary>
+        public bool Float16Native { get; internal set; }
 
         /// <summary>
         /// Supports Float16 intrinsic Min.

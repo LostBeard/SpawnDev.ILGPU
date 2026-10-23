@@ -368,6 +368,8 @@ public static class AcceleratorRequirementsExtensions
         // CPU accelerator on the UI thread. ForceEmulatedF16 (test flag) is read live, as the accelerator does.
         if (device.Capabilities is CLCapabilityContext cl)
             return cl.Float16Native;
+        if (device.Capabilities is global::ILGPU.Runtime.Cuda.CudaCapabilityContext cuda)
+            return cuda.Float16Native;
         if (device is WebGPU.WebGPUILGPUDevice webGpu)
             return webGpu.AdapterSupportsShaderF16 && !WebGPU.Backend.WebGPUBackend.ForceEmulatedF16;
         return device.AcceleratorType == AcceleratorType.CPU
