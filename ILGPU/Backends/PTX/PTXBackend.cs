@@ -299,7 +299,7 @@ namespace ILGPU.Backends.PTX
 
             var ptxAssembly = builder.ToString();
             if (!Capabilities.Float16Native)
-                ptxAssembly = PTXFloat16Emulation.Rewrite(ptxAssembly);
+                ptxAssembly = PTXFloat16Emulation.Rewrite(ptxAssembly, Architecture);
             return new PTXCompiledKernel(
                 Context,
                 entryPoint,

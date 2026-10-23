@@ -9,6 +9,9 @@
 // Source License. See LICENSE.txt for details.
 // ---------------------------------------------------------------------------------------
 
+using ILGPU.Runtime.Cuda;
+using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -17,17 +20,29 @@ namespace ILGPU.Backends.PTX
 {
     /// <summary>
     /// Emulates the f16 arithmetic and compare instructions on devices below sm_53, which
-    /// only offer f16 loads, stores, moves and conversions to/from f32.
+    /// only offer f16 loads, stores, moves and conversions to/from f32 and f64.
     /// </summary>
     /// <remarks>
     /// Half values stay in 16-bit registers exactly as on native devices. Each f16
-    /// arithmetic/compare instruction in the generated PTX is rewritten into a scoped block
-    /// that widens its operands with cvt.f32.f16 (exact), runs the f32 instruction and, for
-    /// value results, rounds back with cvt.rn.f16.f32. add, sub, mul, min, max and the
-    /// compares therefore give the same bits as the native instruction (an f32 operation on
-    /// two f16 values followed by one rounding is correctly rounded). fma goes through an f32
-    /// fma and may differ from the native single rounding in rare double-rounding cases, and
-    /// the .ftz variants do not flush f16 subnormals.
+    /// instruction in the generated PTX is rewritten into a scoped block that widens its
+    /// operands with cvt.f32.f16 (exact), computes in f32 or f64 and rounds back to f16
+    /// once. The rewrite covers the whole module, so .func helpers are included.
+    /// <list type="bullet">
+    /// <item>add, sub, mul, min, max, compares: f32 op on widened operands, one rounding;
+    /// identical to the native instruction.</item>
+    /// <item>fma: the product of two f16 values is exact in f64; the sum with the addend is
+    /// rounded to odd in f64 (add.rm / add.rp pick the odd neighbour when inexact) and then
+    /// rounded to nearest-even f16 once, which equals the single rounding of the native fma.
+    /// </item>
+    /// <item>.ftz forms: f16 subnormal inputs and the result are flushed to a signed zero
+    /// like the native instruction does.</item>
+    /// <item>neg, abs: sign-bit operations. ex2.approx: ex2.approx.f32 on the widened
+    /// operand (an approximation by contract, at least as accurate as the f16 one).</item>
+    /// <item>cvt between f16 and integers goes through f32 (exact for the f16 range).</item>
+    /// </list>
+    /// Any other f16 instruction would make ptxas fail with "requires .target sm_53";
+    /// instead the rewrite throws a <see cref="CapabilityNotSupportedException"/> naming the
+    /// instruction and the architecture.
     /// </remarks>
     internal static class PTXFloat16Emulation
     {
@@ -37,7 +52,7 @@ namespace ILGPU.Backends.PTX
             RegexOptions.CultureInvariant);
 
         private static readonly Regex BinaryRegex = new Regex(
-            @"^(?<base>add|sub|mul|min|max)(\.ftz)?\.f16$",
+            @"^(?<base>add|sub|mul|min|max)(?<ftz>\.ftz)?\.f16$",
             RegexOptions.CultureInvariant);
 
         private static readonly Regex CompareRegex = new Regex(
@@ -52,14 +67,25 @@ namespace ILGPU.Backends.PTX
             @"^cvt\.rzi\.(?<int>[su](8|16|32|64))\.f16$",
             RegexOptions.CultureInvariant);
 
+        /// <summary>Instructions that mention f16 and work on every architecture.</summary>
+        private static readonly Regex NativeRegex = new Regex(
+            @"^cvt\.(f32|f64)\.f16$|^cvt\.rn\.f16\.f32$",
+            RegexOptions.CultureInvariant);
+
+        /// <summary>Any instruction type suffix naming f16 (also f16x2).</summary>
+        private static readonly Regex AnyHalfRegex = new Regex(
+            @"\.f16(x2)?(\.|$)",
+            RegexOptions.CultureInvariant);
+
         /// <summary>
         /// Rewrites all f16 arithmetic and compare instructions in the given PTX.
         /// </summary>
         /// <param name="ptx">The PTX assembly.</param>
+        /// <param name="architecture">The target architecture (for error messages).</param>
         /// <returns>The PTX assembly without native f16 arithmetic.</returns>
-        public static string Rewrite(string ptx)
+        public static string Rewrite(string ptx, CudaArchitecture architecture)
         {
-            if (!ptx.Contains(".f16", System.StringComparison.Ordinal))
+            if (!ptx.Contains(".f16", StringComparison.Ordinal))
                 return ptx;
 
             var result = new StringBuilder(ptx.Length + ptx.Length / 8);
@@ -72,13 +98,24 @@ namespace ILGPU.Backends.PTX
                 position = next;
 
                 var match = InstructionRegex.Match(line);
-                string? replacement = match.Success
-                    ? TryRewrite(
+                string? replacement = null;
+                if (match.Success)
+                {
+                    var op = match.Groups["op"].Value;
+                    replacement = TryRewrite(
                         match.Groups["indent"].Value,
                         match.Groups["pred"].Value,
-                        match.Groups["op"].Value,
-                        match.Groups["args"].Value.Split(','))
-                    : null;
+                        op,
+                        match.Groups["args"].Value.Split(','));
+                    if (replacement == null &&
+                        AnyHalfRegex.IsMatch(op) &&
+                        !NativeRegex.IsMatch(op))
+                    {
+                        throw new CapabilityNotSupportedException(
+                            $"The Float16 instruction '{op}' is not available on {architecture} " +
+                            "(native f16 arithmetic needs sm_53) and is not emulated.");
+                    }
+                }
                 result.Append(replacement ?? line);
             }
             return result.ToString();
@@ -89,11 +126,16 @@ namespace ILGPU.Backends.PTX
         /// </summary>
         private sealed class Block
         {
+            private static readonly (string Prefix, string Type)[] RegisterKinds =
+            {
+                ("ef", ".f32"), ("ed", ".f64"), ("eh", ".b16"), ("er", ".b32"),
+                ("eq", ".b64"), ("ep", ".pred"),
+            };
+
             private readonly StringBuilder statements = new StringBuilder();
+            private readonly Dictionary<string, int> counts = new Dictionary<string, int>();
             private readonly string indent;
             private readonly string predicate;
-            private int numFloats;
-            private int numHalves;
 
             public Block(string indent, string predicate)
             {
@@ -107,50 +149,115 @@ namespace ILGPU.Backends.PTX
                     .Append(statement).Append('\n');
             }
 
+            private string New(string prefix)
+            {
+                counts.TryGetValue(prefix, out int count);
+                counts[prefix] = count + 1;
+                return "%" + prefix + count.ToString(CultureInfo.InvariantCulture);
+            }
+
+            public string NewFloat() => New("ef");
+            public string NewDouble() => New("ed");
+            public string NewHalf() => New("eh");
+            public string NewBits() => New("eq");
+            public string NewBits32() => New("er");
+            public string NewPredicate() => New("ep");
+
+            /// <summary>
+            /// Moves an immediate into a b16 register; registers are returned unchanged.
+            /// </summary>
+            public string AsRegister(string operand)
+            {
+                operand = operand.Trim();
+                if (operand.StartsWith('%'))
+                    return operand;
+                string half = NewHalf();
+                Emit($"mov.b16 {half}, {operand};");
+                return half;
+            }
+
+            /// <summary>
+            /// Flushes an f16 subnormal in place to a zero of the same sign, like .ftz.
+            /// </summary>
+            public void FlushInPlace(string half)
+            {
+                string exponent = NewHalf();
+                string sign = NewHalf();
+                string isZero = NewPredicate();
+                Emit($"and.b16 {exponent}, {half}, 31744;");
+                Emit($"setp.eq.b16 {isZero}, {exponent}, 0;");
+                Emit($"and.b16 {sign}, {half}, 32768;");
+                Emit($"selp.b16 {half}, {sign}, {half}, {isZero};");
+            }
+
             /// <summary>
             /// Widens an f16 operand into a fresh f32 register and returns its name.
             /// </summary>
-            public string Widen(string operand)
+            public string Widen(string operand, bool flush = false)
             {
-                operand = operand.Trim();
-                string half = operand;
-                if (!operand.StartsWith('%'))
+                string half = AsRegister(operand);
+                if (flush)
                 {
-                    // An immediate cannot be converted directly: move it into a register.
-                    half = "%eh" + numHalves++.ToString(CultureInfo.InvariantCulture);
-                    Emit($"mov.b16 {half}, {operand};");
+                    string copy = NewHalf();
+                    Emit($"mov.b16 {copy}, {half};");
+                    FlushInPlace(copy);
+                    half = copy;
                 }
                 string widened = NewFloat();
                 Emit($"cvt.f32.f16 {widened}, {half};");
                 return widened;
             }
 
-            public string NewFloat() =>
-                "%ef" + numFloats++.ToString(CultureInfo.InvariantCulture);
+            /// <summary>
+            /// Rounds an f64 register to f16 exactly once. cvt.rn.f16.f64 cannot be used: sm_50
+            /// hardware goes through f32 and double-rounds near ties. Instead the value is
+            /// rounded to odd at f32 precision (truncate, then set the low bit if inexact),
+            /// which keeps all the sticky information, and cvt.rn.f16.f32 rounds that once.
+            /// </summary>
+            public void RoundDoubleToHalf(string value, string destination)
+            {
+                string truncated = NewFloat();
+                string back = NewDouble();
+                string inexact = NewPredicate();
+                string bits = NewBits32();
+                string oddBits = NewBits32();
+                string odd = NewFloat();
+                string rounded = NewFloat();
+                Emit($"cvt.rz.f32.f64 {truncated}, {value};");
+                Emit($"cvt.f64.f32 {back}, {truncated};");
+                Emit($"setp.neu.f64 {inexact}, {back}, {value};");
+                Emit($"mov.b32 {bits}, {truncated};");
+                Emit($"or.b32 {oddBits}, {bits}, 1;");
+                Emit($"mov.b32 {odd}, {oddBits};");
+                Emit($"selp.f32 {rounded}, {odd}, {truncated}, {inexact};");
+                Emit($"cvt.rn.f16.f32 {destination}, {rounded};");
+            }
+
+            /// <summary>
+            /// Widens an f16 operand into a fresh f64 register and returns its name.
+            /// </summary>
+            public string WidenToDouble(string operand)
+            {
+                string widened = NewDouble();
+                Emit($"cvt.f64.f16 {widened}, {AsRegister(operand)};");
+                return widened;
+            }
 
             public override string ToString()
             {
                 var header = new StringBuilder();
                 header.Append(indent).Append("{\n");
-                if (numFloats > 0)
+                foreach (var (prefix, type) in RegisterKinds)
                 {
-                    header.Append(indent).Append("\t.reg .f32 ");
-                    for (int i = 0; i < numFloats; ++i)
+                    if (!counts.TryGetValue(prefix, out int count) || count == 0)
+                        continue;
+                    header.Append(indent).Append("\t.reg ").Append(type).Append(' ');
+                    for (int i = 0; i < count; ++i)
                     {
                         if (i > 0)
                             header.Append(", ");
-                        header.Append("%ef").Append(i.ToString(CultureInfo.InvariantCulture));
-                    }
-                    header.Append(";\n");
-                }
-                if (numHalves > 0)
-                {
-                    header.Append(indent).Append("\t.reg .b16 ");
-                    for (int i = 0; i < numHalves; ++i)
-                    {
-                        if (i > 0)
-                            header.Append(", ");
-                        header.Append("%eh").Append(i.ToString(CultureInfo.InvariantCulture));
+                        header.Append('%').Append(prefix)
+                            .Append(i.ToString(CultureInfo.InvariantCulture));
                     }
                     header.Append(";\n");
                 }
@@ -172,23 +279,60 @@ namespace ILGPU.Backends.PTX
             if (binary.Success && args.Length == 3)
             {
                 string kind = binary.Groups["base"].Value;
+                bool ftz = binary.Groups["ftz"].Success;
                 // Explicit .rn keeps ptxas from contracting the f32 op with its neighbours.
                 string op32 = kind is "min" or "max" ? kind + ".f32" : kind + ".rn.f32";
-                string left = block.Widen(args[1]);
-                string right = block.Widen(args[2]);
+                string left = block.Widen(args[1], ftz);
+                string right = block.Widen(args[2], ftz);
                 string value = block.NewFloat();
                 block.Emit($"{op32} {value}, {left}, {right};");
                 block.Emit($"cvt.rn.f16.f32 {args[0]}, {value};");
+                if (ftz)
+                    block.FlushInPlace(args[0]);
                 return block.ToString();
             }
 
             if (op == "fma.rn.f16" && args.Length == 4)
             {
-                string a = block.Widen(args[1]);
-                string b = block.Widen(args[2]);
-                string c = block.Widen(args[3]);
+                // a * b is exact in f64 (22 bits). Round a*b+c to odd in f64, then to f16.
+                string a = block.WidenToDouble(args[1]);
+                string b = block.WidenToDouble(args[2]);
+                string c = block.WidenToDouble(args[3]);
+                string product = block.NewDouble();
+                string down = block.NewDouble();
+                string up = block.NewDouble();
+                string nearest = block.NewDouble();
+                string odd = block.NewDouble();
+                string rounded = block.NewDouble();
+                string bits = block.NewBits();
+                string lowBit = block.NewBits();
+                string inexact = block.NewPredicate();
+                string downIsOdd = block.NewPredicate();
+                block.Emit($"mul.rn.f64 {product}, {a}, {b};");
+                block.Emit($"add.rm.f64 {down}, {product}, {c};");
+                block.Emit($"add.rp.f64 {up}, {product}, {c};");
+                block.Emit($"add.rn.f64 {nearest}, {product}, {c};");
+                block.Emit($"setp.neu.f64 {inexact}, {down}, {up};");
+                block.Emit($"mov.b64 {bits}, {down};");
+                block.Emit($"and.b64 {lowBit}, {bits}, 1;");
+                block.Emit($"setp.ne.b64 {downIsOdd}, {lowBit}, 0;");
+                block.Emit($"selp.f64 {odd}, {down}, {up}, {downIsOdd};");
+                block.Emit($"selp.f64 {rounded}, {odd}, {nearest}, {inexact};");
+                block.RoundDoubleToHalf(rounded, args[0]);
+                return block.ToString();
+            }
+
+            if (op == "cvt.rn.f16.f64" && args.Length == 2)
+            {
+                block.RoundDoubleToHalf(args[1], args[0]);
+                return block.ToString();
+            }
+
+            if (op == "ex2.approx.f16" && args.Length == 2)
+            {
+                string source = block.Widen(args[1]);
                 string value = block.NewFloat();
-                block.Emit($"fma.rn.f32 {value}, {a}, {b}, {c};");
+                block.Emit($"ex2.approx.f32 {value}, {source};");
                 block.Emit($"cvt.rn.f16.f32 {args[0]}, {value};");
                 return block.ToString();
             }

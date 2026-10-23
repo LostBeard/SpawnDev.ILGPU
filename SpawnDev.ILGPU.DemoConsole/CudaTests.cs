@@ -111,24 +111,26 @@ public class CudaTests : BackendTestBase
         var flags = await flagBuf.CopyToHostAsync<int>();
 
         var errors = new List<string>();
-        void Check(string op, int k, System.Half expected, global::ILGPU.Half actual)
+        void Check(string op, int k, ushort expected, global::ILGPU.Half actual)
         {
             // Any NaN matches any NaN; everything else must match bit for bit (incl. -0).
-            bool ok = System.Half.IsNaN(expected)
-                ? (actual.RawValue & 0x7FFF) > 0x7C00
-                : actual.RawValue == BitConverter.HalfToUInt16Bits(expected);
+            bool ok = ExactHalfOracle.IsNaN(expected)
+                ? ExactHalfOracle.IsNaN(actual.RawValue)
+                : actual.RawValue == expected;
             if (!ok && errors.Count < 8)
                 errors.Add($"{op}(0x{patterns[k / patterns.Length]:X4}, " +
                     $"0x{patterns[k % patterns.Length]:X4}): expected " +
-                    $"0x{BitConverter.HalfToUInt16Bits(expected):X4}, got 0x{actual.RawValue:X4}");
+                    $"0x{expected:X4}, got 0x{actual.RawValue:X4}");
         }
         for (int k = 0; k < n; k++)
         {
-            var x = BitConverter.UInt16BitsToHalf(patterns[k / patterns.Length]);
-            var y = BitConverter.UInt16BitsToHalf(patterns[k % patterns.Length]);
-            Check("add", k, x + y, sum[k]);
-            Check("sub", k, x - y, diff[k]);
-            Check("mul", k, x * y, prod[k]);
+            ushort xb = patterns[k / patterns.Length];
+            ushort yb = patterns[k % patterns.Length];
+            var x = BitConverter.UInt16BitsToHalf(xb);
+            var y = BitConverter.UInt16BitsToHalf(yb);
+            Check("add", k, ExactHalfOracle.Add(xb, yb), sum[k]);
+            Check("sub", k, ExactHalfOracle.Sub(xb, yb), diff[k]);
+            Check("mul", k, ExactHalfOracle.Mul(xb, yb), prod[k]);
             int expectedFlags = (x < y ? 1 : 0) | (x <= y ? 2 : 0) | (x == y ? 4 : 0)
                 | (x != y ? 8 : 0);
             if (flags[k] != expectedFlags && errors.Count < 8)
@@ -140,6 +142,318 @@ public class CudaTests : BackendTestBase
             throw new Exception("Half ops differ from the CPU oracle: " +
                 string.Join("; ", errors));
     });
+
+    // Hostile bit patterns for the three-operand and fast-math tests: signed zeros,
+    // subnormals (incl. 2^-15), exact ties against 1.0, a product that cancels against
+    // -(1+2^-9) into a subnormal, max finite, infinities and NaNs.
+    static readonly ushort[] HostilePatterns =
+    {
+        0x0000, 0x8000, 0x0001, 0x03FF, 0x0200, 0x0400, 0x3C00, 0xBC00, 0x3C01, 0x3C02,
+        0xBC02, 0x1000, 0x0100, 0x7BFF, 0xFBFF, 0x7C00, 0xFC00, 0x7E00, 0x3555, 0x6800,
+    };
+
+    // fma.rn.f16 as inline PTX: no public Half API reaches that instruction (FmaFP32 is a
+    // managed f32 body on every architecture), so this is the only way to run the rewrite.
+    // The helper keeps a .func in the module, which the rewrite has to cover as well.
+    [System.Runtime.CompilerServices.MethodImpl(
+        System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+    static ushort HalfFmaHelper(ushort a, ushort b, ushort c)
+    {
+        CudaAsm.Emit("fma.rn.f16 %0, %1, %2, %3;", out ushort result, a, b, c);
+        return result;
+    }
+
+    static void HalfFmaKernel(
+        Index1D idx,
+        ArrayView<ushort> a,
+        ArrayView<ushort> b,
+        ArrayView<ushort> c,
+        ArrayView<ushort> inlined,
+        ArrayView<ushort> viaHelper)
+    {
+        ushort x = a[idx], y = b[idx], z = c[idx];
+        CudaAsm.Emit("fma.rn.f16 %0, %1, %2, %3;", out ushort result, x, y, z);
+        inlined[idx] = result;
+        viaHelper[idx] = HalfFmaHelper(x, y, z);
+    }
+
+    [TestMethod]
+    public async Task Tests_PTX_Float16_Fma_MatchesExactOracle() =>
+        await RunTest(async accelerator =>
+    {
+        // Every triple of the hostile patterns; the oracle rounds a*b+c once, exactly.
+        int p = HostilePatterns.Length;
+        var triples = new List<(ushort A, ushort B, ushort C)>();
+        for (int i = 0; i < p * p * p; i++)
+            triples.Add((HostilePatterns[i / (p * p)], HostilePatterns[i / p % p],
+                HostilePatterns[i % p]));
+        // Double-rounding traps: the exact sum is a hair (2^-26, below what f32 holds next to
+        // 1.0) off an f16 tie. Rounding the sum through f32 lands exactly on the tie and then
+        // rounds to even, which is the wrong neighbour for these. 99 * 331 = 2^15 + 1 and
+        // 217 * 151 = 2^15 - 1, so the products are 2^-11 + 2^-26 and 2^-11 - 2^-26.
+        static ushort Bits(float v) => BitConverter.HalfToUInt16Bits((System.Half)v);
+        const float Q = 1f / 8192f; // 2^-13
+        foreach (var (x, y, z) in new[]
+        {
+            (99 * Q, 331 * Q, 1f),            // 1 + 2^-11 + 2^-26: above the tie, up is right
+            (217 * Q, 151 * Q, 1f + 1f / 1024), // 1 + 2^-10 + 2^-11 - 2^-26: below, down is right
+        })
+        {
+            triples.Add((Bits(x), Bits(y), Bits(z)));
+            triples.Add((Bits(-x), Bits(y), Bits(-z)));
+        }
+        int n = triples.Count;
+        var a = new ushort[n];
+        var b = new ushort[n];
+        var c = new ushort[n];
+        for (int i = 0; i < n; i++)
+        {
+            a[i] = triples[i].A;
+            b[i] = triples[i].B;
+            c[i] = triples[i].C;
+        }
+        using var aBuf = accelerator.Allocate1D(a);
+        using var bBuf = accelerator.Allocate1D(b);
+        using var cBuf = accelerator.Allocate1D(c);
+        using var inlinedBuf = accelerator.Allocate1D<ushort>(n);
+        using var helperBuf = accelerator.Allocate1D<ushort>(n);
+        var kernel = accelerator.LoadAutoGroupedStreamKernel<
+            Index1D,
+            ArrayView<ushort>, ArrayView<ushort>, ArrayView<ushort>,
+            ArrayView<ushort>, ArrayView<ushort>>(HalfFmaKernel);
+        kernel((Index1D)n, aBuf.View, bBuf.View, cBuf.View, inlinedBuf.View, helperBuf.View);
+        await accelerator.SynchronizeAsync();
+        var inlined = await inlinedBuf.CopyToHostAsync<ushort>();
+        var viaHelper = await helperBuf.CopyToHostAsync<ushort>();
+
+        var errors = new List<string>();
+        for (int i = 0; i < n; i++)
+        {
+            ushort expected = ExactHalfOracle.Fma(a[i], b[i], c[i]);
+            foreach (var (name, actual) in new[] { ("inline", inlined[i]), ("helper", viaHelper[i]) })
+            {
+                bool ok = ExactHalfOracle.IsNaN(expected)
+                    ? ExactHalfOracle.IsNaN(actual)
+                    : actual == expected;
+                if (!ok && errors.Count < 8)
+                    errors.Add($"fma {name}(0x{a[i]:X4}, 0x{b[i]:X4}, 0x{c[i]:X4}): " +
+                        $"expected 0x{expected:X4}, got 0x{actual:X4}");
+            }
+        }
+        if (errors.Count > 0)
+            throw new Exception("Half fma differs from the exact oracle: " +
+                string.Join("; ", errors));
+    });
+
+    // The real f16 PTX instructions (plain and .ftz), written as inline PTX: Half's operators
+    // compute in f32 and never emit them, so this is what exercises the add/sub/mul/min/max
+    // rewrite. Each op sits on its own line, as the rewrite works line by line.
+    static void HalfInlineArithmeticKernel(
+        Index1D idx, ArrayView<ushort> a, ArrayView<ushort> b, ArrayView<ushort> o)
+    {
+        ushort x = a[idx], y = b[idx];
+        CudaAsm.Emit("add.f16 %0, %1, %2;", out ushort add, x, y);
+        CudaAsm.Emit("sub.f16 %0, %1, %2;", out ushort sub, x, y);
+        CudaAsm.Emit("mul.f16 %0, %1, %2;", out ushort mul, x, y);
+        CudaAsm.Emit("add.ftz.f16 %0, %1, %2;", out ushort addFtz, x, y);
+        CudaAsm.Emit("sub.ftz.f16 %0, %1, %2;", out ushort subFtz, x, y);
+        CudaAsm.Emit("mul.ftz.f16 %0, %1, %2;", out ushort mulFtz, x, y);
+        int i = idx * 6;
+        o[i] = add;
+        o[i + 1] = sub;
+        o[i + 2] = mul;
+        o[i + 3] = addFtz;
+        o[i + 4] = subFtz;
+        o[i + 5] = mulFtz;
+    }
+
+    // min.f16 / max.f16 are native only from sm_80 (and sm_53+ below that fails in ptxas), so
+    // they run in their own kernel that the test skips on such devices.
+    static void HalfInlineMinMaxKernel(
+        Index1D idx, ArrayView<ushort> a, ArrayView<ushort> b, ArrayView<ushort> o)
+    {
+        ushort x = a[idx], y = b[idx];
+        CudaAsm.Emit("min.f16 %0, %1, %2;", out ushort min, x, y);
+        CudaAsm.Emit("max.f16 %0, %1, %2;", out ushort max, x, y);
+        CudaAsm.Emit("min.ftz.f16 %0, %1, %2;", out ushort minFtz, x, y);
+        CudaAsm.Emit("max.ftz.f16 %0, %1, %2;", out ushort maxFtz, x, y);
+        int i = idx * 4;
+        o[i] = min;
+        o[i + 1] = max;
+        o[i + 2] = minFtz;
+        o[i + 3] = maxFtz;
+    }
+
+    [TestMethod]
+    public async Task Tests_PTX_Float16_InlineInstructions_MatchExactOracle() =>
+        await RunTest(async accelerator =>
+    {
+        var cuda = (CudaAccelerator)accelerator;
+        int p = HostilePatterns.Length;
+        int n = p * p;
+        var a = new ushort[n];
+        var b = new ushort[n];
+        for (int i = 0; i < n; i++)
+        {
+            a[i] = HostilePatterns[i / p];
+            b[i] = HostilePatterns[i % p];
+        }
+        using var aBuf = accelerator.Allocate1D(a);
+        using var bBuf = accelerator.Allocate1D(b);
+
+        var errors = new List<string>();
+        void Check(string op, int i, ushort expected, ushort actual)
+        {
+            bool ok = ExactHalfOracle.IsNaN(expected)
+                ? ExactHalfOracle.IsNaN(actual)
+                : actual == expected;
+            if (!ok && errors.Count < 8)
+                errors.Add($"{op}(0x{a[i]:X4}, 0x{b[i]:X4}): expected 0x{expected:X4}, " +
+                    $"got 0x{actual:X4}");
+        }
+
+        using (var outBuf = accelerator.Allocate1D<ushort>(n * 6))
+        {
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<ushort>, ArrayView<ushort>, ArrayView<ushort>>(
+                HalfInlineArithmeticKernel);
+            kernel((Index1D)n, aBuf.View, bBuf.View, outBuf.View);
+            await accelerator.SynchronizeAsync();
+            var o = await outBuf.CopyToHostAsync<ushort>();
+            for (int i = 0; i < n; i++)
+            {
+                Check("add", i, ExactHalfOracle.Add(a[i], b[i]), o[i * 6]);
+                Check("sub", i, ExactHalfOracle.Sub(a[i], b[i]), o[i * 6 + 1]);
+                Check("mul", i, ExactHalfOracle.Mul(a[i], b[i]), o[i * 6 + 2]);
+                Check("add.ftz", i, ExactHalfOracle.Add(a[i], b[i], true), o[i * 6 + 3]);
+                Check("sub.ftz", i, ExactHalfOracle.Sub(a[i], b[i], true), o[i * 6 + 4]);
+                Check("mul.ftz", i, ExactHalfOracle.Mul(a[i], b[i], true), o[i * 6 + 5]);
+            }
+        }
+
+        bool minMaxNative = cuda.Capabilities.Float16Native
+            && cuda.Architecture < CudaArchitecture.SM_80;
+        if (!minMaxNative)
+        {
+            using var outBuf = accelerator.Allocate1D<ushort>(n * 4);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<
+                Index1D, ArrayView<ushort>, ArrayView<ushort>, ArrayView<ushort>>(
+                HalfInlineMinMaxKernel);
+            kernel((Index1D)n, aBuf.View, bBuf.View, outBuf.View);
+            await accelerator.SynchronizeAsync();
+            var o = await outBuf.CopyToHostAsync<ushort>();
+            for (int i = 0; i < n; i++)
+            {
+                Check("min", i, ExactHalfOracle.Min(a[i], b[i]), o[i * 4]);
+                Check("max", i, ExactHalfOracle.Max(a[i], b[i]), o[i * 4 + 1]);
+                Check("min.ftz", i, ExactHalfOracle.Min(a[i], b[i], true), o[i * 4 + 2]);
+                Check("max.ftz", i, ExactHalfOracle.Max(a[i], b[i], true), o[i * 4 + 3]);
+            }
+        }
+        if (errors.Count > 0)
+            throw new Exception("Inline f16 instructions differ from the exact oracle: " +
+                string.Join("; ", errors));
+    });
+    static void DoubleToHalfKernel(
+        Index1D idx, ArrayView<double> source, ArrayView<global::ILGPU.Half> target) =>
+        target[idx] = (global::ILGPU.Half)source[idx];
+
+    // cvt.rn.f16.f64 rounds twice on sm_50 hardware (through f32); the rewrite must not use it.
+    [TestMethod]
+    public async Task Tests_PTX_Float16_DoubleToHalf_RoundsOnce() =>
+        await RunTest(async accelerator =>
+    {
+        double ulp11 = Math.Pow(2, -11);
+        var values = new List<double>
+        {
+            1 + ulp11 + Math.Pow(2, -40),            // just above the tie: up
+            1 + 2 * ulp11 + ulp11 - Math.Pow(2, -40), // just below the tie: down
+            1 + ulp11,                                // exact tie: even (down)
+            1 + 2 * ulp11 + ulp11,                    // exact tie: even (up)
+            Math.Pow(2, -25) + Math.Pow(2, -60),      // above half the smallest subnormal
+            Math.Pow(2, -25),                         // exact tie to zero
+            Math.Pow(2, -25) - Math.Pow(2, -60),
+            65520.0, 65519.99999999999, 65504.0, 1e-30, 1e30,
+            0.0, -0.0, double.NaN, double.PositiveInfinity, double.NegativeInfinity,
+        };
+        int count = values.Count;
+        for (int i = 0; i < count; i++)
+            values.Add(-values[i]);
+        var source = values.ToArray();
+        using var sourceBuf = accelerator.Allocate1D(source);
+        using var targetBuf = accelerator.Allocate1D<global::ILGPU.Half>(source.Length);
+        var kernel = accelerator.LoadAutoGroupedStreamKernel<
+            Index1D, ArrayView<double>, ArrayView<global::ILGPU.Half>>(DoubleToHalfKernel);
+        kernel((Index1D)source.Length, sourceBuf.View, targetBuf.View);
+        await accelerator.SynchronizeAsync();
+        var target = await targetBuf.CopyToHostAsync<global::ILGPU.Half>();
+        var errors = new List<string>();
+        for (int i = 0; i < source.Length; i++)
+        {
+            ushort expected = ExactHalfOracle.FromDouble(source[i]);
+            ushort actual = target[i].RawValue;
+            bool ok = ExactHalfOracle.IsNaN(expected)
+                ? ExactHalfOracle.IsNaN(actual)
+                : actual == expected;
+            if (!ok && errors.Count < 8)
+                errors.Add($"({source[i]:R}): expected 0x{expected:X4}, got 0x{actual:X4}");
+        }
+        if (errors.Count > 0)
+            throw new Exception("double -> Half is not a single rounding: " +
+                string.Join("; ", errors));
+    });
+
+    // Any f16 instruction the rewrite does not know must be rejected at compile time with a
+    // message naming it, never left for ptxas to fail with "requires .target sm_53".
+    [TestMethod]
+    public Task Tests_PTX_Float16_Emulation_RejectsUnemulatedInstructions()
+    {
+        var emulation = typeof(Context).Assembly.GetType(
+            "ILGPU.Backends.PTX.PTXFloat16Emulation", throwOnError: true)!;
+        var rewrite = emulation.GetMethod(
+            "Rewrite",
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static)!;
+        string Rewrite(string ptx) =>
+            (string)rewrite.Invoke(null, new object[] { ptx, CudaArchitecture.SM_50 })!;
+
+        foreach (var op in new[]
+        {
+            "atom.global.add.noftz.f16\t%rs1, [%rd1], %rs2;",
+            "tanh.approx.f16\t%rs1, %rs2;",
+            "add.f16x2\t%r1, %r2, %r3;",
+            "fma.rn.ftz.f16\t%rs1, %rs2, %rs3, %rs4;",
+        })
+        {
+            try
+            {
+                Rewrite("\t" + op + "\n");
+            }
+            catch (System.Reflection.TargetInvocationException ex)
+                when (ex.InnerException is CapabilityNotSupportedException inner)
+            {
+                string name = op.Split('\t')[0];
+                if (!inner.Message.Contains(name) || !inner.Message.Contains("SM_50"))
+                    throw new Exception($"Message does not name '{name}' and SM_50: {inner.Message}");
+                continue;
+            }
+            throw new Exception($"'{op}' was not rejected by the f16 rewrite");
+        }
+
+        // What it does know must leave no native f16 arithmetic behind.
+        string rewritten = Rewrite(
+            "\tadd.ftz.f16\t%rs1, %rs2, %rs3;\n\tfma.rn.f16\t%rs1, %rs2, %rs3, 15360;\n" +
+            "\t@%p1 setp.lt.f16\t%p2, %rs1, %rs2;\n\tex2.approx.f16\t%rs1, %rs2;\n");
+        foreach (var line in rewritten.Split('\n'))
+        {
+            string t = System.Text.RegularExpressions.Regex.Replace(
+                line.Trim(), @"^@!?%\w+\s+", string.Empty);
+            bool nativeCvt = t.StartsWith("cvt.f32.f16") || t.StartsWith("cvt.f64.f16")
+                || t.StartsWith("cvt.rn.f16.f32") || t.StartsWith("cvt.rn.f16.f64");
+            if (t.Contains(".f16") && !nativeCvt)
+                throw new Exception($"Native f16 instruction left after the rewrite: {t}");
+        }
+        return Task.CompletedTask;
+    }
 
     // PTX vector memory intrinsics (Discussion #5 / PR #4 additions)
     // ld.v2.f32 vectorized load + st.v2.f32 vectorized store
