@@ -25,6 +25,27 @@ public class CudaTests : BackendTestBase
         return Task.FromResult<(Context, Accelerator)>((context, accelerator));
     }
 
+    // cuDriverGetVersion can report a newer CUDA than the driver's PTX JIT accepts
+    // (430.x reports 10.2 but its JIT stops at PTX ISA 6.4); the accelerator must end up
+    // on an ISA the driver actually loads.
+    [TestMethod]
+    public async Task Tests_PTX_AcceleratorInstructionSet_IsAcceptedByDriverJit() =>
+        await RunTest(async accelerator =>
+    {
+        var cuda = (CudaAccelerator)accelerator;
+        cuda.Bind();
+        var ptx = $".version {cuda.InstructionSet}\n" +
+            $".target {cuda.Architecture.ToString().ToLowerInvariant()}\n" +
+            ".address_size 64\n";
+        var error = CudaAPI.CurrentAPI.LoadModule(out var module, ptx, out var log);
+        if (error == CudaError.CUDA_SUCCESS)
+            CudaAPI.CurrentAPI.DestroyModule(module);
+        else
+            throw new Exception(
+                $"driver JIT rejected the accelerator's PTX ISA {cuda.InstructionSet} ({error}): {log}");
+        await Task.CompletedTask;
+    });
+
     // PTX vector memory intrinsics (Discussion #5 / PR #4 additions)
     // ld.v2.f32 vectorized load + st.v2.f32 vectorized store
     static void PTXVecF32x2CopyKernel(

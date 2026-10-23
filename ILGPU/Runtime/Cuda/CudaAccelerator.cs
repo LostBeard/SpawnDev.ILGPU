@@ -214,12 +214,49 @@ namespace ILGPU.Runtime.Cuda
                     context.Properties.LibDevicePath)
                 : default;
 
+            var instructionSet = Device.InstructionSet.HasValue
+                ? ResolveJitInstructionSet(Device.InstructionSet.Value)
+                : default;
+            Device.InstructionSet = instructionSet;
+
             Init(new PTXBackend(
                 Context,
                 Capabilities,
                 Architecture,
-                Device.InstructionSet.GetValueOrDefault(),
+                instructionSet,
                 nvvmAPI));
+        }
+
+        /// <summary>
+        /// cuDriverGetVersion can report a newer CUDA version than the PTX JIT built into
+        /// the driver accepts (e.g. it reports 10.2 on a 430.x driver whose JIT stops at
+        /// PTX ISA 6.4), which makes every kernel fail with "Unsupported .version".
+        /// Loads an empty module per candidate ISA, newest first, and returns the first
+        /// one the driver accepts.
+        /// </summary>
+        /// <param name="instructionSet">The ISA derived from the driver version.</param>
+        /// <returns>The newest ISA not newer than the given one that the JIT accepts.</returns>
+        private CudaInstructionSet ResolveJitInstructionSet(
+            CudaInstructionSet instructionSet)
+        {
+            foreach (var candidate in PTXCodeGenerator.SupportedInstructionSets)
+            {
+                if (candidate.CompareTo(instructionSet) > 0)
+                    continue;
+
+                var probe =
+                    $".version {candidate}\n" +
+                    $".target {Architecture.ToString().ToLowerInvariant()}\n" +
+                    ".address_size 64\n";
+                if (CurrentAPI.LoadModule(out var module, probe) ==
+                    CudaError.CUDA_SUCCESS)
+                {
+                    CurrentAPI.DestroyModule(module);
+                    return candidate;
+                }
+            }
+            // No candidate loaded; keep the derived ISA so the usual load error surfaces.
+            return instructionSet;
         }
 
         #endregion
