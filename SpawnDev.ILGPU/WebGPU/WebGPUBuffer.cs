@@ -176,6 +176,7 @@ namespace SpawnDev.ILGPU.WebGPU
             // WebGPU writeBuffer requires the number of bytes to write to be a multiple of 4
             var copyBytes = sourceArray.Length * ElementSize;
             var paddedBytes = WebGPUAlignment.AlignTo4(copyBytes);
+            ThrowIfNotNativeWritable(targetOffset * ElementSize, copyBytes);
             using var uint8Array = new Uint8Array((int)paddedBytes);
             uint8Array.Write(sourceArray);
             FlushBeforeHostWrite();
@@ -201,9 +202,28 @@ namespace SpawnDev.ILGPU.WebGPU
             if (queue == null)
                 throw new InvalidOperationException("GPU queue not available");
 
+            ThrowIfNotNativeWritable(targetByteOffset, source.ByteLength, exactSize: true);
             FlushBeforeHostWrite();
             queue.WriteBuffer(_buffer, targetByteOffset, source);
             WebGPUDispatchPlan.Recording?.NoteHostWrite(source.ByteLength);
+        }
+
+        /// <summary>
+        /// writeBuffer takes only a 4-byte-aligned offset and size, and a rejected write is silently DROPPED (it does not
+        /// throw); a size padded up to 4 writes past the range. This low-level buffer has no stream to run the byte
+        /// kernel that <c>WebGPUMemoryBuffer</c> uses for such ranges, so it refuses them loudly.
+        /// </summary>
+        /// <param name="byteOffset">Target byte offset.</param>
+        /// <param name="byteCount">Number of payload bytes.</param>
+        /// <param name="exactSize">True when the payload is written as-is (JS source): its size must itself be a multiple of 4.</param>
+        private void ThrowIfNotNativeWritable(long byteOffset, long byteCount, bool exactSize = false)
+        {
+            long bufferBytes = Length * ElementSize;
+            bool sizeOk = (byteCount & 3) == 0 || (!exactSize && byteOffset + byteCount == bufferBytes);
+            if ((byteOffset & 3) != 0 || !sizeOk)
+                throw new ArgumentException(
+                    $"WebGPU can only write 4-byte-aligned ranges natively; [{byteOffset}, {byteOffset + byteCount}) of a {bufferBytes}-byte buffer is not one. " +
+                    "Use ArrayView.CopyFromCPU or WebGPUMemoryBuffer.CopyFromJS, which handle any byte range.");
         }
 
         /// <summary>
@@ -223,6 +243,7 @@ namespace SpawnDev.ILGPU.WebGPU
             if (queue == null)
                 throw new InvalidOperationException("GPU queue not available");
 
+            ThrowIfNotNativeWritable(targetByteOffset, source.ByteLength, exactSize: true);
             FlushBeforeHostWrite();
             queue.WriteBuffer(_buffer, targetByteOffset, source);
             WebGPUDispatchPlan.Recording?.NoteHostWrite(source.ByteLength);
@@ -270,6 +291,21 @@ namespace SpawnDev.ILGPU.WebGPU
         private long _cachedStagingSize;
 
         /// <summary>
+        /// The 4-byte-aligned window that holds <paramref name="byteCount"/> bytes at <paramref name="byteOffset"/>.
+        /// <c>copyBufferToBuffer</c> rejects an offset or size that is not a multiple of 4, and the rejection only
+        /// invalidates the command buffer: the copy is dropped and the staging buffer keeps whatever it held, so a
+        /// readback at an odd byte offset returned stale bytes with no exception (SpawnDev.Codecs, 2026-10-23: a
+        /// WebP ALPH byte, a VP8 frame tag, poison-tail checks). Copy the aligned window and read from
+        /// <c>lead</c>. The window never passes the buffer's end: buffers are allocated padded to 4 bytes.
+        /// </summary>
+        private static (long AlignedOffset, int Lead, long WindowBytes) AlignedWindow(long byteOffset, long byteCount)
+        {
+            long alignedOffset = byteOffset & ~3L;
+            int lead = (int)(byteOffset - alignedOffset);
+            return (alignedOffset, lead, WebGPUAlignment.AlignTo4(lead + byteCount));
+        }
+
+        /// <summary>
         /// Copies GPU data into a caller-provided array, reusing a cached staging buffer.
         /// This is the zero-allocation hot path — no GPU buffer or .NET array allocation per call.
         /// The staging buffer is created once and reused for subsequent calls of the same or smaller size.
@@ -288,8 +324,7 @@ namespace SpawnDev.ILGPU.WebGPU
             if (copyLength <= 0) return 0;
 
             var copyBytes = copyLength * ElementSize;
-            var paddedBytes = WebGPUAlignment.AlignTo4(copyBytes);
-            var sourceByteOffset = sourceOffset * ElementSize;
+            var (sourceByteOffset, lead, paddedBytes) = AlignedWindow(sourceOffset * ElementSize, copyBytes);
 
             if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU] CopyToHostAsync: SourceOffset={sourceOffset}, Length={copyLength} elements");
 
@@ -333,7 +368,7 @@ namespace SpawnDev.ILGPU.WebGPU
             using var mappedRange = _cachedStagingBuffer.GetMappedRange();
             if (mappedRange != null)
             {
-                using var uint8Array = new Uint8Array(mappedRange);
+                using var uint8Array = new Uint8Array(mappedRange, lead, (int)copyBytes);
                 uint8Array.Read(0, destination, 0, copyLength);
             }
             _cachedStagingBuffer.Unmap();
@@ -359,7 +394,7 @@ namespace SpawnDev.ILGPU.WebGPU
             copyBytes ??= Length * ElementSize - sourceByteOffset;
             if (copyBytes <= 0) return new Uint8Array();
 
-            var paddedBytes = WebGPUAlignment.AlignTo4(copyBytes.Value);
+            var (alignedSourceOffset, lead, paddedBytes) = AlignedWindow(sourceByteOffset, copyBytes.Value);
 
             if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU] CopyToHostUint8ArrayAsync: SourceByteOffset={sourceByteOffset}, CopyBytes={copyBytes} elements");
 
@@ -390,7 +425,7 @@ namespace SpawnDev.ILGPU.WebGPU
 
             // Copy from GPU buffer to cached staging buffer (size must be multiple of 4)
             using var encoder = device.CreateCommandEncoder();
-            encoder.CopyBufferToBuffer(_buffer, (ulong)sourceByteOffset, _cachedStagingBuffer, 0, (ulong)paddedBytes);
+            encoder.CopyBufferToBuffer(_buffer, (ulong)alignedSourceOffset, _cachedStagingBuffer, 0, (ulong)paddedBytes);
             using var commandBuffer = encoder.Finish();
             _submitArray[0] = commandBuffer;
             Accelerator.Queue?.Submit(_submitArray);
@@ -407,7 +442,7 @@ namespace SpawnDev.ILGPU.WebGPU
                     // Slice to actual requested size (paddedBytes may be larger for alignment)
                     // Slice() returns a NEW ArrayBuffer holding its own JS slot; the Uint8Array copies
                     // the reference, so the intermediate must be released or it leaks per readback.
-                    using var sliced = mappedRange.Slice(0, (int)copyBytes.Value);
+                    using var sliced = mappedRange.Slice(lead, lead + (int)copyBytes.Value);
                     result = new Uint8Array(sliced);
                 }
             }
@@ -442,8 +477,7 @@ namespace SpawnDev.ILGPU.WebGPU
             if (count <= 0) return 0;
 
             var copyBytes = count * destElementSize;
-            var paddedBytes = WebGPUAlignment.AlignTo4(copyBytes);
-            var sourceByteOffset = sourceOffset * destElementSize;
+            var (sourceByteOffset, lead, paddedBytes) = AlignedWindow(sourceOffset * destElementSize, copyBytes);
 
             if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WebGPU] CopyToHostAsync<{typeof(TDest).Name}>: SourceOffset={sourceOffset}, Length={count} elements, ByteSize={copyBytes}");
 
@@ -481,10 +515,10 @@ namespace SpawnDev.ILGPU.WebGPU
 
             // Map, read as TDest into destination array, unmap
             await ProfiledMapReadAsync(_cachedStagingBuffer, paddedBytes);
-            var mappedRange = _cachedStagingBuffer.GetMappedRange();
+            using var mappedRange = _cachedStagingBuffer.GetMappedRange();
             if (mappedRange != null)
             {
-                using var uint8Array = new Uint8Array(mappedRange);
+                using var uint8Array = new Uint8Array(mappedRange, lead, (int)copyBytes);
                 uint8Array.Read(0, destination, 0, count);
             }
             _cachedStagingBuffer.Unmap();
