@@ -146,13 +146,28 @@ namespace ILGPU.Runtime.Cuda
         public CudaCapabilityContext(CudaArchitecture arch)
         {
 <# foreach (var c in commonCapabilities.Concat(cudaCapabilities)) { #>
+<#     if (c.Name == "Float16") { #>
+            // Below sm_53 the PTX backend emulates f16 arithmetic through f32 (see
+            // PTXFloat16Emulation): Float16 stays true, Float16Native tells the paths apart.
+            Float16 = true;
+            Float16Native = arch >= CudaArchitecture.<#= c.Cuda.MinPTX #>;
+<#     } else if (c.Name == "Float16_Min" || c.Name == "Float16_Max") { #>
+            <#= c.Name #> = !Float16Native || arch >= CudaArchitecture.<#= c.Cuda.MinPTX #>;
+<#     } else { #>
             <#= c.Name #> = arch >= CudaArchitecture.<#= c.Cuda.MinPTX #>;
+<#     } #>
 <# } #>
         }
 
         #endregion
 
         #region Properties
+
+        /// <summary>
+        /// True if the device has native f16 arithmetic (sm_53+). If false, Float16 is
+        /// still supported, but its arithmetic is emulated through f32.
+        /// </summary>
+        public bool Float16Native { get; internal set; }
 
 <# foreach (var c in cudaCapabilities) { #>
         /// <summary>
