@@ -94,6 +94,14 @@ namespace ILGPU.Backends.Velocity
                     context.Properties.InliningMode,
                     context.Properties.OptimizationLevel);
 
+                // A loop exit that branches straight to a loop header gets a block of its
+                // own, so the branch builder sees an exit (see VelocityLoopExitSplitting)
+                transformerBuilder.Add(new VelocityLoopExitSplitting());
+
+                // A loop with several back edges gets a single latch, so all lanes have
+                // finished its body before it jumps back (see VelocityLoopLatches)
+                transformerBuilder.Add(new VelocityLoopLatches());
+
                 // Transform all if and switch branches to make them compatible with
                 // the internal vectorization engine
                 transformerBuilder.Add(new VelocityBlockScheduling());

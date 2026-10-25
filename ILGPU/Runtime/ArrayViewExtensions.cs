@@ -941,7 +941,7 @@ namespace ILGPU.Runtime
         /// <remarks>This method is not supported on accelerators.</remarks>
         [NotInsideKernel]
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static void CopyToCPU<T, TView>(
+        public static unsafe void CopyToCPU<T, TView>(
             this TView source,
             AcceleratorStream stream,
             ref T cpuData,
@@ -949,9 +949,14 @@ namespace ILGPU.Runtime
             where TView : IContiguousArrayView<T>
             where T : unmanaged
         {
-            // Copy async into memory
-            source.CopyToCPUUnsafeAsync(stream, ref cpuData, length);
-            stream.Synchronize();
+            // Pin until the copy is done: the driver writes through a raw pointer while the
+            // thread is in a P/Invoke, where a compacting GC may move an unpinned managed
+            // array (2026-10-25, Codecs: an intermittent wrong CUDA transfer).
+            fixed (T* ptr = &cpuData)
+            {
+                source.CopyToCPUUnsafeAsync(stream, ref Unsafe.AsRef<T>(ptr), length);
+                stream.Synchronize();
+            }
         }
 
         /// <summary>
@@ -1369,7 +1374,7 @@ namespace ILGPU.Runtime
         /// <remarks>This method is not supported on accelerators.</remarks>
         [NotInsideKernel]
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        public static void CopyFromCPU<T, TView>(
+        public static unsafe void CopyFromCPU<T, TView>(
             this TView target,
             AcceleratorStream stream,
             ref T cpuData,
@@ -1377,11 +1382,17 @@ namespace ILGPU.Runtime
             where TView : IContiguousArrayView<T>
             where T : unmanaged
         {
-            // Copy async into memory
-            target.CopyFromCPUUnsafeAsync(stream, ref cpuData, length);
-            // Upload is fire-and-forget: wait on desktop (DMA in flight), no-op on browser
-            // (host source consumed synchronously). NOT the throwing sync Synchronize().
-            stream.EnsureHostCopyConsumed();
+            // Pin until the driver has consumed the source: it reads through a raw pointer
+            // while the thread is in a P/Invoke, where a compacting GC may move an unpinned
+            // managed array (2026-10-25, Codecs: 1 wrong CUDA upload in ~4,550 under GC load).
+            fixed (T* ptr = &cpuData)
+            {
+                target.CopyFromCPUUnsafeAsync(stream, ref Unsafe.AsRef<T>(ptr), length);
+                // Upload is fire-and-forget: wait on desktop (DMA in flight), no-op on
+                // browser (host source consumed synchronously). NOT the throwing sync
+                // Synchronize().
+                stream.EnsureHostCopyConsumed();
+            }
         }
 
         #endregion

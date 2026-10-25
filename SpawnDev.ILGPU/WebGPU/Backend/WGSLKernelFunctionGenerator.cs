@@ -8230,6 +8230,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 if (WebGPU.Backend.WebGPUBackend.VerboseLogging && _isScanKernel)
                                     WebGPUBackend.Log($"[CODEGEN]   Skip pass-through B{block.Id} → B{exitUBranch.Target.Id}");
                                 visited.Add(block);
+                                // Skipping the block skips its branch, so its edge's phi moves are ours to emit. The
+                                // break already pushed them for every target EXCEPT an enclosing loop's header
+                                // (EmitIntermediateBlocksToExit stops there): that edge is the enclosing loop's back
+                                // edge, and without its moves the loop-carried values never advance (2026-10-25,
+                                // Codecs Vp8lEncodeGpu.WriteCodeDefinition: an if/else arm ending in an inner loop that
+                                // exits through a pass-through block spun forever on WebGPU).
+                                if (IsHeaderOfEnclosingLoop(exitUBranch.Target, loopNode))
+                                    PushPhiValues(exitUBranch.Target, block);
                                 block = exitUBranch.Target;
                             }
                             else
@@ -8694,6 +8702,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             foreach (var header in loopNode.Headers)
             {
                 if (header == block) return true;
+            }
+            return false;
+        }
+
+        /// <summary>True when <paramref name="block"/> is the header of a loop that encloses <paramref name="loopNode"/>.</summary>
+        private static bool IsHeaderOfEnclosingLoop(BasicBlock block, Loops<ReversePostOrder, Forwards>.Node loopNode)
+        {
+            for (var loop = loopNode.Parent; loop != null; loop = loop.Parent)
+            {
+                if (IsLoopHeader(block, loop)) return true;
             }
             return false;
         }

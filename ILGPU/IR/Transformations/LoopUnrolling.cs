@@ -583,6 +583,20 @@ namespace ILGPU.IR.Transformations
                 return false;
             }
 
+            // A back edge that starts inside a nested loop (`while (i < 64) { ...;
+            // while (run > 0) { ... } }`: the inner loop exits straight to this header)
+            // cannot be cloned by the specializer: the copies lost the inner loop and its
+            // phis named blocks that no longer existed, so every IR backend computed the
+            // loop without its inner loop (2026-10-25). Such a loop stays a loop.
+            foreach (var backEdge in loop.BackEdges)
+            {
+                foreach (var child in loop.Children)
+                {
+                    if (child.Contains(backEdge))
+                        return false;
+                }
+            }
+
             // Check and verify the loop bounds of the induction variable
             var inductionVariable = loopInfo.InductionVariables[0];
             if (!inductionVariable.TryResolveBounds(out var bounds) ||

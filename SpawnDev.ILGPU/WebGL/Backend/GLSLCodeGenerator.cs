@@ -800,11 +800,18 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         }
 
         /// <summary>
-        /// Checks if target is a back-edge to an active loop header (should emit 'continue').
+        /// Checks if target is a back-edge to the INNERMOST open loop's header (should emit 'continue').
         /// </summary>
+        /// <remarks>
+        /// GLSL `continue` reaches only the innermost loop. A branch from an inner loop to the header of an
+        /// enclosing loop (an inner `while` that ends the outer body exits straight to the outer header) is
+        /// an exit of the inner loop: it must `break` (the outer body has nothing left and its loop wraps).
+        /// Matching any open header emitted `continue` there, so the inner loop never ended (2026-10-25,
+        /// NestedLoops_InnerLoopEndsOuterBody: 0 instead of 223 on WebGL).
+        /// </remarks>
         protected bool IsBackEdgeToActiveLoop(BasicBlock target)
         {
-            return _activeLoopHeaders.Contains(target);
+            return _activeLoopHeaders.Count > 0 && _activeLoopHeaders.Peek() == target;
         }
 
         /// <summary>
@@ -958,6 +965,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                             && !HasNonPhiInstructions(exitBlock))
                         {
                             _visitedBlocks.Add(exitBlock);
+                            // Skipping the block skips its branch, so its edge's phi moves are ours to emit. The
+                            // break path pushes them for every target EXCEPT a loop header (it stops at any header),
+                            // which is the next loop's entry or the enclosing loop's back edge: without these the
+                            // next loop started with stale values and the enclosing loop never advanced (2026-10-25,
+                            // NestedLoops_InnerLoopEndsOuterBody: an if/else whose arms each end in two loops).
+                            if (IsBlockLoopHeader(exitUBranch.Target))
+                                PushPhiValues(exitUBranch.Target, exitBlock);
                             exitBlock = exitUBranch.Target;
                         }
                         else
