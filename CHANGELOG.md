@@ -1,6 +1,11 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## Unreleased
+
+- **FIXED (WebGPU, present in 5.4.4 and earlier): `.Length` of a `SubView` made shader creation fail, and named the wrong length.** The IR builder folded the length of a new view but not of a sub view, so `view.SubView(offset, n).Length` reached the WGSL generator, which aliases a sub view to its SOURCE view (`let v_N = v_src;`). It could not resolve that alias to a binding and emitted `arrayLength(&v_N)`: Tint rejects it (`cannot take the address of 'let v_N'`; naga accepts it), and had it compiled it would have been the whole source buffer's length, so a helper that bounds its writes by `view.Length` would have written past its sub view. `IRBuilder.CreateGetViewLength` now folds the length of a sub view to the sub view's own length operand, on every backend. Found by SpawnDev.Codecs (9 kernels: the VP8 bool and coefficient encoders, VP8/VP9 frame entropy, assemble and setup steps, the VP9 compressed header and the VP9 keyframe decoder).
+  - MEASURED without a GPU (the WGSL of all 373 SpawnDev.Codecs kernels, checked for `arrayLength(&v_N)`): 5.4.4 = 9 kernels; this code = 0.
+  - Tests: `SubViewLength_ReturnsSubViewLength` (byte, int and nested sub views, `Length` and `IntLength`) and `SubViewLength_BoundsPerStreamWrites` (the Codecs shape: 64 streams written through sub views at odd offsets, bounded by `view.Length`, with a guard after the last stream).
 ## 5.4.4 (forks 2.4.4) - 2026-10-23 - CUDA runs on older drivers and on GPUs without native f16; WebGPU: three shader-creation failures; unaligned byte copies, uploads and fills
 
 - **FIXED (CUDA): every kernel failed to load on a driver whose PTX JIT is older than the CUDA version it reports.** `cuDriverGetVersion` reported 10.2 on a GeForce 940MX with driver 430.x, ILGPU emitted PTX ISA 6.5, and the driver's JIT accepts only up to 6.4: 622 of 748 CUDA tests failed with "Unsupported .version". The accelerator now loads an empty module for each candidate ISA, newest first, and generates the newest one the JIT accepts (once per accelerator; a driver that accepts the derived ISA keeps it). Found and fixed by a laptop run of the suite (Warf).

@@ -82,6 +82,17 @@ namespace ILGPU.IR.Construction
                     lengthType);
             }
 
+            // The length of a sub view is its own length operand. Without this fold the
+            // node reached the WebGPU generator, which aliases a sub view to its SOURCE
+            // view: it emitted arrayLength(&let) (invalid WGSL) for the source's length.
+            if (view is SubViewValue subView)
+            {
+                return CreateConvert(
+                    location,
+                    subView.Length,
+                    lengthType);
+            }
+
             return Append(new GetViewLength(
                 GetInitializer(location),
                 view,

@@ -2345,11 +2345,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// All offset arithmetic happens at the LEA / Load / Store sites that
         /// actually index into the buffer.
         ///
-        /// Limitation: <c>GetViewLength</c> on a SubView still returns the source
-        /// view's length, not the SubView's. Codecs kernels that motivated this
-        /// fix (Av1 / Vp8 / Vp9 / Flac / Vorbis encoders + decoders) don't call
-        /// <c>.Length</c> on SubView results. Add a <c>SubViewValue</c>-aware
-        /// override of <c>GenerateCode(GetViewLength)</c> if a future kernel does.
+        /// <c>.Length</c> of a SubView never reaches <c>GenerateCode(GetViewLength)</c>:
+        /// <c>IRBuilder.CreateGetViewLength</c> folds it to the SubView's own length
+        /// operand (2026-10-25; before that this alias made it emit
+        /// <c>arrayLength(&amp;let)</c>, invalid WGSL, for the SOURCE view's length).
         /// </remarks>
         public virtual void GenerateCode(global::ILGPU.IR.Values.SubViewValue value)
         {
