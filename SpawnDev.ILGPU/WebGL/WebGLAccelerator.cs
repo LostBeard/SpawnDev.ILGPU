@@ -1289,15 +1289,14 @@ namespace SpawnDev.ILGPU.WebGL
                     {
                         // Body-struct output view field — extract via reflection on
                         // the user's struct value using the C# field index.
-                        var bsFields = arg.GetType().GetFields(
-                            BindingFlags.Public | BindingFlags.Instance);
-                        if (bodyStructClrFieldIdx < bsFields.Length)
+                        var bsFields = FlattenedStructLeaves(arg.GetType());
+                        if (bodyStructClrFieldIdx < bsFields.Count)
                         {
                             var fieldValue = bsFields[bodyStructClrFieldIdx].GetValue(arg);
                             arrView = fieldValue as IArrayView;
                             if (arrView == null && fieldValue != null)
                             {
-                                var rc = GetOrCreateReflectionCache(bsFields[bodyStructClrFieldIdx].FieldType);
+                                var rc = GetOrCreateReflectionCache(bsFields[bodyStructClrFieldIdx].Field.FieldType);
                                 if (rc.BaseViewProperty != null)
                                     arrView = rc.BaseViewProperty.GetValue(fieldValue) as IArrayView;
                             }
@@ -1682,6 +1681,12 @@ namespace SpawnDev.ILGPU.WebGL
         /// uniforms with the same synthetic param index encoding.
         /// </summary>
         [UnconditionalSuppressMessage("Trimming", "IL2075", Justification = global::ILGPU.Util.TrimmingAnnotations.StructureLayout)]
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<Type, List<SpawnDev.ILGPU.CodeGen.ClrStructLeaf>> s_structLeaves = new();
+
+        /// <summary>A user struct's leaves in IR order (see <see cref="SpawnDev.ILGPU.CodeGen.KernelParameterKinds.FlattenUserStruct"/>), cached per type.</summary>
+        private static List<SpawnDev.ILGPU.CodeGen.ClrStructLeaf> FlattenedStructLeaves(Type structType) =>
+            s_structLeaves.GetOrAdd(structType, SpawnDev.ILGPU.CodeGen.KernelParameterKinds.FlattenUserStruct);
+
         private static void EmitBodyStructDispatch(
             object structArg,
             int glslParamIndex,
@@ -1693,16 +1698,17 @@ namespace SpawnDev.ILGPU.WebGL
                 .Where(e => e.ParamIndex == glslParamIndex)
                 .OrderBy(e => e.FieldIndex)
                 .ToList();
-            var clrFields = structArg.GetType().GetFields(
-                BindingFlags.Public | BindingFlags.Instance);
+            // the struct's leaves in IR order (a nested struct contributes its own fields): the manifest's
+            // ClrFieldIndex counts these, not the struct's direct fields
+            var clrFields = FlattenedStructLeaves(structArg.GetType());
 
             foreach (var entry in manifestEntries)
             {
-                if (entry.ClrFieldIndex < 0 || entry.ClrFieldIndex >= clrFields.Length)
+                if (entry.ClrFieldIndex < 0 || entry.ClrFieldIndex >= clrFields.Count)
                     throw new Exception(
                         $"Body struct on param {glslParamIndex} has manifest C# field index " +
                         $"{entry.ClrFieldIndex} (IR field index {entry.FieldIndex}) but the C# struct " +
-                        $"has {clrFields.Length} fields.");
+                        $"has {clrFields.Count} leaf fields.");
                 var clrField = clrFields[entry.ClrFieldIndex];
                 var fieldValue = clrField.GetValue(structArg);
 
@@ -1711,7 +1717,7 @@ namespace SpawnDev.ILGPU.WebGL
                     var view = fieldValue as IArrayView;
                     if (view == null)
                     {
-                        var rc = GetOrCreateReflectionCache(clrField.FieldType);
+                        var rc = GetOrCreateReflectionCache(clrField.Field.FieldType);
                         if (rc.BaseViewProperty != null && fieldValue != null)
                             view = rc.BaseViewProperty.GetValue(fieldValue) as IArrayView;
                     }

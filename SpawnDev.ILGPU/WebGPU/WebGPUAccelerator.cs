@@ -701,11 +701,12 @@ namespace SpawnDev.ILGPU.WebGPU
             {
                 var fieldVal = field.GetValue(structValue);
                 var ft = field.FieldType;
-                // Recursively flatten nested structs that also contain pointers
-                // but stop at IArrayView — those are leaf nodes handled by the view binding path
-                if (fieldVal != null && ft.IsValueType && !ft.IsPrimitive
-                    && !typeof(IArrayView).IsAssignableFrom(ft)
-                    && ContainsPointerFields(ft))
+                // Recursively flatten nested structs, as the IR does, but stop at IArrayView (leaf nodes handled by the
+                // view binding path). A plain nested struct used to stay ONE entry while the IR has one field per leaf:
+                // every later field was off by one (2026-10-26, NestedStructParam_ViewsAroundNestedStruct_ReadEveryField:
+                // 3039 instead of -21941; SpawnDev.Codecs SilkPulsesInputs on WebGL). ILGPU's own scalar types stay whole.
+                if (fieldVal != null && (SpawnDev.ILGPU.CodeGen.KernelParameterKinds.IsNestedStructToFlatten(ft)
+                    || (ft.IsValueType && !ft.IsPrimitive && !typeof(IArrayView).IsAssignableFrom(ft) && ContainsPointerFields(ft))))
                 {
                     result.AddRange(FlattenStructFields(fieldVal));
                 }

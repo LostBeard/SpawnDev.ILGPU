@@ -1009,16 +1009,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 var fields = new List<BodyStructFieldInfoGL>(st.NumFields);
                 int userIdx = param.Index - KernelParamOffset;
                 Type? clrParamType = null;
-                System.Reflection.FieldInfo[]? clrFields = null;
+                // the struct's leaves in IR order (a nested struct is replaced by its own fields), which is what
+                // clrFieldCounter below counts - the dispatcher reads them through the same list
+                List<SpawnDev.ILGPU.CodeGen.ClrStructLeaf>? clrFields = null;
                 if (userIdx >= 0 && userIdx < EntryPoint.Parameters.Count)
                 {
                     clrParamType = EntryPoint.Parameters[userIdx];
                     if (clrParamType.IsValueType)
-                    {
-                        clrFields = clrParamType.GetFields(
-                            System.Reflection.BindingFlags.Instance |
-                            System.Reflection.BindingFlags.Public);
-                    }
+                        clrFields = SpawnDev.ILGPU.CodeGen.KernelParameterKinds.FlattenUserStruct(clrParamType);
                 }
 
                 // State machine for ArrayView1D-wrapper expanded fields. The IR
@@ -1099,10 +1097,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         ClrFieldIndex = clrIdx,
                         SyntheticParamIndex = (param.Index + 1) * 1000 + fi,
                         BindingName = bindingName,
-                        ClrFieldName = (clrFields != null && clrIdx >= 0 && clrIdx < clrFields.Length)
+                        ClrFieldName = (clrFields != null && clrIdx >= 0 && clrIdx < clrFields.Count)
                             ? clrFields[clrIdx].Name : $"field_{fi}",
-                        ClrFieldType = (clrFields != null && clrIdx >= 0 && clrIdx < clrFields.Length)
-                            ? clrFields[clrIdx].FieldType : null,
+                        ClrFieldType = (clrFields != null && clrIdx >= 0 && clrIdx < clrFields.Count)
+                            ? clrFields[clrIdx].Field.FieldType : null,
                     };
                     if (isView)
                         lastViewBindingName = bindingName;
@@ -2032,7 +2030,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     // Blake2b's mixing function (4 ref ulong params) started routing through
                     // the fn-def path instead of being fully inlined.
                     type = scalarElemType!;
-                    init = GetDefaultValue(type);
+                    // a local struct variable needs every field in its constructor: `struct_N(0)` does not compile
+                    // ("Number of constructor parameters does not match the number of structure fields", FLAC 2026-10-26)
+                    init = value is Alloca structAlloca && structAlloca.AllocaType is global::ILGPU.IR.Types.StructureType allocaStruct
+                        ? GetStructDefaultInitializer(allocaStruct)
+                        : GetDefaultValue(type);
+                    if (IsLocalStructAlloca(value))
+                        _localStructVariables.Add(variable.Name);
                 }
                 else if (value.Type is PointerType)
                 {

@@ -2747,6 +2747,34 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 };
             }
             AppendLine($"// LFA: {target} = {source}.{fieldName}");
+            // A field of a LOCAL struct variable (a scalar struct alloca: a struct passed `ref` into an inlined helper):
+            // loads and stores through this address are that field. Before, they read and wrote the int-typed address
+            // variable itself - SpawnDev.Codecs' FLAC bit writer (int, int, long state) failed GLSL compilation with
+            // "cannot convert from 'highp 2-component vector of uint' to 'highp int'" at every field access
+            // (FlacFrameHeaderKernel: 498 of them, 2026-10-26). One leaf only: a nested sub-struct span is not one lvalue.
+            // The source is the struct alloca itself, or a value the generator gave the alloca's variable (170 of the
+            // 411 field addresses of the FLAC-shaped test kernel): decided by the GLSL variable as well.
+            if (value.FieldSpan.Span == 1 &&
+                (IsLocalStructAlloca(value.Source.Resolve()) || _localStructVariables.Contains(source.Name)))
+                _leaArrayExprs[target.Name] = $"{source}.{fieldName}";
+        }
+
+        /// <summary>Names of the GLSL variables that hold a local struct (a scalar struct alloca).</summary>
+        protected readonly HashSet<string> _localStructVariables = new();
+
+        /// <summary>
+        /// True for a scalar (non-array) alloca of a struct type that is a GLSL struct variable: not a scalarized
+        /// array (an alloca used by a NewView stays an int index).
+        /// </summary>
+        protected static bool IsLocalStructAlloca(Value value)
+        {
+            if (value is not Alloca alloca || alloca.IsArrayAllocation(out _)) return false;
+            if (alloca.AllocaType is not global::ILGPU.IR.Types.StructureType) return false;
+            foreach (var use in alloca.Uses)
+            {
+                if (use.Resolve() is global::ILGPU.IR.Values.NewView) return false;
+            }
+            return true;
         }
 
         /// <summary>
