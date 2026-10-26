@@ -309,6 +309,42 @@ namespace ILGPU.IR.Values
         /// </summary>
         public ValueReference Right => this[1];
 
+        /// <summary>
+        /// Returns true if this operation can trap: an integer division or remainder
+        /// whose divisor is not a constant known to be safe. A zero divisor traps, and so
+        /// does a signed MinValue / -1 (Wasm i32/i64 div and rem trap on both, .NET
+        /// throws). GPU backends return an undefined value instead.
+        /// </summary>
+        /// <remarks>
+        /// A transformation that executes a value on a path where the source did not
+        /// (<see cref="Transformations.IfConversion"/>,
+        /// <see cref="Transformations.LoopInvariantCodeMotion"/>) must not move a value
+        /// that can trap: a guarded division in the source (<c>if (n != 0) x / n</c>)
+        /// would trap on Wasm.
+        /// </remarks>
+        public bool CanTrap
+        {
+            get
+            {
+                if (!IsIntOperation ||
+                    Kind != BinaryArithmeticKind.Div && Kind != BinaryArithmeticKind.Rem)
+                {
+                    return false;
+                }
+                if (Right.Resolve() is not PrimitiveValue divisor || divisor.IsZero)
+                    return true;
+                if (IsUnsigned)
+                    return false;
+                return BasicValueType switch
+                {
+                    BasicValueType.Int8 => divisor.Int8Value == -1,
+                    BasicValueType.Int16 => divisor.Int16Value == -1,
+                    BasicValueType.Int32 => divisor.Int32Value == -1,
+                    _ => divisor.Int64Value == -1,
+                };
+            }
+        }
+
         #endregion
 
         #region Methods

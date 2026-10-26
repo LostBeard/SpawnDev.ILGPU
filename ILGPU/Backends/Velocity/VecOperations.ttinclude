@@ -54,9 +54,12 @@ string GetWarpTypeName64(string elementTypeName) =>
 string GetItemRef64(string name, int counter) => counter < half
     ? $"{name}.Item1.GetElement({counter})"
     : $"{name}.Item2.GetElement({counter - half})";
-// integer division and remainder run on every lane of the warp, also the unused ones: see NonZeroDivisor
-string GuardDivisor(string opName, string prefix, string expression) =>
-    (opName == "Div" || opName == "Rem") && prefix != "F" ? $"NonZeroDivisor({expression})" : expression;
+// integer division and remainder run on every lane of the warp, also the unused ones: see NonZeroDivisor and
+// SafeSignedDivisor (a signed one also throws for MinValue / -1)
+string GuardDivisor(string opName, string prefix, string left, string expression) =>
+    (opName == "Div" || opName == "Rem") && prefix != "F"
+        ? prefix == "I" ? $"SafeSignedDivisor({left}, {expression})" : $"NonZeroDivisor({expression})"
+        : expression;
 string GetCastIToX32(string prefix, string variable) =>
     prefix != "I" ? $"CastITo{prefix}32({variable})" : variable;
 string GetCastIToX64(string prefix, string variable) =>
@@ -447,6 +450,37 @@ namespace ILGPU.Backends.Velocity.<#= vecNamespace #>
             where T : struct =>
             (NonZeroDivisor(value.Item1), NonZeroDivisor(value.Item2));
 
+        /// <summary>
+        /// The divisor of a signed integer division or remainder with every zero lane, and every -1 lane whose dividend is MinValue, replaced by one: a
+        /// vector division throws <see cref="OverflowException"/> for MinValue / -1 in any lane, the unused ones included (see
+        /// <see cref="NonZeroDivisor{T}(<#= vecName #>{T})"/>). MinValue / 1 = MinValue and MinValue % 1 = 0 are the two's complement results of MinValue / -1.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static <#= vecName #><int> SafeSignedDivisor(<#= vecName #><int> left, <#= vecName #><int> right) =>
+            <#= vecName #>.ConditionalSelect(
+                <#= vecName #>.Equals(right, <#= vecName #><int>.Zero) |
+                    (<#= vecName #>.Equals(right, <#= vecName #><int>.AllBitsSet) &
+                    <#= vecName #>.Equals(left, <#= vecName #>.Create(int.MinValue))),
+                <#= vecName #><int>.One,
+                right);
+
+        /// <summary>The 64-bit form of <see cref="SafeSignedDivisor(<#= vecName #>{int}, <#= vecName #>{int})"/>.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static <#= vecName #><long> SafeSignedDivisor(<#= vecName #><long> left, <#= vecName #><long> right) =>
+            <#= vecName #>.ConditionalSelect(
+                <#= vecName #>.Equals(right, <#= vecName #><long>.Zero) |
+                    (<#= vecName #>.Equals(right, <#= vecName #><long>.AllBitsSet) &
+                    <#= vecName #>.Equals(left, <#= vecName #>.Create(long.MinValue))),
+                <#= vecName #><long>.One,
+                right);
+
+        /// <summary>The 64-bit lane pair form of <see cref="SafeSignedDivisor(<#= vecName #>{long}, <#= vecName #>{long})"/>.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static (<#= vecName #><long>, <#= vecName #><long>) SafeSignedDivisor(
+            (<#= vecName #><long>, <#= vecName #><long>) left,
+            (<#= vecName #><long>, <#= vecName #><long>) right) =>
+            (SafeSignedDivisor(left.Item1, right.Item1), SafeSignedDivisor(left.Item2, right.Item2));
+
         #region Binary Operations
 
 <# foreach (var op in binaryOps) { #>
@@ -459,7 +493,7 @@ namespace ILGPU.Backends.Velocity.<#= vecNamespace #>
             <#= warpType32 #> second)
         {
             var left = <#= GetCastIToX32(prefix, "first") #>;
-            var right = <#= GuardDivisor(op.Name, prefix, GetCastIToX32(prefix, "second")) #>;
+            var right = <#= GuardDivisor(op.Name, prefix, "left", GetCastIToX32(prefix, "second")) #>;
 
 <#          if (op.Name == "Rem" && prefix == "F") { #>
             // x - x / y * y has no truncation: a float remainder is the IEEE fmod of every lane (what the CPU backend computes)
@@ -484,7 +518,7 @@ namespace ILGPU.Backends.Velocity.<#= vecNamespace #>
             <#= warpType64 #> second)
         {
             var left = <#= GetCastIToX64(prefix, "first") #>;
-            var right = <#= GuardDivisor(op.Name, prefix, GetCastIToX64(prefix, "second")) #>;
+            var right = <#= GuardDivisor(op.Name, prefix, "left", GetCastIToX64(prefix, "second")) #>;
 
 <#          if (op.Name == "Rem" && prefix == "F") { #>
             // x - x / y * y has no truncation: a float remainder is the IEEE fmod of every lane (what the CPU backend computes)

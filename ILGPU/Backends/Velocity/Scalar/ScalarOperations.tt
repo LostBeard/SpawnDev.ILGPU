@@ -36,6 +36,11 @@ string GetWarpTypeName(string elementTypeName) =>
     $"({string.Join(", ", Enumerable.Repeat(elementTypeName, warpSize))})";
 var warpType32 = GetWarpTypeName("int");
 var warpType64 = GetWarpTypeName("long");
+// integer division and remainder run on every lane of the warp, also the unused ones: see SafeDivisor
+string ScalarDivisor(string opName, string prefix, int i) =>
+    (opName == "Div" || opName == "Rem") && prefix != "F"
+        ? $"SafeDivisor(left.Item{i}, right.Item{i})"
+        : $"right.Item{i}";
 #>
 using ILGPU.IR.Values;
 using ILGPU.Util;
@@ -457,6 +462,31 @@ namespace ILGPU.Backends.Velocity.Scalar
 
         #endregion
 
+        /// <summary>
+        /// The divisor of a lane of an integer division or remainder, one where it would throw: a zero divisor, or -1 with a MinValue dividend. A warp
+        /// executes ALL of its lanes, also the ones whose result is never used (the tail of the last warp, lanes switched off by divergent control flow),
+        /// and one throwing lane stops the whole warp. MinValue / 1 = MinValue and MinValue % 1 = 0 are the two's complement results of MinValue / -1; an
+        /// active lane dividing by zero is undefined on every GPU backend.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static int SafeDivisor(int left, int right) =>
+            right == 0 || right == -1 && left == int.MinValue ? 1 : right;
+
+        /// <summary>The 64-bit form of <see cref="SafeDivisor(int, int)"/>.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static long SafeDivisor(long left, long right) =>
+            right == 0 || right == -1 && left == long.MinValue ? 1 : right;
+
+        /// <summary>The unsigned form of <see cref="SafeDivisor(int, int)"/>.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static uint SafeDivisor(uint left, uint right) =>
+            right == 0 ? 1 : right;
+
+        /// <summary>The unsigned 64-bit form of <see cref="SafeDivisor(int, int)"/>.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static ulong SafeDivisor(ulong left, ulong right) =>
+            right == 0 ? 1 : right;
+
         #region Binary Operations
 
 <# foreach (var op in binaryOps) { #>
@@ -475,7 +505,7 @@ namespace ILGPU.Backends.Velocity.Scalar
             result.Item<#= i #> = <#= op.GetOpOrCall(
                 isBool: false,
                 $"left.Item{i}",
-                $"right.Item{i}") #>;
+                ScalarDivisor(op.Name, prefix, i)) #>;
 <#          } #>
             return Cast<#= prefix #>ToI32(result);
         }
@@ -496,7 +526,7 @@ namespace ILGPU.Backends.Velocity.Scalar
             result.Item<#= i #> = <#= op.GetOpOrCall(
                 isBool: false,
                 $"left.Item{i}",
-                $"right.Item{i}") #>;
+                ScalarDivisor(op.Name, prefix, i)) #>;
 <#          } #>
             return Cast<#= prefix #>ToI64(result);
         }

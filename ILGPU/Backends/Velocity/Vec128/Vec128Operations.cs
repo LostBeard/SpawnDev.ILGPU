@@ -1364,6 +1364,37 @@ namespace ILGPU.Backends.Velocity.Vec128
             where T : struct =>
             (NonZeroDivisor(value.Item1), NonZeroDivisor(value.Item2));
 
+        /// <summary>
+        /// The divisor of a signed integer division or remainder with every zero lane, and every -1 lane whose dividend is MinValue, replaced by one: a
+        /// vector division throws <see cref="OverflowException"/> for MinValue / -1 in any lane, the unused ones included (see
+        /// <see cref="NonZeroDivisor{T}(Vector128{T})"/>). MinValue / 1 = MinValue and MinValue % 1 = 0 are the two's complement results of MinValue / -1.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static Vector128<int> SafeSignedDivisor(Vector128<int> left, Vector128<int> right) =>
+            Vector128.ConditionalSelect(
+                Vector128.Equals(right, Vector128<int>.Zero) |
+                    (Vector128.Equals(right, Vector128<int>.AllBitsSet) &
+                    Vector128.Equals(left, Vector128.Create(int.MinValue))),
+                Vector128<int>.One,
+                right);
+
+        /// <summary>The 64-bit form of <see cref="SafeSignedDivisor(Vector128{int}, Vector128{int})"/>.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static Vector128<long> SafeSignedDivisor(Vector128<long> left, Vector128<long> right) =>
+            Vector128.ConditionalSelect(
+                Vector128.Equals(right, Vector128<long>.Zero) |
+                    (Vector128.Equals(right, Vector128<long>.AllBitsSet) &
+                    Vector128.Equals(left, Vector128.Create(long.MinValue))),
+                Vector128<long>.One,
+                right);
+
+        /// <summary>The 64-bit lane pair form of <see cref="SafeSignedDivisor(Vector128{long}, Vector128{long})"/>.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static (Vector128<long>, Vector128<long>) SafeSignedDivisor(
+            (Vector128<long>, Vector128<long>) left,
+            (Vector128<long>, Vector128<long>) right) =>
+            (SafeSignedDivisor(left.Item1, right.Item1), SafeSignedDivisor(left.Item2, right.Item2));
+
         #region Binary Operations
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1615,7 +1646,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> second)
         {
             var left = first;
-            var right = NonZeroDivisor(second);
+            var right = SafeSignedDivisor(left, second);
 
             var result = left / right;
             return result;
@@ -1651,7 +1682,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) second)
         {
             var left = first;
-            var right = NonZeroDivisor(second);
+            var right = SafeSignedDivisor(left, second);
 
             var result = (
                 left.Item1 / right.Item1,
@@ -1696,7 +1727,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             Vector128<int> second)
         {
             var left = first;
-            var right = NonZeroDivisor(second);
+            var right = SafeSignedDivisor(left, second);
 
             var result = left - left / right * right;
             return result;
@@ -1733,7 +1764,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             (Vector128<long>, Vector128<long>) second)
         {
             var left = first;
-            var right = NonZeroDivisor(second);
+            var right = SafeSignedDivisor(left, second);
 
             var result = (
                 left.Item1 - left.Item1 / right.Item1 * right.Item1,

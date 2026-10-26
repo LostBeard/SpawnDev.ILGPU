@@ -1364,6 +1364,37 @@ namespace ILGPU.Backends.Velocity.Vec512
             where T : struct =>
             (NonZeroDivisor(value.Item1), NonZeroDivisor(value.Item2));
 
+        /// <summary>
+        /// The divisor of a signed integer division or remainder with every zero lane, and every -1 lane whose dividend is MinValue, replaced by one: a
+        /// vector division throws <see cref="OverflowException"/> for MinValue / -1 in any lane, the unused ones included (see
+        /// <see cref="NonZeroDivisor{T}(Vector512{T})"/>). MinValue / 1 = MinValue and MinValue % 1 = 0 are the two's complement results of MinValue / -1.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static Vector512<int> SafeSignedDivisor(Vector512<int> left, Vector512<int> right) =>
+            Vector512.ConditionalSelect(
+                Vector512.Equals(right, Vector512<int>.Zero) |
+                    (Vector512.Equals(right, Vector512<int>.AllBitsSet) &
+                    Vector512.Equals(left, Vector512.Create(int.MinValue))),
+                Vector512<int>.One,
+                right);
+
+        /// <summary>The 64-bit form of <see cref="SafeSignedDivisor(Vector512{int}, Vector512{int})"/>.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static Vector512<long> SafeSignedDivisor(Vector512<long> left, Vector512<long> right) =>
+            Vector512.ConditionalSelect(
+                Vector512.Equals(right, Vector512<long>.Zero) |
+                    (Vector512.Equals(right, Vector512<long>.AllBitsSet) &
+                    Vector512.Equals(left, Vector512.Create(long.MinValue))),
+                Vector512<long>.One,
+                right);
+
+        /// <summary>The 64-bit lane pair form of <see cref="SafeSignedDivisor(Vector512{long}, Vector512{long})"/>.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static (Vector512<long>, Vector512<long>) SafeSignedDivisor(
+            (Vector512<long>, Vector512<long>) left,
+            (Vector512<long>, Vector512<long>) right) =>
+            (SafeSignedDivisor(left.Item1, right.Item1), SafeSignedDivisor(left.Item2, right.Item2));
+
         #region Binary Operations
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1615,7 +1646,7 @@ namespace ILGPU.Backends.Velocity.Vec512
             Vector512<int> second)
         {
             var left = first;
-            var right = NonZeroDivisor(second);
+            var right = SafeSignedDivisor(left, second);
 
             var result = left / right;
             return result;
@@ -1651,7 +1682,7 @@ namespace ILGPU.Backends.Velocity.Vec512
             (Vector512<long>, Vector512<long>) second)
         {
             var left = first;
-            var right = NonZeroDivisor(second);
+            var right = SafeSignedDivisor(left, second);
 
             var result = (
                 left.Item1 / right.Item1,
@@ -1696,7 +1727,7 @@ namespace ILGPU.Backends.Velocity.Vec512
             Vector512<int> second)
         {
             var left = first;
-            var right = NonZeroDivisor(second);
+            var right = SafeSignedDivisor(left, second);
 
             var result = left - left / right * right;
             return result;
@@ -1733,7 +1764,7 @@ namespace ILGPU.Backends.Velocity.Vec512
             (Vector512<long>, Vector512<long>) second)
         {
             var left = first;
-            var right = NonZeroDivisor(second);
+            var right = SafeSignedDivisor(left, second);
 
             var result = (
                 left.Item1 - left.Item1 / right.Item1 * right.Item1,

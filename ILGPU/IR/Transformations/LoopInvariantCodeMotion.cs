@@ -38,10 +38,11 @@ namespace ILGPU.IR.Transformations
 
             private readonly Dictionary<Value, bool> mapping;
 
-            public LoopInvariance(Loop loop)
+            public LoopInvariance(Loop loop, Dominators<Forwards> dominators)
             {
                 mapping = new Dictionary<Value, bool>(loop.Count << 1);
                 Loop = loop;
+                Dominators = dominators;
             }
 
             #endregion
@@ -53,9 +54,33 @@ namespace ILGPU.IR.Transformations
             /// </summary>
             public Loop Loop { get; }
 
+            /// <summary>
+            /// Returns the dominators of the parent method.
+            /// </summary>
+            public Dominators<Forwards> Dominators { get; }
+
             #endregion
 
             #region Methods
+
+            /// <summary>
+            /// Returns true if the given loop block runs whenever the loop runs to an
+            /// exit: it dominates every breaker of the loop.
+            /// </summary>
+            /// <param name="block">The loop block to test.</param>
+            /// <returns>True, if the given block runs before every loop exit.</returns>
+            private readonly bool RunsBeforeEveryExit(BasicBlock block)
+            {
+                var breakers = Loop.Breakers;
+                if (breakers.Length < 1)
+                    return false;
+                foreach (var breaker in breakers)
+                {
+                    if (!Dominators.Dominates(block, breaker))
+                        return false;
+                }
+                return true;
+            }
 
             /// <summary>
             /// Registers the given value as not invariant and returns false.
@@ -91,6 +116,16 @@ namespace ILGPU.IR.Transformations
                     case SideEffectValue _:
                         // Values with side effects cannot be moved out of loops
                         return false;
+                    case BinaryArithmeticValue arithmetic
+                        when arithmetic.CanTrap &&
+                        Loop.Contains(arithmetic.BasicBlock) &&
+                        !RunsBeforeEveryExit(arithmetic.BasicBlock):
+                        // A moved value runs in the entry block, also when the loop
+                        // runs zero times or skips the value's block. An integer
+                        // division that can trap may only move if its block runs
+                        // anyway (`for (k < count) acc += num / den` with count == 0 and
+                        // den == 0 trapped on Wasm).
+                        return ReturnNotInvariant(arithmetic);
                     default:
                         // Values with associated dependencies can be moved out of loops
                         // if and only if all of its dependencies are loop invariant
@@ -178,10 +213,14 @@ namespace ILGPU.IR.Transformations
         /// <param name="builder">The parent method builder.</param>
         /// <param name="loop">The current loop.</param>
         /// <returns>True, if the transformation could be applied.</returns>
-        private static bool ApplyLICM(Method.Builder builder, Loop loop)
+        /// <param name="dominators">The dominators of the parent method.</param>
+        private static bool ApplyLICM(
+            Method.Builder builder,
+            Loop loop,
+            Dominators<Forwards> dominators)
         {
             // Initialize the current loop invariance cache
-            var invariance = new LoopInvariance(loop);
+            var invariance = new LoopInvariance(loop, dominators);
 
             // Ensure that all blocks are in the correct order
             BasicBlockCollection<ReversePostOrder, Forwards> blocks =
@@ -228,6 +267,7 @@ namespace ILGPU.IR.Transformations
         {
             var cfg = builder.SourceBlocks.CreateCFG();
             var loops = cfg.CreateLoops();
+            var dominators = cfg.CreateDominators();
 
             // We change the control-flow structure during the transformation but
             // need to get information about previous predecessors and successors
@@ -238,7 +278,7 @@ namespace ILGPU.IR.Transformations
             {
                 if (loop.Entries.Length > 1)
                     return;
-                applied |= ApplyLICM(builder, loop);
+                applied |= ApplyLICM(builder, loop, dominators);
             });
             return applied;
         }

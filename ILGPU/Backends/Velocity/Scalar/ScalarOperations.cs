@@ -1635,6 +1635,31 @@ namespace ILGPU.Backends.Velocity.Scalar
 
         #endregion
 
+        /// <summary>
+        /// The divisor of a lane of an integer division or remainder, one where it would throw: a zero divisor, or -1 with a MinValue dividend. A warp
+        /// executes ALL of its lanes, also the ones whose result is never used (the tail of the last warp, lanes switched off by divergent control flow),
+        /// and one throwing lane stops the whole warp. MinValue / 1 = MinValue and MinValue % 1 = 0 are the two's complement results of MinValue / -1; an
+        /// active lane dividing by zero is undefined on every GPU backend.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static int SafeDivisor(int left, int right) =>
+            right == 0 || right == -1 && left == int.MinValue ? 1 : right;
+
+        /// <summary>The 64-bit form of <see cref="SafeDivisor(int, int)"/>.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static long SafeDivisor(long left, long right) =>
+            right == 0 || right == -1 && left == long.MinValue ? 1 : right;
+
+        /// <summary>The unsigned form of <see cref="SafeDivisor(int, int)"/>.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static uint SafeDivisor(uint left, uint right) =>
+            right == 0 ? 1 : right;
+
+        /// <summary>The unsigned 64-bit form of <see cref="SafeDivisor(int, int)"/>.</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static ulong SafeDivisor(ulong left, ulong right) =>
+            right == 0 ? 1 : right;
+
         #region Binary Operations
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
@@ -1898,8 +1923,8 @@ namespace ILGPU.Backends.Velocity.Scalar
             var right = CastIToI32(second);
             Unsafe.SkipInit(out (int, int) result);
 
-            result.Item1 = left.Item1 / right.Item1;
-            result.Item2 = left.Item2 / right.Item2;
+            result.Item1 = left.Item1 / SafeDivisor(left.Item1, right.Item1);
+            result.Item2 = left.Item2 / SafeDivisor(left.Item2, right.Item2);
             return CastIToI32(result);
         }
 
@@ -1912,8 +1937,8 @@ namespace ILGPU.Backends.Velocity.Scalar
             var right = CastIToU32(second);
             Unsafe.SkipInit(out (uint, uint) result);
 
-            result.Item1 = left.Item1 / right.Item1;
-            result.Item2 = left.Item2 / right.Item2;
+            result.Item1 = left.Item1 / SafeDivisor(left.Item1, right.Item1);
+            result.Item2 = left.Item2 / SafeDivisor(left.Item2, right.Item2);
             return CastUToI32(result);
         }
 
@@ -1940,8 +1965,8 @@ namespace ILGPU.Backends.Velocity.Scalar
             var right = CastIToI64(second);
             Unsafe.SkipInit(out (long, long) result);
 
-            result.Item1 = left.Item1 / right.Item1;
-            result.Item2 = left.Item2 / right.Item2;
+            result.Item1 = left.Item1 / SafeDivisor(left.Item1, right.Item1);
+            result.Item2 = left.Item2 / SafeDivisor(left.Item2, right.Item2);
             return CastIToI64(result);
         }
 
@@ -1954,8 +1979,8 @@ namespace ILGPU.Backends.Velocity.Scalar
             var right = CastIToU64(second);
             Unsafe.SkipInit(out (ulong, ulong) result);
 
-            result.Item1 = left.Item1 / right.Item1;
-            result.Item2 = left.Item2 / right.Item2;
+            result.Item1 = left.Item1 / SafeDivisor(left.Item1, right.Item1);
+            result.Item2 = left.Item2 / SafeDivisor(left.Item2, right.Item2);
             return CastUToI64(result);
         }
 
@@ -1982,8 +2007,8 @@ namespace ILGPU.Backends.Velocity.Scalar
             var right = CastIToI32(second);
             Unsafe.SkipInit(out (int, int) result);
 
-            result.Item1 = left.Item1 % right.Item1;
-            result.Item2 = left.Item2 % right.Item2;
+            result.Item1 = left.Item1 % SafeDivisor(left.Item1, right.Item1);
+            result.Item2 = left.Item2 % SafeDivisor(left.Item2, right.Item2);
             return CastIToI32(result);
         }
 
@@ -1996,8 +2021,8 @@ namespace ILGPU.Backends.Velocity.Scalar
             var right = CastIToU32(second);
             Unsafe.SkipInit(out (uint, uint) result);
 
-            result.Item1 = left.Item1 % right.Item1;
-            result.Item2 = left.Item2 % right.Item2;
+            result.Item1 = left.Item1 % SafeDivisor(left.Item1, right.Item1);
+            result.Item2 = left.Item2 % SafeDivisor(left.Item2, right.Item2);
             return CastUToI32(result);
         }
 
@@ -2024,8 +2049,8 @@ namespace ILGPU.Backends.Velocity.Scalar
             var right = CastIToI64(second);
             Unsafe.SkipInit(out (long, long) result);
 
-            result.Item1 = left.Item1 % right.Item1;
-            result.Item2 = left.Item2 % right.Item2;
+            result.Item1 = left.Item1 % SafeDivisor(left.Item1, right.Item1);
+            result.Item2 = left.Item2 % SafeDivisor(left.Item2, right.Item2);
             return CastIToI64(result);
         }
 
@@ -2038,8 +2063,8 @@ namespace ILGPU.Backends.Velocity.Scalar
             var right = CastIToU64(second);
             Unsafe.SkipInit(out (ulong, ulong) result);
 
-            result.Item1 = left.Item1 % right.Item1;
-            result.Item2 = left.Item2 % right.Item2;
+            result.Item1 = left.Item1 % SafeDivisor(left.Item1, right.Item1);
+            result.Item2 = left.Item2 % SafeDivisor(left.Item2, right.Item2);
             return CastUToI64(result);
         }
 

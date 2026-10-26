@@ -4153,7 +4153,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         // Other
         /// <summary>
-        /// Emits a select: WGSL <c>select(falseValue, trueValue, cond)</c>, or an if/else when either operand is a load.
+        /// Emits a select: WGSL <c>select(falseValue, trueValue, cond)</c>. Both operands are values computed before the
+        /// select, so a select and an if/else evaluate the same things.
         /// </summary>
         /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(Predicate value)
@@ -4161,26 +4162,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var target = Load(value);
             var cond = Load(value.Condition);
             Declare(target);
-
-            bool trueHasLoad = value.TrueValue is global::ILGPU.IR.Values.Load;
-            bool falseHasLoad = value.FalseValue is global::ILGPU.IR.Values.Load;
-
-            if (trueHasLoad || falseHasLoad)
-            {
-                var trueVal = Load(value.TrueValue);
-                var falseVal = Load(value.FalseValue);
-                AppendLine($"if ({cond}) {{");
-                AppendLine($"    {target} = {trueVal};");
-                AppendLine($"}} else {{");
-                AppendLine($"    {target} = {falseVal};");
-                AppendLine($"}}");
-            }
-            else
-            {
-                var trueVal = Load(value.TrueValue);
-                var falseVal = Load(value.FalseValue);
-                AppendLine($"{target} = select({falseVal}, {trueVal}, {cond});");
-            }
+            var trueVal = Load(value.TrueValue);
+            var falseVal = Load(value.FalseValue);
+            AppendLine($"{target} = select({falseVal}, {trueVal}, {cond});");
         }
 
         /// <summary>Base implementation emits a placeholder 0 for the dynamic shared memory length.</summary>

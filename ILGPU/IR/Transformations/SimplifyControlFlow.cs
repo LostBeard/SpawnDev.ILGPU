@@ -56,22 +56,6 @@ namespace ILGPU.IR.Transformations
                 if (nextBlock.Predecessors.Length > 1 || visited.Contains(nextBlock))
                     break;
 
-                // Do NOT merge across barrier boundaries. If the root block contains
-                // a barrier (Group.Barrier), merging the successor allows later
-                // optimization passes to reorder loads across the barrier, causing
-                // shared memory visibility bugs in multi-worker dispatch.
-                bool hasBarrier = false;
-                foreach (var value in root)
-                {
-                    if (value is BarrierOperation)
-                    {
-                        hasBarrier = true;
-                        break;
-                    }
-                }
-                if (hasBarrier)
-                    break;
-
                 // Mark next block as seen
                 visited.Add(nextBlock);
 
