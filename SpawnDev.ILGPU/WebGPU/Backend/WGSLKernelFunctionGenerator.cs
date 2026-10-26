@@ -912,7 +912,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // Solution: For grid-stride kernels (KernelParamOffset == 0), ALL struct params with view
                 // fields are body structs — grid-stride kernels never receive raw ArrayView2D/3D params.
                 // For stream kernels (KernelParamOffset > 0), use IsMultiDim to distinguish view wrappers.
-                IsMultiDim(param.ParameterType, out var earlyIsMultiDimInit, out _, out _, out _, out _);
+                IsMultiDim(param, out var earlyIsMultiDimInit, out _, out _, out _, out _);
                 if (param.ParameterType is global::ILGPU.IR.Types.StructureType bodyStructType
                     && IsBodyStruct(bodyStructType)
                     && (KernelParamOffset == 0 || !earlyIsMultiDimInit))
@@ -1022,7 +1022,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 else
                 {
                     // Non-body-struct param: track if it's a packed scalar
-                    IsMultiDim(param.ParameterType, out _, out var isView, out _, out _, out _);
+                    IsMultiDim(param, out _, out var isView, out _, out _, out _);
                     bool isStruct = param.ParameterType is global::ILGPU.IR.Types.StructureType && !isView;
                     bool isAtomic = _atomicParameters.Contains(param.Index);
                     bool ownBinding = isView || isStruct || isAtomic;
@@ -1050,13 +1050,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 bool emuF64 = Backend.EnableF64Emulation && wType == "emu_f64";
                 bool emuI64 = Backend.EnableI64Emulation && (wType == "emu_i64" || wType == "emu_u64");
 
-                IsMultiDim(param.ParameterType, out _, out var isView, out _, out _, out _);
+                IsMultiDim(param, out _, out var isView, out _, out _, out _);
                 bool isStruct = param.ParameterType is global::ILGPU.IR.Types.StructureType && !isView;
                 bool isAtomic = _atomicParameters.Contains(param.Index);
                 bool ownBinding = isView || isStruct || isAtomic;
 
                 // Body structs are handled separately (their view fields get bindings too)
-                IsMultiDim(param.ParameterType, out var isMultiDimCheck, out _, out _, out _, out _);
+                IsMultiDim(param, out var isMultiDimCheck, out _, out _, out _, out _);
                 bool isBodyStruct = param.ParameterType is global::ILGPU.IR.Types.StructureType bsType2
                     && IsBodyStruct(bsType2)
                     && (KernelParamOffset == 0 || !isMultiDimCheck);
@@ -1169,7 +1169,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             foreach (var param in Method.Parameters)
             {
                 if (param.Index < paramOffset) continue;
-                IsMultiDim(param.ParameterType, out var isMultiDim, out var isView, out _, out var is2D, out var is3D);
+                IsMultiDim(param, out var isMultiDim, out var isView, out _, out var is2D, out var is3D);
                 bool isStruct = param.ParameterType is global::ILGPU.IR.Types.StructureType && !isView;
                 bool isAtomic = _atomicParameters.Contains(param.Index);
 
@@ -1325,7 +1325,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 if (param.Index < paramOffset) continue;
                 // Skip body-struct params (already handled above).
                 if (_bodyStructParams.ContainsKey(param.Index)) continue;
-                IsMultiDim(param.ParameterType, out var isMultiDim, out var isViewParam, out _, out var is2D, out var is3D);
+                IsMultiDim(param, out var isMultiDim, out var isViewParam, out _, out var is2D, out var is3D);
                 if (!isViewParam || is2D || is3D) continue;
                 if (_atomicParameters.Contains(param.Index)) continue;
                 if (_directParamOutputs.Contains(param.Index)) continue;
@@ -2054,7 +2054,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // Solution: For grid-stride kernels (KernelParamOffset == 0), ALL struct params with
                 // view fields are body structs — grid-stride kernels never receive raw view params.
                 // For stream kernels (KernelParamOffset > 0), use IsMultiDim to exclude view wrappers.
-                IsMultiDim(param.ParameterType, out var earlyIsMultiDim, out var earlyIsView, out var earlyIs1D, out var earlyIs2D, out var earlyIs3D);
+                IsMultiDim(param, out var earlyIsMultiDim, out var earlyIsView, out var earlyIs1D, out var earlyIs2D, out var earlyIs3D);
                 if (param.ParameterType is global::ILGPU.IR.Types.StructureType earlyBodyStructType
                     && IsBodyStruct(earlyBodyStructType)
                     && (KernelParamOffset == 0 || !earlyIsMultiDim))
@@ -2363,7 +2363,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
 
                 // Determine if this is a view, multidim view, struct, or primitive scalar
-                IsMultiDim(param.ParameterType, out var isMultiDim, out var isView, out var is1DView, out var is2DView, out var is3DView);
+                IsMultiDim(param, out var isMultiDim, out var isView, out var is1DView, out var is2DView, out var is3DView);
 
                 bool isStruct = param.ParameterType is global::ILGPU.IR.Types.StructureType && !isView;
                 bool isAtomic = _atomicParameters.Contains(param.Index);
@@ -4968,7 +4968,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                 // Pre-scan sub-word element types so SetupParameterBindings and
                 // GenerateHeader can both detect them before body generation runs.
-                IsMultiDim(param.ParameterType, out _, out var isView, out _, out _, out _);
+                IsMultiDim(param, out _, out var isView, out _, out _, out _);
                 if (isView && elementType is PrimitiveType preScanPt)
                 {
                     switch (preScanPt.BasicValueType)
@@ -5172,6 +5172,31 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+        /// <summary>
+        /// <see cref="IsMultiDim(TypeNode, out bool, out bool, out bool, out bool, out bool)"/> for a kernel
+        /// parameter, decided by its .NET type first, the way the dispatcher binds it: a value type that is not an
+        /// <see cref="IArrayView"/> is a body struct (the dispatcher flattens it into its fields), never a view.
+        /// </summary>
+        /// <remarks>
+        /// The structural rule alone reads a user struct with ONE view by its field count: `{ ArrayView&lt;byte&gt;
+        /// Bytes; int A, B, C, D, E; }` flattens to 6 fields and looked like an ArrayView3D, so the layout got a
+        /// stride binding the dispatcher never builds ("layout expects 5 binding(s), but only 4 entries were
+        /// built", 2026-10-25, SpawnDev.Codecs SilkShellCoderTestKernel).
+        /// </remarks>
+        void IsMultiDim(global::ILGPU.IR.Values.Parameter param, out bool isMultiDim, out bool isView, out bool is1DView, out bool is2DView, out bool is3DView)
+        {
+            int clrIndex = param.Index - EntryPoint.KernelIndexParameterOffset;
+            if (param.ParameterType is global::ILGPU.IR.Types.StructureType
+                && clrIndex >= 0 && clrIndex < EntryPoint.Parameters.Count
+                && EntryPoint.Parameters[clrIndex] is Type clrType
+                && clrType.IsValueType && !typeof(IArrayView).IsAssignableFrom(clrType))
+            {
+                isMultiDim = isView = is1DView = is2DView = is3DView = false;
+                return;
+            }
+            IsMultiDim(param.ParameterType, out isMultiDim, out isView, out is1DView, out is2DView, out is3DView);
+        }
+
         void IsMultiDim(TypeNode ParameterType, out bool isMultiDim, out bool isView, out bool is1DView, out bool is2DView, out bool is3DView)
         {
             is1DView = false;
@@ -5293,7 +5318,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     continue;
                 }
 
-                IsMultiDim(param.ParameterType, out var isMultiDim, out var isView, out var is1DView, out var is2DView, out var is3DView);
+                IsMultiDim(param, out var isMultiDim, out var isView, out var is1DView, out var is2DView, out var is3DView);
                 bool isStruct = param.ParameterType is global::ILGPU.IR.Types.StructureType && !isView;
                 bool isAtomic = _atomicParameters.Contains(param.Index);
 
@@ -5321,7 +5346,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 if (param.Index < paramOffset) continue;
                 var variable = Allocate(param);
 
-                IsMultiDim(param.ParameterType, out var isMultiDim, out var isView, out var is1DView, out var is2DView, out var is3DView);
+                IsMultiDim(param, out var isMultiDim, out var isView, out var is1DView, out var is2DView, out var is3DView);
 
                 // --- BODY STRUCT: create individual field variables ---
                 if (_bodyStructParams.TryGetValue(param.Index, out var fieldInfos))
@@ -7699,7 +7724,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 int paramOffset = KernelParamOffset;
                 if (param.Index >= paramOffset)
                 {
-                    IsMultiDim(param.ParameterType, out var isMultiDim, out var isView, out var is1DView, out var is2DView, out var is3DView);
+                    IsMultiDim(param, out var isMultiDim, out var isView, out var is1DView, out var is2DView, out var is3DView);
 
                     if (isView)
                     {
@@ -9328,6 +9353,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             exitInfo.SentinelLine = new string(' ', IndentLevel * 4) + exitSentinel + Environment.NewLine;
             exitInfo.NormalExit = loopNode.Exits.Length > 0 ? loopNode.Exits[0] : null;
             _loopExitInfo[loopNode] = exitInfo;
+            int exitSentinelPos = Builder.Length;
             AppendLine(exitSentinel);
             AppendLine("loop {");
             PushIndent();
@@ -9589,11 +9615,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // break (so the barrier stays in uniform control flow); a barrier-free loop reverts to its
             // NATURAL thread-dependent break (fixes the GEMV K-loop conflation). The unconditionally
             // emitted synthetic counter/let are harmless (written-but-unread) when the natural break wins.
+            // These patches scan only the text from this loop's start (no earlier text changes while a loop body is
+            // emitted) and never copy the body into a string: replacing in the whole builder and copying each loop's
+            // body made WGSL generation quadratic - 9.6 GB allocated for a 9 M-character kernel, and an
+            // OutOfMemoryException in the browser (2026-10-25, SpawnDev.Codecs VP8/VP9 entropy and transcode kernels).
             if (_ufBreakSentinel != null)
             {
-                string _ufBody = Builder.ToString(_ufBodyStartPos, Builder.Length - _ufBodyStartPos);
-                bool _ufLoopHasBarrier = _ufBody.Contains("workgroupBarrier(", StringComparison.Ordinal)
-                    || _ufBody.Contains("storageBarrier(", StringComparison.Ordinal);
+                bool _ufLoopHasBarrier = BuilderContainsFrom(_ufBodyStartPos, "workgroupBarrier(")
+                    || BuilderContainsFrom(_ufBodyStartPos, "storageBarrier(");
                 if (_ufPreSentinelLine != null)
                 {
                     // No thread-counter replacement exists and the break depends on a memory load or shuffle, which the
@@ -9603,23 +9632,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (_ufLoopHasBarrier)
                     {
                         string indent = new string(' ', _ufPreSentinelLine.Length - _ufPreSentinelLine.TrimStart(' ').Length);
-                        Builder.Replace(_ufPreSentinelLine,
+                        ReplaceFrom(_ufBodyStartPos, _ufPreSentinelLine,
                             indent + $"if (local_index == 0u) {{ _uf_break_flag = select(0u, 1u, {_ufNaturalBreak}); }}" + Environment.NewLine);
-                        Builder.Replace(_ufBreakSentinel, "workgroupUniformLoad(&_uf_break_flag) != 0u");
+                        ReplaceFrom(_ufBodyStartPos, _ufBreakSentinel, "workgroupUniformLoad(&_uf_break_flag) != 0u");
                     }
                     else
                     {
-                        Builder.Replace(_ufPreSentinelLine, "");
-                        Builder.Replace(_ufBreakSentinel, _ufNaturalBreak);
+                        ReplaceFrom(_ufBodyStartPos, _ufPreSentinelLine, "");
+                        ReplaceFrom(_ufBodyStartPos, _ufBreakSentinel, _ufNaturalBreak);
                     }
                 }
                 else
-                    Builder.Replace(_ufBreakSentinel, _ufLoopHasBarrier ? _ufUniformBreak : _ufNaturalBreak);
+                    ReplaceFrom(_ufBodyStartPos, _ufBreakSentinel, _ufLoopHasBarrier ? _ufUniformBreak : _ufNaturalBreak);
             }
 
             // Divergent exits: declare the flag in the scope enclosing the loop (the post-loop dispatch reads it);
             // otherwise drop the sentinel line so loops without them emit exactly as before.
-            Builder.Replace(exitInfo.SentinelLine, exitInfo.Divergent.Count > 0
+            ReplaceFrom(exitSentinelPos, exitInfo.SentinelLine, exitInfo.Divergent.Count > 0
                 ? new string(' ', exitInfo.SentinelLine.Length - exitSentinel.Length - Environment.NewLine.Length)
                     + $"var {exitInfo.Flag} : i32 = 0;" + Environment.NewLine
                 : "");
@@ -9635,6 +9664,57 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// the sentinel for the condition. <c>GenerateLoopConstruct</c> resolves both once the body shows whether the
         /// loop contains a barrier.
         /// </summary>
+        /// <summary>
+        /// Replaces <paramref name="sentinel"/> with <paramref name="replacement"/> in the text from
+        /// <paramref name="fromPos"/> on, falling back to the whole builder if it is not there (the replacement
+        /// and the sentinel always differ in length, so an unchanged length means nothing was replaced).
+        /// </summary>
+        private void ReplaceFrom(int fromPos, string sentinel, string replacement)
+        {
+            if (fromPos > Builder.Length) fromPos = Builder.Length;
+            int lengthBefore = Builder.Length;
+            Builder.Replace(sentinel, replacement, fromPos, Builder.Length - fromPos);
+            if (Builder.Length == lengthBefore && sentinel.Length != replacement.Length)
+                Builder.Replace(sentinel, replacement);
+        }
+
+        /// <summary>
+        /// True when the text from <paramref name="fromPos"/> on contains <paramref name="needle"/>, scanned chunk
+        /// by chunk without copying the range into a string.
+        /// </summary>
+        private bool BuilderContainsFrom(int fromPos, string needle)
+        {
+            int keep = needle.Length - 1;
+            string carry = "";
+            int pos = 0;
+            foreach (var chunk in Builder.GetChunks())
+            {
+                var span = chunk.Span;
+                int chunkStart = pos;
+                pos += span.Length;
+                if (pos <= fromPos) continue;
+                var part = span.Slice(Math.Max(0, fromPos - chunkStart));
+                // A match that straddles the previous chunk and this one
+                if (carry.Length > 0)
+                {
+                    string joined = string.Concat(carry.AsSpan(), part.Slice(0, Math.Min(part.Length, keep)));
+                    if (joined.Contains(needle, StringComparison.Ordinal)) return true;
+                }
+                if (part.IndexOf(needle.AsSpan(), StringComparison.Ordinal) >= 0) return true;
+                // Keep the last needle.Length - 1 characters for the next chunk
+                if (part.Length >= keep)
+                {
+                    carry = part.Slice(part.Length - keep).ToString();
+                }
+                else
+                {
+                    string tail = carry + part.ToString();
+                    carry = tail.Length > keep ? tail.Substring(tail.Length - keep) : tail;
+                }
+            }
+            return false;
+        }
+
         private string BeginNonUniformBreak(out string breakSentinel, out string preSentinelLine)
         {
             string id = (_ufBreakSentinelCounter++).ToString();

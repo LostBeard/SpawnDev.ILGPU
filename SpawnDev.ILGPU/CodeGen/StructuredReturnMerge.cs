@@ -25,7 +25,53 @@ namespace SpawnDev.ILGPU.CodeGen;
 /// </remarks>
 public sealed class StructuredReturnMerge
 {
-    readonly Dictionary<BasicBlock, HashSet<BasicBlock>> _reachable = new();
+    // Reachability per block, cached as a bit set over dense block indices (assigned here as blocks are first seen).
+    // It was a HashSet<BasicBlock> per block: N sets of up to N blocks each, held for the whole function - 7.4 GB
+    // allocated for the ~17,000 blocks of SpawnDev.Codecs' Vp8EntropyStepKernel, and the browser ran out of memory
+    // (2026-10-25). Order-sensitive callers walk the blocks again (ReachableInclusiveInOrder): same order as before.
+    readonly Dictionary<BasicBlock, BlockBits> _reachable = new();
+    readonly Dictionary<BasicBlock, int> _index = new();
+
+    sealed class BlockBits
+    {
+        public ulong[] Words = System.Array.Empty<ulong>();
+        public int Count;
+
+        /// <summary>Adds the index; false when it was already there.</summary>
+        public bool Add(int index)
+        {
+            int word = index >> 6;
+            if (word >= Words.Length) System.Array.Resize(ref Words, System.Math.Max(word + 1, Words.Length * 2));
+            ulong bit = 1UL << (index & 63);
+            if ((Words[word] & bit) != 0) return false;
+            Words[word] |= bit;
+            Count++;
+            return true;
+        }
+
+        public bool Contains(int index)
+        {
+            int word = index >> 6;
+            return word < Words.Length && (Words[word] & (1UL << (index & 63))) != 0;
+        }
+    }
+
+    int IndexOf(BasicBlock block)
+    {
+        if (!_index.TryGetValue(block, out int index))
+        {
+            index = _index.Count;
+            _index.Add(block, index);
+        }
+        return index;
+    }
+
+    bool InReachable(BasicBlock from, BasicBlock block)
+    {
+        // Computing the set first indexes every block it holds; a block still without an index is not in it.
+        var reachable = Reachable(from);
+        return _index.TryGetValue(block, out int index) && reachable.Contains(index);
+    }
 
     /// <summary>
     /// The return-aware merge of the arms <paramref name="a"/> and <paramref name="b"/>, not past
@@ -36,21 +82,24 @@ public sealed class StructuredReturnMerge
     {
         // Reachable from EITHER arm: an arm whose every path returns never reaches the merge at all
         // (`if (fits) { write } else { undo; return; }` merges at the write arm's own block).
-        var common = new HashSet<BasicBlock>(ReachableInclusive(a));
-        common.UnionWith(ReachableInclusive(b));
+        var common = new List<BasicBlock>();
+        var inCommon = new HashSet<BasicBlock>();
+        foreach (var m in ReachableInclusiveInOrder(a))
+            if (inCommon.Add(m)) common.Add(m);
+        foreach (var m in ReachableInclusiveInOrder(b))
+            if (inCommon.Add(m)) common.Add(m);
         // A return path is a dead end, never a merge.
-        common.RemoveWhere(m => IsReturn(m) || IsCodeFreeReturnPath(m));
+        common.RemoveAll(m => IsReturn(m) || IsCodeFreeReturnPath(m));
         if (stop != null)
         {
             // Nothing past the enclosing region's end: its caller owns that code.
-            var pastStop = Reachable(stop);
-            common.RemoveWhere(m => m != stop && pastStop.Contains(m));
+            common.RemoveAll(m => m != stop && InReachable(stop, m));
         }
         if (common.Count == 0) return null;
 
         // The earliest merge reaches every later one, so it has the largest reachable set: test in that order and
         // stop at the first block that really is a merge.
-        var candidates = new List<BasicBlock>(common);
+        var candidates = common;
         candidates.Sort((x, y) => Reachable(y).Count.CompareTo(Reachable(x).Count));
         foreach (var m in candidates)
             if (AllPathsMeetOrReturn(a, m, stop) && AllPathsMeetOrReturn(b, m, stop))
@@ -64,7 +113,6 @@ public sealed class StructuredReturnMerge
     bool AllPathsMeetOrReturn(BasicBlock start, BasicBlock merge, BasicBlock? stop)
     {
         if (start == merge) return true;
-        var afterMerge = Reachable(merge);
         var seen = new HashSet<BasicBlock> { start };
         var work = new Stack<BasicBlock>();
         work.Push(start);
@@ -77,7 +125,7 @@ public sealed class StructuredReturnMerge
             // emitting it again in this arm is just a `return`. An exit block with real code (a kernel's final
             // Group.Barrier()) is where both arms genuinely meet - copying it into one arm duplicates the code and
             // puts a barrier in non-uniform control flow (WGSL rejects that: CrossGroupScanReuseDetector, 2026-10-02).
-            if (afterMerge.Contains(block) && !IsCodeFreeReturnPath(block)) return false;
+            if (InReachable(merge, block) && !IsCodeFreeReturnPath(block)) return false;
             foreach (var succ in block.Successors)
                 if (succ != merge && seen.Add(succ)) work.Push(succ);
         }
@@ -90,14 +138,14 @@ public sealed class StructuredReturnMerge
     /// reach its merge only returns: the emitters write it as a guard clause (<c>if (c) { ...; return; }</c>) and keep
     /// the other arm at the enclosing scope, because that arm dominates everything after the merge and its
     /// declarations (a local array, a let binding) must stay visible there.</summary>
-    public bool Reaches(BasicBlock from, BasicBlock to) => from == to || Reachable(from).Contains(to);
+    public bool Reaches(BasicBlock from, BasicBlock to) => from == to || InReachable(from, to);
 
     /// <summary>The blocks of a guard clause's returning arm: <paramref name="returningArm"/> and everything it reaches.
     /// None of them reaches the merge, so the region is a dead end and may be emitted again for another branch that
     /// enters it - the second test of <c>if (a || b) { ..; return; }</c> jumps into the SAME returning block the first
     /// test's guard already emitted. The emitters un-visit this region before each guard; skipping it as "visited" left
     /// that guard empty and the thread ran on past the return (PointerAlias_ViewStoredInTwoBranches, 2026-10-02).</summary>
-    public IEnumerable<BasicBlock> ReturningRegion(BasicBlock returningArm) => ReachableInclusive(returningArm);
+    public IEnumerable<BasicBlock> ReturningRegion(BasicBlock returningArm) => ReachableInclusiveInOrder(returningArm);
 
     /// <summary>True when <paramref name="block"/> is a bare return path: phi-only blocks joined by unconditional
     /// branches, ending in a return block with no code of its own. Emitting it again is just a <c>return</c>.</summary>
@@ -115,24 +163,45 @@ public sealed class StructuredReturnMerge
         return false;
     }
 
-    HashSet<BasicBlock> ReachableInclusive(BasicBlock start)
+    /// <summary><paramref name="start"/> and every block it reaches, in discovery order followed by
+    /// <paramref name="start"/> (unless it reaches itself) - the enumeration order of the former cached HashSet.</summary>
+    List<BasicBlock> ReachableInclusiveInOrder(BasicBlock start)
     {
-        var set = new HashSet<BasicBlock>(Reachable(start)) { start };
-        return set;
+        var order = ReachableInOrder(start, out var seen);
+        if (!seen.Contains(start)) order.Add(start);
+        return order;
     }
 
-    /// <summary>Blocks reachable from <paramref name="start"/> through at least one edge (cached per block).</summary>
-    HashSet<BasicBlock> Reachable(BasicBlock start)
+    /// <summary>Blocks reachable from <paramref name="start"/> through at least one edge, in discovery order.</summary>
+    static List<BasicBlock> ReachableInOrder(BasicBlock start, out HashSet<BasicBlock> seen)
     {
-        if (_reachable.TryGetValue(start, out var cached)) return cached;
-        var seen = new HashSet<BasicBlock>();
+        seen = new HashSet<BasicBlock>();
+        var order = new List<BasicBlock>();
         var work = new Stack<BasicBlock>();
         foreach (var succ in start.Successors)
-            if (seen.Add(succ)) work.Push(succ);
+            if (seen.Add(succ)) { order.Add(succ); work.Push(succ); }
         while (work.Count > 0)
             foreach (var succ in work.Pop().Successors)
-                if (seen.Add(succ)) work.Push(succ);
-        _reachable[start] = seen;
-        return seen;
+                if (seen.Add(succ)) { order.Add(succ); work.Push(succ); }
+        return order;
     }
+
+    /// <summary>Blocks reachable from <paramref name="start"/> through at least one edge (cached per block, as bits).</summary>
+    BlockBits Reachable(BasicBlock start)
+    {
+        if (_reachable.TryGetValue(start, out var cached)) return cached;
+        // The set itself is the visited set; the work stack is reused, so a miss allocates only the bits.
+        var bits = new BlockBits();
+        var work = _work;
+        work.Clear();
+        foreach (var succ in start.Successors)
+            if (bits.Add(IndexOf(succ))) work.Push(succ);
+        while (work.Count > 0)
+            foreach (var succ in work.Pop().Successors)
+                if (bits.Add(IndexOf(succ))) work.Push(succ);
+        _reachable[start] = bits;
+        return bits;
+    }
+
+    readonly Stack<BasicBlock> _work = new();
 }
