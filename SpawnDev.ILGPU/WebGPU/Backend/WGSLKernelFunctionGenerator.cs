@@ -4030,6 +4030,27 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
             }
 
+            // PHASE 5: single-assignment hoisted vars become lets at their assignment (Tint's module step costs vars x
+            // branches; see ConvertSingleAssignmentVarsToLet).
+            {
+                var lines = Builder.ToString(signatureInsertPosition, Builder.Length - signatureInsertPosition).Split('\n');
+                int converted = ConvertSingleAssignmentVarsToLet(lines);
+                if (converted > 0)
+                {
+                    Builder.Remove(signatureInsertPosition, Builder.Length - signatureInsertPosition);
+                    bool first = true;
+                    foreach (var l in lines)
+                    {
+                        if (l == null) continue;
+                        if (!first) Builder.Append('\n');
+                        Builder.Append(l);
+                        first = false;
+                    }
+                    if (WebGPUBackend.VerboseLogging)
+                        WebGPUBackend.Log($"[VarToLet] {converted} single-assignment vars became lets");
+                }
+            }
+
             PopIndent();
             Builder.AppendLine("}"); // End Function
 
@@ -4200,6 +4221,171 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     foreach (var word in lineWords[li]) linesMentioning[word]--;
             }
             return removedCount;
+        }
+
+        /// <summary>
+        /// PHASE 5 of <see cref="GenerateCode()"/>: turns every hoisted <c>var v_N : T;</c> that is assigned once per scope,
+        /// and read only after that assignment in the same block or a block inside it, into <c>let v_N : T = expr;</c> at
+        /// each assignment, and drops the declaration. Returns the number of names converted; dropped lines become null.
+        /// </summary>
+        /// <remarks>
+        /// Tint's module step (WGSL resolve + uniformity analysis) costs about (function-scope vars in scope) x (branches
+        /// and loops) in time AND memory, and nothing for a <c>let</c>. Hoisting every value to a function-scope var made
+        /// the big SpawnDev.Codecs kernels unloadable: MEASURED 2026-10-26 in Chrome 156, the GPU process of
+        /// Vp8KeyframeDecodeStepKernel (66k lines, 23k vars, 2.4k branches) grew 600 MB/s to 16 GB while creating the shader
+        /// module and was killed ("A valid external Instance reference no longer exists"); with the single-assignment vars
+        /// as lets (87% of them) the module step takes 2.9 s, and Av1EncodeFrameStepKernel's 17.8 s -> 0.8 s. Synthetic,
+        /// 4000 values / 2000 branches: hoisted vars 991 ms / 923 MB, lets 83 ms / 198 MB.
+        /// One IR block emitted in several sibling scopes assigns the same name once in each: every copy becomes a let of
+        /// its own. A name stays a var when one assignment's block contains another's (phi copies, a reassignment), a read
+        /// is not preceded by exactly one assignment whose block contains it (a read after a merge, a zero-initialized
+        /// read, a value carried from an earlier loop iteration, a read in a sibling scope), it is written through a
+        /// member, index or compound assignment, or its address is taken. The generator writes one statement per line; a
+        /// comment's text is not scanned.
+        /// </remarks>
+        private static int ConvertSingleAssignmentVarsToLet(string[] lines)
+        {
+            // innermost brace block of each line (the block a statement starting on that line belongs to)
+            var blockParent = new List<int> { -1 };
+            var blockOfLine = new int[lines.Length];
+            int current = 0;
+            var info = new Dictionary<string, LetCandidate>(StringComparer.Ordinal);
+            LetCandidate Get(string name)
+            {
+                if (!info.TryGetValue(name, out var c))
+                {
+                    c = new LetCandidate();
+                    info[name] = c;
+                }
+                return c;
+            }
+            for (int li = 0; li < lines.Length; li++)
+            {
+                blockOfLine[li] = current;
+                var line = lines[li];
+                if (line == null) continue;
+                int comment = line.IndexOf("//", StringComparison.Ordinal);
+                int end = comment >= 0 ? comment : line.Length;
+                var decl = s_varHoistPattern.Match(line);
+                string declared = null;
+                if (decl.Success)
+                {
+                    declared = decl.Groups[2].Value;
+                    var c = Get(declared);
+                    c.Declarations++;
+                    c.DeclLine = li;
+                    c.DeclType = decl.Groups[3].Value.Trim();
+                    // an initializer naming another value is a real computation, not the hoisted zero
+                    if (decl.Groups[4].Success && decl.Groups[4].Value.Contains("v_", StringComparison.Ordinal))
+                        c.Disqualified = true;
+                }
+                int i = 0;
+                while (i < end)
+                {
+                    char ch = line[i];
+                    if (ch == '{') { blockParent.Add(current); current = blockParent.Count - 1; i++; continue; }
+                    if (ch == '}') { if (current > 0) current = blockParent[current]; i++; continue; }
+                    if (!IsWordChar(ch)) { i++; continue; }
+                    int start = i;
+                    while (i < end && IsWordChar(line[i])) i++;
+                    if (i - start < 3 || line[start] != 'v' || line[start + 1] != '_' || !char.IsDigit(line[start + 2]))
+                        continue;
+                    if (start > 0 && IsWordChar(line[start - 1]))
+                        continue;
+                    var name = line.Substring(start, i - start);
+                    if (name == declared) continue; // the declaration itself
+                    var cand = Get(name);
+                    // what precedes / follows the token (spaces skipped)
+                    int before = start - 1;
+                    while (before >= 0 && line[before] == ' ') before--;
+                    bool statementStart = before < 0 || line[before] == '{' || line[before] == ';';
+                    int after = i;
+                    while (after < end && line[after] == ' ') after++;
+                    char next = after < end ? line[after] : '\0';
+                    char next2 = after + 1 < end ? line[after + 1] : '\0';
+                    // address-of: `&v_N` with the `&` against the name and no operand before it (`a & v_N` is a bitwise and)
+                    if (start > 0 && line[start - 1] == '&' &&
+                        (start < 2 || !(IsWordChar(line[start - 2]) || line[start - 2] == ')' || line[start - 2] == ']')))
+                    {
+                        cand.Disqualified = true;
+                        continue;
+                    }
+                    if (statementStart && (next == '.' || next == '['))
+                    {
+                        cand.Disqualified = true; // member / element write (or a statement we do not model)
+                        continue;
+                    }
+                    if ((next == '+' || next == '-') && next2 == next) { cand.Disqualified = true; continue; }
+                    if (next2 == '=' && "+-*/%&|^".IndexOf(next) >= 0) { cand.Disqualified = true; continue; }
+                    char next3 = after + 2 < end ? line[after + 2] : '\0';
+                    if ((next == '<' || next == '>') && next2 == next && next3 == '=') { cand.Disqualified = true; continue; } // <<= >>=
+                    if (statementStart && next == '=' && next2 != '=')
+                    {
+                        cand.AssignLines ??= new List<int>();
+                        cand.AssignLines.Add(li);
+                        // only `v_N = expr;` alone on its line can become `let v_N : T = expr;`
+                        if (before >= 0) cand.Disqualified = true;
+                        continue;
+                    }
+                    cand.Uses ??= new List<int>();
+                    cand.Uses.Add(li);
+                }
+            }
+
+            // is block `inner` the block `outer` or nested inside it
+            bool Within(int inner, int outer)
+            {
+                while (inner != outer && inner > 0) inner = blockParent[inner];
+                return inner == outer;
+            }
+            int converted = 0;
+            foreach (var kv in info)
+            {
+                var c = kv.Value;
+                var defs = c.AssignLines;
+                if (c.Disqualified || c.Declarations != 1 || defs == null || defs.Count > MaxLetCopies) continue;
+                // Several assignments are fine when each sits in its own scope - the same IR block emitted in sibling
+                // scopes (12,941 of Vp8EntropyStepKernel's 16k remaining vars) - and is then a let of its own: no
+                // assignment's block may contain another's (that would be a reassignment), ...
+                bool ok = true;
+                for (int i = 0; i < defs.Count && ok; i++)
+                    for (int j = 0; j < defs.Count && ok; j++)
+                        if (i != j && Within(blockOfLine[defs[j]], blockOfLine[defs[i]])) ok = false;
+                // ... and every read comes after exactly one assignment whose block contains it (a read after a merge
+                // of several assignments, like a phi, keeps the var)
+                if (ok && c.Uses != null)
+                {
+                    foreach (int use in c.Uses)
+                    {
+                        int covering = 0;
+                        foreach (int def in defs)
+                            if (def < use && Within(blockOfLine[use], blockOfLine[def])) covering++;
+                        if (covering != 1) { ok = false; break; }
+                    }
+                }
+                if (!ok) continue;
+                foreach (int def in defs)
+                {
+                    var line = lines[def];
+                    int nameAt = line.IndexOf(kv.Key, StringComparison.Ordinal);
+                    int eq = line.IndexOf('=', nameAt + kv.Key.Length);
+                    lines[def] = line.Substring(0, nameAt) + "let " + kv.Key + " : " + c.DeclType + " =" + line.Substring(eq + 1);
+                }
+                lines[c.DeclLine] = null;
+                converted++;
+            }
+            return converted;
+        }
+
+        /// <summary>The most sibling-scope copies of one value <see cref="ConvertSingleAssignmentVarsToLet"/> checks.</summary>
+        private const int MaxLetCopies = 16;
+
+        private sealed class LetCandidate
+        {
+            public int Declarations, DeclLine = -1;
+            public string DeclType;
+            public bool Disqualified;
+            public List<int> AssignLines, Uses;
         }
 
         /// <summary>The variable a "var v_N :" / "var v_N_suffix :" declaration line declares, else null.</summary>
