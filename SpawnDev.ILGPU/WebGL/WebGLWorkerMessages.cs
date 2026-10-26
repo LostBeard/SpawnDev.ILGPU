@@ -151,10 +151,10 @@ namespace SpawnDev.ILGPU.WebGL
         public int dispatchId { get; init; }
         /// <summary>Compiled program id (the worker caches programs by it).</summary>
         public int programId { get; init; }
-        /// <summary>GLSL source.</summary>
-        public string source { get; init; } = "";
-        /// <summary>Transform-feedback varying names.</summary>
-        public string[] varyingNames { get; init; } = System.Array.Empty<string>();
+        /// <summary>GLSL source; null after the program's first dispatch (the worker keeps it by <see cref="programId"/>).</summary>
+        public string? source { get; init; }
+        /// <summary>Transform-feedback varying names; null after the program's first dispatch, like <see cref="source"/>.</summary>
+        public string[]? varyingNames { get; init; }
         /// <summary>Vertices to draw (one per thread).</summary>
         public int totalVertices { get; init; }
         /// <summary>Launch extent X.</summary>

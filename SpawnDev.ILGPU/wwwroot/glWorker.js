@@ -2,6 +2,9 @@
 let gl = null;
 let canvas = null;
 const programCache = {};
+// programId -> the compile or link error of a program that failed. The accelerator sends a program's source and
+// varying names with its FIRST dispatch only, so a later dispatch of a failed program must repeat that error.
+const failedPrograms = {};
 
 // ---- GPU-resident buffer registry ----
 // Maps bufferId → { texture, width, height, glslType, byteSize, data: Uint8Array }
@@ -47,6 +50,17 @@ self.onmessage = function (e) {
             });
             canvas.addEventListener('webglcontextrestored', function () {
                 gl = canvas.getContext('webgl2');
+                // programs and the cached GL objects belonged to the lost context; the accelerator re-sends sources
+                for (const id in programCache) delete programCache[id];
+                for (const id in failedPrograms) delete failedPrograms[id];
+                for (const t in scatterPrograms) delete scatterPrograms[t];
+                scatterFBO = null;
+                cachedTFBuffer = null;
+                cachedTFBufferSize = 0;
+                cachedTFObject = null;
+                cachedDummyVBO = null;
+                cachedDummyVBOSize = 0;
+                cachedDummyVAO = null;
                 self.postMessage({ type: 'contextrestored' });
             });
             break;
@@ -374,11 +388,26 @@ function handleCopyBuffer(msg) {
 
 // ---- Shader Compilation ----
 
+// source / varyingNames are null after a program's first dispatch: the cached entry (or the cached error) answers.
 function getOrCompileProgram(programId, source, varyingNames) {
     const cached = programCache[programId];
-    if (cached && !cached.disposed && cached.source === source) {
+    if (cached && !cached.disposed && (source == null || cached.source === source)) {
         return cached;
     }
+    if (source == null) {
+        if (programId in failedPrograms) throw new Error(failedPrograms[programId]);
+        throw new Error('GL worker: program ' + programId + ' is not compiled and its source was not sent');
+    }
+    try {
+        return compileProgram(programId, source, varyingNames || []);
+    } catch (e) {
+        failedPrograms[programId] = e.message;
+        throw e;
+    }
+}
+
+function compileProgram(programId, source, varyingNames) {
+    const cached = programCache[programId];
     if (cached && !cached.disposed) {
         gl.deleteProgram(cached.program);
         gl.deleteShader(cached.vs);
@@ -423,7 +452,7 @@ function getOrCompileProgram(programId, source, varyingNames) {
         throw new Error('Program link error: ' + log);
     }
 
-    const entry = { program, vs, fs, uniformCache: {}, disposed: false, source };
+    const entry = { program, vs, fs, uniformCache: {}, disposed: false, source, varyingNames };
     programCache[programId] = entry;
     return entry;
 }
@@ -445,7 +474,7 @@ function dispatchKernel(msg) {
     while (gl.getError() !== 0) { }
 
     // ---- Step 1: Get or compile program ----
-    const cached = getOrCompileProgram(programId, source, varyingNames || []);
+    const cached = getOrCompileProgram(programId, source, varyingNames);
     gl.useProgram(cached.program);
 
     // ---- ANGLE f64 workaround: set u_one = 1.0 ----
@@ -581,7 +610,8 @@ function dispatchKernel(msg) {
     // ---- Step 4: Transform Feedback setup ----
     let tfBuffer = null;
     let transformFeedback = null;
-    const vNames = varyingNames || [];
+    // from the program cache: the message carries varying names with the program's first dispatch only
+    const vNames = cached.varyingNames || [];
 
     if (vNames.length > 0) {
         const tfFloatCount = totalVertices * vNames.length;

@@ -189,11 +189,26 @@ namespace SpawnDev.ILGPU.WebGL
         private WebGLAccelerator(Context context, Device device) : base(context, device) { }
 
         /// <summary>
+        /// The most transform-feedback output components a program may have on this device
+        /// (<c>MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS</c>; WebGL2 guarantees 64). Every output varying is one scalar
+        /// component.
+        /// </summary>
+        private int _maxTransformFeedbackComponents;
+
+        /// <summary>
+        /// Program ids whose GLSL source and varying names the GL worker has been sent. A program's source goes with its
+        /// first dispatch only; the worker keeps the program (or its compile error) by id. Cleared when the context is
+        /// restored, since the worker then drops its programs.
+        /// </summary>
+        private readonly HashSet<int> _programsSentToWorker = new();
+
+        /// <summary>
         /// Creates a new WebGL2 accelerator with a dedicated GL worker.
         /// </summary>
         public static WebGLAccelerator Create(Context context, WebGLILGPUDevice device, WebGLBackendOptions? options)
         {
             var accelerator = new WebGLAccelerator(context, device);
+            accelerator._maxTransformFeedbackComponents = device.NativeDevice.MaxTransformFeedbackInterleavedComponents;
             var canvas = device.NativeDevice.CreateOffscreenCanvas();
             accelerator.Canvas = canvas;
             accelerator.Backend = new WebGLBackend(context, options ?? WebGLBackendOptions.Default);
@@ -288,9 +303,31 @@ namespace SpawnDev.ILGPU.WebGL
 
         #region Kernel Management
 
+        /// <summary>
+        /// Refuses a kernel with more output varyings than the device's transform feedback can capture: the program
+        /// would fail to link on its first dispatch. Codecs 10-26: the serial Inflate step kernel had 158 (155 store
+        /// sites of one view), and its dispatch message exhausted the heap before the link error could be seen.
+        /// </summary>
+        private void ValidateTransformFeedback(WebGLCompiledKernel compiledKernel)
+        {
+            int components = compiledKernel.OutputVaryings.Count;
+            if (_maxTransformFeedbackComponents > 0 && components > _maxTransformFeedbackComponents)
+            {
+                var kernelName = compiledKernel.EntryPoint.MethodInfo?.Name ?? "glsl_kernel";
+                throw new UnsupportedKernelFeatureException(
+                    $"{components} transform feedback outputs in kernel '{kernelName}'",
+                    AcceleratorType.WebGL,
+                    $"This device captures at most {_maxTransformFeedbackComponents} output components per thread " +
+                    "(MAX_TRANSFORM_FEEDBACK_INTERLEAVED_COMPONENTS): every store site of an output view is one. A kernel " +
+                    "that writes many elements per thread needs scatter stores: declare " +
+                    "AcceleratorRequirements.RequiresScatterStores to select another backend.");
+            }
+        }
+
         /// <inheritdoc/>
         protected override WebGLKernel CreateKernel(WebGLCompiledKernel compiledKernel)
         {
+            ValidateTransformFeedback(compiledKernel);
             LastGeneratedGLSL = compiledKernel.GLSLSource;
             var kernelName = compiledKernel.EntryPoint.MethodInfo?.Name ?? "glsl_kernel";
             try { OnShaderCompiled?.Invoke(kernelName, compiledKernel.GLSLSource); } catch { }
@@ -303,6 +340,7 @@ namespace SpawnDev.ILGPU.WebGL
         /// <inheritdoc/>
         protected override WebGLKernel CreateKernel(WebGLCompiledKernel compiledKernel, MethodInfo launcher)
         {
+            ValidateTransformFeedback(compiledKernel);
             LastGeneratedGLSL = compiledKernel.GLSLSource;
             var kernelName = compiledKernel.EntryPoint.MethodInfo?.Name ?? "glsl_kernel";
             try { OnShaderCompiled?.Invoke(kernelName, compiledKernel.GLSLSource); } catch { }
@@ -698,9 +736,12 @@ namespace SpawnDev.ILGPU.WebGL
             // output (same bug class as the Wasm kernelId). Uses the compiled kernel's monotonic ProgramId.
             var programId = compiledKernel.ProgramId;
 
-            var varyingNames = compiledKernel.OutputVaryings
-                .Select(o => o.VaryingName)
-                .ToArray();
+            // The source (hundreds of KB for a big kernel) and the varying names go with the program's first dispatch
+            // only; the worker keeps them by programId. Sending them every launch marshalled the whole GLSL per dispatch.
+            bool sendProgram = webGlAccel._programsSentToWorker.Add(programId);
+            var varyingNames = sendProgram
+                ? compiledKernel.OutputVaryings.Select(o => o.VaryingName).ToArray()
+                : null;
 
             // Assign unique dispatch ID for response correlation
             var dispatchId = Interlocked.Increment(ref webGlAccel._nextDispatchId);
@@ -710,7 +751,7 @@ namespace SpawnDev.ILGPU.WebGL
             {
                 dispatchId = dispatchId,
                 programId = programId,
-                source = compiledKernel.GLSLSource,
+                source = sendProgram ? compiledKernel.GLSLSource : null,
                 varyingNames = varyingNames,
                 totalVertices = totalVertices,
                 dimX = dimX,
@@ -769,6 +810,8 @@ namespace SpawnDev.ILGPU.WebGL
                 if (msgType == "contextrestored")
                 {
                     IsContextLost = false;
+                    // the worker dropped its programs (they belonged to the lost context): send sources again
+                    _programsSentToWorker.Clear();
                     if (VerboseLogging) Log("[WebGL] Context restored");
                     return;
                 }
