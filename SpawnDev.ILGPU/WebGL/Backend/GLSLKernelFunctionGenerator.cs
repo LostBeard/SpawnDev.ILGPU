@@ -655,6 +655,24 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         public override void GenerateCode()
         {
+            // -1. A VIEW chosen at run time (a select or phi of views: `c ? x.SubView(..) : x.SubView(..)`) has no GLSL
+            //     form here - a sub-view only exists inside the element-address chain that indexes it - and generated
+            //     GLSL that read undeclared variables ("'v_N' : undeclared identifier") or lost the store. Refuse it.
+            foreach (var block in Method.Blocks)
+            {
+                foreach (var entry in block)
+                {
+                    var value = entry.Value;
+                    if (value.Type is global::ILGPU.IR.Types.ViewType
+                        && (value is global::ILGPU.IR.Values.Predicate || value is global::ILGPU.IR.Values.PhiValue))
+                        throw new SpawnDev.ILGPU.UnsupportedKernelFeatureException(
+                            feature: $"a view chosen at run time (a select or phi of views) in kernel '{Method.Name}'",
+                            backend: global::ILGPU.Runtime.AcceleratorType.WebGL,
+                            remediation: "Index each view in its own branch, or pass the offset as an int and index one view " +
+                                "with it. WebGPU, CUDA, OpenCL, Wasm and the CPU backends run it.");
+                }
+            }
+
             // 0. Scan kernel parameters for body structs (struct params with multiple
             //    ArrayView fields). Must run BEFORE the analyzers so AnalyzeOutputBuffers
             //    and AnalyzeInputBuffers can route through GetField for body-struct view

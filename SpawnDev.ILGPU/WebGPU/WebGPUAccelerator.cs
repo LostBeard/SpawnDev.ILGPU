@@ -2508,8 +2508,9 @@ namespace SpawnDev.ILGPU.WebGPU
                         }
                         else throw new NotSupportedException($"Unsupported non-packed non-view argument type: {arg?.GetType()}");
 
-                        // Struct scalars are declared read_write: the read_write arena (see WebGPUBackend.BatchScalarArena).
-                        if (batchMode && batchStream.TryArenaSlot(true, bytes, bytes.Length, out var structSlot))
+                        // Struct scalars are declared `read` (Tint treats read_write loads as non-uniform): the read arena
+                        // (see WebGPUBackend.BatchScalarArena), shared with the packed scalars, which are `read` too.
+                        if (batchMode && batchStream.TryArenaSlot(false, bytes, bytes.Length, out var structSlot))
                             resource = structSlot;
                         else
                         {

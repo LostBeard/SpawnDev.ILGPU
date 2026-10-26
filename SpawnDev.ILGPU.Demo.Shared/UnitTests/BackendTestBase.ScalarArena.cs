@@ -8,8 +8,8 @@ using SpawnDev.ILGPU.WebGPU.Backend;
 namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 {
     // Scalar arenas + bind-group reuse (WebGPU record batching): WebGPUBackend.BatchScalarArena puts every per-dispatch
-    // scalar binding of a batch into 256-byte slots of two arena buffers (read: packed scalars + view strides;
-    // read_write: struct scalars), uploaded in one writeBuffer per arena; WebGPUBackend.BatchBindGroupReuse caches the
+    // scalar binding of a batch into 256-byte slots of an arena buffer (the read arena: packed scalars, view strides and,
+    // since 5.4.7, struct scalars, which are bound `read`), uploaded in one writeBuffer per arena; WebGPUBackend.BatchBindGroupReuse caches the
     // JS bind groups. These tests dispatch far more kernels than an arena starts with, WITHOUT flushing, so a batch
     // overflows and regrows mid-run, and then run the same sequence again with NEW values, which must hit the bind-group
     // cache and still read the new scalars (a stale slot or a wrong slot offset shows up as a wrong value). They run on
@@ -45,7 +45,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             // render-to-texture kernels cannot do.)
             if (accelerator is not WebGPUAccelerator) throw new UnsupportedTestException("WebGPU record batching only");
             const int Packed = 1500;    // > the read arena's first capacity (512 slots): overflows + regrows mid-batch
-            const int Structs = 300;    // > the read_write arena's first capacity (64 slots)
+            const int Structs = 300;    // struct scalars share the read arena with the packed ones
             const int Rows = 600, Cols = 4;
             var packedK = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, int, int>(ScalarArena_PackedKernel);
             var structK = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ScalarArenaParams>(ScalarArena_StructKernel);
@@ -85,7 +85,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 var structs = await structOut.CopyToHostAsync<float>();
                 for (int i = 0; i < Structs; i++)
                     if (structs[i] != (i + bias) * 0.5f)
-                        throw new Exception($"pass {pass}: struct-scalar dispatch {i} wrote {structs[i]}, expected {(i + bias) * 0.5f} (wrong or stale read_write arena slot)");
+                        throw new Exception($"pass {pass}: struct-scalar dispatch {i} wrote {structs[i]}, expected {(i + bias) * 0.5f} (wrong or stale arena slot)");
                 var strided = await strideOut.View.BaseView.CopyToHostAsync<int>();
                 for (int r = 0; r < Rows; r++)
                     for (int c = 0; c < Cols; c++)
@@ -101,10 +101,11 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             if (webgpu && WebGPUBackend.EnableDispatchBatching && WebGPUBackend.BatchScalarArena)
             {
                 long readUsed = WebGPUBackend.ScalarArenaSlotsUsed[0] - readBefore, rwUsed = WebGPUBackend.ScalarArenaSlotsUsed[1] - rwBefore;
-                if (readUsed < passes * (Packed + Rows))
-                    throw new Exception($"read arena: {readUsed} slots used, expected >= {passes * (Packed + Rows)} - packed/stride scalars did not go through the arena (batching off?)");
-                if (rwUsed < passes * Structs)
-                    throw new Exception($"read_write arena: {rwUsed} slots used, expected >= {passes * Structs} - struct scalars did not go through the arena");
+                if (readUsed < passes * (Packed + Rows + Structs))
+                    throw new Exception($"read arena: {readUsed} slots used, expected >= {passes * (Packed + Rows + Structs)} - packed/stride/struct scalars did not go through the arena (batching off?)");
+                // struct scalars are bound `read` (a read_write load is non-uniform to Tint), so nothing is writable
+                if (rwUsed != 0)
+                    throw new Exception($"read_write arena: {rwUsed} slots used, expected 0 - a struct scalar went to the writable arena");
                 if (!measured)
                     throw new Exception($"the arenas were still regrowing after {MaxPasses} passes - they should settle after a few");
                 if (WebGPUBackend.ScalarArenaOverflows == overflowBefore)

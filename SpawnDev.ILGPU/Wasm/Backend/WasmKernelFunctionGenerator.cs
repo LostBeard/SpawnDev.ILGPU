@@ -4553,6 +4553,66 @@ EmitSaveAllLocals();
         }
 
         /// <summary>
+        /// Pushes the i64 element count of <paramref name="view"/> when it is a sub-view or a select of views (each arm
+        /// a sub-view, a select of views, or a kernel view parameter). Returns false for anything else (the caller
+        /// traces it to a kernel parameter). A PHI of views has no length to read here - the view is a bare pointer
+        /// local - and is refused rather than read as 0.
+        /// </summary>
+        private bool TryEmitViewLength(Value view, int depth)
+        {
+            var current = view.Resolve();
+            for (int i = 0; i < 20 && current != null; i++)
+            {
+                if (current is global::ILGPU.IR.Values.Parameter p && _inlineParamAliases.TryGetValue(p, out var aliased))
+                    current = aliased.Resolve();
+                else if (current is AddressSpaceCast asc)
+                    current = asc.Value.Resolve();
+                else
+                    break;
+            }
+            if (current is SubViewValue subView)
+            {
+                var subLength = subView.Length.Resolve();
+                EmitGetLocal(subLength);
+                if (GetWasmTypeFromIR(subLength.Type) != WasmOpCodes.I64)
+                    Code.Add(WasmOpCodes.I64ExtendI32S);
+                return true;
+            }
+            if (current is Predicate pred && pred.Type is ViewType)
+            {
+                // select(lengthOfTrue, lengthOfFalse, condition)
+                if (!EmitViewLengthArm(pred.TrueValue, depth) || !EmitViewLengthArm(pred.FalseValue, depth))
+                    throw new SpawnDev.ILGPU.UnsupportedKernelFeatureException(
+                        feature: "the length of a view chosen at run time from a view that is not a sub-view or a kernel parameter",
+                        backend: global::ILGPU.Runtime.AcceleratorType.Wasm,
+                        remediation: "Read the length before choosing the view, or choose between sub-views of a kernel parameter.");
+                EmitGetLocal(pred.Condition.Resolve());
+                Code.Add(WasmOpCodes.Select);
+                return true;
+            }
+            if (current is PhiValue phi && phi.Type is ViewType)
+                throw new SpawnDev.ILGPU.UnsupportedKernelFeatureException(
+                    feature: "the length of a view assigned in more than one branch (a phi of views)",
+                    backend: global::ILGPU.Runtime.AcceleratorType.Wasm,
+                    remediation: "Read the length in each branch, or choose the view with a conditional expression.");
+            return false;
+        }
+
+        /// <summary>One arm of a select of views: its length, or a kernel parameter's length local.</summary>
+        private bool EmitViewLengthArm(Value arm, int depth)
+        {
+            if (depth < 16 && TryEmitViewLength(arm, depth + 1)) return true;
+            int paramIdx = TraceToParameter(arm.Resolve());
+            if (paramIdx >= 0 && _paramLocals.TryGetValue(paramIdx, out var locals) && locals.Length > 1)
+            {
+                WasmModuleBuilder.EmitLocalGet(Code, locals[1]);
+                Code.Add(WasmOpCodes.I64ExtendI32S);
+                return true;
+            }
+            return false;
+        }
+
+        /// <summary>
         /// Handles ArrayView.Length: traces the view back to its kernel parameter
         /// and reads the pre-stored length local (locals[1]).
         /// This is the correct cross-backend approach — the length is already passed
@@ -4573,13 +4633,11 @@ EmitSaveAllLocals();
 
             // A sub-view's length is its OWN length, not the length of the parameter it was cut from
             // (TraceToParameter does not walk SubViewValue - see its doc - so without this a sub-view of a
-            // 4-element buffer reported 4 instead of its requested length).
-            if (TryResolveSubView(viewSource, out var subView))
+            // 4-element buffer reported 4 instead of its requested length). A view chosen at run time between
+            // sub-views (`c ? x.SubView(0, 4) : x.SubView(4, 9)`, a Predicate of views) selects between the
+            // arms' lengths; it fell through to the 0L fallback below (ChosenView_Length_IsTheChosenViewsLength).
+            if (TryEmitViewLength(viewSource, depth: 0))
             {
-                var subLength = subView.Length.Resolve();
-                EmitGetLocal(subLength);
-                if (GetWasmTypeFromIR(subLength.Type) != WasmOpCodes.I64)
-                    Code.Add(WasmOpCodes.I64ExtendI32S);
                 WasmModuleBuilder.EmitLocalSet(Code, target);
                 return;
             }

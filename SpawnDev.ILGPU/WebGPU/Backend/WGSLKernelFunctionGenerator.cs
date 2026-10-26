@@ -1683,6 +1683,207 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             return param != null;
         }
 
+        #region Views chosen at run time
+
+        // A select or phi whose value is a VIEW (`var b = c ? x.SubView(0, n) : x.SubView(1, n - 1);`, or a view assigned in
+        // both arms of a branch) has no WGSL form: a sub-view is an alias of its root binding whose offset is applied where
+        // it is indexed, and WGSL has neither pointer variables nor select() of pointers (the old output, "unexpected
+        // argument type for `select` call" / "cannot convert ptr to i32", failed shader creation). Every such view whose
+        // arms all reach ONE root view is lowered to an element offset `<v>_vo` (and, when its length is read, a length
+        // `<v>_vl`) relative to that root; indexing it adds the offset and continues with the root, so the root keeps all
+        // of its own handling (offset slot, sub-word packing, coalesce, body-struct field). Arms that reach different
+        // buffers cannot be expressed and are refused at compile time.
+
+        /// <summary>Each view-typed select / phi of this kernel -> its one root view.</summary>
+        private readonly Dictionary<Value, Value> _chosenViewRoots = new();
+
+        /// <summary>The chosen views whose length is read (directly, or through a chosen view built from them).</summary>
+        private readonly HashSet<Value> _chosenViewNeedsLength = new();
+
+        /// <summary>The WGSL type of a view length (<c>GetViewLength</c>'s type).</summary>
+        private string _chosenViewLengthType = "i32";
+
+        private static bool IsChosenViewCandidate(Value value) =>
+            value.Type is ViewType && (value is global::ILGPU.IR.Values.Predicate || value is PhiValue);
+
+        /// <summary>The identity of a root view: a parameter, a body-struct field of one, or the value itself.</summary>
+        private static object ViewRootKey(Value root) =>
+            root is GetField gf && gf.ObjectValue.Resolve() is global::ILGPU.IR.Values.Parameter p
+                ? (p, gf.FieldSpan.Index)
+                : root;
+
+        private static void CollectViewRoots(Value value, HashSet<Value> visiting, Dictionary<object, Value> roots)
+        {
+            value = value.Resolve();
+            while (value is global::ILGPU.IR.Values.SubViewValue sv) value = sv.Source.Resolve();
+            if (IsChosenViewCandidate(value))
+            {
+                if (!visiting.Add(value)) return; // a loop passing the view to itself adds no root
+                if (value is global::ILGPU.IR.Values.Predicate pred)
+                {
+                    CollectViewRoots(pred.TrueValue, visiting, roots);
+                    CollectViewRoots(pred.FalseValue, visiting, roots);
+                }
+                else
+                {
+                    foreach (var node in ((PhiValue)value).Nodes)
+                        CollectViewRoots(node.Resolve(), visiting, roots);
+                }
+                return;
+            }
+            roots.TryAdd(ViewRootKey(value), value);
+        }
+
+        /// <summary>
+        /// Records every view-typed select / phi with its root (<see cref="_chosenViewRoots"/>) and which of them need a
+        /// length. Runs before any code is generated.
+        /// </summary>
+        private void ScanChosenViews()
+        {
+            foreach (var block in Method.Blocks)
+            {
+                foreach (var entry in block)
+                {
+                    var value = entry.Value;
+                    if (!IsChosenViewCandidate(value)) continue;
+                    var roots = new Dictionary<object, Value>();
+                    CollectViewRoots(value, new HashSet<Value>(), roots);
+                    if (roots.Count != 1)
+                        throw new UnsupportedKernelFeatureException(
+                            $"a view chosen at run time between {roots.Count} different buffers in kernel '{Method.Name}'",
+                            global::ILGPU.Runtime.AcceleratorType.WebGPU,
+                            "WGSL cannot select or merge pointers to different bindings. Index each buffer in its own branch, " +
+                            "or choose between sub-views of ONE view (supported: the choice becomes an offset into that view).");
+                    _chosenViewRoots[value] = roots.Values.First();
+                }
+            }
+            if (_chosenViewRoots.Count == 0) return;
+            foreach (var block in Method.Blocks)
+            {
+                foreach (var entry in block)
+                {
+                    if (entry.Value is global::ILGPU.IR.Values.GetViewLength gvl && _chosenViewRoots.ContainsKey(gvl.View.Resolve()))
+                    {
+                        _chosenViewLengthType = TypeGenerator[gvl.Type];
+                        MarkChosenViewNeedsLength(gvl.View.Resolve());
+                    }
+                }
+            }
+        }
+
+        private void MarkChosenViewNeedsLength(Value value)
+        {
+            value = value.Resolve();
+            if (!_chosenViewRoots.ContainsKey(value) || !_chosenViewNeedsLength.Add(value)) return;
+            if (value is global::ILGPU.IR.Values.Predicate pred)
+            {
+                MarkChosenViewNeedsLength(pred.TrueValue);
+                MarkChosenViewNeedsLength(pred.FalseValue);
+            }
+            else
+            {
+                foreach (var node in ((PhiValue)value).Nodes)
+                    MarkChosenViewNeedsLength(node.Resolve());
+            }
+        }
+
+        /// <summary>The offset (relative to its source view) of <paramref name="sv"/> as an i32 WGSL expression.</summary>
+        private string SubViewOffsetExpr(global::ILGPU.IR.Values.SubViewValue sv)
+        {
+            var svOffsetVar = Load(sv.Offset);
+            bool svOffsetIsEmuI64 = Backend.EnableI64Emulation
+                && sv.Offset.Resolve().BasicValueType == BasicValueType.Int64;
+            return svOffsetIsEmuI64 ? $"i64_to_i32({svOffsetVar})" : $"{svOffsetVar}";
+        }
+
+        /// <summary>The offset ("vo") or length ("vl") variable of the chosen view <paramref name="view"/>.</summary>
+        private string ChosenViewVar(Value view, string suffix) => $"{Load(view).Name}_{suffix}";
+
+        /// <summary>The element offset of <paramref name="view"/> relative to its chosen-view root, as an i32 expression.</summary>
+        private string ChosenViewOffsetExpr(Value view)
+        {
+            view = view.Resolve();
+            if (view is global::ILGPU.IR.Values.SubViewValue sv)
+                return $"(({SubViewOffsetExpr(sv)}) + ({ChosenViewOffsetExpr(sv.Source)}))";
+            if (_chosenViewRoots.ContainsKey(view))
+                return ChosenViewVar(view, "vo");
+            return "0";
+        }
+
+        /// <summary>The element count of <paramref name="view"/> (an arm of a chosen view) as a WGSL expression.</summary>
+        private string ChosenViewLengthExpr(Value view)
+        {
+            view = view.Resolve();
+            if (view is global::ILGPU.IR.Values.SubViewValue sv)
+            {
+                // SubView(int, int) and SubView(long, long) give an i32 or a 64-bit length operand
+                string length = Load(sv.Length).ToString();
+                bool lengthIs64 = sv.Length.Resolve().BasicValueType == BasicValueType.Int64;
+                bool wants64 = _chosenViewLengthType == "emu_i64" || _chosenViewLengthType == "emu_u64";
+                if (Backend.EnableI64Emulation && wants64 && !lengthIs64) return $"i64_from_i32({length})";
+                if (Backend.EnableI64Emulation && !wants64 && lengthIs64) return $"i64_to_i32({length})";
+                return length;
+            }
+            if (_chosenViewRoots.ContainsKey(view))
+                return ChosenViewVar(view, "vl");
+            if (view is global::ILGPU.IR.Values.Parameter param && param.Index >= KernelParamOffset)
+                return ParamViewLengthExpr(param, _chosenViewLengthType);
+            throw new UnsupportedKernelFeatureException(
+                $"the length of a view chosen at run time from a {view.GetType().Name} in kernel '{Method.Name}'",
+                global::ILGPU.Runtime.AcceleratorType.WebGPU,
+                "Read the length before choosing the view, or choose between sub-views of a kernel parameter.");
+        }
+
+        /// <summary>Declares chosen-view variable <paramref name="name"/> at function scope (assigned where it is chosen).</summary>
+        private void DeclareChosenViewVar(string name, string type)
+        {
+            if (!declaredVariables.Add(name)) return;
+            if (_useDeferredDeclarations)
+                _deferredVarDeclarations.Add($"    var {name} : {type};");
+            else if (IsStateMachineActive)
+                VariableBuilder.AppendLine($"    var {name} : {type};");
+            else
+                AppendLine($"var {name} : {type};");
+        }
+
+        /// <summary>A select of views: selects the offset (and length) into the one root view.</summary>
+        public override void GenerateCode(global::ILGPU.IR.Values.Predicate value)
+        {
+            if (!_chosenViewRoots.ContainsKey(value))
+            {
+                base.GenerateCode(value);
+                return;
+            }
+            var cond = Load(value.Condition);
+            string vo = ChosenViewVar(value, "vo");
+            DeclareChosenViewVar(vo, "i32");
+            AppendLine($"{vo} = select({ChosenViewOffsetExpr(value.FalseValue)}, {ChosenViewOffsetExpr(value.TrueValue)}, {cond});");
+            if (_chosenViewNeedsLength.Contains(value))
+            {
+                string vl = ChosenViewVar(value, "vl");
+                DeclareChosenViewVar(vl, _chosenViewLengthType);
+                AppendLine($"{vl} = select({ChosenViewLengthExpr(value.FalseValue)}, {ChosenViewLengthExpr(value.TrueValue)}, {cond});");
+            }
+        }
+
+        /// <summary>A phi of views: each edge assigns the offset (and length) of its operand into the one root view.</summary>
+        protected override bool TryAddChosenViewPhiCopies(PhiValue phi, Value source, List<(string Target, string Source)> viewCopies)
+        {
+            if (!_chosenViewRoots.ContainsKey(phi)) return false;
+            string vo = ChosenViewVar(phi, "vo");
+            DeclareChosenViewVar(vo, "i32");
+            viewCopies.Add((vo, ChosenViewOffsetExpr(source)));
+            if (_chosenViewNeedsLength.Contains(phi))
+            {
+                string vl = ChosenViewVar(phi, "vl");
+                DeclareChosenViewVar(vl, _chosenViewLengthType);
+                viewCopies.Add((vl, ChosenViewLengthExpr(source)));
+            }
+            return true;
+        }
+
+        #endregion
+
         /// <summary>
         /// Every parameter a store / atomic TARGET (or a pointer argument) may point into, each with the body-struct field
         /// index on its path (-1 = the parameter's own view). Walks element and field addresses, sub-views, views, casts,
@@ -2499,7 +2700,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // algorithm kernels bind SubViews of the same temp buffer to multiple params.
                     // WebGPU rejects mixed read-only/read-write usage on the same buffer in one
                     // compute pass. Enabling this requires runtime buffer aliasing checks.
-                    string accessMode = "read_write";
+                    // A by-value struct parameter is never written and has a buffer of its own (the dispatcher's
+                    // read-only scalar arena or a pooled buffer), so none of the aliasing above applies. It MUST be
+                    // `read`: Tint's uniformity analysis treats every load from read_write storage as non-uniform, so
+                    // a loop bounded by a struct field could not contain a barrier ("'storageBarrier' must only be
+                    // called from uniform control flow"; SpawnDev.Codecs Vp8/Vp9EncodeWavefrontGroupKernel, whose
+                    // diagonal loop starts at p.DiagAndRMin, 2026-10-26). _scalar_params is `read` for the same reason.
+                    string accessMode = isStruct && !isView && !isAtomic ? "read" : "read_write";
                     string bindingWgslType = wgslType;
 
                     if (isEmulatedF64 || isEmulatedI64)
@@ -3658,6 +3865,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 if (_bodyStructParams.ContainsKey(f16ParamIdx)) continue;        // body-struct field, not a direct binding
                 _plainLoadFloat16Params.Add(f16ParamIdx);
             }
+
+            // 0c. Views chosen at run time (select / phi of views) become offsets into their root view.
+            ScanChosenViews();
 
             // 1. Scan and declare hoisted variables
             HoistCrossBlockVariables();
@@ -5968,15 +6178,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // read them as plain values - "cannot assign 'atomic<u32>' to 'i32'" in
             // SpawnDev.Codecs' VP8/VP9/AV1 encoders and VP8 decoder - and it dropped the
             // view's offset slot for a kernel argument that is itself a sub-view.)
+            // A view chosen at run time (select / phi of views) adds its offset variable and continues with its root.
             var effectiveSourceValue = value.Source.Resolve();
-            while (effectiveSourceValue is global::ILGPU.IR.Values.SubViewValue sv)
+            while (true)
             {
-                var svOffsetVar = Load(sv.Offset);
-                bool svOffsetIsEmuI64 = Backend.EnableI64Emulation
-                    && sv.Offset.Resolve().BasicValueType == BasicValueType.Int64;
-                string svOffsetExpr = svOffsetIsEmuI64 ? $"i64_to_i32({svOffsetVar})" : $"{svOffsetVar}";
-                offsetExpr = $"(({svOffsetExpr}) + ({offsetExpr}))";
-                effectiveSourceValue = sv.Source.Resolve();
+                if (effectiveSourceValue is global::ILGPU.IR.Values.SubViewValue sv)
+                {
+                    offsetExpr = $"(({SubViewOffsetExpr(sv)}) + ({offsetExpr}))";
+                    effectiveSourceValue = sv.Source.Resolve();
+                }
+                else if (_chosenViewRoots.TryGetValue(effectiveSourceValue, out var chosenRoot))
+                {
+                    offsetExpr = $"(({ChosenViewVar(effectiveSourceValue, "vo")}) + ({offsetExpr}))";
+                    effectiveSourceValue = chosenRoot;
+                }
+                else break;
             }
 
             // --- BODY STRUCT VIEW FIELD ACCESS ---
@@ -7380,19 +7596,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private void PushPhiValues(BasicBlock targetBlock, BasicBlock sourceBlock)
         {
             var copies = new List<(Variable Target, Variable Source)>();
+            var viewCopies = new List<(string Target, string Source)>();
             foreach (var value in targetBlock)
             {
                 if (value.Value is PhiValue phi)
                 {
                     var targetVar = Load(phi);
-                    Declare(targetVar); // Ensure phi var is declared (Allocate doesn't call Declare)
+                    bool chosenView = _chosenViewRoots.ContainsKey(phi);
+                    if (!chosenView)
+                        Declare(targetVar); // Ensure phi var is declared (Allocate doesn't call Declare)
                     bool matched = false;
                     // PhiValue in ILGPU implements a collection of (SourceBlock, Value) pairs
                     for (int i = 0; i < phi.Count; i++)
                     {
                         if (phi.Sources[i] == sourceBlock)
                         {
-                            copies.Add((targetVar, Load(phi[i])));
+                            if (!chosenView || !TryAddChosenViewPhiCopies(phi, phi[i], viewCopies))
+                                copies.Add((targetVar, Load(phi[i])));
                             matched = true;
                         }
                     }
@@ -7405,7 +7625,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     }
                 }
             }
-            EmitPhiCopies(copies);
+            EmitPhiCopies(copies, viewCopies);
         }
 
         /// <summary>
@@ -8341,11 +8561,34 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         {
             var target = Load(value);
 
+            // A view chosen at run time carries its length in a variable of its own.
+            if (_chosenViewRoots.ContainsKey(value.View.Resolve()))
+            {
+                string chosenPrefix = _hoistedPrimitives.Contains(value) ? "" : "let ";
+                AppendLine($"{chosenPrefix}{target} = {ChosenViewVar(value.View.Resolve(), "vl")};");
+                return;
+            }
+
             // Try to resolve the view to a kernel parameter
             if (ResolveToParameter(value.View) is global::ILGPU.IR.Values.Parameter param
                 && param.Index >= KernelParamOffset)
             {
                 string prefix = _hoistedPrimitives.Contains(value) ? "" : "let ";
+                AppendLine($"{prefix}{target} = {ParamViewLengthExpr(param, TypeGenerator[value.Type])};");
+                return;
+            }
+
+            // Fallback to base implementation
+            base.GenerateCode(value);
+        }
+
+        /// <summary>
+        /// The element count of kernel view parameter <paramref name="param"/> as a WGSL expression of type
+        /// <paramref name="targetWgslType"/> (an <c>i32</c>, or <c>emu_i64</c> under 64-bit emulation).
+        /// </summary>
+        private string ParamViewLengthExpr(global::ILGPU.IR.Values.Parameter param, string targetWgslType)
+        {
+            {
                 string lengthExpr;
 
                 // Direct-param coalesce member: arrayLength() returns the SHARED binding's
@@ -8392,19 +8635,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
 
                 // Handle emulated i64 case
-                var targetWgslType = TypeGenerator[value.Type];
                 if (Backend.EnableI64Emulation &&
                     (targetWgslType == "emu_i64" || targetWgslType == "emu_u64"))
                 {
                     lengthExpr = $"i64_from_i32({lengthExpr})";
                 }
 
-                AppendLine($"{prefix}{target} = {lengthExpr};");
-                return;
+                return lengthExpr;
             }
-
-            // Fallback to base implementation
-            base.GenerateCode(value);
         }
 
         protected override bool IsAtomicPointer(Value ptr)

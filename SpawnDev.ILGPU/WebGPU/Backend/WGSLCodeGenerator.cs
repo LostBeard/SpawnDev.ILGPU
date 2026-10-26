@@ -3025,17 +3025,46 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         protected void EmitPhiAssignments(BasicBlock sourceBlock, BasicBlock targetBlock)
         {
             var copies = new List<(Variable Target, Variable Source)>();
+            var viewCopies = new List<(string Target, string Source)>();
             foreach (var valueEntry in targetBlock)
             {
                 if (valueEntry.Value is PhiValue phi)
                 {
-                    var phiVar = Load(phi);
                     var srcValue = phi.GetValue(sourceBlock);
-                    if (srcValue != null)
-                        copies.Add((phiVar, Load(srcValue)));
+                    if (srcValue == null) continue;
+                    if (TryAddChosenViewPhiCopies(phi, srcValue, viewCopies)) continue;
+                    copies.Add((Load(phi), Load(srcValue)));
                 }
             }
+            EmitPhiCopies(copies, viewCopies);
+        }
+
+        /// <summary>
+        /// A phi whose value is a VIEW chosen at run time has no WGSL variable of its own (WGSL has no pointer
+        /// variables): the kernel generator lowers it to an element offset (and length) into its one root view and adds
+        /// those copies for the edge here. Returns false for every other phi.
+        /// </summary>
+        /// <param name="phi">The phi.</param>
+        /// <param name="source">Its operand for the edge.</param>
+        /// <param name="viewCopies">(target variable, source expression) pairs to assign on the edge.</param>
+        protected virtual bool TryAddChosenViewPhiCopies(PhiValue phi, Value source, List<(string Target, string Source)> viewCopies) => false;
+
+        /// <summary>
+        /// <see cref="EmitPhiCopies(List{ValueTuple{Variable, Variable}})"/> plus the offset / length copies of views chosen
+        /// at run time. Their source expressions read the view variables of the SOURCE block (a loop can pass a view
+        /// phi to itself), so every one is read into a <c>let</c> before anything on the edge is assigned.
+        /// </summary>
+        protected void EmitPhiCopies(List<(Variable Target, Variable Source)> copies, List<(string Target, string Source)> viewCopies)
+        {
+            var staged = new string[viewCopies.Count];
+            for (int i = 0; i < viewCopies.Count; i++)
+            {
+                staged[i] = $"_phi_copy_{_phiCopyTempCounter++}";
+                AppendLine($"let {staged[i]} = {viewCopies[i].Source};");
+            }
             EmitPhiCopies(copies);
+            for (int i = 0; i < viewCopies.Count; i++)
+                AppendLine($"{viewCopies[i].Target} = {staged[i]};");
         }
 
         /// <summary>

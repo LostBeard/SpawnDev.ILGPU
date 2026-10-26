@@ -1558,6 +1558,10 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                 "Tracked as rc.16 Bug D follow-up.");
 
         [TestMethod]
+        public new Task StructParam_BoundsBarrierLoop_ShaderIsUniform_MatchesOracle() =>
+            throw new UnsupportedTestException("WebGL: shared memory + barriers (vertex shaders have neither)");
+
+        [TestMethod]
         public new Task Tests23_SubWordCoalesceAliasingInHelper_NoCodegenError() =>
             throw new UnsupportedTestException(
                 "WebGL: GLSL ES 3.0 has no pointer types — ArrayView<byte> fn-params can't go " +
