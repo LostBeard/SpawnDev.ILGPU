@@ -65,6 +65,135 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         // block emitted twice; test BackendTestBase.PointerAlias_ViewStoredInTwoBranches_DeclaredOnce, 2026-09-29).
         private readonly Dictionary<(int ParamIndex, string Key), int> _storeSlotByKey = new();
 
+        /// <summary>
+        /// One store SITE of an output buffer (a distinct element address expression): its slot, and its element address
+        /// split into a dynamic part (<see cref="BaseSignature"/>) plus <see cref="Const"/>. Sites of one buffer with the
+        /// same dynamic part share a GROUP and one base varying; the value of site s lands at base + Const
+        /// (Plans/webgl-store-addresses-2026-10-26.md).
+        /// </summary>
+        private sealed class StoreSite
+        {
+            public string Key = "";
+            public string BaseSignature = "";
+            public long Const;
+            public int Slot;
+            public int Group;
+        }
+
+        /// <summary>Output buffer key -> its store sites in IR order (index = slot).</summary>
+        private readonly Dictionary<int, List<StoreSite>> _storeSites = new();
+        /// <summary>Output buffer key -> its store groups' base varying names (index = group).</summary>
+        private readonly Dictionary<int, List<string>> _storeBaseVaryings = new();
+        /// <summary>Output buffer key -> its stored-mask word varying names (word w holds sites 32w..32w+31).</summary>
+        private readonly Dictionary<int, List<string>> _storeMaskVaryings = new();
+
+        /// <summary>The key of a store target, shared by the analysis and <see cref="GetStoreSlot"/>.</summary>
+        private static string StoreSiteKey(Value target) =>
+            target is LoadElementAddress lea ? $"{lea.Source}[{lea.Offset}]" : target.ToString();
+
+        /// <summary>
+        /// Splits a store target's element address (the element index plus every sub-view offset of its chain) into
+        /// its dynamic part, as a signature of the IR values it adds and subtracts, and a constant.
+        /// </summary>
+        private static (string Signature, long Const) StoreAddressSplit(Value target)
+        {
+            var dyn = new List<string>();
+            long constant = 0;
+            if (target is LoadElementAddress lea)
+            {
+                SplitAffine(lea.Offset, 1, dyn, ref constant, 0);
+                var source = lea.Source.Resolve();
+                while (source is SubViewValue sv)
+                {
+                    SplitAffine(sv.Offset, 1, dyn, ref constant, 0);
+                    source = sv.Source.Resolve();
+                }
+            }
+            else
+                dyn.Add("+" + target);
+            dyn.Sort(StringComparer.Ordinal);
+            return (string.Join(",", dyn), constant);
+        }
+
+        private static void SplitAffine(Value value, int sign, List<string> dyn, ref long constant, int depth)
+        {
+            value = value.Resolve();
+            if (depth < 32)
+            {
+                if (value is PrimitiveValue pv
+                    && (pv.BasicValueType == BasicValueType.Int32 || pv.BasicValueType == BasicValueType.Int64))
+                {
+                    constant += sign * (pv.BasicValueType == BasicValueType.Int64 ? pv.Int64Value : pv.Int32Value);
+                    return;
+                }
+                if (value is BinaryArithmeticValue bin
+                    && (bin.Kind == BinaryArithmeticKind.Add || bin.Kind == BinaryArithmeticKind.Sub))
+                {
+                    SplitAffine(bin.Left, sign, dyn, ref constant, depth + 1);
+                    SplitAffine(bin.Right, bin.Kind == BinaryArithmeticKind.Sub ? -sign : sign, dyn, ref constant, depth + 1);
+                    return;
+                }
+                if (value is ConvertValue cv
+                    && (cv.BasicValueType == BasicValueType.Int32 || cv.BasicValueType == BasicValueType.Int64)
+                    && (cv.Value.BasicValueType == BasicValueType.Int32 || cv.Value.BasicValueType == BasicValueType.Int64))
+                {
+                    SplitAffine(cv.Value, sign, dyn, ref constant, depth + 1);
+                    return;
+                }
+            }
+            dyn.Add((sign < 0 ? "-" : "+") + CanonicalTerm(value, 0));
+        }
+
+        /// <summary>
+        /// A structural key for a dynamic address term: pure arithmetic, conversions, constants and parameters compare by
+        /// what they compute (each store site of `out[i * 4 + k]` has its own `i * 4` node, and all of them must share
+        /// one base varying), everything else (loads, phis, calls) by identity.
+        /// </summary>
+        private static string CanonicalTerm(Value value, int depth)
+        {
+            value = value.Resolve();
+            if (depth > 24) return value.ToString();
+            switch (value)
+            {
+                case PrimitiveValue pv:
+                    return $"c{pv.BasicValueType}:{pv.RawValue}";
+                case global::ILGPU.IR.Values.Parameter p:
+                    return $"p{p.Index}";
+                case BinaryArithmeticValue bin:
+                    return $"{bin.Kind}({CanonicalTerm(bin.Left, depth + 1)},{CanonicalTerm(bin.Right, depth + 1)})";
+                case UnaryArithmeticValue un:
+                    return $"{un.Kind}({CanonicalTerm(un.Value, depth + 1)})";
+                case ConvertValue cv:
+                    return $"cv{cv.BasicValueType}({CanonicalTerm(cv.Value, depth + 1)})";
+                case GetField gf when gf.ObjectValue.Resolve() is global::ILGPU.IR.Values.Parameter:
+                    return $"f{gf.FieldSpan.Index}({CanonicalTerm(gf.ObjectValue, depth + 1)})";
+                case DeviceConstantValue dc:
+                    return $"{dc.GetType().Name}{(dc is DeviceConstantDimensionValue d3 ? d3.Dimension.ToString() : "")}";
+                default:
+                    return value.ToString();
+            }
+        }
+
+        /// <summary>
+        /// Records the store site of <paramref name="target"/> for output buffer <paramref name="outKey"/> (once per
+        /// distinct address expression), in IR order, so the slot numbers the varyings use and the address split the
+        /// readback uses are fixed before any code is generated.
+        /// </summary>
+        private void RecordStoreSite(int outKey, Value target)
+        {
+            string key = StoreSiteKey(target);
+            if (_storeSlotByKey.ContainsKey((outKey, key))) return;
+            if (!_storeSites.TryGetValue(outKey, out var sites))
+                _storeSites[outKey] = sites = new List<StoreSite>();
+            var (signature, constant) = StoreAddressSplit(target);
+            var site = new StoreSite { Key = key, BaseSignature = signature, Const = constant, Slot = sites.Count };
+            int group = sites.FindIndex(s => s.BaseSignature == signature);
+            site.Group = group >= 0 ? sites[group].Group : sites.Select(s => s.Group + 1).DefaultIfEmpty(0).Max();
+            sites.Add(site);
+            _storeSlotByKey[(outKey, key)] = site.Slot;
+            _currentStoreSlot[outKey] = site.Slot + 1;
+        }
+
         private int GetStoreSlot(int paramIndex, global::ILGPU.IR.Values.Store storeVal)
         {
             var target = storeVal.Target.Resolve();
@@ -370,6 +499,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         if (TryGetBufferTrackingKey(target, paramOffset, out int outKey))
                         {
                             _outputParamIndices.Add(outKey);
+                            RecordStoreSite(outKey, target);
                             if (!uniqueLeaExprs.TryGetValue(outKey, out var exprSet))
                             {
                                 exprSet = new HashSet<string>();
@@ -1885,7 +2015,89 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 }
             }
 
+            EmitStoreAddressVaryings(ref outIndex);
             Builder.AppendLine();
+        }
+
+        /// <summary>
+        /// Declares, for every output buffer with store sites, one base varying per store group and one stored-mask word
+        /// per 32 sites, and points each of the buffer's value varyings at its site's group base, constant and mask bit.
+        /// The readback writes a site's value at base + constant, only in vertices whose mask has the site's bit
+        /// (Plans/webgl-store-addresses-2026-10-26.md). Before this, every value landed at the vertex's own element
+        /// (`buf[k + n] = x` wrote buf[n]) and a store not taken still overwrote it.
+        /// </summary>
+        private void EmitStoreAddressVaryings(ref int outIndex)
+        {
+            foreach (var (key, sites) in _storeSites)
+            {
+                var valueVaryings = _outputVaryings.Where(o => o.ParamIndex == key && !o.IsAtomicVote && !o.IsStoreMeta).ToList();
+                if (valueVaryings.Count == 0) continue;
+                // A struct element buffer has one varying per FIELD, not per site: two sites would share them.
+                if (sites.Count > 1 && valueVaryings.Any(o => o.FieldIndex >= 0))
+                    throw new SpawnDev.ILGPU.UnsupportedKernelFeatureException(
+                        feature: $"{sites.Count} store sites into one struct-element buffer in kernel '{Method.Name}'",
+                        backend: global::ILGPU.Runtime.AcceleratorType.WebGL,
+                        remediation: "Store each struct element from one place (build the value, then store once).");
+                var bases = new List<string>();
+                var baseIndices = new List<int>();
+                int groups = sites.Max(s => s.Group) + 1;
+                for (int g = 0; g < groups; g++)
+                {
+                    string name = $"tf_base_{key}_g{g}";
+                    Builder.AppendLine($"flat out highp int {name}; // store group {g} base element of output {key} (-1 none, -2 two elements from one site)");
+                    var meta = new OutputVaryingInfo(key, outIndex++, name, "int") { IsStoreMeta = true };
+                    _outputVaryings.Add(meta);
+                    _generatorArgs.OutputVaryings.Add(meta);
+                    bases.Add(name);
+                    baseIndices.Add(meta.OutputIndex);
+                }
+                var masks = new List<string>();
+                var maskIndices = new List<int>();
+                for (int w = 0; w < (sites.Count + 31) / 32; w++)
+                {
+                    string name = $"tf_mask_{key}_w{w}";
+                    Builder.AppendLine($"flat out highp int {name}; // stored-site bits {32 * w}..{32 * w + 31} of output {key}");
+                    var meta = new OutputVaryingInfo(key, outIndex++, name, "int") { IsStoreMeta = true };
+                    _outputVaryings.Add(meta);
+                    _generatorArgs.OutputVaryings.Add(meta);
+                    masks.Add(name);
+                    maskIndices.Add(meta.OutputIndex);
+                }
+                _storeBaseVaryings[key] = bases;
+                _storeMaskVaryings[key] = masks;
+                foreach (var ov in valueVaryings)
+                {
+                    var site = sites[Math.Max(ov.StoreSlot, 0)];
+                    ov.SiteConst = checked((int)site.Const);
+                    ov.BaseOutputIndex = baseIndices[site.Group];
+                    ov.MaskOutputIndex = maskIndices[site.Slot / 32];
+                    ov.MaskBit = 1 << (site.Slot % 32);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Emits the address half of a store to output buffer <paramref name="key"/> at site <paramref name="slot"/>,
+        /// whose element index is <paramref name="elementIndexExpr"/>: the group base becomes index - constant (or -2
+        /// when this vertex already stored a different element there), and the site's mask bit is set.
+        /// </summary>
+        private void EmitStoreAddress(int key, int slot, string elementIndexExpr)
+        {
+            if (!_storeSites.TryGetValue(key, out var sites) || slot < 0 || slot >= sites.Count
+                || !_storeBaseVaryings.TryGetValue(key, out var bases))
+                return;
+            var site = sites[slot];
+            // The state lives in locals (`_sa_` + varying name) and every update is copied to the output: reading a
+            // vertex shader OUTPUT back is legal GLSL ES, but Chrome's ANGLE (D3D11) did not return the value just
+            // written - every first store saw "already stored a different element" (-2).
+            string baseVar = bases[site.Group];
+            string b = site.Const == 0 ? $"int({elementIndexExpr})" : $"(int({elementIndexExpr}) - ({site.Const}))";
+            AppendLine($"_sa_{baseVar} = (_sa_{baseVar} == -1 || _sa_{baseVar} == {b}) ? {b} : -2;");
+            AppendLine($"{baseVar} = _sa_{baseVar};");
+            string maskVar = _storeMaskVaryings[key][site.Slot / 32];
+            string bit = site.Slot % 32 == 31 ? "int(0x80000000u)" : $"{1 << (site.Slot % 32)}";
+            AppendLine($"_sa_{maskVar} = _sa_{maskVar} | {bit};");
+            AppendLine($"{maskVar} = _sa_{maskVar};");
         }
 
         /// <summary>
@@ -1962,6 +2174,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
             // Set gl_Position to dummy value (required for vertex shader)
             AppendLine("gl_Position = vec4(0.0, 0.0, 0.0, 1.0);");
+            // Store addresses: nothing stored yet (an unwritten varying is undefined, and the readback must skip it).
+            foreach (var bases in _storeBaseVaryings.Values)
+                foreach (var b in bases) { AppendLine($"int _sa_{b} = -1;"); AppendLine($"{b} = -1;"); }
+            foreach (var masks in _storeMaskVaryings.Values)
+                foreach (var m in masks) { AppendLine($"int _sa_{m} = 0;"); AppendLine($"{m} = 0;"); }
             AppendLine("");
         }
 
@@ -2521,22 +2738,38 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var target = Load(value);
             var offset = Load(value.Offset);
 
+            // SubView chain walk: an in-kernel sub-view (`view.SubView(o, n)`) has no GLSL variable of its own - its
+            // offset is added here, at the element address, and the address continues with the view it was cut from
+            // (every path below resolves THROUGH sub-views to their parameter). The offset used to be dropped:
+            // `input.SubView(4, 8)[i]` read input[i] (silent wrong values; SubViewLoad_InKernelOffset_ReadsTheOffsetElements).
+            string offsetExpr = offset.ToString();
+            var effectiveSource = value.Source.Resolve();
+            while (effectiveSource is SubViewValue sv)
+            {
+                var svOffset = Load(sv.Offset);
+                bool svOffsetIsEmuI64 = Backend.EnableI64Emulation
+                    && sv.Offset.Resolve().BasicValueType == BasicValueType.Int64;
+                string svOffsetExpr = svOffsetIsEmuI64 ? $"i64_to_i32({svOffset})" : $"int({svOffset})";
+                offsetExpr = $"(({svOffsetExpr}) + int({offsetExpr}))";
+                effectiveSource = sv.Source.Resolve();
+            }
+
             // Body-struct view-field LEA: when LEA's source resolves (possibly through
             // an ArrayView1D wrapper's nested GetField extracting BaseView) to
             // GetField(bodyStructParam, viewFieldIdx), route to the per-field synthetic
             // param index. Walks chained GetFields to handle both raw ArrayView<T> body
             // fields (one GetField step) and ArrayView1D<T,Stride> body fields (two
             // GetField steps: outer extracts wrapper, inner extracts BaseView).
-            if (TryResolveBodyStructField(value.Source.Resolve(),
+            if (TryResolveBodyStructField(effectiveSource,
                     out var bsParamIdx, out var bsFieldIdx, out var bsViewInfo))
             {
                 int synth = bsViewInfo.SyntheticParamIndex;
                 string bindingName = bsViewInfo.BindingName;
 
                 if (_crossBlockPointers.Contains(value))
-                    _crossBlockPointerExprs[target.Name] = $"texelFetch({bindingName}, ivec2((int({offset}) + {bindingName}_offset) % {bindingName}_tileW, (int({offset}) + {bindingName}_offset) / {bindingName}_tileW), 0)";
+                    _crossBlockPointerExprs[target.Name] = $"texelFetch({bindingName}, ivec2((int({offsetExpr}) + {bindingName}_offset) % {bindingName}_tileW, (int({offsetExpr}) + {bindingName}_offset) / {bindingName}_tileW), 0)";
 
-                EmitLeaIntPointer(target, offset.ToString(), $"body-struct LEA into {bindingName}");
+                EmitLeaIntPointer(target, offsetExpr, $"body-struct LEA into {bindingName}");
                 Bind(value, new Variable(target.Name, "int"));
                 _leaParamMap[target.Name] = synth;
                 if (_subWordParams.ContainsKey(synth))
@@ -2544,7 +2777,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 return;
             }
 
-            if (ResolveToParameter(value.Source) is global::ILGPU.IR.Values.Parameter param)
+            if (ResolveToParameter(effectiveSource) is global::ILGPU.IR.Values.Parameter param)
             {
                 int paramOffset = KernelParamOffset;
                 if (param.Index >= paramOffset)
@@ -2555,17 +2788,17 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         bool isF64 = _emulatedF64Params.Contains(param.Index);
                         _emulatedVarMappings[target.Name] = (param.Index, isF64);
 
-                        AppendLine($"int {target.Name}_base_idx = int({offset}) * 2;");
+                        AppendLine($"int {target.Name}_base_idx = int({offsetExpr}) * 2;");
                         return;
                     }
 
                     if (_crossBlockPointers.Contains(value))
                     {
                         string cbBn = GetParamBindingName(param.Index);
-                        _crossBlockPointerExprs[target.Name] = $"texelFetch({cbBn}, ivec2((int({offset}) + {cbBn}_offset) % {cbBn}_tileW, (int({offset}) + {cbBn}_offset) / {cbBn}_tileW), 0)";
+                        _crossBlockPointerExprs[target.Name] = $"texelFetch({cbBn}, ivec2((int({offsetExpr}) + {cbBn}_offset) % {cbBn}_tileW, (int({offsetExpr}) + {cbBn}_offset) / {cbBn}_tileW), 0)";
                     }
 
-                    EmitLeaIntPointer(target, offset.ToString(), $"LEA into param{param.Index}");
+                    EmitLeaIntPointer(target, offsetExpr, $"LEA into param{param.Index}");
                     // Re-bind with correct type: the GLSL variable is declared as 'int',
                     // but the IR type is a pointer whose element type may differ (e.g. float).
                     Bind(value, new Variable(target.Name, "int"));
@@ -2582,16 +2815,16 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // This happens for 2D/3D views where GetField(viewParam, 0) creates a buffer
             // alias that is in _leaParamMap, but ResolveToParameter can't trace through
             // the StructureType → GetField → ViewType chain
-            var sourceVal = Load(value.Source);
+            var sourceVal = Load(effectiveSource);
             if (_leaParamMap.TryGetValue(sourceVal.ToString(), out var sourceParamIdx))
             {
                 if (_crossBlockPointers.Contains(value))
                 {
                     string srcBn = GetParamBindingName(sourceParamIdx);
-                    _crossBlockPointerExprs[target.Name] = $"texelFetch({srcBn}, ivec2((int({offset}) + {srcBn}_offset) % {srcBn}_tileW, (int({offset}) + {srcBn}_offset) / {srcBn}_tileW), 0)";
+                    _crossBlockPointerExprs[target.Name] = $"texelFetch({srcBn}, ivec2((int({offsetExpr}) + {srcBn}_offset) % {srcBn}_tileW, (int({offsetExpr}) + {srcBn}_offset) / {srcBn}_tileW), 0)";
                 }
 
-                EmitLeaIntPointer(target, offset.ToString(), $"LEA into param{sourceParamIdx} (via alias)");
+                EmitLeaIntPointer(target, offsetExpr, $"LEA into param{sourceParamIdx} (via alias)");
                 Bind(value, new Variable(target.Name, "int"));
                 _leaParamMap[target.Name] = sourceParamIdx;
                 if (_subWordParams.ContainsKey(sourceParamIdx))
@@ -2610,13 +2843,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (_allocaArrayNames.TryGetValue(sourceVal.Name, out var localArrName))
             {
                 Declare(target);
-                AppendLine($"{target} = {sourceVal} + {offset}; // LEA into {localArrName}");
-                _leaArrayExprs[target.Name] = $"{localArrName}[{offset}]";
+                AppendLine($"{target} = {sourceVal} + {offsetExpr}; // LEA into {localArrName}");
+                _leaArrayExprs[target.Name] = $"{localArrName}[{offsetExpr}]";
                 return;
             }
 
             Declare(target);
-            AppendLine($"{target} = {sourceVal} + {offset}; // generic LEA");
+            AppendLine($"{target} = {sourceVal} + {offsetExpr}; // generic LEA");
         }
 
         private readonly Dictionary<string, int> _leaParamMap = new();
@@ -2958,14 +3191,41 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 return;
             }
 
-            // Standard load
+            // Standard load. A bool local read through an integer pointer cast (aliased to the local, see
+            // GenerateCode(PointerCast)) converts: GLSL has no implicit bool <-> int.
+            string loadExpr = source.ToString();
+            if (source.Type == "bool" && target.Type != "bool")
+                loadExpr = $"{target.Type}({source})";
+            else if (source.Type != "bool" && target.Type == "bool")
+                loadExpr = $"(({source}) != {source.Type}(0))";
             if (_hoistedPrimitives.Contains(loadVal))
-                AppendLine($"{target} = {source};");
+                AppendLine($"{target} = {loadExpr};");
             else
             {
                 Declare(target);
-                AppendLine($"{target} = {source};");
+                AppendLine($"{target} = {loadExpr};");
             }
+        }
+
+        /// <summary>
+        /// A pointer cast of a LOCAL scalar (a function-local GLSL variable is its own storage) aliases the local, so
+        /// loads and stores through the cast reach it. The base emitted `v_cast = v_local; // ptrCast`, a COPY that the
+        /// stores then went to: a `ref bool` written by an inlined helper (IL writes a bool through a byte pointer)
+        /// never changed the local, and its bool-to-int copy did not compile ("cannot convert from 'bool' to 'highp
+        /// int'"; RefBool_ThroughHelper_SetsAndReadsTheLocal, SpawnDev.Codecs SnappyDecompressorGpu).
+        /// </summary>
+        public override void GenerateCode(PointerCast value)
+        {
+            if (value.Value.Resolve() is Alloca alloca && !alloca.IsArrayAllocation(out _))
+            {
+                var source = Load(value.Value);
+                if (!_allocaArrayNames.ContainsKey(source.Name) && !_leaParamMap.ContainsKey(source.Name))
+                {
+                    Bind(value, source);
+                    return;
+                }
+            }
+            base.GenerateCode(value);
         }
 
         public override void GenerateCode(global::ILGPU.IR.Values.Store storeVal)
@@ -3027,6 +3287,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         AppendLine($"{loOutput.VaryingName} = {val}.x;");
                         AppendLine($"{hiOutput.VaryingName} = {val}.y;");
                     }
+                    EmitStoreAddress(emulInfo.ParamIndex, GetStoreSlot(emulInfo.ParamIndex, storeVal), $"({address.Name}_base_idx >> 1)");
                 }
                 return;
             }
@@ -3085,6 +3346,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                             // TF varying type matches the field's native type, so direct assignment
                             AppendLine($"{fieldOutput.VaryingName} = {fieldExpr};");
                         }
+                        EmitStoreAddress(leaParamIdx, GetStoreSlot(leaParamIdx, storeVal), address.Name);
                         return;
                     }
                 }
@@ -3099,6 +3361,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     {
                         string tfValExpr = CastIfNeeded(val, slotOutput.GlslType ?? "float");
                         AppendLine($"{slotOutput.VaryingName} = {tfValExpr};");
+                        EmitStoreAddress(leaParamIdx, slot, address.Name);
                         return;
                     }
                 }
@@ -3113,11 +3376,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     if (_subWordFloat16Params.Contains(leaParamIdx))
                     {
                         AppendLine($"{output.VaryingName} = int(_f32_to_f16({val}));");
+                        EmitStoreAddress(leaParamIdx, GetStoreSlot(leaParamIdx, storeVal), address.Name);
                         return;
                     }
                     if (_subWordBFloat16Params.Contains(leaParamIdx))
                     {
                         AppendLine($"{output.VaryingName} = int(_f32_to_bf16({val}));");
+                        EmitStoreAddress(leaParamIdx, GetStoreSlot(leaParamIdx, storeVal), address.Name);
                         return;
                     }
                     if (_subWordFloat8Params.TryGetValue(leaParamIdx, out bool fp8IsE4M3Store))
@@ -3125,6 +3390,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         // FP8 sub-word store: convert f32 -> 8-bit pattern, write to the TF varying;
                         // host readback packs 4 bytes per texel (the byte sub-word layout).
                         AppendLine($"{output.VaryingName} = int({(fp8IsE4M3Store ? "_f32_to_e4m3" : "_f32_to_e5m2")}({val}));");
+                        EmitStoreAddress(leaParamIdx, GetStoreSlot(leaParamIdx, storeVal), address.Name);
                         return;
                     }
                     if (_subWordFloat4Params.Contains(leaParamIdx))
@@ -3162,6 +3428,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     // GLSL ES 3.0: cast value to match output type if needed
                     string tfValExpr = CastIfNeeded(val, output.GlslType ?? "float");
                     AppendLine($"{output.VaryingName} = {tfValExpr};");
+                    EmitStoreAddress(leaParamIdx, GetStoreSlot(leaParamIdx, storeVal), address.Name);
                     return;
                 }
             }
@@ -3178,6 +3445,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     {
                         string cbValExpr = CastIfNeeded(val, cbOutput.GlslType ?? "float");
                         AppendLine($"{cbOutput.VaryingName} = {cbValExpr};");
+                        EmitStoreAddress(cbParamIdx, GetStoreSlot(cbParamIdx, storeVal), address.Name);
                         return;
                     }
                 }
@@ -3185,8 +3453,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 return;
             }
 
-            // GLSL ES 3.0: cast value to match address type if needed
-            string valExpr = CastIfNeeded(val, address.Type);
+            // GLSL ES 3.0: cast value to match address type if needed (bool <-> int explicitly: a bool local stored
+            // through an integer pointer cast, see GenerateCode(PointerCast))
+            string valExpr = address.Type == "bool" && val.Type != "bool" ? $"(({val}) != {val.Type}(0))"
+                : address.Type != "bool" && val.Type == "bool" ? $"{address.Type}({val})"
+                : CastIfNeeded(val, address.Type);
             AppendLine($"{address} = {valExpr};");
         }
 
@@ -4176,6 +4447,20 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         public int FieldByteSize { get; init; }
         /// <summary>For struct field varyings: the size in bytes of one struct element.</summary>
         public int StructByteSize { get; init; }
+
+        /// <summary>
+        /// True for a store-address varying (a store group's base element, or a stored-mask word): it is captured
+        /// with the outputs but is not itself a buffer output (see Plans/webgl-store-addresses-2026-10-26.md).
+        /// </summary>
+        public bool IsStoreMeta { get; init; }
+        /// <summary>The constant part of this store site's element address: the value lands at base + this.</summary>
+        public int SiteConst { get; set; }
+        /// <summary>Output index of this site's group base varying (-1 = none: the vertex's own element).</summary>
+        public int BaseOutputIndex { get; set; } = -1;
+        /// <summary>Output index of the stored-mask word that holds this site's bit.</summary>
+        public int MaskOutputIndex { get; set; } = -1;
+        /// <summary>This site's bit in its stored-mask word (set when the site stored in that vertex).</summary>
+        public int MaskBit { get; set; }
 
         /// <summary>Creates the varying description.</summary>
         /// <param name="paramIndex">See <see cref="ParamIndex"/>.</param>

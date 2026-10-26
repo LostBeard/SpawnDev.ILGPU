@@ -1115,9 +1115,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // Packed-4-bit (QInt4/QUInt4/FP4) DIRECT view params ALSO reserve a count slot right
                     // after the offset slot - GetViewLength can't use arrayLength*8 for them (rounds up to
                     // the word boundary). MUST match the manifest pass (~2284) in slot order.
+                    // Sub-word views (byte, short, Half, BFloat16, FP8) too when the kernel reads their length:
+                    // arrayLength() counts the u32 WORDS of the binding, so `words * 4` rounded a byte view's
+                    // length up to a multiple of 4 (SpawnDev.Codecs SnappyCompressorGpu, data.IntLength of the last
+                    // block: every input whose length % 4 != 0 framed wrong on WebGPU only, 2026-10-26).
                     if (GetBufferElementType(param.ParameterType) is PrimitiveType dpCntPt
                         && (dpCntPt.BasicValueType == BasicValueType.QInt4
-                            || dpCntPt.BasicValueType == BasicValueType.Float4E2M1))
+                            || dpCntPt.BasicValueType == BasicValueType.Float4E2M1
+                            || (IsSubWordElement(dpCntPt.BasicValueType) && ParamLengthIsRead(param.Index))))
                     {
                         _viewCountScalarSlots[param.Index] = globalScalarSlotOffset;
                         globalScalarSlotOffset++;
@@ -2917,7 +2922,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     };
                     scalarManifest.Add(dpCountEntry);
                     _viewCountScalarSlots[viewParamIndex] = scalarSlotOffset;
-                    builder.AppendLine($"// View element count for direct packed-4-bit param{viewParamIndex} at scalar slot {scalarSlotOffset}");
+                    builder.AppendLine($"// View element count for direct packed-4-bit / sub-word param{viewParamIndex} at scalar slot {scalarSlotOffset}");
                     scalarSlotOffset++;
                 }
 
@@ -6701,6 +6706,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return;
             }
 
+            // A bool local loaded through an integer pointer cast (see GenerateCode(PointerCast)).
+            if (_boolLocalCastPtrs.TryGetValue(source.Name, out var boolLocal))
+            {
+                Declare(target);
+                string loadType = TypeGenerator[loadVal.Type];
+                AppendLine(loadType == "bool"
+                    ? $"{target} = {boolLocal};"
+                    : $"{target} = select({loadType}(0), {loadType}(1), {boolLocal});");
+                return;
+            }
+
             // Special handling for loading an ArrayView parameter (which is a struct).
             // We cannot 'load' the struct from the buffer binding (which is array<T>).
             // Instead, we treat the 'loaded' value as a pointer/alias to the binding.
@@ -6954,6 +6970,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     AppendLine($"*{address} = select(0i, 1i, {val});");
                 else
                     AppendLine($"*{address} = {val};");
+                return;
+            }
+
+            // A bool local stored through an integer pointer cast (see GenerateCode(PointerCast)).
+            if (_boolLocalCastPtrs.TryGetValue(address.Name, out var boolLocal))
+            {
+                AppendLine(TypeGenerator[storeVal.Value.Type] == "bool"
+                    ? $"{boolLocal} = {val};"
+                    : $"{boolLocal} = ({val}) != {TypeGenerator[storeVal.Value.Type]}(0);");
                 return;
             }
 
@@ -8063,8 +8088,45 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 valueVariables[value] = src;
                 return;
             }
+            // A `ref bool` LOCAL reached through a byte pointer (IL keeps a bool as a byte: `ref bool` through an
+            // inlined helper casts the bool alloca's pointer to an Int8 pointer and stores i32 0/1 through it). The
+            // local is a WGSL `var v : bool`; the base emitted `v_cast = v_local; // ptrCast` (an undeclared variable
+            // holding the VALUE, then `*v_cast = ...`, "no definition in scope"; SpawnDev.Codecs SnappyDecompressorGpu
+            // ReadElement(.., ref bool isCopy, ..)). Loads and stores through the cast convert to and from the bool.
+            if (_localAllocaVarNames.Contains(src.Name)
+                && value.SourceElementType is PrimitiveType { BasicValueType: BasicValueType.Int1 }
+                && value.TargetElementType is PrimitiveType targetPrim && targetPrim.BasicValueType != BasicValueType.Int1)
+            {
+                _boolLocalCastPtrs[Load(value).Name] = src.Name;
+                return;
+            }
             base.GenerateCode(value);
         }
+
+        /// <summary>True for the element types a WGSL binding packs several of into one u32 word.</summary>
+        private static bool IsSubWordElement(BasicValueType type) =>
+            type == BasicValueType.Int8 || type == BasicValueType.Int16 || type == BasicValueType.Float16
+            || type == BasicValueType.BFloat16 || type == BasicValueType.Float8E4M3 || type == BasicValueType.Float8E5M2;
+
+        private HashSet<int>? _lengthReadParams;
+
+        /// <summary>True when the kernel reads the length of kernel view parameter <paramref name="paramIndex"/> itself.</summary>
+        private bool ParamLengthIsRead(int paramIndex)
+        {
+            if (_lengthReadParams == null)
+            {
+                _lengthReadParams = new HashSet<int>();
+                foreach (var block in Method.Blocks)
+                    foreach (var entry in block)
+                        if (entry.Value is global::ILGPU.IR.Values.GetViewLength gvl
+                            && ResolveToParameter(gvl.View) is global::ILGPU.IR.Values.Parameter p)
+                            _lengthReadParams.Add(p.Index);
+            }
+            return _lengthReadParams.Contains(paramIndex);
+        }
+
+        /// <summary>A pointer cast of a bool local to an integer pointer -> the bool local's variable name.</summary>
+        private readonly Dictionary<string, string> _boolLocalCastPtrs = new(StringComparer.Ordinal);
 
         public override void GenerateCode(AddressSpaceCast value)
         {
@@ -8627,6 +8689,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         lengthExpr = $"i32(_scalar_params[{dpCntSlot}])";
                     else
                         lengthExpr = $"({lengthExpr} * 8)";
+                }
+                else if (_viewCountScalarSlots.TryGetValue(param.Index, out int swCntSlot)
+                    && !_directParamCoalesceMembership.ContainsKey(param.Index))
+                {
+                    // Sub-word view with a true-element-count slot (reserved when its length is read): exact,
+                    // where arrayLength * elementsPerWord rounds up to the word boundary.
+                    lengthExpr = $"i32(_scalar_params[{swCntSlot}])";
                 }
                 else if (_subWordParams.TryGetValue(param.Index, out var swElemSize))
                 {

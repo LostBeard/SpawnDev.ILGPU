@@ -22,11 +22,7 @@ namespace SpawnDev.ILGPU.WebGL
         /// <returns>A task that completes when all worker dispatches are done.</returns>
         public static async Task SynchronizeAsync(this WebGLAccelerator accelerator)
         {
-            if (accelerator.PendingWorkTasks.Count > 0)
-            {
-                await Task.WhenAll(accelerator.PendingWorkTasks);
-                accelerator.PendingWorkTasks.Clear();
-            }
+            await accelerator.DrainPendingWorkAsync();
         }
     }
 }

@@ -135,6 +135,20 @@ namespace SpawnDev.ILGPU.WebGL
         /// </summary>
         internal List<Task> PendingWorkTasks { get; } = new List<Task>();
 
+        /// <summary>
+        /// Awaits every pending dispatch, taking them out of <see cref="PendingWorkTasks"/> FIRST: a dispatch that faulted
+        /// reports its error to this one awaiter. The list used to be cleared only after a successful await, so one failed
+        /// dispatch (a refused kernel) stayed in it and every later SynchronizeAsync / readback on the accelerator threw
+        /// that same old error (StoreAddress_OffSlotStore failed with StoreAddress_OneSiteManyElements' error, 2026-10-26).
+        /// </summary>
+        internal async Task DrainPendingWorkAsync()
+        {
+            if (PendingWorkTasks.Count == 0) return;
+            var pending = PendingWorkTasks.ToArray();
+            PendingWorkTasks.Clear();
+            await Task.WhenAll(pending);
+        }
+
         // ---- Reflection cache: avoids per-dispatch GetProperty calls ----
         private static readonly ConcurrentDictionary<Type, ReflectionMetadataCache> _reflectionCache = new();
 
@@ -612,11 +626,7 @@ namespace SpawnDev.ILGPU.WebGL
             EnsureBufferInWorker(memBuffer, memBuffer.GlslType);
 
             // Wait for any pending dispatches first
-            if (PendingWorkTasks.Count > 0)
-            {
-                await Task.WhenAll(PendingWorkTasks);
-                PendingWorkTasks.Clear();
-            }
+            await DrainPendingWorkAsync();
 
             // Request readback from worker
             var requestId = Interlocked.Increment(ref _nextReadbackRequestId);
@@ -660,11 +670,7 @@ namespace SpawnDev.ILGPU.WebGL
         {
             EnsureBufferInWorker(memBuffer, memBuffer.GlslType);
 
-            if (PendingWorkTasks.Count > 0)
-            {
-                await Task.WhenAll(PendingWorkTasks);
-                PendingWorkTasks.Clear();
-            }
+            await DrainPendingWorkAsync();
 
             var requestId = Interlocked.Increment(ref _nextBlitRequestId);
             var tcs = new TaskCompletionSource();
@@ -1268,6 +1274,7 @@ namespace SpawnDev.ILGPU.WebGL
             for (int outIdx = 0; outIdx < outputVaryings.Count; outIdx++)
             {
                 var outputInfo = outputVaryings[outIdx];
+                if (outputInfo.IsStoreMeta) continue; // a store group's base / mask word, read through the outputs
                 int paramIndexEffective = outputInfo.ParamIndex;
                 int bodyStructClrFieldIdx = -1;
                 if (paramIndexEffective >= 1000)
@@ -1342,7 +1349,11 @@ namespace SpawnDev.ILGPU.WebGL
                                 structByteSize = outputInfo.StructByteSize,
                                 writeByteOffset = (int)(contiguous.Index * contiguous.ElementSize),
                                 writeLengthBytes = (int)contiguous.LengthInBytes,
-                                subWordElementSize = subWordElementSize
+                                subWordElementSize = subWordElementSize,
+                                siteConst = outputInfo.SiteConst,
+                                baseIndex = outputInfo.BaseOutputIndex,
+                                maskIndex = outputInfo.MaskOutputIndex,
+                                maskBit = outputInfo.MaskBit,
                             });
                         }
                     }

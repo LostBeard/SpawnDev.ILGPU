@@ -280,5 +280,13 @@ namespace SpawnDev.ILGPU.WebGL
         public int writeLengthBytes { get; init; }
         /// <summary>subWordElementSize.</summary>
         public int subWordElementSize { get; init; }
+        /// <summary>The store site's constant element offset (the value lands at base + siteConst).</summary>
+        public int siteConst { get; init; }
+        /// <summary>Output index of the site's group base varying (-1 = the vertex's own element).</summary>
+        public int baseIndex { get; init; } = -1;
+        /// <summary>Output index of the stored-mask word holding the site's bit.</summary>
+        public int maskIndex { get; init; } = -1;
+        /// <summary>The site's bit in that mask word.</summary>
+        public int maskBit { get; init; }
     }
 }

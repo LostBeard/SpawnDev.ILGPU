@@ -520,6 +520,15 @@ namespace ILGPU.Backends.Velocity
             switch (basicValueType)
             {
                 case BasicValueType.Int1:
+                    // A bool in memory is a byte, but in a warp register it is the warp's bool form (all bits set per
+                    // lane on the SIMD warps, 1 on Scalar): a raw byte 1 - what IL stores for `true` through a byte
+                    // pointer, e.g. a `ref bool` written by an inlined helper - read as FALSE in every select
+                    // (RefBool_ThroughHelper_SetsAndReadsTheLocal, 2026-10-26). Normalize: byte != 0.
+                    Load8(emitter);
+                    emitter.Emit(OpCodes.Ldc_I4_0);
+                    ConvertScalarTo32(emitter, VelocityWarpOperationMode.I);
+                    Compare32(emitter, CompareKind.NotEqual, VelocityWarpOperationMode.I);
+                    break;
                 case BasicValueType.Int8:
                     Load8(emitter);
                     break;
