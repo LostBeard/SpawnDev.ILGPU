@@ -5185,11 +5185,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </remarks>
         void IsMultiDim(global::ILGPU.IR.Values.Parameter param, out bool isMultiDim, out bool isView, out bool is1DView, out bool is2DView, out bool is3DView)
         {
-            int clrIndex = param.Index - EntryPoint.KernelIndexParameterOffset;
             if (param.ParameterType is global::ILGPU.IR.Types.StructureType
-                && clrIndex >= 0 && clrIndex < EntryPoint.Parameters.Count
-                && EntryPoint.Parameters[clrIndex] is Type clrType
-                && clrType.IsValueType && !typeof(IArrayView).IsAssignableFrom(clrType))
+                && SpawnDev.ILGPU.CodeGen.KernelParameterKinds.IsUserStruct(EntryPoint, param.Index))
             {
                 isMultiDim = isView = is1DView = is2DView = is3DView = false;
                 return;

@@ -956,6 +956,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// Mirror of WGSL's IsBodyStruct check, generalized to also recognize
         /// single-view body structs like `Tests23_OnlyShortStruct { ArrayView&lt;short&gt; S0 }`.
         /// </summary>
+        /// <summary>True when <paramref name="st"/> has at least one view field.</summary>
+        private static bool HasViewField(StructureType st)
+        {
+            for (int i = 0; i < st.NumFields; i++)
+                if (IsViewFieldType(st.Fields[i])) return true;
+            return false;
+        }
+
         private static bool IsBodyStruct(StructureType st)
         {
             if (IsTensorViewLikeBodyStruct(st))
@@ -994,7 +1002,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             {
                 if (param.Index < KernelParamOffset) continue;
                 if (param.ParameterType is not StructureType st) continue;
-                if (!IsBodyStruct(st)) continue;
+                // A user struct holding a view is a body struct whatever its field count (KernelParameterKinds).
+                if (!IsBodyStruct(st) && !(HasViewField(st) && SpawnDev.ILGPU.CodeGen.KernelParameterKinds.IsUserStruct(EntryPoint, param.Index)))
+                    continue;
 
                 var fields = new List<BodyStructFieldInfoGL>(st.NumFields);
                 int userIdx = param.Index - KernelParamOffset;

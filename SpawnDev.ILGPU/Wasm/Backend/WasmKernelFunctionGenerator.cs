@@ -732,7 +732,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             {
                 var param = parameters[i];
                 var paramType = param.Type;
-                bool isView = IsViewType(paramType);
+                // A user struct holding a view is a body struct, never a single view (KernelParameterKinds)
+                bool isView = IsViewType(paramType) && !IsUserStructBody(i, paramType);
 
                 if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Setup] param[{i}] id={param.Id} type={paramType} isView={isView} _nextLocalIndex={_nextLocalIndex}");
 
@@ -818,7 +819,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         ElementSize = elemSize,
                     });
                 }
-                else if (paramType is StructureType bodySt && IsBodyStruct(bodySt)
+                else if (paramType is StructureType bodySt && (IsBodyStruct(bodySt) || IsUserStructBody(i, bodySt))
                     && _bodyStructFields.TryGetValue(i, out var bsFields))
                 {
                     _hasViews = true;
@@ -2760,7 +2761,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // For ArrayView1D params, the source might be a GetField(param, field)
             // rather than the Parameter directly. Use TraceToParameter to resolve.
             int resolvedParamIdx = -1;
-            if (source is global::ILGPU.IR.Values.Parameter directParam && IsViewType(directParam.Type))
+            if (source is global::ILGPU.IR.Values.Parameter directParam && IsViewParam(directParam))
             {
                 for (int pi = 0; pi < Method.Parameters.Count; pi++)
                     if (Method.Parameters[pi] == directParam) { resolvedParamIdx = pi; break; }
@@ -2771,7 +2772,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 resolvedParamIdx = TraceToParameter(source);
                 // Only use if the resolved param is actually a view
                 if (resolvedParamIdx >= 0 && resolvedParamIdx < Method.Parameters.Count
-                    && !IsViewType(Method.Parameters[resolvedParamIdx].Type))
+                    && !IsViewParam(Method.Parameters[resolvedParamIdx]))
                     resolvedParamIdx = -1;
             }
 
@@ -5988,7 +5989,7 @@ EmitSaveAllLocals();
             _bodyStructFields.Clear();
             foreach (var param in Method.Parameters)
             {
-                if (param.ParameterType is not StructureType st || !IsBodyStruct(st))
+                if (param.ParameterType is not StructureType st || !(IsBodyStruct(st) || IsUserStructBody(param.Index, st)))
                     continue;
 
                 var fields = new List<BodyStructFieldInfoWasm>(st.NumFields);
@@ -6032,6 +6033,24 @@ EmitSaveAllLocals();
 
                 _bodyStructFields[param.Index] = fields;
             }
+        }
+
+        /// <summary>
+        /// True when IR parameter <paramref name="irIndex"/> is a user struct (by its .NET type) holding a view: a body
+        /// struct whatever its field count. The structural rules read `{ ArrayView&lt;byte&gt; Bytes; int A, B; }` as an
+        /// ArrayView1D (2026-10-25, see KernelParameterKinds).
+        /// </summary>
+        /// <summary>True when kernel parameter <paramref name="param"/> is a single view (not a user struct holding one).</summary>
+        private bool IsViewParam(global::ILGPU.IR.Values.Parameter param) =>
+            IsViewType(param.Type) && !IsUserStructBody(param.Index, param.Type);
+
+        private bool IsUserStructBody(int irIndex, TypeNode type)
+        {
+            if (type is not StructureType st) return false;
+            bool hasView = false;
+            for (int i = 0; i < st.NumFields && !hasView; i++)
+                hasView = IsViewFieldType(st.Fields[i]);
+            return hasView && SpawnDev.ILGPU.CodeGen.KernelParameterKinds.IsUserStruct(_generatorArgs.EntryPoint, irIndex);
         }
 
         private static bool IsBodyStruct(StructureType st)
@@ -6103,7 +6122,7 @@ EmitSaveAllLocals();
                         continue;
                     }
 
-                    if (param.ParameterType is not StructureType st || !IsBodyStruct(st))
+                    if (param.ParameterType is not StructureType st || !(IsBodyStruct(st) || IsUserStructBody(param.Index, st)))
                         return false;
                     if (!_bodyStructFields.TryGetValue(param.Index, out var fields))
                         return false;
