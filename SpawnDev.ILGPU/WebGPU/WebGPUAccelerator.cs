@@ -2122,6 +2122,10 @@ namespace SpawnDev.ILGPU.WebGPU
                                 ? (m.fieldIdx, -1)
                                 : (group.BodyStructParamIndex, m.fieldIdx);
                             coalesceFieldElementOffsets[offsetKey] = slotValue;
+                            // A direct-param member's OWN element count (the shared binding's arrayLength is the sum
+                            // of all members): read by its count slot, keyed -(param + 1) like the manifest entry.
+                            if (group.IsDirectParam)
+                                viewElementCounts[-(m.fieldIdx + 1)] = (int)m.elementCount;
 
                             runningByteOffset += copySize;
                             runningElementCount += m.elementCount;

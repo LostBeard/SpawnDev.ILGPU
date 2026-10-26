@@ -1558,6 +1558,10 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
                 "Tracked as rc.16 Bug D follow-up.");
 
         [TestMethod]
+        public new Task Atomic_ThroughInKernelSubView_MatchesOracle() =>
+            throw new UnsupportedTestException("WebGL: no atomics (vertex shaders have none)");
+
+        [TestMethod]
         public new Task StructParam_BoundsBarrierLoop_ShaderIsUniform_MatchesOracle() =>
             throw new UnsupportedTestException("WebGL: shared memory + barriers (vertex shaders have neither)");
 

@@ -49,3 +49,11 @@ GpuEpipolarRansac, 2026-09-27). So `[MethodImpl(NoInlining)]` cannot split such 
 - A helper taking a workgroup (`SharedMemory`) view.
 - WGSL shape: the helper is a real `fn` (WGSL has it, `main` calls it); the whole-suite WGSL/GLSL/Wasm screen + naga on
   all Codecs kernels; both WebGPU lanes.
+
+## Status 2026-10-26 evening: ON HOLD
+
+The driving case is gone: Geordi split `Vp8EntropyStepKernel` and `Vp9EntropyStepKernel` by hand (one block-coder call
+site; MEASURED with the 5.4.7 generator in node Dawn's module step: 147 ms / 163 MB and 176 ms / 184 MB, from > 6 GB).
+Today no consumer kernel needs a real WGSL function with an address parameter, and the change touches every WebGPU
+kernel with helpers. Resume when a kernel again exceeds Tint's budget and cannot be restructured, and relax
+`TakesAddress` only for explicit `[MethodImpl(NoInlining)]` helpers first (smallest blast radius).

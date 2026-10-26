@@ -387,6 +387,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // needs coalescing. Mutates BodyStructFieldInfo.BindingName + IsCoalesceMember/Leader
             // so the rest of the codegen path emits one binding per group instead of one per field.
             DecideCoalesceGroups();
+            ReserveCoalesceMemberCountSlots();
 
             // Bug D phase 7 (2026-05-05): scan kernel IR for MethodCall nodes and record
             // observed address spaces for each ViewType arg passed to a NoInlining helper.
@@ -1138,6 +1139,31 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     }
                 }
             }
+            _scalarSlotsAfterScan = globalScalarSlotOffset;
+        }
+
+        /// <summary>The first scalar slot after every slot <see cref="ScanBodyStructParams"/> reserved.</summary>
+        private int _scalarSlotsAfterScan;
+
+        /// <summary>
+        /// Direct-param coalesce member -> the scalar slot holding ITS element count, for members whose length the
+        /// kernel reads and that got no count slot in <see cref="ScanBodyStructParams"/> (which runs before coalescing is
+        /// decided). These slots follow every scanned slot; <c>GenerateHeader</c> adds their manifest entries last.
+        /// </summary>
+        private readonly Dictionary<int, int> _coalesceCountSlots = new();
+
+        /// <summary>
+        /// Gives every direct-param coalesce member whose length is read a true element count. arrayLength() of the
+        /// shared binding is the SUM of all members, so `view.Length` of a coalesced input was wrong (silently).
+        /// </summary>
+        private void ReserveCoalesceMemberCountSlots()
+        {
+            int next = _scalarSlotsAfterScan;
+            foreach (int paramIndex in _directParamCoalesceMembership.Keys.OrderBy(k => k))
+            {
+                if (_viewCountScalarSlots.ContainsKey(paramIndex) || !ParamLengthIsRead(paramIndex)) continue;
+                _coalesceCountSlots[paramIndex] = next++;
+            }
         }
 
         /// <summary>
@@ -1681,6 +1707,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     current = cast.Value;
                     continue;
                 }
+                // A pointer into a sub-view belongs to the parameter the sub-view was cut from: an atomic through
+                // `var s = counts.SubView(4, 8); Atomic.Add(ref s[i], 1)` was not seen by the atomic scan, the binding
+                // was declared non-atomic and shader creation failed ("atomic operation is done on a pointer to a
+                // non-atomic"; Atomic_ThroughInKernelSubView_MatchesOracle).
+                if (current is global::ILGPU.IR.Values.SubViewValue subView)
+                {
+                    current = subView.Source.Resolve();
+                    continue;
+                }
                 break;
             }
             // Fallback: use original ResolveToParameter
@@ -2051,7 +2086,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         protected override bool IsFloatAtomicTarget(global::ILGPU.IR.Value target)
         {
             // Check direct parameter float atomics
-            if (ResolveToParameter(target) is global::ILGPU.IR.Values.Parameter param
+            if (ResolveToParameter(target, throughSubViews: true) is global::ILGPU.IR.Values.Parameter param
                 && _floatAtomicParameters.Contains(param.Index))
                 return true;
 
@@ -2072,7 +2107,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         protected override bool IsUnsignedAtomicTarget(global::ILGPU.IR.Value target)
         {
             // Check direct parameter unsigned atomics
-            if (ResolveToParameter(target) is global::ILGPU.IR.Values.Parameter param
+            if (ResolveToParameter(target, throughSubViews: true) is global::ILGPU.IR.Values.Parameter param
                 && _unsignedAtomicParameters.Contains(param.Index))
                 return true;
 
@@ -2093,7 +2128,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         protected override bool IsEmulated64BitAtomicTarget(global::ILGPU.IR.Value target)
         {
             // Check direct parameter emulated 64-bit atomics
-            if (ResolveToParameter(target) is global::ILGPU.IR.Values.Parameter param
+            if (ResolveToParameter(target, throughSubViews: true) is global::ILGPU.IR.Values.Parameter param
                 && (_emulatedI64Params.Contains(param.Index) || _emulatedF64Params.Contains(param.Index))
                 && _atomicParameters.Contains(param.Index))
                 return true;
@@ -2918,7 +2953,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         ByteSize = 4,
                         WgslType = "u32",
                         IsViewCount = true,
-                        ViewCountBindingIndex = viewBindIdx,
+                        // a coalesce member shares the leader's binding: its own count rides under -(param + 1)
+                        ViewCountBindingIndex = _directParamCoalesceMembership.ContainsKey(viewParamIndex)
+                            ? -(viewParamIndex + 1) : viewBindIdx,
                     };
                     scalarManifest.Add(dpCountEntry);
                     _viewCountScalarSlots[viewParamIndex] = scalarSlotOffset;
@@ -2980,10 +3017,28 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // by 1, drifting all subsequent members' slot indices. A correct fix needs
                 // count-slot pre-allocation in ScanBodyStructParams, but DecideCoalesceGroups
                 // runs AFTER ScanBodyStructParams so coalesce membership is unknown there.
-                // For v1, GetViewLength on a coalesce member falls back to arrayLength()
-                // which returns the shared binding's element count (sum across members) —
-                // wrong, but kernels using direct-param coalesce typically don't read
-                // view.Length on the inputs. Tracked for v2.
+                // (5.4.7: fixed by ReserveCoalesceMemberCountSlots - the count slots of coalesce members follow
+                // every scanned slot and are added after this loop.)
+            }
+            if (_coalesceCountSlots.Count > 0)
+            {
+                if (scalarSlotOffset != _scalarSlotsAfterScan)
+                    throw new InvalidOperationException(
+                        $"WGSL scalar slots drifted: header pass ended at {scalarSlotOffset}, reservation at {_scalarSlotsAfterScan} ({Method.Name})");
+                foreach (var (paramIndex, slot) in _coalesceCountSlots.OrderBy(kv => kv.Value))
+                {
+                    scalarManifest.Add(new ScalarPackingEntry
+                    {
+                        ParamIndex = paramIndex,
+                        ByteOffset = slot * 4,
+                        ByteSize = 4,
+                        WgslType = "u32",
+                        IsViewCount = true,
+                        ViewCountBindingIndex = -(paramIndex + 1),
+                    });
+                    builder.AppendLine($"// View element count for coalesce member param{paramIndex} at scalar slot {slot}");
+                    scalarSlotOffset = slot + 1;
+                }
             }
 
             // Emit the single packed scalar binding (if any scalars were packed)
@@ -8653,12 +8708,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 string lengthExpr;
 
-                // Direct-param coalesce member: arrayLength() returns the SHARED binding's
-                // u32 count (sum across members), not this member's logical element count.
-                // v1 doesn't allocate per-member count slots — kernels using direct-param
-                // coalesce that read view.Length on coalesced inputs will get the wrong
-                // answer. Tracked for v2; the AV1 walker doesn't read view.Length on its
-                // coalesce-eligible inputs.
+                // Direct-param coalesce member: arrayLength() is the SHARED binding's u32 count (the sum of
+                // all members) - a member whose length is read has a count slot of its own (below,
+                // ReserveCoalesceMemberCountSlots), so this arrayLength form is only the non-member default.
                 lengthExpr = $"i32(arrayLength(&{(_directParamCoalesceMembership.TryGetValue(param.Index, out var dpLenGroup) ? dpLenGroup.BindingName : $"param{param.Index}")}))";
 
                 // For packed struct params, arrayLength() returns u32 count — divide by stride to get logical element count
@@ -8691,7 +8743,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         lengthExpr = $"({lengthExpr} * 8)";
                 }
                 else if (_viewCountScalarSlots.TryGetValue(param.Index, out int swCntSlot)
-                    && !_directParamCoalesceMembership.ContainsKey(param.Index))
+                    || _coalesceCountSlots.TryGetValue(param.Index, out swCntSlot))
                 {
                     // Sub-word view with a true-element-count slot (reserved when its length is read): exact,
                     // where arrayLength * elementsPerWord rounds up to the word boundary.
