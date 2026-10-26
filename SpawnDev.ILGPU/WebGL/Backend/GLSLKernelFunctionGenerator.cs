@@ -78,6 +78,43 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             public long Const;
             public int Slot;
             public int Group;
+            /// <summary>GLSL type of the stored value: the type of the site's forwarding shadow.</summary>
+            public string ValueType = "";
+            /// <summary>The dynamic part of the address is the same in every place of the thread (see <see cref="IsThreadInvariant"/>).</summary>
+            public bool Invariant;
+            /// <summary>Every IR store of this site: its block and position in the block.</summary>
+            public readonly List<(BasicBlock Block, int Pos)> Stores = new();
+        }
+
+        /// <summary>Position of each IR value in its block (filled by <see cref="AnalyzeOutputBuffers"/>).</summary>
+        private readonly Dictionary<Value, int> _valuePositions = new();
+        /// <summary>Block -> the blocks reachable from it in one or more steps.</summary>
+        private readonly Dictionary<BasicBlock, HashSet<BasicBlock>> _reachableFrom = new();
+
+        private HashSet<BasicBlock> ReachableFrom(BasicBlock block)
+        {
+            if (_reachableFrom.TryGetValue(block, out var set)) return set;
+            set = new HashSet<BasicBlock>();
+            var work = new Stack<BasicBlock>();
+            foreach (var succ in block.Successors) work.Push(succ);
+            while (work.Count > 0)
+            {
+                var b = work.Pop();
+                if (!set.Add(b)) continue;
+                foreach (var succ in b.Successors) work.Push(succ);
+            }
+            return _reachableFrom[block] = set;
+        }
+
+        /// <summary>True when a store of <paramref name="site"/> can run before <paramref name="load"/> in one thread.</summary>
+        private bool SiteMayPrecede(StoreSite site, Value load)
+        {
+            var lb = load.BasicBlock;
+            if (lb == null || !_valuePositions.TryGetValue(load, out int lp) || site.Stores.Count == 0) return true;
+            foreach (var (block, pos) in site.Stores)
+                if (block == lb && pos < lp || ReachableFrom(block).Contains(lb))
+                    return true;
+            return false;
         }
 
         /// <summary>Output buffer key -> its store sites in IR order (index = slot).</summary>
@@ -175,20 +212,74 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         }
 
         /// <summary>
+        /// True when every term of an element address (index and sub-view offsets) is built only from constants,
+        /// parameters and device constants, so it has one value in the whole thread. Two such addresses with the same
+        /// <see cref="StoreAddressSplit"/> signature differ by exactly their constants. A term compared by identity (a
+        /// load, a phi) can change between loop iterations, so equal signatures prove nothing there.
+        /// </summary>
+        private static bool IsAddressThreadInvariant(Value target)
+        {
+            target = target.Resolve();
+            if (target is not LoadElementAddress lea) return false;
+            if (!IsThreadInvariant(lea.Offset, 0)) return false;
+            var source = lea.Source.Resolve();
+            while (source is SubViewValue sv)
+            {
+                if (!IsThreadInvariant(sv.Offset, 0)) return false;
+                source = sv.Source.Resolve();
+            }
+            return true;
+        }
+
+        private static bool IsThreadInvariant(Value value, int depth)
+        {
+            value = value.Resolve();
+            if (depth > 24) return false;
+            switch (value)
+            {
+                case PrimitiveValue:
+                case global::ILGPU.IR.Values.Parameter:
+                case DeviceConstantValue:
+                    return true;
+                case BinaryArithmeticValue bin:
+                    return IsThreadInvariant(bin.Left, depth + 1) && IsThreadInvariant(bin.Right, depth + 1);
+                case UnaryArithmeticValue un:
+                    return IsThreadInvariant(un.Value, depth + 1);
+                case ConvertValue cv:
+                    return IsThreadInvariant(cv.Value, depth + 1);
+                case GetField gf when gf.ObjectValue.Resolve() is global::ILGPU.IR.Values.Parameter:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>
         /// Records the store site of <paramref name="target"/> for output buffer <paramref name="outKey"/> (once per
         /// distinct address expression), in IR order, so the slot numbers the varyings use and the address split the
         /// readback uses are fixed before any code is generated.
         /// </summary>
-        private void RecordStoreSite(int outKey, Value target)
+        private void RecordStoreSite(int outKey, Value target, Store store)
         {
             string key = StoreSiteKey(target);
-            if (_storeSlotByKey.ContainsKey((outKey, key))) return;
+            var occurrence = (store.BasicBlock, _valuePositions.GetValueOrDefault(store, -1));
+            if (_storeSlotByKey.TryGetValue((outKey, key), out int existing))
+            {
+                _storeSites[outKey][existing].Stores.Add(occurrence);
+                return;
+            }
+            var storedValue = store.Value;
             if (!_storeSites.TryGetValue(outKey, out var sites))
                 _storeSites[outKey] = sites = new List<StoreSite>();
             var (signature, constant) = StoreAddressSplit(target);
-            var site = new StoreSite { Key = key, BaseSignature = signature, Const = constant, Slot = sites.Count };
+            var site = new StoreSite
+            {
+                Key = key, BaseSignature = signature, Const = constant, Slot = sites.Count,
+                ValueType = TypeGenerator[storedValue.Type], Invariant = IsAddressThreadInvariant(target),
+            };
             int group = sites.FindIndex(s => s.BaseSignature == signature);
             site.Group = group >= 0 ? sites[group].Group : sites.Select(s => s.Group + 1).DefaultIfEmpty(0).Max();
+            site.Stores.Add(occurrence);
             sites.Add(site);
             _storeSlotByKey[(outKey, key)] = site.Slot;
             _currentStoreSlot[outKey] = site.Slot + 1;
@@ -491,6 +582,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var uniqueLeaExprs = new Dictionary<int, HashSet<string>>();
             foreach (var block in Method.Blocks)
             {
+                int position = 0;
+                foreach (var entry in block)
+                    _valuePositions[entry.Value] = position++;
+            }
+            foreach (var block in Method.Blocks)
+            {
                 foreach (var value in block)
                 {
                     if (value.Value is Store store)
@@ -499,7 +596,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         if (TryGetBufferTrackingKey(target, paramOffset, out int outKey))
                         {
                             _outputParamIndices.Add(outKey);
-                            RecordStoreSite(outKey, target);
+                            RecordStoreSite(outKey, target, store);
                             if (!uniqueLeaExprs.TryGetValue(outKey, out var exprSet))
                             {
                                 exprSet = new HashSet<string>();
@@ -2081,7 +2178,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// whose element index is <paramref name="elementIndexExpr"/>: the group base becomes index - constant (or -2
         /// when this vertex already stored a different element there), and the site's mask bit is set.
         /// </summary>
-        private void EmitStoreAddress(int key, int slot, string elementIndexExpr)
+        private void EmitStoreAddress(int key, int slot, string elementIndexExpr, Variable? value)
         {
             if (!_storeSites.TryGetValue(key, out var sites) || slot < 0 || slot >= sites.Count
                 || !_storeBaseVaryings.TryGetValue(key, out var bases))
@@ -2098,6 +2195,104 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             string bit = site.Slot % 32 == 31 ? "int(0x80000000u)" : $"{1 << (site.Slot % 32)}";
             AppendLine($"_sa_{maskVar} = _sa_{maskVar} | {bit};");
             AppendLine($"{maskVar} = _sa_{maskVar};");
+            if (value != null)
+            {
+                AppendLine($"_sv_{key}_{slot} = {StoredShadowValue(key, site, value)};");
+                AppendLine($"_sad_{key}_{slot} = int({elementIndexExpr});");
+                AppendLine($"_ss_{key}_{slot} = ++_sseq;");
+            }
+        }
+
+        /// <summary>
+        /// The value a load of the element just stored must see: the stored value as the buffer holds it (a byte or
+        /// short wraps to its width, a Half / BFloat16 / FP8 rounds to its precision), in the site's value type.
+        /// </summary>
+        private string StoredShadowValue(int key, StoreSite site, Variable value)
+        {
+            string v = value.Type == site.ValueType ? value.ToString()
+                : ForwardConvert(value.ToString(), value.Type, site.ValueType)
+                    ?? throw new SpawnDev.ILGPU.UnsupportedKernelFeatureException(
+                        feature: $"a {value.Type} value stored into a {site.ValueType} element of output {key} in kernel '{Method.Name}'",
+                        backend: global::ILGPU.Runtime.AcceleratorType.WebGL,
+                        remediation: "Use WebGPU, Wasm or a desktop backend.");
+            if (_subWordFloat16Params.Contains(key)) return $"_f16_to_f32(_f32_to_f16({v}))";
+            if (_subWordBFloat16Params.Contains(key)) return $"_bf16_to_f32(_f32_to_bf16({v}))";
+            if (_subWordFloat8Params.TryGetValue(key, out bool e4m3))
+                return e4m3 ? $"_e4m3_to_f32(_f32_to_e4m3({v}))" : $"_e5m2_to_f32(_f32_to_e5m2({v}))";
+            if (_subWordParams.TryGetValue(key, out int size) && (site.ValueType == "int" || site.ValueType == "uint"))
+            {
+                string mask = size == 1 ? "0xFF" : "0xFFFF";
+                string sign = size == 1 ? "0x80" : "0x8000";
+                string wrapped = _subWordUnsignedParams.Contains(key)
+                    ? $"(int({v}) & {mask})"
+                    : $"(((int({v}) & {mask}) ^ {sign}) - {sign})";
+                return site.ValueType == "int" ? wrapped : $"uint({wrapped})";
+            }
+            return v;
+        }
+
+        /// <summary>A scalar in GLSL type <paramref name="to"/> with the bits (or truth) of <paramref name="from"/>; null for other shapes.</summary>
+        private static string? ForwardConvert(string expr, string from, string to)
+        {
+            if (from == to) return expr;
+            return (from, to) switch
+            {
+                ("float", "int") => $"floatBitsToInt({expr})",
+                ("float", "uint") => $"floatBitsToUint({expr})",
+                ("int", "float") => $"intBitsToFloat({expr})",
+                ("uint", "float") => $"uintBitsToFloat({expr})",
+                ("int", "uint") or ("uint", "int") => $"{to}({expr})",
+                ("bool", "int") or ("bool", "uint") => $"{to}({expr})",
+                ("int", "bool") or ("uint", "bool") => $"(({expr}) != {from}(0))",
+                _ => null,
+            };
+        }
+
+        /// <summary>
+        /// Store-to-load forwarding: after a load of element <paramref name="elementIndexExpr"/> of output buffer
+        /// <paramref name="key"/> from its texture, takes the value of this thread's most recent store to that element.
+        /// Transform feedback only captures stores and the texture keeps the dispatch's input, so a kernel that read
+        /// back what it had written (an in-place two-pass transform, `out[i] += x` in a loop) read the old contents
+        /// (SpawnDev.Codecs Vp9ForwardWht4x4Gpu.Transform on WebGL: 0 instead of 1600). <paramref name="assign"/>
+        /// makes the assignment statement from a shadow expression. A site whose address provably differs from the
+        /// load's (both thread-invariant, same signature, other constant) is left out at compile time.
+        /// </summary>
+        private void EmitStoreForward(Value load, int key, string elementIndexExpr, Value? loadAddress, string targetType, Func<string, string> assign)
+        {
+            if (!_storeBaseVaryings.ContainsKey(key) || !_storeSites.TryGetValue(key, out var sites)) return;
+            string? signature = null;
+            long constant = 0;
+            if (loadAddress != null && IsAddressThreadInvariant(loadAddress))
+                (signature, constant) = StoreAddressSplit(loadAddress.Resolve());
+            var lines = new List<string>();
+            foreach (var site in sites)
+            {
+                // A store that cannot run before this load (no CFG path from it) never forwards to it.
+                if (!SiteMayPrecede(site, load)) continue;
+                string stamp = $"_ss_{key}_{site.Slot}";
+                string cond;
+                if (signature != null && site.Invariant && site.BaseSignature == signature)
+                {
+                    if (site.Const != constant) continue;
+                    cond = $"{stamp} > _fb";
+                }
+                else
+                    cond = $"{stamp} > _fb && _sad_{key}_{site.Slot} == int({elementIndexExpr})";
+                string shadow = $"_sv_{key}_{site.Slot}";
+                if (targetType.Length > 0 && site.ValueType != targetType)
+                    shadow = ForwardConvert(shadow, site.ValueType, targetType)
+                        ?? throw new SpawnDev.ILGPU.UnsupportedKernelFeatureException(
+                            feature: $"a {targetType} load of output {key}, which kernel '{Method.Name}' stores as {site.ValueType}",
+                            backend: global::ILGPU.Runtime.AcceleratorType.WebGL,
+                            remediation: "Load the element as the type it is stored as, or use WebGPU, Wasm or a desktop backend.");
+                lines.Add($"if ({cond}) {{ {assign(shadow)} _fb = {stamp}; }}");
+            }
+            if (lines.Count == 0) return;
+            AppendLine("{ int _fb = 0;");
+            PushIndent();
+            foreach (var l in lines) AppendLine(l);
+            PopIndent();
+            AppendLine("}");
         }
 
         /// <summary>
@@ -2179,6 +2374,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 foreach (var b in bases) { AppendLine($"int _sa_{b} = -1;"); AppendLine($"{b} = -1;"); }
             foreach (var masks in _storeMaskVaryings.Values)
                 foreach (var m in masks) { AppendLine($"int _sa_{m} = 0;"); AppendLine($"{m} = 0;"); }
+            // Store forwarding shadows (EmitStoreForward): each site's last value, element and store stamp.
+            if (_storeBaseVaryings.Count > 0) AppendLine("int _sseq = 0;");
+            foreach (var key in _storeBaseVaryings.Keys)
+                foreach (var site in _storeSites[key])
+                {
+                    AppendLine($"{site.ValueType} _sv_{key}_{site.Slot};");
+                    AppendLine($"int _sad_{key}_{site.Slot} = -1;");
+                    AppendLine($"int _ss_{key}_{site.Slot} = 0;");
+                }
             AppendLine("");
         }
 
@@ -2767,7 +2971,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 string bindingName = bsViewInfo.BindingName;
 
                 if (_crossBlockPointers.Contains(value))
+                {
                     _crossBlockPointerExprs[target.Name] = $"texelFetch({bindingName}, ivec2((int({offsetExpr}) + {bindingName}_offset) % {bindingName}_tileW, (int({offsetExpr}) + {bindingName}_offset) / {bindingName}_tileW), 0)";
+                    _crossBlockIndexExprs[target.Name] = offsetExpr;
+                }
 
                 EmitLeaIntPointer(target, offsetExpr, $"body-struct LEA into {bindingName}");
                 Bind(value, new Variable(target.Name, "int"));
@@ -2796,6 +3003,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     {
                         string cbBn = GetParamBindingName(param.Index);
                         _crossBlockPointerExprs[target.Name] = $"texelFetch({cbBn}, ivec2((int({offsetExpr}) + {cbBn}_offset) % {cbBn}_tileW, (int({offsetExpr}) + {cbBn}_offset) / {cbBn}_tileW), 0)";
+                        _crossBlockIndexExprs[target.Name] = offsetExpr;
                     }
 
                     EmitLeaIntPointer(target, offsetExpr, $"LEA into param{param.Index}");
@@ -2822,6 +3030,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 {
                     string srcBn = GetParamBindingName(sourceParamIdx);
                     _crossBlockPointerExprs[target.Name] = $"texelFetch({srcBn}, ivec2((int({offsetExpr}) + {srcBn}_offset) % {srcBn}_tileW, (int({offsetExpr}) + {srcBn}_offset) / {srcBn}_tileW), 0)";
+                    _crossBlockIndexExprs[target.Name] = offsetExpr;
                 }
 
                 EmitLeaIntPointer(target, offsetExpr, $"LEA into param{sourceParamIdx} (via alias)");
@@ -2865,6 +3074,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         }
 
         private readonly Dictionary<string, int> _leaParamMap = new();
+        /// <summary>Cross-block pointer name -> its element index expression (for <see cref="EmitStoreForward"/>).</summary>
+        private readonly Dictionary<string, string> _crossBlockIndexExprs = new();
         /// <summary>Maps parameter index → GLSL element type ("int", "uint", "float") for buffer params.</summary>
         private readonly Dictionary<int, string> _bufferGlslTypes = new();
 
@@ -2974,12 +3185,17 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 if (lfa.LeafCount == 1)
                 {
                     AppendLine($"{target} = {StructLeafFetchExpr(lfaLeaves[lfa.FirstLeaf], lfa.ElemIdx, lfaBn, lfaElemType.Size)};");
+                    EmitStoreForward(loadVal, lfa.ParamIdx, lfa.ElemIdx, (loadVal.Source.Resolve() as LoadFieldAddress)?.Source, "",
+                        sh => $"{target} = {sh}{lfaLeaves[lfa.FirstLeaf].Path};");
                 }
                 else
                 {
                     // A nested struct field: its own flattened leaves are field_0..field_{n-1}, in order.
                     for (int k = 0; k < lfa.LeafCount; k++)
                         AppendLine($"{target}.field_{k} = {StructLeafFetchExpr(lfaLeaves[lfa.FirstLeaf + k], lfa.ElemIdx, lfaBn, lfaElemType.Size)};");
+                    EmitStoreForward(loadVal, lfa.ParamIdx, lfa.ElemIdx, (loadVal.Source.Resolve() as LoadFieldAddress)?.Source, "",
+                        sh => string.Concat(Enumerable.Range(0, lfa.LeafCount)
+                            .Select(k => $"{target}.field_{k} = {sh}{lfaLeaves[lfa.FirstLeaf + k].Path}; ")));
                 }
                 return;
             }
@@ -3026,6 +3242,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     AppendLine($"{emuValHi});");
                     PopIndent();
                 }
+                EmitStoreForward(loadVal, emulInfo.ParamIndex, $"({baseIdxVar} >> 1)", loadVal.Source, target.Type, sh => $"{target} = {sh};");
                 return;
             }
 
@@ -3042,6 +3259,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     Declare(target);
                     AppendLine($"{target} = {castExpr};");
                 }
+                if (_leaParamMap.TryGetValue(source.ToString(), out var cbKey)
+                    && _crossBlockIndexExprs.TryGetValue(source.ToString(), out var cbIndex))
+                    EmitStoreForward(loadVal, cbKey, cbIndex, loadVal.Source, target.Type, sh => $"{target} = {sh};");
                 return;
             }
 
@@ -3140,6 +3360,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     Declare(target);
                     AppendLine($"{target} = {extractExpr};");
                 }
+                EmitStoreForward(loadVal, subWordParamIdx, idx, loadVal.Source, target.Type, sh => $"{target} = {sh};");
                 return;
             }
 
@@ -3165,6 +3386,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         Declare(target);
                         foreach (var leaf in leaves)
                             AppendLine($"{target}{leaf.Path} = {StructLeafFetchExpr(leaf, source.ToString(), leaBn, elemSize)};");
+                        EmitStoreForward(loadVal, leaParamIdx, source.ToString(), loadVal.Source, target.Type, sh => $"{target} = {sh};");
                         return;
                     }
                 }
@@ -3200,6 +3422,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     Declare(target);
                     AppendLine($"{target} = {castExpr};");
                 }
+                EmitStoreForward(loadVal, leaParamIdx, source.ToString(), loadVal.Source, target.Type, sh => $"{target} = {sh};");
                 return;
             }
 
@@ -3299,7 +3522,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         AppendLine($"{loOutput.VaryingName} = {val}.x;");
                         AppendLine($"{hiOutput.VaryingName} = {val}.y;");
                     }
-                    EmitStoreAddress(emulInfo.ParamIndex, GetStoreSlot(emulInfo.ParamIndex, storeVal), $"({address.Name}_base_idx >> 1)");
+                    EmitStoreAddress(emulInfo.ParamIndex, GetStoreSlot(emulInfo.ParamIndex, storeVal), $"({address.Name}_base_idx >> 1)", val);
                 }
                 return;
             }
@@ -3358,7 +3581,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                             // TF varying type matches the field's native type, so direct assignment
                             AppendLine($"{fieldOutput.VaryingName} = {fieldExpr};");
                         }
-                        EmitStoreAddress(leaParamIdx, GetStoreSlot(leaParamIdx, storeVal), address.Name);
+                        EmitStoreAddress(leaParamIdx, GetStoreSlot(leaParamIdx, storeVal), address.Name, val);
                         return;
                     }
                 }
@@ -3373,7 +3596,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     {
                         string tfValExpr = CastIfNeeded(val, slotOutput.GlslType ?? "float");
                         AppendLine($"{slotOutput.VaryingName} = {tfValExpr};");
-                        EmitStoreAddress(leaParamIdx, slot, address.Name);
+                        EmitStoreAddress(leaParamIdx, slot, address.Name, val);
                         return;
                     }
                 }
@@ -3388,13 +3611,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     if (_subWordFloat16Params.Contains(leaParamIdx))
                     {
                         AppendLine($"{output.VaryingName} = int(_f32_to_f16({val}));");
-                        EmitStoreAddress(leaParamIdx, GetStoreSlot(leaParamIdx, storeVal), address.Name);
+                        EmitStoreAddress(leaParamIdx, GetStoreSlot(leaParamIdx, storeVal), address.Name, val);
                         return;
                     }
                     if (_subWordBFloat16Params.Contains(leaParamIdx))
                     {
                         AppendLine($"{output.VaryingName} = int(_f32_to_bf16({val}));");
-                        EmitStoreAddress(leaParamIdx, GetStoreSlot(leaParamIdx, storeVal), address.Name);
+                        EmitStoreAddress(leaParamIdx, GetStoreSlot(leaParamIdx, storeVal), address.Name, val);
                         return;
                     }
                     if (_subWordFloat8Params.TryGetValue(leaParamIdx, out bool fp8IsE4M3Store))
@@ -3402,7 +3625,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         // FP8 sub-word store: convert f32 -> 8-bit pattern, write to the TF varying;
                         // host readback packs 4 bytes per texel (the byte sub-word layout).
                         AppendLine($"{output.VaryingName} = int({(fp8IsE4M3Store ? "_f32_to_e4m3" : "_f32_to_e5m2")}({val}));");
-                        EmitStoreAddress(leaParamIdx, GetStoreSlot(leaParamIdx, storeVal), address.Name);
+                        EmitStoreAddress(leaParamIdx, GetStoreSlot(leaParamIdx, storeVal), address.Name, val);
                         return;
                     }
                     if (_subWordFloat4Params.Contains(leaParamIdx))
@@ -3440,7 +3663,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     // GLSL ES 3.0: cast value to match output type if needed
                     string tfValExpr = CastIfNeeded(val, output.GlslType ?? "float");
                     AppendLine($"{output.VaryingName} = {tfValExpr};");
-                    EmitStoreAddress(leaParamIdx, GetStoreSlot(leaParamIdx, storeVal), address.Name);
+                    EmitStoreAddress(leaParamIdx, GetStoreSlot(leaParamIdx, storeVal), address.Name, val);
                     return;
                 }
             }
@@ -3457,7 +3680,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     {
                         string cbValExpr = CastIfNeeded(val, cbOutput.GlslType ?? "float");
                         AppendLine($"{cbOutput.VaryingName} = {cbValExpr};");
-                        EmitStoreAddress(cbParamIdx, GetStoreSlot(cbParamIdx, storeVal), address.Name);
+                        EmitStoreAddress(cbParamIdx, GetStoreSlot(cbParamIdx, storeVal), address.Name, val);
                         return;
                     }
                 }
