@@ -1878,6 +1878,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     AppendLine($"{target} = {fn}({left}, {right});");
                     return;
                 }
+                // Emulated 64-bit integer Div/Rem: `/` and `%` on uvec2 divide the two words independently.
+                if (Backend.EnableI64Emulation && (lt == "uvec2" || rt == "uvec2")
+                    && (value.Kind == BinaryArithmeticKind.Div || value.Kind == BinaryArithmeticKind.Rem))
+                {
+                    string fn = (value.IsUnsigned ? "u64_" : "i64_") + (value.Kind == BinaryArithmeticKind.Div ? "div" : "rem");
+                    AppendLine($"{target} = {fn}({left}, {right});");
+                    return;
+                }
             }
             string leftType = TypeGenerator[value.Left.Type];
             bool leftIsEmuI64 = Backend.EnableI64Emulation

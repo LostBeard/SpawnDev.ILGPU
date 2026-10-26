@@ -745,6 +745,47 @@ uvec2 i64_mul(uvec2 a, uvec2 b) {
     return result;
 }
 
+// emu_u64 division and remainder: (quotient.lo, quotient.hi, remainder.lo, remainder.hi). Restoring long division,
+// one bit per step; both operands below 2^32 take the native uint path. A divisor of 0 gives (n, 0). `/` and `%` on
+// the uvec2 divided the two words independently (wrong for any value >= 2^32, and 0u % 0u on the high words is
+// undefined in GLSL - ANGLE returned garbage even for small values).
+uvec4 u64_divmod(uvec2 n, uvec2 d) {
+    if (d.x == 0u && d.y == 0u) return uvec4(n.x, n.y, 0u, 0u);
+    if (n.y == 0u && d.y == 0u) return uvec4(n.x / d.x, 0u, n.x % d.x, 0u);
+    uvec2 q = uvec2(0u, 0u);
+    uvec2 r = uvec2(0u, 0u);
+    for (int i = 63; i >= 0; i--) {
+        uint carry = r.y >> 31u;
+        uint bit = i >= 32 ? (n.y >> uint(i - 32)) & 1u : (n.x >> uint(i)) & 1u;
+        r = uvec2((r.x << 1u) | bit, (r.y << 1u) | (r.x >> 31u));
+        if (carry == 1u || r.y > d.y || (r.y == d.y && r.x >= d.x)) {
+            uint borrow = r.x < d.x ? 1u : 0u;
+            r = uvec2(r.x - d.x, r.y - d.y - borrow);
+            if (i >= 32) q.y = q.y | (1u << uint(i - 32)); else q.x = q.x | (1u << uint(i));
+        }
+    }
+    return uvec4(q.x, q.y, r.x, r.y);
+}
+
+uvec2 u64_div(uvec2 n, uvec2 d) { return u64_divmod(n, d).xy; }
+uvec2 u64_rem(uvec2 n, uvec2 d) { return u64_divmod(n, d).zw; }
+
+// emu_i64 division and remainder, truncating toward zero like .NET: the quotient is negative when the signs differ,
+// the remainder takes the dividend's sign.
+uvec4 i64_divmod(uvec2 n, uvec2 d) {
+    bool neg_n = (n.y & 0x80000000u) != 0u;
+    bool neg_d = (d.y & 0x80000000u) != 0u;
+    uvec4 qr = u64_divmod(neg_n ? i64_neg(n) : n, neg_d ? i64_neg(d) : d);
+    uvec2 q = qr.xy;
+    uvec2 r = qr.zw;
+    if (neg_n != neg_d) q = i64_neg(q);
+    if (neg_n) r = i64_neg(r);
+    return uvec4(q.x, q.y, r.x, r.y);
+}
+
+uvec2 i64_div(uvec2 n, uvec2 d) { return i64_divmod(n, d).xy; }
+uvec2 i64_rem(uvec2 n, uvec2 d) { return i64_divmod(n, d).zw; }
+
 // Bitwise operations
 uvec2 i64_and(uvec2 a, uvec2 b) {
     return uvec2(a.x & b.x, a.y & b.y);

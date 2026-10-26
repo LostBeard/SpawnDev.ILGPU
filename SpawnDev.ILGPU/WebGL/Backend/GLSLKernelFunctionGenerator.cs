@@ -2852,6 +2852,18 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             AppendLine($"{target} = {sourceVal} + {offsetExpr}; // generic LEA");
         }
 
+        /// <summary>
+        /// The declaration prefix ("type ") for a value's assignment, or "" when it is hoisted or its name is already
+        /// declared. A helper inlined at several call sites emits its IR values under the same names each time: the
+        /// arithmetic emitters declared them again ("'v_1224' : redefinition"; SpawnDev.Codecs Av1ForwardDct16/32,
+        /// Av1ForwardAdst16, Av1InverseAdst16, Vp9ForwardDct32x32 on WebGL).
+        /// </summary>
+        private string DeclarationPrefix(Value value, Variable target, string typedPrefix)
+        {
+            if (_hoistedPrimitives.Contains(value)) return "";
+            return declaredVariables.Add(target.Name) ? typedPrefix : "";
+        }
+
         private readonly Dictionary<string, int> _leaParamMap = new();
         /// <summary>Maps parameter index → GLSL element type ("int", "uint", "float") for buffer params.</summary>
         private readonly Dictionary<int, string> _bufferGlslTypes = new();
@@ -3640,7 +3652,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     if (isView)
                     {
                         var target = Load(value);
-                        string prefix = _hoistedPrimitives.Contains(value) ? "" : $"{TypeGenerator[value.Type]} ";
+                        string prefix = DeclarationPrefix(value, target, $"{TypeGenerator[value.Type]} ");
 
                         if (value.FieldSpan.Index == 0)
                         {
@@ -3746,7 +3758,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 {
                     var target = Load(value);
                     var source = Load(value.ObjectValue);
-                    string prefix = _hoistedPrimitives.Contains(value) ? "" : "int ";
+                    string prefix = DeclarationPrefix(value, target, "int ");
 
                     if (EntryPoint.IndexType == IndexType.Index2D)
                     {
@@ -3780,7 +3792,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var target = Load(value);
             var left = Load(value.Left);
             var right = Load(value.Right);
-            string prefix = _hoistedPrimitives.Contains(value) ? "" : $"{TypeGenerator[value.Type]} ";
+            string prefix = DeclarationPrefix(value, target, $"{TypeGenerator[value.Type]} ");
 
             var leftType = TypeGenerator[value.Left.Type];
             var rightType = TypeGenerator[value.Right.Type];
@@ -3813,6 +3825,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     BinaryArithmeticKind.Add => "i64_add",
                     BinaryArithmeticKind.Sub => "i64_sub",
                     BinaryArithmeticKind.Mul => "i64_mul",
+                    // `/` and `%` on the uvec2 divided the two words independently
+                    BinaryArithmeticKind.Div => value.IsUnsigned ? "u64_div" : "i64_div",
+                    BinaryArithmeticKind.Rem => value.IsUnsigned ? "u64_rem" : "i64_rem",
                     BinaryArithmeticKind.And => "i64_and",
                     BinaryArithmeticKind.Or => "i64_or",
                     BinaryArithmeticKind.Xor => "i64_xor",
@@ -3973,7 +3988,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var first = Load(value.First);
             var second = Load(value.Second);
             var third = Load(value.Third);
-            string prefix = _hoistedPrimitives.Contains(value) ? "" : $"{TypeGenerator[value.Type]} ";
+            string prefix = DeclarationPrefix(value, target, $"{TypeGenerator[value.Type]} ");
 
             var firstType = TypeGenerator[value.First.Type];
             bool isEmulatedF64 = Backend.EnableF64Emulation && (firstType == "vec2" || (Backend.UseOzakiF64Emulation && firstType == "vec4"));
@@ -3994,7 +4009,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var target = Load(value);
             var left = Load(value.Left);
             var right = Load(value.Right);
-            string prefix = _hoistedPrimitives.Contains(value) ? "" : "bool ";
+            string prefix = DeclarationPrefix(value, target, "bool ");
 
             var leftType = TypeGenerator[value.Left.Type];
             bool isEmulatedF64 = Backend.EnableF64Emulation && (leftType == "vec2" || (Backend.UseOzakiF64Emulation && leftType == "vec4"));

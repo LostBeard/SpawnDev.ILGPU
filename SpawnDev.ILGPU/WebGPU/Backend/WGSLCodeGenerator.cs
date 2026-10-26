@@ -800,6 +800,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     else if (expr.Contains("i64_from_i32") || expr.Contains("u64_from_u32") ||
                              expr.Contains("i64_add") || expr.Contains("i64_sub") || expr.Contains("i64_mul") ||
                              expr.Contains("u64_mul") || expr.Contains("i64_neg") || expr.Contains("i64_abs") ||
+                             expr.Contains("i64_div") || expr.Contains("i64_rem") || expr.Contains("u64_div") || expr.Contains("u64_rem") ||
                              expr.Contains("i64_and") || expr.Contains("i64_or") || expr.Contains("i64_xor") ||
                              expr.Contains("i64_shl") || expr.Contains("i64_shr") || expr.Contains("u64_shr") ||
                              expr.Contains("i64_not") || expr.Contains("emu_i64(") || expr.Contains("emu_u64("))
@@ -1375,6 +1376,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     BinaryArithmeticKind.Add => "i64_add",
                     BinaryArithmeticKind.Sub => "i64_sub",
                     BinaryArithmeticKind.Mul => isUnsignedI64 ? "u64_mul" : "i64_mul",
+                    // `/` and `%` on the vec2<u32> divided the two words independently
+                    BinaryArithmeticKind.Div => isUnsignedI64 ? "u64_div" : "i64_div",
+                    BinaryArithmeticKind.Rem => isUnsignedI64 ? "u64_rem" : "i64_rem",
                     BinaryArithmeticKind.And => "i64_and",
                     BinaryArithmeticKind.Or => "i64_or",
                     BinaryArithmeticKind.Xor => "i64_xor",
@@ -1385,7 +1389,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     AppendLine($"{target} = {emulI64Func}({left}, {right});");
                     return;
                 }
-                // Other kinds (Shl/Shr/Min/Max/Div/Rem) fall through to their
+                // Other kinds (Shl/Shr/Min/Max) fall through to their
                 // dedicated branches below, which already handle emu_i64 LHS.
             }
 

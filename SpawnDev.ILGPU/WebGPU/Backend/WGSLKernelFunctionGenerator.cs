@@ -4892,6 +4892,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (expr.Contains("i64_from_i32") || expr.Contains("u64_from_u32") ||
                 expr.Contains("i64_add") || expr.Contains("i64_sub") || expr.Contains("i64_mul") ||
                 expr.Contains("u64_mul") || expr.Contains("i64_neg") || expr.Contains("i64_abs") ||
+                expr.Contains("i64_div") || expr.Contains("i64_rem") || expr.Contains("u64_div") || expr.Contains("u64_rem") ||
                 expr.Contains("i64_and") || expr.Contains("i64_or") || expr.Contains("i64_xor") ||
                 expr.Contains("i64_shl") || expr.Contains("i64_shr") || expr.Contains("u64_shr") ||
                 expr.Contains("i64_not") || expr.Contains("emu_i64(") || expr.Contains("emu_u64("))
@@ -7532,6 +7533,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     BinaryArithmeticKind.Add => "i64_add",
                     BinaryArithmeticKind.Sub => "i64_sub",
                     BinaryArithmeticKind.Mul => isUnsigned ? "u64_mul" : "i64_mul",
+                    // `/` and `%` on the vec2<u32> divided the two words independently
+                    BinaryArithmeticKind.Div => isUnsigned ? "u64_div" : "i64_div",
+                    BinaryArithmeticKind.Rem => isUnsigned ? "u64_rem" : "i64_rem",
                     BinaryArithmeticKind.And => "i64_and",
                     BinaryArithmeticKind.Or => "i64_or",
                     BinaryArithmeticKind.Xor => "i64_xor",

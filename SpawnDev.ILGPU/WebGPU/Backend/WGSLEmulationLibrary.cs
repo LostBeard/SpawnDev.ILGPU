@@ -806,6 +806,52 @@ fn i64_mul(a: emu_i64, b: emu_i64) -> emu_i64 {
     return result;
 }
 
+// emu_u64 division and remainder: (quotient.lo, quotient.hi, remainder.lo, remainder.hi). Restoring long division,
+// one bit per step; both operands below 2^32 take the native u32 path. A divisor of 0 gives (n, 0), WGSL's integer
+// convention. `/` and `%` on the vec2<u32> used to divide the two words independently (wrong for any value >= 2^32).
+fn u64_divmod(n: emu_u64, d: emu_u64) -> vec4<u32> {
+    if (d.x == 0u && d.y == 0u) { return vec4<u32>(n.x, n.y, 0u, 0u); }
+    if (n.y == 0u && d.y == 0u) { return vec4<u32>(n.x / d.x, 0u, n.x % d.x, 0u); }
+    var q = emu_u64(0u, 0u);
+    var r = emu_u64(0u, 0u);
+    for (var i = 63i; i >= 0i; i = i - 1i) {
+        // the remainder's top bit leaves on the shift: then r >= d whatever the 64 bits say
+        let carry = r.y >> 31u;
+        var bit = 0u;
+        if (i >= 32i) { bit = (n.y >> u32(i - 32i)) & 1u; } else { bit = (n.x >> u32(i)) & 1u; }
+        r = emu_u64((r.x << 1u) | bit, (r.y << 1u) | (r.x >> 31u));
+        if (carry == 1u || r.y > d.y || (r.y == d.y && r.x >= d.x)) {
+            let borrow = select(0u, 1u, r.x < d.x);
+            r = emu_u64(r.x - d.x, r.y - d.y - borrow);
+            if (i >= 32i) { q.y = q.y | (1u << u32(i - 32i)); } else { q.x = q.x | (1u << u32(i)); }
+        }
+    }
+    return vec4<u32>(q.x, q.y, r.x, r.y);
+}
+
+fn u64_div(n: emu_u64, d: emu_u64) -> emu_u64 { return u64_divmod(n, d).xy; }
+fn u64_rem(n: emu_u64, d: emu_u64) -> emu_u64 { return u64_divmod(n, d).zw; }
+
+// emu_i64 division and remainder, truncating toward zero like .NET: the quotient is negative when the signs differ,
+// the remainder takes the dividend's sign. MinValue / -1 wraps to MinValue (the u64 quotient 2^63).
+fn i64_divmod(n: emu_i64, d: emu_i64) -> vec4<u32> {
+    let neg_n = (n.y & 0x80000000u) != 0u;
+    let neg_d = (d.y & 0x80000000u) != 0u;
+    var abs_n = n;
+    var abs_d = d;
+    if (neg_n) { abs_n = i64_neg(n); }
+    if (neg_d) { abs_d = i64_neg(d); }
+    let qr = u64_divmod(abs_n, abs_d);
+    var q = qr.xy;
+    var r = qr.zw;
+    if (neg_n != neg_d) { q = i64_neg(q); }
+    if (neg_n) { r = i64_neg(r); }
+    return vec4<u32>(q.x, q.y, r.x, r.y);
+}
+
+fn i64_div(n: emu_i64, d: emu_i64) -> emu_i64 { return i64_divmod(n, d).xy; }
+fn i64_rem(n: emu_i64, d: emu_i64) -> emu_i64 { return i64_divmod(n, d).zw; }
+
 // Bitwise AND
 fn i64_and(a: emu_i64, b: emu_i64) -> emu_i64 {
     return emu_i64(a.x & b.x, a.y & b.y);
