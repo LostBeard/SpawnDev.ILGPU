@@ -581,8 +581,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         target = cas.Target;
                     if (target == null) continue;
 
-                    if (ResolveToParameterWithFieldChain(target, out var param, out var fieldIdx)
-                        && param != null)
+                    foreach (var (param, fieldIdx) in ResolveWrittenParameters(target))
                     {
                         if (fieldIdx >= 0
                             && _bodyStructParams.TryGetValue(param.Index, out var bsFields)
@@ -661,7 +660,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         target = cas.Target;
                     if (target == null) continue;
 
-                    if (ResolveToParameterWithFieldChain(target, out var param, out _) && param != null)
+                    foreach (var (param, _) in ResolveWrittenParameters(target))
                     {
                         int kernelParamIdx = paramMapper(param.Index);
                         if (kernelParamIdx >= 0)
@@ -693,7 +692,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         var arg = methodCall[argIdx];
                         // Only a BUFFER passed by pointer resolves to a param here; a loaded scalar
                         // value (e.g. weight[i] fed to a conversion) does not, so it is not flagged.
-                        if (ResolveToParameterWithFieldChain(arg, out var parentParam, out _) && parentParam != null)
+                        foreach (var (parentParam, _) in ResolveWrittenParameters(arg))
                         {
                             int kernelIdx = parentParamMapper(parentParam.Index);
                             if (kernelIdx >= 0)
@@ -1682,6 +1681,65 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Fallback: use original ResolveToParameter
             param = ResolveToParameter(target) as global::ILGPU.IR.Values.Parameter;
             return param != null;
+        }
+
+        /// <summary>
+        /// Every parameter a store / atomic TARGET (or a pointer argument) may point into, each with the body-struct field
+        /// index on its path (-1 = the parameter's own view). Walks element and field addresses, sub-views, views, casts,
+        /// and every source of a phi or select.
+        /// </summary>
+        /// <remarks>
+        /// The write scans that decide what a kernel never writes (direct-param coalesce gathers such params into one
+        /// COPIED binding; Float16 atomic elision) used <see cref="ResolveToParameterWithFieldChain"/>, which stops at a
+        /// <c>SubViewValue</c>. A kernel that wrote a parameter only through a sub-view (<c>var f = recon.SubView(..);
+        /// f[i] = x;</c>) counted it as read-only, so the dispatcher gathered it into the coalesced copy and every write
+        /// was lost (SpawnDev.Codecs Av1EncodeFrameBatchStepKernel, 2026-10-26: batch-of-one != single-frame encode on
+        /// WebGPU only). Over-reporting only keeps a parameter out of an optimization; under-reporting loses writes.
+        /// </remarks>
+        private static List<(global::ILGPU.IR.Values.Parameter Param, int FieldIdx)> ResolveWrittenParameters(Value target)
+        {
+            var result = new List<(global::ILGPU.IR.Values.Parameter, int)>();
+            var work = new Stack<(Value Value, int FieldIdx)>();
+            var seen = new HashSet<(Value, int)>();
+            work.Push((target, -1));
+            while (work.Count > 0)
+            {
+                var (current, fieldIdx) = work.Pop();
+                if (current == null || !seen.Add((current, fieldIdx))) continue;
+                switch (current)
+                {
+                    case global::ILGPU.IR.Values.Parameter p:
+                        result.Add((p, fieldIdx));
+                        break;
+                    case PointerValue pv: // LoadElementAddress, SubViewValue, LoadArrayElementAddress
+                        work.Push((pv.Source, fieldIdx));
+                        break;
+                    case LoadFieldAddress lfa:
+                        work.Push((lfa.Source, fieldIdx));
+                        break;
+                    case GetField gf:
+                        // the body-struct field nearest the parameter wins (as ResolveToParameterWithFieldChain)
+                        work.Push((gf.ObjectValue, gf.FieldSpan.Index));
+                        break;
+                    case global::ILGPU.IR.Values.NewView nv:
+                        work.Push((nv.Pointer, fieldIdx));
+                        break;
+                    case CastValue cast: // AddressSpaceCast, PointerCast, ViewCast, ...
+                        work.Push((cast.Value, fieldIdx));
+                        break;
+                    // no Load: a loaded value is data, not an address into the parameter (the helper-argument scan
+                    // relies on a loaded scalar NOT resolving)
+                    case global::ILGPU.IR.Values.Predicate pred:
+                        work.Push((pred.TrueValue, fieldIdx));
+                        work.Push((pred.FalseValue, fieldIdx));
+                        break;
+                    case PhiValue phi:
+                        foreach (var source in phi.Nodes)
+                            work.Push((source.Resolve(), fieldIdx));
+                        break;
+                }
+            }
+            return result;
         }
 
         /// <summary>
