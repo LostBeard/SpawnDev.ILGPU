@@ -1,7 +1,9 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## Unreleased
+## 5.4.5 (forks 2.4.5) - 2026-10-25 - Loops that end in an inner loop (WebGPU hang, wrong results on every IR backend, Velocity, WebGL); browser shader generation in linear memory; struct parameters with one view; pinned `ref` copies; `SubView.Length`
+
+- Release sweep (RTX 4070, all lanes, `b737b29`): 6,223 test cases, 5,729 passed, 494 skipped, 0 failed (32m39s; 5.4.4 was 5,687/0/488 in 37m01s). Consumer checks on 5.4.5-local.2: SpawnDev.ILGPU.ML WebGPU + Velocity lanes 2,072 passed / 0 failed / 59 skipped (Tuvok); SpawnDev.Codecs CUDA 515/0/600 and the lossless WebP encoder bit-exact on the real GPU's WebGPU, where it used to lose the device (Geordi).
 
 - **FIXED (WebGPU, WebGL): generating the shader of a very large kernel used memory quadratic in its size and ran out of memory in the browser.** The return-aware if/else merge (`StructuredReturnMerge`) cached a `HashSet` of every block's reachable blocks: N sets of up to N blocks, held until the kernel was done. It now keeps them as bit sets over dense block indices, and the WGSL loop patches (break and exit sentinels) scan only the text from the loop's start and no longer copy each loop body into a string. MEASURED on SpawnDev.Codecs' `Vp8EntropyStepKernel` (181,042 lines of WGSL): peak managed heap 5,509 MB -> 489 MB, allocated 9.6 GB -> 2.2 GB, 23.8 s -> 7.8 s; the WGSL of all 373 Codecs kernels and the WGSL / GLSL / Wasm of all ILGPU test kernels are byte-identical before and after. Found by SpawnDev.Codecs (an `OutOfMemoryException` in `WGSLKernelFunctionGenerator.GenerateCode` for a VP9 kernel, after which the test page hung).
 

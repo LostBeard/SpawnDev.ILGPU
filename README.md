@@ -343,7 +343,7 @@ PMT_FILTER=AlgorithmRadixSortPairsTest dotnet test PlaywrightMultiTest/Playwrigh
 PMT_LANES=WebGPUTests PMT_FILTER=RadixSort dotnet test PlaywrightMultiTest/PlaywrightMultiTest.csproj
 ```
 
-The suite has about 900 shared test methods. Each one runs on every backend lane, and a lane skips the tests its backend cannot run. The 5.4.4 sweep ran 6,175 test cases: 5,687 passed, 488 were skipped as backend capability gates (for example shared memory on WebGL) and none failed. The demo's `/tests` page runs the same suite in a browser: `dotnet run --project SpawnDev.ILGPU.Demo`.
+The suite has about 900 shared test methods. Each one runs on every backend lane, and a lane skips the tests its backend cannot run. The 5.4.5 sweep ran 6,223 test cases: 5,729 passed, 494 were skipped as backend capability gates (for example shared memory on WebGL) and none failed. The demo's `/tests` page runs the same suite in a browser: `dotnet run --project SpawnDev.ILGPU.Demo`.
 
 ## In development: P2P distributed compute
 
