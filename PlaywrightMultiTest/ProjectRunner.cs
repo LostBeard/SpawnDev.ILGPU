@@ -1297,6 +1297,35 @@ namespace PlaywrightMultiTest
             }
 
             LogStatus($"All scheduled tests complete in {swAll.Elapsed:hh\\:mm\\:ss} ({_outcomes.Count} outcomes cached).");
+            ReportDurations();
+        }
+
+        /// <summary>
+        /// The real per-test durations, measured when each test ran. The trx only has NUnit's replay of the cached
+        /// outcome (0.0-0.1 s each), so a run's slowest tests were invisible (Rule 12). Prints the 20 slowest to the
+        /// log and writes every one to <c>PMT_DURATIONS_FILE</c> (default: pmt-durations.json in the working
+        /// directory) as [{ "name", "status", "ms" }], slowest first.
+        /// </summary>
+        private void ReportDurations()
+        {
+            var all = _outcomes.Select(kv => (Name: kv.Key, kv.Value.Status, kv.Value.DurationMs))
+                .OrderByDescending(o => o.DurationMs).ToList();
+            foreach (var o in all.Take(20))
+                LogStatus($"SLOWEST {o.DurationMs / 1000.0,8:0.00}s {o.Status,-7} {o.Name}");
+            try
+            {
+                var path = Environment.GetEnvironmentVariable("PMT_DURATIONS_FILE");
+                if (string.IsNullOrEmpty(path))
+                    path = Path.Combine(Environment.CurrentDirectory, "pmt-durations.json");
+                var json = System.Text.Json.JsonSerializer.Serialize(
+                    all.Select(o => new { name = o.Name, status = o.Status, ms = Math.Round(o.DurationMs, 1) }));
+                File.WriteAllText(path, json);
+                LogStatus($"Per-test durations ({all.Count}) written to {path}");
+            }
+            catch (Exception ex)
+            {
+                LogStatus($"Per-test durations not written: {ex.Message}");
+            }
         }
 
         private async Task RunLaneSequentialAsync(List<ProjectTest> tests, TestableBlazorWasm blazor)
