@@ -84,6 +84,19 @@ namespace ILGPU.Backends.Velocity
         /// <inheritdoc/>
         public void GenerateCode(UnaryArithmeticValue value)
         {
+            if (value.Kind == UnaryArithmeticKind.Not &&
+                value.BasicValueType == BasicValueType.Int1)
+            {
+                // A bool's NOT is `value == false`, compared in the specializer's own bool form. The bitwise NOT is
+                // only right for an all-ones true: the Scalar warps hold true as 1, and ~1 = -2 is still true, so
+                // `flag = !flag` of a constant true never flipped (SpawnDev.Codecs WebPLossyEncoderGpu's I16 mode
+                // choice on Velocity Scalar2, the first Velocity device `Velocity()` registers).
+                Load(value.Value);
+                Specializer.ConvertBoolScalar(Emitter, false);
+                Specializer.Compare32(Emitter, CompareKind.Equal, VelocityWarpOperationMode.I);
+                Store(value);
+                return;
+            }
             Load(value.Value);
 
             // Determine the current warp mode and its bitness

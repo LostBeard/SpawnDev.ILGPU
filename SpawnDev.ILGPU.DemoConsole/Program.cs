@@ -212,7 +212,7 @@ try
     {
         typeof(CPUTests),
         typeof(VelocityTests),   // the SIMD CPU backend (Vector128) as a lane: all 731 pass or skip (Plans/velocity-as-production-cpu-backend-2026-10-20.md)
-        // typeof(VelocityScalar2Tests),   // the two-lane scalar fallback of Velocity: the same tests, a second set of operations; a sample of 129 passes, enable to run all
+        typeof(VelocityScalar2Tests),   // the two-lane scalar Velocity device (the first one Context.Builder.Velocity() registers): first full run 2026-10-26 737/1/57, the 1 a 4-lane-warp test that now skips
         // typeof(VelocityVector256Tests),   // Velocity with 256-bit vectors (eight lanes per warp)
         // typeof(VelocityVector512Tests),   // Velocity with 512-bit vectors (sixteen lanes per warp)
         typeof(CudaTests),

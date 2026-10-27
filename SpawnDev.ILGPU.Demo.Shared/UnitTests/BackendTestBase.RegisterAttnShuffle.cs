@@ -70,6 +70,12 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new UnsupportedTestException(
                     "WebGL cannot do cross-lane Warp.ShuffleXor (no shared memory/barriers in Transform Feedback).");
 
+            // The butterfly reduces RAS_NLANES lanes of ONE warp: a warp narrower than that (Velocity Scalar2: 2 lanes)
+            // has no lane `lane ^ 2` to shuffle with.
+            if (accelerator.WarpSize < RAS_NLANES)
+                throw new UnsupportedTestException(
+                    $"Warp.ShuffleXor across {RAS_NLANES} lanes needs a warp of at least {RAS_NLANES} lanes (this one has {accelerator.WarpSize}).");
+
             int total = RAS_WARP * RAS_T; // 512
             var input = new float[total];
             for (int i = 0; i < total; i++) input[i] = (i % 13) * 0.25f - 1.5f;
