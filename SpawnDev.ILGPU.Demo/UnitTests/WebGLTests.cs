@@ -790,6 +790,10 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         public new async Task SharedMemoryAtomics_GroupHistogram_MatchesOracle() =>
             throw new UnsupportedTestException("WebGL: no shared memory or atomics in vertex shaders");
 
+        [TestMethod]
+        public new async Task VoidHelperInBarrierKernel_MatchesOracle() =>
+            throw new UnsupportedTestException("WebGL: no shared memory, barriers or atomics in vertex shaders");
+
         // --- Tests10: SharedMemoryResolver stress tests ---
         [TestMethod]
         public new async Task SharedMemSingleAllocTest() =>

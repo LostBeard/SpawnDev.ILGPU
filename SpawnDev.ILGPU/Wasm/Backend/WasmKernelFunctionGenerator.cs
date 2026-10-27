@@ -1556,11 +1556,14 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 // Option E: helper returns actual result (yield flag is in scratch[0])
                 WasmModuleBuilder.EmitLocalGet(Code, _helperResultLocal);
             }
-            else if (_phaseMode || (!_isHelperFunction))
+            else if (!_isHelperFunction)
             {
                 // Kernel always returns i32 (_yieldedLocal)
                 WasmModuleBuilder.EmitLocalGet(Code, _yieldedLocal);
             }
+            // A VOID helper returns nothing, in phase mode too: its type is `-> nil` (GenerateAsHelper) and its
+            // yield flag is in scratch[0]. Pushing _yieldedLocal here left an i32 at the end of a `-> nil`
+            // function, an invalid module ("type mismatch at end of function, expected [] but got [i32]").
             // Helpers not in phase mode: return value handled by GenerateAsHelper
 
             // Propagate phase info
@@ -4136,10 +4139,12 @@ EmitSaveAllLocals();
                     // resultLocal at 0 - the "got 0" failures in phase-mode kernels calling
                     // non-void multi-block helpers (FusedFFN_RegBlocked{Tanh,Erf}GELU:
                     // the erf/tanh activation helpers). Fixed 2026-06-11 (Seven).
+                    // A VOID helper returns nothing (its type is `-> nil`), so there is nothing to drop: the
+                    // `else if (_phaseMode) Drop` that stood here made every phase-mode kernel calling a void
+                    // multi-block helper an invalid module ("not enough arguments on the stack for drop";
+                    // SpawnDev.Codecs GDeflate PlanKernel, 2026-10-27). Same as the barrier-helper call path.
                     if (resultLocal.HasValue)
                         WasmModuleBuilder.EmitLocalSet(Code, resultLocal.Value);
-                    else if (_phaseMode)
-                        Code.Add(WasmOpCodes.Drop); // void phase helper returns yield-flag i32
                 }
 
                 // Advance barrier counter for subsequent barriers/calls
