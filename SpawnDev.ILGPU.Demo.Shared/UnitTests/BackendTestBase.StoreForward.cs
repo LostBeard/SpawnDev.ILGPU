@@ -12,27 +12,34 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
     public abstract partial class BackendTestBase
     {
         // The Vp9ForwardWht4x4Gpu shape: an in-place two-pass 4x4 transform, one thread per block, the output buffer
-        // is the intermediate.
+        // is the intermediate. Each row and column is its own call with a constant index, so every store has its own
+        // site (WebGL captures one element per site; Vp9ForwardWht4x4Gpu's loops are not unrolled and WebGL refuses it).
         static void StoreForward_TwoPassKernel(Index1D block, ArrayView<short> input, ArrayView<int> output)
         {
             long b = (long)(int)block * 16;
-            for (int i = 0; i < 4; i++)
-            {
-                long a1 = input[b + i], b1 = input[b + i + 4], c1 = input[b + i + 8], d1 = input[b + i + 12];
-                a1 += b1; d1 -= c1;
-                long e1 = (a1 - d1) >> 1;
-                b1 = e1 - b1; c1 = e1 - c1; a1 -= c1; d1 += b1;
-                output[b + i] = (int)a1; output[b + i + 4] = (int)c1; output[b + i + 8] = (int)d1; output[b + i + 12] = (int)b1;
-            }
-            for (int i = 0; i < 4; i++)
-            {
-                long a1 = output[b + i * 4], b1 = output[b + i * 4 + 1], c1 = output[b + i * 4 + 2], d1 = output[b + i * 4 + 3];
-                a1 += b1; d1 -= c1;
-                long e1 = (a1 - d1) >> 1;
-                b1 = e1 - b1; c1 = e1 - c1; a1 -= c1; d1 += b1;
-                output[b + i * 4] = (int)(a1 * 4); output[b + i * 4 + 1] = (int)(c1 * 4);
-                output[b + i * 4 + 2] = (int)(d1 * 4); output[b + i * 4 + 3] = (int)(b1 * 4);
-            }
+            StoreForward_Rows(input, output, b, 0); StoreForward_Rows(input, output, b, 1);
+            StoreForward_Rows(input, output, b, 2); StoreForward_Rows(input, output, b, 3);
+            StoreForward_Columns(output, b, 0); StoreForward_Columns(output, b, 1);
+            StoreForward_Columns(output, b, 2); StoreForward_Columns(output, b, 3);
+        }
+
+        static void StoreForward_Rows(ArrayView<short> input, ArrayView<int> output, long b, int i)
+        {
+            long a1 = input[b + i], b1 = input[b + i + 4], c1 = input[b + i + 8], d1 = input[b + i + 12];
+            a1 += b1; d1 -= c1;
+            long e1 = (a1 - d1) >> 1;
+            b1 = e1 - b1; c1 = e1 - c1; a1 -= c1; d1 += b1;
+            output[b + i] = (int)a1; output[b + i + 4] = (int)c1; output[b + i + 8] = (int)d1; output[b + i + 12] = (int)b1;
+        }
+
+        static void StoreForward_Columns(ArrayView<int> output, long b, int i)
+        {
+            long a1 = output[b + i * 4], b1 = output[b + i * 4 + 1], c1 = output[b + i * 4 + 2], d1 = output[b + i * 4 + 3];
+            a1 += b1; d1 -= c1;
+            long e1 = (a1 - d1) >> 1;
+            b1 = e1 - b1; c1 = e1 - c1; a1 -= c1; d1 += b1;
+            output[b + i * 4] = (int)(a1 * 4); output[b + i * 4 + 1] = (int)(c1 * 4);
+            output[b + i * 4 + 2] = (int)(d1 * 4); output[b + i * 4 + 3] = (int)(b1 * 4);
         }
 
         static void StoreForward_TwoPassOracle(short[] input, int[] output, int block)
