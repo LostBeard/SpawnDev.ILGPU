@@ -786,6 +786,10 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             throw new UnsupportedTestException("WebGL: RadixSort requires shared memory + peer-to-peer buffer copies");
         // RadixSort100KBenchmarkTest now RUNS on WebGL (int keys-only, n=64, scatter-based radix, CPU verify).
 
+        [TestMethod]
+        public new async Task SharedMemoryAtomics_GroupHistogram_MatchesOracle() =>
+            throw new UnsupportedTestException("WebGL: no shared memory or atomics in vertex shaders");
+
         // --- Tests10: SharedMemoryResolver stress tests ---
         [TestMethod]
         public new async Task SharedMemSingleAllocTest() =>

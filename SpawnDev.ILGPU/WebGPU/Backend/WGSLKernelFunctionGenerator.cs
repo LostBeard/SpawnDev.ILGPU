@@ -3104,6 +3104,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Allocas.SharedAllocations because the kernel's own Allocas may be EMPTY
             // when shared memory is allocated inside helper functions (e.g., reduction).
             var resolver = _generatorArgs.SharedMemoryResolver;
+            foreach (var shared in _atomicSharedAllocas)
+                if (valueVariables.TryGetValue(shared, out var sharedVar))
+                    resolver.MarkAtomic(sharedVar.Name, Method.Name);
             resolver.EmitStaticDeclarations(builder, TypeGenerator, (allocaNode, varName, wgslType) =>
             {
                 valueVariables[allocaNode] = new Variable(varName, wgslType);
@@ -3870,6 +3873,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // emulation library — producing unresolved call targets in the WGSL.
             // Fix: scan kernel AND helper methods' IR here so body and header are consistent.
             SetEmulationFlags();
+
+            // Shared arrays an atomic touches are atomic arrays: their loads and stores must know before the body.
+            ScanForSharedAtomics();
 
             // Pre-scan for subgroup, broadcast, and barrier usage BEFORE SetupIndexVariables().
             // The range check (early return for excess threads) breaks WGSL static uniformity
@@ -8777,7 +8783,52 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 return _atomicParameters.Contains(param.Index);
             }
+            // An element of a shared array an atomic touches: the array is array<atomic<T>, N>, so its plain loads and
+            // stores are atomicLoad / atomicStore too.
+            if (_atomicSharedAllocas.Count > 0 && ResolveToSharedAlloca(ptr) is Alloca shared
+                && _atomicSharedAllocas.Contains(shared))
+                return true;
             return base.IsAtomicPointer(ptr);
+        }
+
+        /// <summary>Shared (workgroup) allocas that an Atomic.* op of the kernel targets (see <see cref="ScanForSharedAtomics"/>).</summary>
+        private readonly HashSet<Value> _atomicSharedAllocas = new();
+
+        /// <summary>The shared alloca a pointer or view points into, through element addresses, sub-views, views and casts.</summary>
+        private static Alloca? ResolveToSharedAlloca(Value value)
+        {
+            for (int depth = 0; depth < 32; depth++)
+            {
+                value = value.Resolve();
+                switch (value)
+                {
+                    case Alloca alloca:
+                        return alloca.AddressSpace == MemoryAddressSpace.Shared ? alloca : null;
+                    case LoadElementAddress lea:
+                        value = lea.Source;
+                        break;
+                    case SubViewValue sv:
+                        value = sv.Source;
+                        break;
+                    case NewView nv:
+                        value = nv.Pointer;
+                        break;
+                    case BaseAddressSpaceCast cast:
+                        value = cast.Value;
+                        break;
+                    default:
+                        return null;
+                }
+            }
+            return null;
+        }
+
+        private void ScanForSharedAtomics()
+        {
+            foreach (var block in Method.Blocks)
+                foreach (var entry in block)
+                    if (entry.Value is AtomicValue atomic && ResolveToSharedAlloca(atomic.Target) is Alloca shared)
+                        _atomicSharedAllocas.Add(shared);
         }
 
         #endregion

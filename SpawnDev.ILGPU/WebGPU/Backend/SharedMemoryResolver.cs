@@ -129,6 +129,28 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public HashSet<string> BoolRemappedVars { get; } = new();
 
         /// <summary>
+        /// Declares shared array <paramref name="name"/> as <c>array&lt;atomic&lt;T&gt;, N&gt;</c>: an Atomic.* op targets
+        /// one of its elements. WGSL atomics need an atomic element type; the plain declaration failed shader creation
+        /// ("atomic operation is done on a pointer to a non-atomic", SpawnDev.Codecs WeightPackGpu.CompressCountKernel's
+        /// shared histogram). Only i32 and u32 elements can be atomic in WGSL.
+        /// </summary>
+        public void MarkAtomic(string name, string kernelName)
+        {
+            foreach (var key in _entries.Keys.ToList())
+            {
+                var (entryName, declaration) = _entries[key];
+                if (entryName != name || declaration.Contains("atomic<")) continue;
+                string? element = declaration.Contains("array<i32, ") ? "i32" : declaration.Contains("array<u32, ") ? "u32" : null;
+                if (element == null || BoolRemappedVars.Contains(entryName))
+                    throw new SpawnDev.ILGPU.UnsupportedKernelFeatureException(
+                        feature: $"an atomic on an element of shared memory '{declaration}' in kernel '{kernelName}'",
+                        backend: global::ILGPU.Runtime.AcceleratorType.WebGPU,
+                        remediation: "WGSL atomics exist only for 32-bit integers: use an int or uint shared array, or Wasm or a desktop backend.");
+                _entries[key] = (entryName, declaration.Replace($"array<{element}, ", $"array<atomic<{element}>, "));
+            }
+        }
+
+        /// <summary>
         /// Creates a SharedMemoryResolver pre-populated with shared allocations from the backend context.
         /// </summary>
         /// <param name="sharedAllocations">Static shared memory allocations from the backend context.</param>

@@ -858,6 +858,17 @@ function dispatchKernel(msg) {
                             destView[dstOff] = val & 0xFF;
                         }
                     }
+                } else if (out.baseIndex < 0 && (out.storeCount || 1) === 1 && ((destView.byteOffset + writeOffset) & 3) === 0) {
+                    // Vertex v's value is element v (an own-element output, GLSLKernelFunctionGenerator
+                    // _ownElementOutputs): one typed copy instead of a per-element call and four byte copies,
+                    // which cost as much as the readback itself (WebGL 1.4M radix sort: 5.7 s of 800 dispatches).
+                    const n = Math.min(totalVertices, Math.floor(out.writeLengthBytes / 4));
+                    const dst32 = new Int32Array(destView.buffer, destView.byteOffset + writeOffset, n);
+                    if (strideWords === 1) dst32.set(int32All.subarray(0, n));
+                    else {
+                        const o = out.outputIndex;
+                        for (let v = 0; v < n; v++) dst32[v] = int32All[v * strideWords + o];
+                    }
                 } else {
                     const viewElems = Math.floor(out.writeLengthBytes / 4);
                     for (let v = 0; v < totalVertices; v++) {

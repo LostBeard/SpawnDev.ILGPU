@@ -117,6 +117,35 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             return false;
         }
 
+        /// <summary>
+        /// Outputs with ONE store site, at the thread's own element (`out[idx]` of a 1D auto-grouped kernel), stored as a
+        /// plain 32-bit value: no base or mask varying. Their value varying starts as the element's current value, so a
+        /// thread that does not store writes that value back, and the readback places vertex v at element v. The two
+        /// store-address varyings tripled the transform feedback a dispatch reads back: the WebGL 1.4M-key radix sort
+        /// took 24.8 s on 5.4.7-local.6 against 11.1 s on 5.4.6 (getBufferSubData 11.9 s of 800 dispatches, 3 varyings).
+        /// </summary>
+        private readonly HashSet<int> _ownElementOutputs = new();
+
+        private bool IsOwnElementCandidate(int key)
+        {
+            if (EntryPoint.IndexType != IndexType.Index1D) return false;
+            if (!_storeSites.TryGetValue(key, out var sites) || sites.Count != 1) return false;
+            var site = sites[0];
+            if (site.BaseSignature != "+p0" || site.Const != 0) return false;
+            // A 32-bit element (int, uint, float): the sub-word, 64-bit and struct sets are not filled yet at step 1.7.
+            var param = Method.Parameters.FirstOrDefault(p => p.Index == key);
+            if (param == null || UnwrapType(param.ParameterType) is not PrimitiveType element
+                || element.BasicValueType is not (BasicValueType.Int32 or BasicValueType.Float32))
+                return false;
+            if (key >= 1000 || _subWordParams.ContainsKey(key) || _structFieldCounts.ContainsKey(key)
+                || _emulatedF64Params.Contains(key) || _emulatedI64Params.Contains(key) || _atomicParamIndices.Contains(key))
+                return false;
+            return site.ValueType is "int" or "uint" or "float";
+        }
+
+        /// <summary>True when output <paramref name="key"/> has store-site bookkeeping (address varyings or own element).</summary>
+        private bool HasStoreSiteState(int key) => _storeBaseVaryings.ContainsKey(key) || _ownElementOutputs.Contains(key);
+
         /// <summary>Output buffer key -> its store sites in IR order (index = slot).</summary>
         private readonly Dictionary<int, List<StoreSite>> _storeSites = new();
         /// <summary>Output buffer key -> its store groups' base varying names (index = group).</summary>
@@ -914,6 +943,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
             // 1.6. Detect which buffer params are load sources (need sampler uniforms)
             AnalyzeInputBuffers();
+
+            // 1.7. Outputs stored only at the thread's own element: they read their element back for the initial value
+            foreach (var key in _storeSites.Keys)
+                if (IsOwnElementCandidate(key)) _inputParamIndices.Add(key);
 
             // 2. Analyze hoisting needs
             AnalyzeHoisting();
@@ -2129,6 +2162,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             {
                 var valueVaryings = _outputVaryings.Where(o => o.ParamIndex == key && !o.IsAtomicVote && !o.IsStoreMeta).ToList();
                 if (valueVaryings.Count == 0) continue;
+                if (valueVaryings.Count == 1 && !valueVaryings[0].IsEmulated && valueVaryings[0].FieldIndex < 0
+                    && valueVaryings[0].StoreCount == 1 && _inputParamIndices.Contains(key) && IsOwnElementCandidate(key))
+                {
+                    _ownElementOutputs.Add(key);
+                    continue;
+                }
                 // A struct element buffer has one varying per FIELD, not per site: two sites would share them.
                 if (sites.Count > 1 && valueVaryings.Any(o => o.FieldIndex >= 0))
                     throw new SpawnDev.ILGPU.UnsupportedKernelFeatureException(
@@ -2180,10 +2219,21 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// </summary>
         private void EmitStoreAddress(int key, int slot, string elementIndexExpr, Variable? value)
         {
-            if (!_storeSites.TryGetValue(key, out var sites) || slot < 0 || slot >= sites.Count
-                || !_storeBaseVaryings.TryGetValue(key, out var bases))
+            if (!_storeSites.TryGetValue(key, out var sites) || slot < 0 || slot >= sites.Count)
                 return;
             var site = sites[slot];
+            if (_ownElementOutputs.Contains(key))
+            {
+                if (value != null)
+                {
+                    AppendLine($"_sv_{key}_{slot} = {StoredShadowValue(key, site, value)};");
+                    AppendLine($"_sad_{key}_{slot} = int({elementIndexExpr});");
+                    AppendLine($"_ss_{key}_{slot} = ++_sseq;");
+                }
+                return;
+            }
+            if (!_storeBaseVaryings.TryGetValue(key, out var bases))
+                return;
             // The state lives in locals (`_sa_` + varying name) and every update is copied to the output: reading a
             // vertex shader OUTPUT back is legal GLSL ES, but Chrome's ANGLE (D3D11) did not return the value just
             // written - every first store saw "already stored a different element" (-2).
@@ -2259,7 +2309,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// </summary>
         private void EmitStoreForward(Value load, int key, string elementIndexExpr, Value? loadAddress, string targetType, Func<string, string> assign)
         {
-            if (!_storeBaseVaryings.ContainsKey(key) || !_storeSites.TryGetValue(key, out var sites)) return;
+            if (!HasStoreSiteState(key) || !_storeSites.TryGetValue(key, out var sites)) return;
             string? signature = null;
             long constant = 0;
             if (loadAddress != null && IsAddressThreadInvariant(loadAddress))
@@ -2374,9 +2424,18 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 foreach (var b in bases) { AppendLine($"int _sa_{b} = -1;"); AppendLine($"{b} = -1;"); }
             foreach (var masks in _storeMaskVaryings.Values)
                 foreach (var m in masks) { AppendLine($"int _sa_{m} = 0;"); AppendLine($"{m} = 0;"); }
+            // Own-element outputs start as the element's current value (a thread that does not store writes it back).
+            foreach (var key in _ownElementOutputs)
+            {
+                var ov = _outputVaryings.First(o => o.ParamIndex == key && !o.IsAtomicVote && !o.IsStoreMeta);
+                string bn = GetParamBindingName(key);
+                string fetch = $"texelFetch({bn}, ivec2((_idx + {bn}_offset) % {bn}_tileW, (_idx + {bn}_offset) / {bn}_tileW), 0).r";
+                string samplerType = _bufferGlslTypes.TryGetValue(key, out var bt) ? bt : ov.GlslType ?? "float";
+                AppendLine($"{ov.VaryingName} = {ForwardConvert(fetch, samplerType, ov.GlslType ?? "float") ?? fetch};");
+            }
             // Store forwarding shadows (EmitStoreForward): each site's last value, element and store stamp.
-            if (_storeBaseVaryings.Count > 0) AppendLine("int _sseq = 0;");
-            foreach (var key in _storeBaseVaryings.Keys)
+            if (_storeBaseVaryings.Count > 0 || _ownElementOutputs.Count > 0) AppendLine("int _sseq = 0;");
+            foreach (var key in _storeBaseVaryings.Keys.Concat(_ownElementOutputs))
                 foreach (var site in _storeSites[key])
                 {
                     AppendLine($"{site.ValueType} _sv_{key}_{site.Slot};");
