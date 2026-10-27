@@ -111,6 +111,21 @@ namespace ILGPU.Backends.Velocity
         private readonly Dictionary<Value, ILLocal> locals = new();
 
         /// <summary>
+        /// Values defined in a loop and used after it: the loop their block is
+        /// innermost in, and a local holding each lane's value at the time the lane
+        /// left that loop (see <see cref="CaptureLoopExitValues"/>).
+        /// </summary>
+        private readonly Dictionary<Value, (Loops<IR.Analyses.TraversalOrders.ReversePostOrder, IR.Analyses.ControlFlowDirection.Forwards>.Node Loop, ILLocal Local)>
+            loopExitValues = new();
+
+        /// <summary>The values of <see cref="loopExitValues"/> per loop.</summary>
+        private readonly Dictionary<Loops<IR.Analyses.TraversalOrders.ReversePostOrder, IR.Analyses.ControlFlowDirection.Forwards>.Node, List<Value>>
+            loopLiveOuts = new();
+
+        /// <summary>The block whose code is being generated (null outside the blocks).</summary>
+        private BasicBlock? currentBlock;
+
+        /// <summary>
         /// Temporary locals for initialization.
         /// </summary>
         private readonly Dictionary<TypeNode, ILLocal> nullLocals = new();
@@ -324,6 +339,9 @@ namespace ILGPU.Backends.Velocity
             foreach (var phiValue in phiBindings.PhiValues)
                 Emitter.LoadNull(GetLocal(phiValue));
 
+            // Locals for the values that leave their loops
+            CollectLoopLiveOuts();
+
             // Init all allocations
             BindAllocations();
 
@@ -343,6 +361,7 @@ namespace ILGPU.Backends.Velocity
 #endif
 
                 // Generate code for all values
+                currentBlock = block;
                 foreach (var value in block)
                     this.GenerateCodeFor(value);
 
@@ -351,6 +370,96 @@ namespace ILGPU.Backends.Velocity
 
                 // Build terminator
                 this.GenerateCodeFor(block.Terminator.AsNotNull());
+            }
+            currentBlock = null;
+        }
+
+        /// <summary>
+        /// Finds the values defined in a loop and used after it. A value of the loop
+        /// body is one warp-wide local that every iteration overwrites, for every lane:
+        /// a lane that has left the loop is masked off in the next iterations, and a
+        /// masked load gives it nothing, so a use after the loop read what a LATER
+        /// iteration left there (SpawnDev.Codecs Vp9FrameEntropyKernel batch: the end
+        /// of block bit of a frame whose block ended first was coded with the
+        /// probability loaded for a later coefficient). Such a value gets a second
+        /// local, merged with the lanes that leave on every exit edge (loop-closed
+        /// values), and the blocks after the loop read that one.
+        /// </summary>
+        private void CollectLoopLiveOuts()
+        {
+            foreach (var block in Method.Blocks)
+            {
+                if (!masks.TryGetLoop(block, out var loop))
+                    continue;
+                foreach (var entry in block)
+                {
+                    var value = entry.Value;
+                    if (value.Type.IsVoidType || !IsUsedOutside(value, loop))
+                        continue;
+                    var local = DeclareVectorizedTemporary(value.Type);
+                    loopExitValues.Add(value, (loop, local));
+                    if (!loopLiveOuts.TryGetValue(loop, out var values))
+                        loopLiveOuts.Add(loop, values = new List<Value>());
+                    values.Add(value);
+                }
+            }
+        }
+
+        private static bool IsUsedOutside(
+            Value value,
+            Loops<IR.Analyses.TraversalOrders.ReversePostOrder, IR.Analyses.ControlFlowDirection.Forwards>.Node loop)
+        {
+            foreach (var use in value.Uses)
+            {
+                var user = use.Target;
+                // A phi argument is read on its edge, in the block it comes from
+                var block = user is PhiValue phi ? phi.Sources[use.Index] : user.BasicBlock;
+                if (block != null && !loop.Contains(block))
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// On an edge from <paramref name="source"/> to <paramref name="target"/>:
+        /// merges the values of every loop the edge leaves into their exit locals, for
+        /// the lanes taking the edge (the mask <paramref name="passMask"/> pushes).
+        /// </summary>
+        internal void CaptureLoopExitValues(
+            BasicBlock source,
+            BasicBlock target,
+            Action passMask)
+        {
+            if (loopLiveOuts.Count == 0 || !masks.TryGetLoop(source, out var loop))
+                return;
+            for (var exited = loop;
+                exited != null && !exited.Contains(target);
+                exited = exited.Parent)
+            {
+                if (!loopLiveOuts.TryGetValue(exited, out var values))
+                    continue;
+                foreach (var value in values)
+                {
+                    // Not emitted on the way to this edge: it does not dominate it
+                    if (!locals.TryGetValue(value, out var current))
+                        continue;
+                    var exitLocal = loopExitValues[value].Local;
+                    var merged = EmitMerge(value,
+                        () =>
+                        {
+                            Emitter.Emit(LocalOperation.Load, exitLocal);
+                            return exitLocal.VariableType;
+                        },
+                        () =>
+                        {
+                            Emitter.Emit(LocalOperation.Load, current);
+                            return current.VariableType;
+                        },
+                        passMask,
+                        _ => exitLocal);
+                    if (!merged.HasValue)
+                        Emitter.Emit(LocalOperation.Store, exitLocal);
+                }
             }
         }
 
@@ -445,8 +554,9 @@ namespace ILGPU.Backends.Velocity
                     ? tempLocal
                     : GetLocal(value);
 
-                // Move contents while merging our information
-                var phiLocal = GetLocal(phiValue);
+                // Move contents while merging our information (into the phi's own
+                // local, not its exit local)
+                var phiLocal = locals[phiValue];
                 var intermediateTempLocal = EmitMerge(phiValue,
                     () =>
                     {
@@ -492,6 +602,14 @@ namespace ILGPU.Backends.Velocity
         {
             // Load the local
             value.Assert(locals.ContainsKey(value));
+            // After its loop, a value of the loop is each lane's value at the time the
+            // lane left (see CollectLoopLiveOuts)
+            if (currentBlock != null &&
+                loopExitValues.TryGetValue(value, out var exit) &&
+                !exit.Loop.Contains(currentBlock))
+            {
+                return exit.Local;
+            }
             return locals[value];
         }
 

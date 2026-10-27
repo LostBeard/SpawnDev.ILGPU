@@ -74,6 +74,9 @@ namespace ILGPU.Backends.Velocity
             /// <param name="passMask">The pass mask action.</param>
             public void RecordBranchTarget(BasicBlock target, Action passMask)
             {
+                // Keep the values of every loop this edge leaves for the lanes leaving
+                codeGenerator.CaptureLoopExitValues(current, target, passMask);
+
                 // Check for a jump into a (possibly different) loop
                 if (Masks.IsHeader(target, out var targetLoop))
                 {
