@@ -952,8 +952,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     var wordIdx = $"(u32({idx}) / 4u)";
                     var shift = $"((u32({idx}) % 4u) * 8u)";
                     var packFn = isE4M3St ? "_f32_to_e4m3" : "_f32_to_e5m2";
-                    AppendLine($"atomicAnd(&{subWordBinding}[{wordIdx}], ~(0xFFu << {shift}));");
-                    AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], (({packFn}({val}) & 0xFFu) << {shift}));");
+                    AppendLine(SubWordAtomicStore($"&{subWordBinding}[{wordIdx}]", "0xFF", shift, $"{packFn}({val})"));
                 }
                 else if (elemSize == 1 && _subWordFloat4Params.Contains(storeParamIdx))
                 {
@@ -962,36 +961,31 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // u32(val)) re-narrows a widened f32 to the FP4 storage type.
                     var wordIdx = $"(u32({idx}) / 4u)";
                     var shift = $"((u32({idx}) % 4u) * 8u)";
-                    AppendLine($"atomicAnd(&{subWordBinding}[{wordIdx}], ~(0xFFu << {shift}));");
-                    AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], ((_f32_to_e2m1({val}) & 0xFFu) << {shift}));");
+                    AppendLine(SubWordAtomicStore($"&{subWordBinding}[{wordIdx}]", "0xFF", shift, $"_f32_to_e2m1({val})"));
                 }
                 else if (elemSize == 1)
                 {
                     var wordIdx = $"(u32({idx}) / 4u)";
                     var shift = $"((u32({idx}) % 4u) * 8u)";
-                    AppendLine($"atomicAnd(&{subWordBinding}[{wordIdx}], ~(0xFFu << {shift}));");
-                    AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], ((u32({val}) & 0xFFu) << {shift}));");
+                    AppendLine(SubWordAtomicStore($"&{subWordBinding}[{wordIdx}]", "0xFF", shift, $"u32({val})"));
                 }
                 else if (_subWordFloat16Params.Contains(storeParamIdx))
                 {
                     var wordIdx = $"(u32({idx}) / 2u)";
                     var shift = $"((u32({idx}) % 2u) * 16u)";
-                    AppendLine($"atomicAnd(&{subWordBinding}[{wordIdx}], ~(0xFFFFu << {shift}));");
-                    AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], ((_f32_to_f16({val}) & 0xFFFFu) << {shift}));");
+                    AppendLine(SubWordAtomicStore($"&{subWordBinding}[{wordIdx}]", "0xFFFF", shift, $"_f32_to_f16({val})"));
                 }
                 else if (_subWordBFloat16Params.Contains(storeParamIdx))
                 {
                     var wordIdx = $"(u32({idx}) / 2u)";
                     var shift = $"((u32({idx}) % 2u) * 16u)";
-                    AppendLine($"atomicAnd(&{subWordBinding}[{wordIdx}], ~(0xFFFFu << {shift}));");
-                    AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], ((_f32_to_bf16({val}) & 0xFFFFu) << {shift}));");
+                    AppendLine(SubWordAtomicStore($"&{subWordBinding}[{wordIdx}]", "0xFFFF", shift, $"_f32_to_bf16({val})"));
                 }
                 else // Int16 / UInt16
                 {
                     var wordIdx = $"(u32({idx}) / 2u)";
                     var shift = $"((u32({idx}) % 2u) * 16u)";
-                    AppendLine($"atomicAnd(&{subWordBinding}[{wordIdx}], ~(0xFFFFu << {shift}));");
-                    AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], ((u32({val}) & 0xFFFFu) << {shift}));");
+                    AppendLine(SubWordAtomicStore($"&{subWordBinding}[{wordIdx}]", "0xFFFF", shift, $"u32({val})"));
                 }
                 return;
             }

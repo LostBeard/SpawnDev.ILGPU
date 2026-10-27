@@ -1552,7 +1552,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         /// <summary>
         /// Statements storing a field of a BYTE-ADDRESSED packed struct: neighbouring ELEMENTS share its u32
-        /// word, so the field's bits are cleared and set with atomicAnd / atomicOr (the sub-word view RMW).
+        /// word, so the field's bits are replaced in one atomic step (<see cref="WGSLCodeGenerator.SubWordAtomicStore"/>).
         /// </summary>
         private static string ByteAddressedFieldStore(string binding, string byteIdx, PackedStructFieldInfo field, string value)
         {
@@ -1560,7 +1560,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             string word = $"&(*{binding})[u32({byteIdx}) >> 2u]";
             string shift = $"((u32({byteIdx}) & 3u) * 8u)";
             string asU32 = field.WgslType == "i32" ? $"bitcast<u32>({value})" : value;
-            return $"atomicAnd({word}, ~({mask}u << {shift})); atomicOr({word}, ({asU32} & {mask}u) << {shift});";
+            return SubWordAtomicStore(word, mask.ToString(System.Globalization.CultureInfo.InvariantCulture), shift, asU32);
         }
 
         /// <summary>
@@ -7147,8 +7147,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // ONLY this thread's nibble (disjoint masks compose under any interleaving).
                     var wordIdx = $"(u32({idx}) >> 3u)";
                     var shift = $"((u32({idx}) & 7u) * 4u)";
-                    AppendLine($"atomicAnd(&{subWordBinding}[{wordIdx}], ~(0xFu << {shift}));");
-                    AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], ((u32({val}) & 0xFu) << {shift}));");
+                    AppendLine(SubWordAtomicStore($"&{subWordBinding}[{wordIdx}]", "0xF", shift, $"u32({val})"));
                     return;
                 }
                 if (_subWordFloat4Params.Contains(storeParamIdx))
@@ -7158,8 +7157,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // _f32_to_e2m1 is what re-narrows a widened f32 to the FP4 storage type.
                     var wordIdx = $"(u32({idx}) >> 3u)";
                     var shift = $"((u32({idx}) & 7u) * 4u)";
-                    AppendLine($"atomicAnd(&{subWordBinding}[{wordIdx}], ~(0xFu << {shift}));");
-                    AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], ((u32(_f32_to_e2m1({val})) & 0xFu) << {shift}));");
+                    AppendLine(SubWordAtomicStore($"&{subWordBinding}[{wordIdx}]", "0xF", shift, $"u32(_f32_to_e2m1({val}))"));
                     return;
                 }
                 if (elemSize == 1)
@@ -7168,17 +7166,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // WGSL requires explicit parenthesization for mixed-precedence operators
                     var wordIdx = $"(u32({idx}) / 4u)";
                     var shift = $"((u32({idx}) % 4u) * 8u)";
-                    AppendLine($"atomicAnd(&{subWordBinding}[{wordIdx}], ~(0xFFu << {shift}));");
                     if (_subWordFloat8Params.TryGetValue(storeParamIdx, out bool fp8IsE4M3))
                         // FP8: convert the f32 value to the 8-bit pattern (RNE), then pack the byte.
-                        AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], (({(fp8IsE4M3 ? "_f32_to_e4m3" : "_f32_to_e5m2")}({val}) & 0xFFu) << {shift}));");
+                        AppendLine(SubWordAtomicStore($"&{subWordBinding}[{wordIdx}]", "0xFF", shift, $"{(fp8IsE4M3 ? "_f32_to_e4m3" : "_f32_to_e5m2")}({val})"));
                     else if (_subWordFloat4Params.Contains(storeParamIdx))
                         // FP4: convert the f32 value to the E2M1 byte (RNE, code in low nibble), then pack.
                         // Converting through _f32_to_e2m1 (not u32(val)) is what re-narrows a widened f32
                         // to the FP4 storage type - the latent (float)fp4 -> store no-op-alias case.
-                        AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], ((_f32_to_e2m1({val}) & 0xFFu) << {shift}));");
+                        AppendLine(SubWordAtomicStore($"&{subWordBinding}[{wordIdx}]", "0xFF", shift, $"_f32_to_e2m1({val})"));
                     else
-                        AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], ((u32({val}) & 0xFFu) << {shift}));");
+                        AppendLine(SubWordAtomicStore($"&{subWordBinding}[{wordIdx}]", "0xFF", shift, $"u32({val})"));
                 }
                 else if (_subWordFloat16Params.Contains(storeParamIdx))
                 {
@@ -7189,8 +7186,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // inline store zeroed the mantissa on overflow, losing NaN.
                     var wordIdx = $"(u32({idx}) / 2u)";
                     var shift = $"((u32({idx}) % 2u) * 16u)";
-                    AppendLine($"atomicAnd(&{subWordBinding}[{wordIdx}], ~(0xFFFFu << {shift}));");
-                    AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], ((_f32_to_f16({val}) & 0xFFFFu) << {shift}));");
+                    AppendLine(SubWordAtomicStore($"&{subWordBinding}[{wordIdx}]", "0xFFFF", shift, $"_f32_to_f16({val})"));
                 }
                 else if (_subWordBFloat16Params.Contains(storeParamIdx))
                 {
@@ -7198,8 +7194,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // word via RMW (same 2-byte sub-word layout as Float16).
                     var wordIdx = $"(u32({idx}) / 2u)";
                     var shift = $"((u32({idx}) % 2u) * 16u)";
-                    AppendLine($"atomicAnd(&{subWordBinding}[{wordIdx}], ~(0xFFFFu << {shift}));");
-                    AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], ((_f32_to_bf16({val}) & 0xFFFFu) << {shift}));");
+                    AppendLine(SubWordAtomicStore($"&{subWordBinding}[{wordIdx}]", "0xFFFF", shift, $"_f32_to_bf16({val})"));
                 }
                 else // elemSize == 2, Int16/UInt16
                 {
@@ -7207,8 +7202,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // WGSL requires explicit parenthesization for mixed-precedence operators
                     var wordIdx = $"(u32({idx}) / 2u)";
                     var shift = $"((u32({idx}) % 2u) * 16u)";
-                    AppendLine($"atomicAnd(&{subWordBinding}[{wordIdx}], ~(0xFFFFu << {shift}));");
-                    AppendLine($"atomicOr(&{subWordBinding}[{wordIdx}], ((u32({val}) & 0xFFFFu) << {shift}));");
+                    AppendLine(SubWordAtomicStore($"&{subWordBinding}[{wordIdx}]", "0xFFFF", shift, $"u32({val})"));
                 }
                 return;
             }
@@ -8239,6 +8233,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 if (_localAllocaVarNames.Contains(basePtr.Name))
                 {
                     valueVariables[value] = basePtr;
+                    return;
+                }
+                // The same for a view of a SHARED alloca (SharedMemory.Allocate, emitted `let v_view = &shared_N;`):
+                // the base path assigned the workgroup pointer to an element-typed var (`var v_c : i32; v_c = v_view;`,
+                // "cannot assign 'ptr<workgroup, array<i32, 16>, read_write>' to 'i32'"), so a shared array passed to
+                // an inlined helper taking ArrayView<T> did not compile. Alias the cast to the view's pointer.
+                if (localView.Pointer.Resolve() is global::ILGPU.IR.Values.Alloca { AddressSpace: global::ILGPU.IR.MemoryAddressSpace.Shared })
+                {
+                    valueVariables[value] = source;
                     return;
                 }
             }

@@ -1972,6 +1972,26 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             $"select(abs({x}), -abs({x}), (bitcast<u32>(f32({y})) >> 31u) != 0u)";
 
         /// <summary>
+        /// One statement that stores <paramref name="bits"/> (an unshifted u32) into the bit-range <paramref name="mask"/>
+        /// &lt;&lt; <paramref name="shift"/> of the packed <c>atomic&lt;u32&gt;</c> word <paramref name="wordPtr"/> (a WGSL
+        /// pointer expression), leaving the other bits alone: a byte, half, nibble or packed struct field that shares its
+        /// word with neighbouring elements other threads write.
+        /// The new value's bits are SET first (atomicOr), then the bits it does not have are cleared (atomicAnd): both touch
+        /// only this element's bits, so neighbours are safe, and a store of the value the element already holds changes
+        /// nothing at any moment. The old order (atomicAnd to clear, then atomicOr) showed the element as 0 between the two,
+        /// so a thread reading it while its owner stored, even the same value, got 0 (SpawnDev.Codecs WebP cleanup,
+        /// 2026-10-27: a pixel copied from a pixel its own thread was storing read back 0). Many threads storing one value
+        /// to one element (a flag) agree. Only a read racing a store that CHANGES the element can see old | new, in a
+        /// program whose read is racy anyway.
+        /// A compare-exchange loop would give old-or-new even then, but MEASURED it multiplies the D3D pipeline compile of
+        /// kernels with many byte stores (Codecs Vp9EntropyStepKernel 78 s -> 289 s, a 256-store predictor 3 s -> 17 s
+        /// under node Dawn / FXC); this order costs the same two atomics as before.
+        /// </summary>
+        protected static string SubWordAtomicStore(string wordPtr, string mask, string shift, string bits) =>
+            $"{{ let _swp = {wordPtr}; let _sws = {shift}; let _swb = ({bits}) & {mask}u; " +
+            $"atomicOr(_swp, _swb << _sws); atomicAnd(_swp, ~((~_swb & {mask}u) << _sws)); }}";
+
+        /// <summary>
         /// The WGSL expression for a <see cref="ConvertValue"/> - shared by kernel bodies and
         /// [NoInlining] helper functions so a conversion means the same thing in both. The
         /// helper path used to have its own, much thinner version: every 32-to-64-bit widening
