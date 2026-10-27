@@ -1546,6 +1546,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 wgslSource = wgslSource.Replace(UniformBreakFlagPlaceholder,
                     wgslSource.Contains("_uf_break_flag") ? "var<workgroup> _uf_break_flag : u32;" : "");
 
+            // Resolve the opaque-zero initializer (WGSLCodeGenerator.FunctionArrayIndex): read the zero slot that the
+            // kernel's GenerateHeader reserved, or drop the line when no body indexes a function-scope array dynamically.
+            const string OpaqueZeroInit = "/*__ILGPU_OPAQUE_ZERO_INIT__*/";
+            if (wgslSource.Contains(OpaqueZeroInit))
+                wgslSource = wgslSource.Replace(OpaqueZeroInit,
+                    data.OpaqueZero[1] >= 0 ? $"_ilgpu_oz = i32(_scalar_params[{data.OpaqueZero[1]}]);" : "");
+
             // Prepend kernel method name as a comment for identification
             var methodName = entryPoint.MethodInfo?.Name ?? "unknown";
             wgslSource = $"// Kernel: {methodName}\n" + wgslSource;
@@ -1981,5 +1988,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         /// <summary>For IsUserDim entries: which extent this slot holds (0 = X, 1 = Y, 2 = Z).</summary>
         public int UserDimAxis { get; set; }
+
+        /// <summary>
+        /// A slot that is always 0 (the packers leave it as allocated; <see cref="ParamIndex"/> is -3, so no argument
+        /// maps to it). The shader reads it into <c>_ilgpu_oz</c> and adds it to every non-constant index into a
+        /// function-scope array: a zero the shader compiler cannot see through, for the NVIDIA D3D12 driver bug
+        /// described at <see cref="WGSLCodeGenerator.FunctionArrayIndex"/>.
+        /// </summary>
+        public bool IsZeroSlot { get; set; }
     }
 }

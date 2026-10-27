@@ -701,7 +701,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // Full-word: helper's local source is a ptr, so we must deref before
                 // indexing. WGSL: `&((*ptr)[idx])` produces ptr<storage, T>.
                 var sourceVar = Load(value.Source);
-                AppendLine($"let {target.Name} = &(*{sourceVar})[{offsetExpr}];");
+                // A view of the caller's function-scope array (ptr<function, ...>) stored to at a constant-choice index
+                // takes the opaque zero too (WGSLCodeGenerator.FunctionArrayIndex: NVIDIA D3D12 driver bug).
+                string paramIndexExpr = ((ViewType)param.ParameterType).AddressSpace == MemoryAddressSpace.Local
+                    ? OpaqueZeroIndex(value, offsetExpr) : offsetExpr;
+                AppendLine($"let {target.Name} = &(*{sourceVar})[{paramIndexExpr}];");
                 return;
             }
 

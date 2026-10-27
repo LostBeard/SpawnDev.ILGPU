@@ -142,6 +142,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             public List<int> ExpectedBindingCountHolder { get; } = new() { 0 };
 
             /// <summary>
+            /// The opaque zero (<see cref="FunctionArrayIndex"/>): [0] is set to 1 (Interlocked - the generators run in
+            /// parallel) when any body indexes a function-scope array at a non-constant index; [1] is the
+            /// <c>_scalar_params</c> slot holding the zero, assigned by the kernel's GenerateHeader (-1 if none).
+            /// </summary>
+            public int[] OpaqueZero { get; } = new int[] { 0, -1 };
+
+            /// <summary>
             /// Spinlock-companion-buffer keys for i64/f64 Min/Max/Exchange atomics.
             /// Key: (ParamIdx, FieldIdx). FieldIdx=-1 for direct view params;
             /// FieldIdx>=0 for body-struct view fields. Populated during ScanForAtomicUsage,
@@ -2340,8 +2347,85 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             Builder.Append("let ");
             Builder.Append(target.Name);
             Builder.Append(" = ");
-            Builder.Append($"&{source}[{offset}];");
+            Builder.Append($"&{source}[{FunctionArrayIndex(value, value.Source, offset.ToString())}];");
             Builder.AppendLine();
+        }
+
+        /// <summary>
+        /// The index expression of the element address <paramref name="lea"/> into <paramref name="source"/>: when the
+        /// source is a function-scope array (a local alloca, directly or through a view), the address is stored to, and
+        /// its index is a choice between constants (<see cref="IsConstantChoice"/>), the index plus <c>_ilgpu_oz</c>, a
+        /// zero the shader reads from <c>_scalar_params</c> (<see cref="ScalarPackingEntry.IsZeroSlot"/>).
+        /// <para>
+        /// Works around an NVIDIA D3D12 driver miscompile (RTX 4070, driver 32.0.15.9621; Chrome 156 / Canary 157 /
+        /// Edge 148, Dawn D3D12 + DXC; SwiftShader and FXC-compiled DXBC are correct): inside a loop with a runtime trip
+        /// count, a store into a function-scope array at an index the compiler can reduce to a select with a zero arm
+        /// (<c>select(8, 0, i == 0)</c>, also as <c>8 * i32(i != 0)</c> or an if/else) wrote the other arm's element.
+        /// Tint's HLSL and DXC's DXIL were both correct; the driver's compile of the DXIL was not. Adding a zero that
+        /// no compiler can fold (a buffer load) keeps the index from being reduced to that select. Found through
+        /// SpawnDev.Codecs (Geordi 2026-10-27): the BC7 encoder's candidate copy put subset 0's endpoints at subset 1's
+        /// slots. The 15-line WGSL reproducer and every variant tried: Plans/nvidia-d3d12-function-array-store-2026-10-27.md.
+        /// Test: <c>FunctionArrayStore_SelectIndexInLoop_MatchesOracle</c>.
+        /// </para>
+        /// <para>
+        /// Only such stores take it: an index the compiler can resolve after unrolling (a loop counter) must stay
+        /// foldable, or the array could no longer live in registers. Loads at such an index were read correctly.
+        /// </para>
+        /// </summary>
+        protected string FunctionArrayIndex(LoadElementAddress lea, Value source, string indexExpr)
+        {
+            var src = source.Resolve();
+            if (src is NewView view) src = view.Pointer.Resolve();
+            if (src is not Alloca { AddressSpace: MemoryAddressSpace.Local }) return indexExpr;
+            return OpaqueZeroIndex(lea, indexExpr);
+        }
+
+        /// <summary>
+        /// <paramref name="indexExpr"/> plus <c>_ilgpu_oz</c> when <paramref name="lea"/> (an element address into a
+        /// function-scope array) is a store target at a constant-choice index; otherwise the index unchanged.
+        /// </summary>
+        protected string OpaqueZeroIndex(LoadElementAddress lea, string indexExpr)
+        {
+            if (!IsConstantChoice(lea.Offset)) return indexExpr;
+            bool stored = false;
+            foreach (var use in lea.Uses)
+                if (use.Resolve() is Store st && st.Target.Resolve() == lea) { stored = true; break; }
+            if (!stored) return indexExpr;
+            System.Threading.Interlocked.Exchange(ref _baseArgs.OpaqueZero[0], 1);
+            return $"(i32({indexExpr}) + _ilgpu_oz)";
+        }
+
+        /// <summary>
+        /// An index that is one of a few constants: past conversions and arithmetic with a constant operand, a select
+        /// (<see cref="Predicate"/>) of two constants or a phi of constants (an if/else that picks a constant).
+        /// </summary>
+        private static bool IsConstantChoice(Value index)
+        {
+            var v = index.Resolve();
+            for (int guard = 0; guard < 16; guard++)
+            {
+                if (v is ConvertValue cv) { v = cv.Value.Resolve(); continue; }
+                if (v is BinaryArithmeticValue b
+                    && b.Kind is BinaryArithmeticKind.Add or BinaryArithmeticKind.Sub or BinaryArithmeticKind.Mul)
+                {
+                    var l = b.Left.Resolve();
+                    var r = b.Right.Resolve();
+                    if (r is PrimitiveValue) { v = l; continue; }
+                    if (l is PrimitiveValue) { v = r; continue; }
+                    return false;
+                }
+                break;
+            }
+            if (v is Predicate p)
+                return p.TrueValue.Resolve() is PrimitiveValue && p.FalseValue.Resolve() is PrimitiveValue;
+            if (v is PhiValue phi)
+            {
+                if (phi.Nodes.Length == 0) return false;
+                foreach (var n in phi.Nodes)
+                    if (n.Resolve() is not PrimitiveValue) return false;
+                return true;
+            }
+            return false;
         }
 
         /// <summary>

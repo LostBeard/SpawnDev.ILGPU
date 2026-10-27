@@ -3053,6 +3053,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
             }
 
+            // The opaque zero (WGSLCodeGenerator.FunctionArrayIndex): every body has been generated (CodeGeneratorBackend
+            // runs all GenerateCode before any GenerateHeader), so the flag is final. Its slot follows every other one.
+            if (System.Threading.Volatile.Read(ref _generatorArgs.OpaqueZero[0]) != 0)
+            {
+                int zeroSlot = 0;
+                foreach (var e in scalarManifest) zeroSlot = Math.Max(zeroSlot, e.ByteOffset / 4 + e.SlotCount);
+                zeroSlot = Math.Max(zeroSlot, scalarSlotOffset);
+                scalarManifest.Add(new ScalarPackingEntry
+                {
+                    ParamIndex = -3, ByteOffset = zeroSlot * 4, ByteSize = 4, WgslType = "u32", IsZeroSlot = true,
+                });
+                _generatorArgs.OpaqueZero[1] = zeroSlot;
+                _bodyReferencesScalarParams = true;
+                builder.AppendLine($"// Opaque zero for function-scope array indices at scalar slot {zeroSlot}");
+                builder.AppendLine("var<private> _ilgpu_oz : i32;");
+            }
+
             // Emit the single packed scalar binding (if any scalars were packed)
             // GenerateHeader runs AFTER body generation, so Builder already contains
             // the full function body. If _scalar_params[ is never referenced in the
@@ -4443,6 +4460,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 "    // because `bitcast<f32>(const_u32_with_inf_bit_pattern)` is rejected\n" +
                 "    // at shader creation. See WGSLEmulationLibrary.F32SpecialValueFunctions.\n" +
                 "    _ilgpu_runtime_zero = local_id.x ^ local_id.x;\n" +
+                // The opaque zero for function-scope array indices (WGSLCodeGenerator.FunctionArrayIndex): resolved in
+                // WebGPUBackend.CreateKernel once GenerateHeader has assigned its _scalar_params slot, or removed.
+                "    /*__ILGPU_OPAQUE_ZERO_INIT__*/\n" +
                 (bodyNeedsSubgroups ? "    let subgroup_id = _ep_local_index / subgroup_size;\n" : "") +
                 // The uniformity transform's synthetic loop counters, at FUNCTION scope so every loop that assigns one
                 // (in any nested or sibling block) sees the declaration.
@@ -6739,13 +6759,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // user-array allocations and the NewView fix above emits `&v_alloca`
             // (yielding `ptr<function, array<T, 1>>`), so `&(*v)[idx]` produces
             // the right `ptr<function, T>` for the element address.
+            // A function-scope array at a non-constant index takes the opaque zero (FunctionArrayIndex: NVIDIA D3D12 driver bug).
+            string arrayIndexExpr = FunctionArrayIndex(value, effectiveSourceValue, offsetExpr);
             if (effectiveSourceValue is global::ILGPU.IR.Values.NewView || effectiveSourceValue.Type.IsPointerType)
             {
-                Builder.Append($"&(*{sourceVal})[{offsetExpr}];");
+                Builder.Append($"&(*{sourceVal})[{arrayIndexExpr}];");
             }
             else
             {
-                Builder.Append($"&{sourceVal}[{offsetExpr}];");
+                Builder.Append($"&{sourceVal}[{arrayIndexExpr}];");
             }
             Builder.AppendLine();
 
