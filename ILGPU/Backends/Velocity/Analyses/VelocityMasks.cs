@@ -89,8 +89,12 @@ namespace ILGPU.Backends.Velocity.Analyses
 
             // The position of each block in the order the code is generated in
             var blockIndices = new Dictionary<BasicBlock, int>();
+            var blockOrder = new List<BasicBlock>();
             foreach (var block in blocks)
+            {
                 blockIndices.Add(block, blockIndices.Count);
+                blockOrder.Add(block);
+            }
 
             // Iterate over all loops and determine all body blocks and all back edges
             var cfg = blocks.CreateCFG();
@@ -132,8 +136,18 @@ namespace ILGPU.Backends.Velocity.Analyses
                     }
                     exitBlocks[block] = set;
                 }
+                // Continue with the block generated right after the loop, not with the exit: blocks between the loop
+                // and its exit (the else arm of `if (c) { loop } else { loop }`, whose loops share the merge block as
+                // exit) hold lanes too. Jumping to the exit skipped them: a then-loop no lane entered left at once and
+                // every store of the else arm was lost (BranchLoops_LoopInEachArm_EveryArmStoresOrIsRefusedOnWebGL, SpawnDev.Codecs
+                // VorbisResidueAccumulateGpu). Every block between runs under its own mask.
                 if (firstExit is not null)
-                    firstExits[loop] = firstExit;
+                {
+                    int next = 0;
+                    foreach (var member in loop.AllMembers)
+                        next = Math.Max(next, blockIndices[member] + 1);
+                    firstExits[loop] = next < blockIndices[firstExit] ? blockOrder[next] : firstExit;
+                }
 
                 // Register all back edges
                 foreach (var backEdge in loop.BackEdges)

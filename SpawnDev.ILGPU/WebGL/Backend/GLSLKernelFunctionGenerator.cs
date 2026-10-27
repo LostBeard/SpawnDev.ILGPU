@@ -2693,7 +2693,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // vertex executable" when Transform Feedback is active.
             _visitedBlocks.Clear();
             _activeLoopHeaders.Clear();
+            // Declarations made while emitting (Declare, DeclarationPrefix) go to function scope, spliced in here.
+            HoistDeclarations = true;
+            VariableBuilder.Clear();
+            int declarationsAt = Builder.Length;
             GenerateStructuredCode(Method.EntryBlock, null);
+            HoistDeclarations = false;
+            if (VariableBuilder.Length > 0)
+                Builder.Insert(declarationsAt, VariableBuilder.ToString());
         }
 
         /// <summary>
@@ -3065,12 +3072,19 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// The declaration prefix ("type ") for a value's assignment, or "" when it is hoisted or its name is already
         /// declared. A helper inlined at several call sites emits its IR values under the same names each time: the
         /// arithmetic emitters declared them again ("'v_1224' : redefinition"; SpawnDev.Codecs Av1ForwardDct16/32,
-        /// Av1ForwardAdst16, Av1InverseAdst16, Vp9ForwardDct32x32 on WebGL).
+        /// Av1ForwardAdst16, Av1InverseAdst16, Vp9ForwardDct32x32 on WebGL). In a multi-block body the first declaration
+        /// goes to function scope (<see cref="GLSLCodeGenerator.VariableBuilder"/>): declared where it was first emitted,
+        /// inside a branch or loop body, a later copy in another scope read it undeclared ("'v_5761' : undeclared
+        /// identifier", Vp9ForwardDct32x32).
         /// </summary>
         private string DeclarationPrefix(Value value, Variable target, string typedPrefix)
         {
             if (_hoistedPrimitives.Contains(value)) return "";
-            return declaredVariables.Add(target.Name) ? typedPrefix : "";
+            if (!declaredVariables.Add(target.Name)) return "";
+            if (!HoistDeclarations) return typedPrefix;
+            if (typedPrefix.Trim() == "bool") booleanVariables.Add(target.Name);
+            VariableBuilder.AppendLine($"    {typedPrefix}{target.Name};");
+            return "";
         }
 
         private readonly Dictionary<string, int> _leaParamMap = new();
@@ -4184,6 +4198,20 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     AppendLine($"{prefix}{target} = {resultGlslType}(uint({left}) {op} uint({right}));");
                     return;
                 }
+            }
+
+            // An integer division or remainder by a CONSTANT zero (a branch the kernel never takes at run time, e.g.
+            // SpawnDev.Codecs VorbisResidueAccumulateGpu's lookup-type-1 loop called with quantvals = 0) is undefined in
+            // GLSL, and the D3D compiler behind ANGLE acted on it at compile time: the shader stored NOTHING (its transform
+            // feedback came back empty, every element kept its old value, no error). Emit WGSL's defined result instead
+            // (x / 0 = x, x % 0 = 0) and never the division. A divisor that is zero only at run time is unaffected.
+            if ((value.Kind == BinaryArithmeticKind.Div || value.Kind == BinaryArithmeticKind.Rem)
+                && (resultGlslType == "int" || resultGlslType == "uint")
+                && IsConstantZero(value.Right))
+            {
+                string defined = value.Kind == BinaryArithmeticKind.Div ? $"{resultGlslType}({left})" : $"{resultGlslType}(0)";
+                AppendLine($"{prefix}{target} = {defined}; // {(value.Kind == BinaryArithmeticKind.Div ? "/" : "%")} by constant 0");
+                return;
             }
 
             // Sister fix to the Shl/Shr unsigned cast. GLSL ES 3.0 `int / int` and

@@ -2062,6 +2062,16 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 || value.Kind == BinaryArithmeticKind.Shr;
             bool isDivOrRem = value.Kind == BinaryArithmeticKind.Div
                 || value.Kind == BinaryArithmeticKind.Rem;
+            // An integer division or remainder by a CONSTANT zero (a branch the kernel never takes at run time, e.g.
+            // SpawnDev.Codecs VorbisResidueAccumulateGpu's lookup-type-1 loop called with quantvals = 0) is undefined in
+            // GLSL, and the D3D compiler behind ANGLE acted on it at compile time: the shader stored NOTHING (its transform
+            // feedback came back empty, every element kept its old value, no error). Emit WGSL's defined result instead
+            // (x / 0 = x, x % 0 = 0) and never the division. A divisor that is zero only at run time is unaffected.
+            if (isDivOrRem && isIntTargetType && IsConstantZero(value.Right))
+            {
+                AppendLine($"{target} = {(value.Kind == BinaryArithmeticKind.Div ? leftExpr : $"{target.Type}(0)")}; // {op} by constant 0");
+                return;
+            }
             if (isInt32 && isIntTargetType && (
                     (value.IsUnsigned && (isShlOrShr || isDivOrRem))
                     || value.Kind == BinaryArithmeticKind.Shl))
@@ -2077,6 +2087,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 AppendLine($"{target} = {leftExpr} {op} {rightExpr};");
             }
         }
+
+        /// <summary>True when <paramref name="value"/> is an integer constant zero.</summary>
+        protected static bool IsConstantZero(Value value) =>
+            value.Resolve() is PrimitiveValue pv && pv.BasicValueType is BasicValueType.Int8 or BasicValueType.Int16
+                or BasicValueType.Int32 or BasicValueType.Int64 && pv.RawValue == 0;
 
         /// <summary>Emits a unary arithmetic operation (delegates to <c>GenerateUnOp</c>).</summary>
         /// <param name="value">The IR value.</param>

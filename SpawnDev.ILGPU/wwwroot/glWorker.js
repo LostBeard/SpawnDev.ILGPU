@@ -895,6 +895,12 @@ function dispatchKernel(msg) {
     }
 
     gl.useProgram(null);
+    // A context lost DURING the dispatch (driver reset, GPU hang) reads back an all-zero transform feedback buffer: no
+    // store-site bit set, so every element kept its old value and the dispatch looked successful (SpawnDev.Codecs
+    // VorbisResidueAccumulateGpu_Type2: target came back untouched, nothing refused). The webglcontextlost event comes
+    // later, asynchronously; isContextLost() is the synchronous answer.
+    if (!readbackError && gl.isContextLost())
+        readbackError = new Error('WebGL: the context was lost during this dispatch (GPU reset or driver crash); its results were not written.');
     if (readbackError) throw readbackError;
 
     // No ArrayBuffer transfers — data stays GPU-resident in the worker
