@@ -791,6 +791,10 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             throw new UnsupportedTestException("WebGL: no shared memory or atomics in vertex shaders");
 
         [TestMethod]
+        public new async Task AtomicBuffer_PlainStoreAndLoad_MatchesOracle() =>
+            throw new UnsupportedTestException("WebGL: no atomics in vertex shaders (Atomic.Or / float Atomic.Add)");
+
+        [TestMethod]
         public new async Task VoidHelperInBarrierKernel_MatchesOracle() =>
             throw new UnsupportedTestException("WebGL: no shared memory, barriers or atomics in vertex shaders");
 

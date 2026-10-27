@@ -1,6 +1,10 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.9 (forks 2.4.7) - unreleased (local feed 5.4.9-local.1) - WebGPU: plain loads and stores of a uint / float buffer that the kernel also updates with atomics compile
+
+- **FIXED (WebGPU): a kernel that updated a `uint` or `float` buffer with `Atomic.*` and also read or wrote it with plain loads / stores did not compile.** Such a buffer is declared `array<atomic<u32>>` (WGSL has no `atomic<f32>`, and unsigned atomics use `u32`) while the kernel's uint and float values are `i32` / `f32`. The atomic operations bitcast; the plain accesses did not, so `words[i] = 0` became `atomicStore(ptr<storage, atomic<u32>, read_write>, i32)` and a read `let v : i32 = atomicLoad(...)`, which Tint rejects ("no matching call to 'atomicStore(...)'"), and the pipeline was invalid. Plain loads and stores of these buffers now bitcast like the atomic operations (`AtomicHoldsU32` / `AtomicStoreValue` in `WGSLKernelFunctionGenerator`). Found through SpawnDev.Codecs (Geordi): the zlib lanes emitter (`EmitLanesKernel`) zeroes its bit words, ORs codes into them and reads bytes back; its WGSL fails under 5.4.8 and compiles with the fix (checked offline in Tint). Test: `AtomicBuffer_PlainStoreAndLoad_MatchesOracle` (uint: zero, Atomic.Or, read; float: store, Atomic.Add, read; CPU oracle): red on both WebGPU lanes before, green on 8 backends (WebGL skips: no atomics).
+
 ## 5.4.8 (forks 2.4.7) - 2026-10-27 - WebGPU: a thread reading a byte / half / nibble its owner is storing no longer sees 0, a shared array passed to a helper compiles; Wasm: a kernel with barriers that calls a void helper compiles
 
 - Release sweep (RTX 4070, all lanes, `db7506e`): 7,340 test cases, 6,784 passed, 556 skipped, 0 failed (42m39s; 5.4.7 was 6,767/0/555 in 43m35s, no test changed outcome). The forks are unchanged (2.4.7). Found and verified with SpawnDev.Codecs (Geordi): its GDeflate encoder (PlanKernel) on Wasm and its WebP RGBA->YUV cleanup on WebGPU pass on 5.4.8.

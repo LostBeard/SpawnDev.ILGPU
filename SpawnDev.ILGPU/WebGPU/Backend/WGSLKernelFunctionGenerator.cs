@@ -2104,6 +2104,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// detected as unsigned during ScanForAtomicUsage. Used by the base class
         /// GenerateCode(GenericAtomic) to use atomic&lt;u32&gt; operations for unsigned semantics.
         /// </summary>
+        /// <summary>
+        /// The buffer behind <paramref name="ptr"/> is <c>array&lt;atomic&lt;u32&gt;&gt;</c> while its values are i32 or f32 in
+        /// the kernel: an unsigned buffer (uint locals are i32 here) or a float one (atomic f32 = a CAS loop on the bits).
+        /// A plain load / store of such a buffer (one the kernel ALSO updates with Atomic.*) must bitcast, as the atomic
+        /// ops do: `atomicStore(p, 0)` of a uint buffer was `atomicStore(ptr&lt;..atomic&lt;u32&gt;&gt;, i32)`, which Tint
+        /// rejects (SpawnDev.Codecs zlib EmitLanesKernel, 2026-10-27), and a float one stored / loaded f32 the same way.
+        /// </summary>
+        private bool AtomicHoldsU32(global::ILGPU.IR.Value ptr) => IsUnsignedAtomicTarget(ptr) || IsFloatAtomicTarget(ptr);
+
+        private string AtomicStoreValue(global::ILGPU.IR.Value ptr, Variable val) =>
+            AtomicHoldsU32(ptr) ? BitcastToU32(val.ToString(), val.Type) : val.ToString();
+
         protected override bool IsUnsignedAtomicTarget(global::ILGPU.IR.Value target)
         {
             // Check direct parameter unsigned atomics
@@ -6981,7 +6993,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (_crossBlockPointerExprs.TryGetValue(source.ToString(), out var inlineExpr))
             {
                 if (_crossBlockElementPointers.Contains(source.ToString()) && IsAtomicPointer(loadVal.Source))
-                    inlineExpr = $"atomicLoad(&{inlineExpr})";
+                    inlineExpr = AtomicHoldsU32(loadVal.Source)
+                        ? BitcastFromU32($"atomicLoad(&{inlineExpr})", target.Type)
+                        : $"atomicLoad(&{inlineExpr})";
                 if (_hoistedPrimitives.Contains(loadVal))
                 {
                     AppendLine($"{target} = {inlineExpr};");
@@ -7000,7 +7014,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // When a buffer has both atomic ops (Atomic.And) and non-atomic reads,
             // the buffer is declared array<atomic<T>> and ALL reads must use atomicLoad.
             bool isAtomic = !isAllocaVar && IsAtomicPointer(loadVal.Source);
-            string rhs = isAllocaVar ? $"{source}" : isAtomic ? $"atomicLoad({source})" : $"*{source}";
+            string rhs = isAllocaVar ? $"{source}" : isAtomic
+                ? (AtomicHoldsU32(loadVal.Source) ? BitcastFromU32($"atomicLoad({source})", target.Type) : $"atomicLoad({source})")
+                : $"*{source}";
 
             // Check if we already declared this at the top
             if (_hoistedPrimitives.Contains(loadVal))
@@ -7211,7 +7227,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (_crossBlockPointerExprs.TryGetValue(address.ToString(), out var inlineExpr))
             {
                 if (_crossBlockElementPointers.Contains(address.ToString()) && IsAtomicPointer(storeVal.Target))
-                    AppendLine($"atomicStore(&{inlineExpr}, {val});");
+                    AppendLine($"atomicStore(&{inlineExpr}, {AtomicStoreValue(storeVal.Target, val)});");
                 else
                     AppendLine($"{inlineExpr} = {val};");
                 return;
@@ -7221,7 +7237,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (_localAllocaVarNames.Contains(address.Name))
                 AppendLine($"{address} = {val};");
             else if (IsAtomicPointer(storeVal.Target))
-                AppendLine($"atomicStore({address}, {val});");
+                AppendLine($"atomicStore({address}, {AtomicStoreValue(storeVal.Target, val)});");
             else
                 AppendLine($"*{address} = {val};");
         }
