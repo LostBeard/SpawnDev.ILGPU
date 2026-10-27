@@ -2323,6 +2323,28 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         }
 
         /// <summary>
+        /// Returns the emulation-library function for a compare of two emulated 64-bit integers (uvec2 lo/hi).
+        /// ILGPU's IR has no UInt64 type: <c>ulong</c> compares are Int64 compares flagged
+        /// <see cref="CompareValue.IsUnsignedOrUnordered"/>, so that flag picks <c>u64_*</c> over the signed
+        /// <c>i64_*</c> (signed, <c>err &lt; ulong.MaxValue</c> is <c>err &lt; -1</c>, always false).
+        /// </summary>
+        /// <param name="value">The compare.</param>
+        /// <returns>The GLSL function name.</returns>
+        protected static string EmulatedI64CompareFunction(CompareValue value)
+        {
+            bool u = value.IsUnsignedOrUnordered;
+            return value.Kind switch
+            {
+                CompareKind.LessThan => u ? "u64_lt" : "i64_lt",
+                CompareKind.LessEqual => u ? "u64_le" : "i64_le",
+                CompareKind.GreaterThan => u ? "u64_gt" : "i64_gt",
+                CompareKind.GreaterEqual => u ? "u64_ge" : "i64_ge",
+                CompareKind.NotEqual => "i64_ne",
+                _ => "i64_eq",
+            };
+        }
+
+        /// <summary>
         /// Emits a comparison. Emulated f64 operands go through the <c>f64_lt</c>/<c>f64_eq</c>/... helpers, scalar
         /// floats get explicit NaN handling for unordered and equality compares, and unsigned integer compares
         /// cast both sides to <c>uint</c>.
@@ -2373,6 +2395,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         AppendLine($"{target} = {f}({left}, {right});");
                     return;
                 }
+            }
+
+            // Emulated 64-bit integers are uvec2: `<` on a uvec2 is not GLSL, and `==` must agree with the kernel path.
+            if (Backend.EnableI64Emulation && (leftType == "uvec2" || rightType == "uvec2"))
+            {
+                AppendLine($"{target} = {EmulatedI64CompareFunction(value)}({left}, {right});");
+                return;
             }
 
             bool isFloatScalar = (value.Left.BasicValueType == BasicValueType.Float32

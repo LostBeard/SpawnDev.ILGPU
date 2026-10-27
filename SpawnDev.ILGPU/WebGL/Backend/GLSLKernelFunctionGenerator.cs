@@ -4353,13 +4353,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
             if (isEmulatedI64)
             {
-                string? f = value.Kind switch
-                {
-                    CompareKind.LessThan => "i64_lt", CompareKind.LessEqual => "i64_le",
-                    CompareKind.GreaterThan => "i64_gt", CompareKind.GreaterEqual => "i64_ge",
-                    CompareKind.Equal => "i64_eq", CompareKind.NotEqual => "i64_ne", _ => null
-                };
-                if (f != null) { AppendLine($"{prefix}{target} = {f}({left}, {right});"); return; }
+                AppendLine($"{prefix}{target} = {EmulatedI64CompareFunction(value)}({left}, {right});");
+                return;
             }
 
             string op = GetCompareOp(value.Kind);
