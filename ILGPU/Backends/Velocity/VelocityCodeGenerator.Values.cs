@@ -520,6 +520,10 @@ namespace ILGPU.Backends.Velocity
                     GetVectorizedType(value.Type));
                 Emitter.LoadNull(tempLocal);
                 nullLocals.Add(value.Type, tempLocal);
+                // The FIRST null value of a type was aliased to the empty `local` (TryGetValue's default) instead of
+                // the local just declared: a phi merging it crashed the compile (NullReferenceException in
+                // GetFieldInfo; SpawnDev.Codecs Vp9KeyframeDecodeStepKernel, a struct defaulted on one path).
+                local = tempLocal;
             }
             Alias(value, local);
         }
