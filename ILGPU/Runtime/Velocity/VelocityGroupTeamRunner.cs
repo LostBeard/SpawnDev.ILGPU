@@ -160,7 +160,9 @@ namespace ILGPU.Runtime.Velocity
             while (workers.Count < count)
             {
                 var worker = new Worker { Index = workers.Count };
-                worker.Thread = new Thread(() => WorkerLoop(worker))
+                worker.Thread = new Thread(
+                    () => WorkerLoop(worker),
+                    VelocityChunkRunner.WorkerStackSize)
                 {
                     IsBackground = true,
                     Name = $"Velocity warp {worker.Index}",

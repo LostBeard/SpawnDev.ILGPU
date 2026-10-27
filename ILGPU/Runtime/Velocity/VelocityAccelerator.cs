@@ -187,6 +187,13 @@ namespace ILGPU.Runtime.Velocity
             Justification = "This is disposed in DisposeAccelerator_SyncRoot")]
         private readonly VelocityGroupTeamRunner teamRunner;
 
+        [SuppressMessage(
+            "Microsoft.Usage",
+            "CA2213: Disposable fields should be disposed",
+            Justification = "This is disposed in DisposeAccelerator_SyncRoot")]
+        private readonly VelocityChunkRunner chunkRunner;
+        private readonly Action<int, VelocityGroupExecutionContext> processChunk;
+
         /// <summary>
         /// Constructs a new Velocity accelerator.
         /// </summary>
@@ -211,6 +218,8 @@ namespace ILGPU.Runtime.Velocity
             };
             executionEngine = new ParallelExecutionEngine(this);
             teamRunner = new VelocityGroupTeamRunner(this);
+            chunkRunner = new VelocityChunkRunner(this);
+            processChunk = (chunk, context) => executionEngine.Process(chunk, null, context);
 
             // Uncomment this line and comment the corresponding creation line to enable
             // code generation debugging on the command line
@@ -338,8 +347,9 @@ namespace ILGPU.Runtime.Velocity
                 // Propagate changes to other threads
                 Thread.MemoryBarrier();
 
-                // Launch all threads
-                executionEngine.ParallelFor(0, numChunks, parallelOptions);
+                // Launch all threads: worker threads with a large stack (see
+                // VelocityChunkRunner), not Parallel.For on the calling thread
+                chunkRunner.Run(numChunks, NumMultiprocessors, processChunk);
             }
             finally
             {
@@ -638,6 +648,7 @@ namespace ILGPU.Runtime.Velocity
             taskConcurrencyLimit.Wait();
             executionEngine.Dispose();
             teamRunner.Dispose();
+            chunkRunner.Dispose();
 
             // Dispose barriers
             taskConcurrencyLimit.Dispose();
