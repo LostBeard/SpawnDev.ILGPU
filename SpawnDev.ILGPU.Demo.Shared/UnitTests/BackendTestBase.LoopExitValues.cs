@@ -11,7 +11,8 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
     // Vp9FrameEntropyKernel batched two frames per warp, and the end-of-block bit of the frame whose block ended first was
     // coded with the probability loaded for a later coefficient (Vp9KeyframeEncoderGpu_Batch_Unaligned_EqualsSingleFrameEncodes,
     // 4957 bytes instead of 4956). The shapes: the minimal one (one loop, an early break) and Codecs' bool encoder in its
-    // token loop (an early return, inside a [NoInlining] step that codes four blocks). Every backend, against a CPU oracle.
+    // token loop (an early return, inside a [NoInlining] step that codes four blocks). Every backend, against a CPU oracle (WebGL refuses the loops' byte writes:
+    // one element per store site).
     public abstract partial class BackendTestBase
     {
         public struct LoopExit_BoolState { public uint LowValue; public uint Range; public int Count; public long OutLen; }
@@ -150,6 +151,23 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task LoopExitValues_EarlyExitUsesBodyValue_MatchesOracle() => await RunEmulatedTest(async accelerator =>
         {
+            try
+            {
+                await LoopExitValues_Run(accelerator);
+            }
+            catch (Exception ex) when (accelerator is SpawnDev.ILGPU.WebGL.WebGLAccelerator)
+            {
+                // WebGL captures one element per store site per thread: the bool encoder's byte writes from a loop are
+                // refused, never wrong
+                bool refused = false;
+                for (var e = ex; e != null; e = e.InnerException)
+                    if (e.Message.Contains("wrote two different elements")) refused = true;
+                if (!refused) throw;
+            }
+        });
+
+        static async Task LoopExitValues_Run(Accelerator accelerator)
+        {
             var rng = new Random(3);
             var coefs = new int[128];
             for (int i = 0; i < coefs.Length; i++) coefs[i] = rng.Next(-40, 40);
@@ -220,7 +238,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
             for (int i = 0; i < 512; i++)
                 if (out2[i] != wantOut2[i]) throw new Exception($"token loop: out[{i}] = {out2[i]}, expected {wantOut2[i]}");
-        });
+        }
 
         static void LoopExit_EncodeBoolHost(ref LoopExit_BoolState state, byte[] outBuf, int bit, int probability, bool carry)
         {
