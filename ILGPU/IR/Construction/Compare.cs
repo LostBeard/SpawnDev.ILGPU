@@ -86,22 +86,35 @@ namespace ILGPU.IR.Construction
             if (left.Type is PrimitiveType leftType &&
                 leftType.BasicValueType == BasicValueType.Int1)
             {
-                // Bool comparison -> convert to logical operation
+                // Bool comparison -> convert to logical operation. An ordered compare orders false before true
+                // (`flag ? 1 : 0` is `cgt.un flag, 0`); each kind is the bool itself, its negation or a constant.
                 if (rightValue != null)
                 {
-                    return kind == CompareKind.Equal
-                        ? rightValue.Int1Value
-                            ? (ValueReference)left
-                            : CreateArithmetic(
-                                location,
-                                left,
-                                UnaryArithmeticKind.Not)
-                        : rightValue.Int1Value
-                            ? CreateArithmetic(
-                                location,
-                                left,
-                                UnaryArithmeticKind.Not)
-                            : (ValueReference)left;
+                    bool c = rightValue.Int1Value;
+                    switch (kind)
+                    {
+                        case CompareKind.Equal:
+                        case CompareKind.NotEqual:
+                            return c == (kind == CompareKind.Equal)
+                                ? (ValueReference)left
+                                : CreateArithmetic(location, left, UnaryArithmeticKind.Not);
+                        case CompareKind.LessThan:          // b < c
+                            return c
+                                ? CreateArithmetic(location, left, UnaryArithmeticKind.Not)
+                                : CreatePrimitiveValue(location, false);
+                        case CompareKind.LessEqual:         // b <= c
+                            return c
+                                ? CreatePrimitiveValue(location, true)
+                                : CreateArithmetic(location, left, UnaryArithmeticKind.Not);
+                        case CompareKind.GreaterThan:       // b > c
+                            return c
+                                ? CreatePrimitiveValue(location, false)
+                                : (ValueReference)left;
+                        case CompareKind.GreaterEqual:      // b >= c
+                            return c
+                                ? (ValueReference)left
+                                : CreatePrimitiveValue(location, true);
+                    }
                 }
             }
 

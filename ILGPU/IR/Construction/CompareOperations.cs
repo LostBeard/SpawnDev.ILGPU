@@ -178,6 +178,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(location, left.Float32Value < right.Float32Value);
                 case BasicValueType.Float64:
                     return CreatePrimitiveValue(location, left.Float64Value < right.Float64Value);
+                case BasicValueType.Int1:
+                    // An ordered compare of two bools orders false before true: `flag ? 1 : 0` is `cgt.un flag, 0`,
+                    // and a flag the frontend folded to a constant reaches this fold.
+                    return CreatePrimitiveValue(location, (left.Int1Value ? 1 : 0) < (right.Int1Value ? 1 : 0));
                 case BasicValueType.Int8:
                     if (isUnsigned)
                         return CreatePrimitiveValue(location, left.UInt8Value < right.UInt8Value);
@@ -228,6 +232,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(location, left.Float32Value <= right.Float32Value);
                 case BasicValueType.Float64:
                     return CreatePrimitiveValue(location, left.Float64Value <= right.Float64Value);
+                case BasicValueType.Int1:
+                    // An ordered compare of two bools orders false before true: `flag ? 1 : 0` is `cgt.un flag, 0`,
+                    // and a flag the frontend folded to a constant reaches this fold.
+                    return CreatePrimitiveValue(location, (left.Int1Value ? 1 : 0) <= (right.Int1Value ? 1 : 0));
                 case BasicValueType.Int8:
                     if (isUnsigned)
                         return CreatePrimitiveValue(location, left.UInt8Value <= right.UInt8Value);
@@ -278,6 +286,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(location, left.Float32Value > right.Float32Value);
                 case BasicValueType.Float64:
                     return CreatePrimitiveValue(location, left.Float64Value > right.Float64Value);
+                case BasicValueType.Int1:
+                    // An ordered compare of two bools orders false before true: `flag ? 1 : 0` is `cgt.un flag, 0`,
+                    // and a flag the frontend folded to a constant reaches this fold.
+                    return CreatePrimitiveValue(location, (left.Int1Value ? 1 : 0) > (right.Int1Value ? 1 : 0));
                 case BasicValueType.Int8:
                     if (isUnsigned)
                         return CreatePrimitiveValue(location, left.UInt8Value > right.UInt8Value);
@@ -328,6 +340,10 @@ namespace ILGPU.IR.Construction
                     return CreatePrimitiveValue(location, left.Float32Value >= right.Float32Value);
                 case BasicValueType.Float64:
                     return CreatePrimitiveValue(location, left.Float64Value >= right.Float64Value);
+                case BasicValueType.Int1:
+                    // An ordered compare of two bools orders false before true: `flag ? 1 : 0` is `cgt.un flag, 0`,
+                    // and a flag the frontend folded to a constant reaches this fold.
+                    return CreatePrimitiveValue(location, (left.Int1Value ? 1 : 0) >= (right.Int1Value ? 1 : 0));
                 case BasicValueType.Int8:
                     if (isUnsigned)
                         return CreatePrimitiveValue(location, left.UInt8Value >= right.UInt8Value);
