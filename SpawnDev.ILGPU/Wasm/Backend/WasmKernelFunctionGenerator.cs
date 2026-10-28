@@ -46,6 +46,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// </summary>
         private readonly Dictionary<int, uint[]> _paramLocals = new();
 
+        // Helper function only: IR parameter index of a view parameter -> the local holding its element count (i32),
+        // passed right after the view's pointer (see EmitHelperArguments).
+        private readonly Dictionary<int, uint> _helperViewLengthLocals = new();
+
         /// <summary>
         /// For view parameters, maps ILGPU param index to the first stride field index in the IR struct.
         /// Strides are always the trailing Int32 fields after the pointer + Int64 extent fields.
@@ -559,6 +563,16 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 uint paramLocal = _nextLocalIndex++;
                 _paramCount++;
                 _localMap[GetValueKey(param)] = paramLocal;
+
+                // A view arrives as its pointer and then its element count: without the count, ArrayView.Length in a
+                // helper was the constant 0, so `if (i < view.Length) view[i] = x` in a non-inlined helper never stored
+                // (the SpawnDev.Codecs VP8/VP9 bool-coder helpers wrote all zero bytes on Wasm, 2026-10-28).
+                if (param.Type is ViewType)
+                {
+                    FuncParamTypes.Add(WasmOpCodes.I32);
+                    _helperViewLengthLocals[i] = _nextLocalIndex++;
+                    _paramCount++;
+                }
 
                 if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-Helper] param[{i}] '{GetValueKey(param)}' -> local_{paramLocal} (type={wasmType:X2})");
             }
@@ -3998,8 +4012,7 @@ EmitSaveAllLocals();
                         WasmModuleBuilder.EmitLocalGet(Code, helperPhaseLocal);
                         WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimXLocal);
                         WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimYLocal);
-                        for (int i = 0; i < targetMethod.Parameters.Count && i < methodCall.Nodes.Length; i++)
-                            EmitGetLocal(methodCall.Nodes[i].Resolve());
+                        EmitHelperArguments(targetMethod, methodCall);
 
                         WasmModuleBuilder.EmitCall(Code, (uint)helperFuncIdx);
 
@@ -4126,8 +4139,7 @@ EmitSaveAllLocals();
                     WasmModuleBuilder.EmitI32Const(Code, 0); // phase 0: fresh run, no restore
                     WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimXLocal);
                     WasmModuleBuilder.EmitLocalGet(Code, _realGroupDimYLocal);
-                    for (int i = 0; i < targetMethod.Parameters.Count && i < methodCall.Nodes.Length; i++)
-                        EmitGetLocal(methodCall.Nodes[i].Resolve());
+                    EmitHelperArguments(targetMethod, methodCall);
 
                     WasmModuleBuilder.EmitCall(Code, (uint)helperFuncIdx);
 
@@ -4603,18 +4615,80 @@ EmitSaveAllLocals();
             return false;
         }
 
-        /// <summary>One arm of a select of views: its length, or a kernel parameter's length local.</summary>
+        /// <summary>One arm of a select of views: its length, or a parameter's length local.</summary>
         private bool EmitViewLengthArm(Value arm, int depth)
         {
             if (depth < 16 && TryEmitViewLength(arm, depth + 1)) return true;
-            int paramIdx = TraceToParameter(arm.Resolve());
-            if (paramIdx >= 0 && _paramLocals.TryGetValue(paramIdx, out var locals) && locals.Length > 1)
+            return TryEmitParameterViewLength(arm.Resolve());
+        }
+
+        /// <summary>
+        /// Pushes the i64 element count of a view that traces to a parameter: a kernel view parameter's length local,
+        /// or, in a helper, the length passed after a view parameter's pointer. False when it traces to neither.
+        /// </summary>
+        private bool TryEmitParameterViewLength(Value view)
+        {
+            int paramIdx = TraceToParameter(view);
+            if (paramIdx < 0) return false;
+            uint lengthLocal;
+            if (_isHelperFunction)
             {
-                WasmModuleBuilder.EmitLocalGet(Code, locals[1]);
-                Code.Add(WasmOpCodes.I64ExtendI32S);
-                return true;
+                if (!_helperViewLengthLocals.TryGetValue(paramIdx, out lengthLocal)) return false;
             }
-            return false;
+            else if (_paramLocals.TryGetValue(paramIdx, out var locals) && locals.Length > 1)
+                lengthLocal = locals[1];
+            else
+                return false;
+            WasmModuleBuilder.EmitLocalGet(Code, lengthLocal);
+            Code.Add(WasmOpCodes.I64ExtendI32S);
+            return true;
+        }
+
+        /// <summary>
+        /// True when <see cref="TryEmitViewLength"/> or <see cref="TryEmitParameterViewLength"/> can push this view's
+        /// length without throwing (no phi of views, every select arm resolvable). Emits nothing.
+        /// </summary>
+        private bool CanEmitViewLength(Value view, int depth)
+        {
+            var current = view.Resolve();
+            for (int i = 0; i < 20 && current != null; i++)
+            {
+                if (current is global::ILGPU.IR.Values.Parameter p && _inlineParamAliases.TryGetValue(p, out var aliased))
+                    current = aliased.Resolve();
+                else if (current is AddressSpaceCast asc)
+                    current = asc.Value.Resolve();
+                else
+                    break;
+            }
+            if (current == null) return false;
+            if (current is SubViewValue) return true;
+            if (current is Predicate pred && pred.Type is ViewType)
+                return depth < 16 && CanEmitViewLength(pred.TrueValue, depth + 1) && CanEmitViewLength(pred.FalseValue, depth + 1);
+            if (current is PhiValue) return false;
+            int paramIdx = TraceToParameter(current);
+            if (paramIdx < 0) return false;
+            return _isHelperFunction
+                ? _helperViewLengthLocals.ContainsKey(paramIdx)
+                : _paramLocals.TryGetValue(paramIdx, out var locals) && locals.Length > 1;
+        }
+
+        /// <summary>
+        /// Pushes a helper call's IR arguments. A view argument is its pointer and then its element count (i32), which
+        /// the helper reads for ArrayView.Length (see SetupHelperParameters). A view whose length cannot be traced here
+        /// (a phi of views) passes 0, as every helper view did before the count was passed.
+        /// </summary>
+        private void EmitHelperArguments(Method targetMethod, MethodCall methodCall)
+        {
+            for (int i = 0; i < targetMethod.Parameters.Count && i < methodCall.Nodes.Length; i++)
+            {
+                var arg = methodCall.Nodes[i].Resolve();
+                EmitGetLocal(arg);
+                if (targetMethod.Parameters[i].Type is not ViewType) continue;
+                if (CanEmitViewLength(arg, 0) && (TryEmitViewLength(arg, 0) || TryEmitParameterViewLength(arg)))
+                    Code.Add(WasmOpCodes.I32WrapI64);
+                else
+                    WasmModuleBuilder.EmitI32Const(Code, 0);
+            }
         }
 
         /// <summary>
@@ -4647,15 +4721,10 @@ EmitSaveAllLocals();
                 return;
             }
 
-            int paramIdx = TraceToParameter(viewSource);
-
-            if (paramIdx >= 0 && _paramLocals.TryGetValue(paramIdx, out var locals) && locals.Length > 1)
+            if (TryEmitParameterViewLength(viewSource))
             {
-                // locals[1] is the element count (i32) for this view parameter.
-                // Extend to i64 since GetViewLength returns long.
-                WasmModuleBuilder.EmitLocalGet(Code, locals[1]);
-                Code.Add(WasmOpCodes.I64ExtendI32S);
-                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-GetViewLength] param[{paramIdx}] length -> local_{locals[1]} (i32 extended to i64)");
+                // The parameter's element count (i32), extended to i64 since GetViewLength returns long.
+                if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-GetViewLength] parameter length (helper={_isHelperFunction})");
             }
             else
             {

@@ -1,6 +1,10 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.11 (forks 2.4.9) - unreleased (local feed 5.4.11-local.1) - Wasm: ArrayView.Length in a helper function is the view's length
+
+- **FIXED (Wasm): `ArrayView.Length` / `IntLength` in a helper that stays a call (not inlined) was 0.** A helper received a view as its pointer only, and its `GetViewLength` fell back to the constant 0, so `if (i < view.Length) view[i] = x` never stored and a bounds-checked write in any non-inlined helper was lost (the store of the kernel itself was fine). A view argument now passes its element count after its pointer, and the helper reads it: from a kernel view parameter, a sub-view, a choice of views, or the helper's own view parameter. A view whose length cannot be traced at the call (a phi of views) still passes 0, as before. Found through SpawnDev.Codecs (Geordi): on Wasm the VP8 / VP9 coefficient and keyframe encoders wrote all-zero bytes (their bool-coder helpers, `EncodeBool(ref state, outBuf, ...)`, are calls once the inlining budget is used) and the VP8 keyframe decoder produced a wrong Y plane, while every other backend was bit-exact. Test `RefStructState_ThroughNestedHelpers_MatchesHost` (a coder state passed `ref` through two non-inlined helpers that write a sub-view): red on Wasm before ("byte 0: 0, expected 77"), green on all lanes; Wasm lane 833 passed, 0 failed, 43 skipped.
+
 ## 5.4.10 (forks 2.4.9) - 2026-10-28 - CUDA: branches on thread-dependent values are no longer marked uniform at O2 (the 5.4.9 default)
 
 - Release sweep (RTX 4070, all lanes, `546437e`): 7,407 test cases, 6,849 passed, 558 skipped, 0 failed (57m32s, with another test run sharing the PC for its first minutes; 5.4.9 was 6,831/0/557 in 47m13s). No test changed outcome; the 19 new cases are the divergent-branch tests. **Upgrade from 5.4.9 if you use CUDA.**
