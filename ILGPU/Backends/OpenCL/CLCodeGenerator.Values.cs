@@ -489,7 +489,8 @@ namespace ILGPU.Backends.OpenCL
         /// <summary cref="IBackendCodeGenerator.GenerateCode(MemoryBarrier)"/>
         public void GenerateCode(MemoryBarrier barrier)
         {
-            var fenceFlags = CLInstructions.GetMemoryFenceFlags(true);
+            // Local memory too: see GenerateCode(Barrier).
+            var fenceFlags = CLInstructions.GetMemoryFenceFlags(true) + " | " + CLInstructions.GetMemoryFenceFlags(false);
             var command = CLInstructions.GetMemoryBarrier(
                 barrier.Kind,
                 out string memoryScope);
@@ -1108,11 +1109,14 @@ namespace ILGPU.Backends.OpenCL
         /// <summary cref="IBackendCodeGenerator.GenerateCode(Barrier)"/>
         public void GenerateCode(Barrier barrier)
         {
+            // A group barrier orders shared (local) memory as well as global memory. OpenCL fences only the address
+            // spaces named in the flags, and the global flag alone does not order local memory (upstream ILGPU passed
+            // only CLK_GLOBAL_MEM_FENCE; NVIDIA fences everything anyway, a stricter driver need not).
             using var statement = BeginStatement(
                 CLInstructions.GetBarrier(barrier.Kind));
             statement.BeginArguments();
             statement.AppendCommand(
-                CLInstructions.GetMemoryFenceFlags(true));
+                CLInstructions.GetMemoryFenceFlags(true) + " | " + CLInstructions.GetMemoryFenceFlags(false));
             statement.EndArguments();
         }
 

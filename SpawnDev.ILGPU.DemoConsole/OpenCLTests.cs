@@ -31,7 +31,7 @@ public class OpenCLTests : BackendTestBase
     // passed that float pointer to vload_half / vstore_half, which convert it to the generic and the global half overload
     // alike: "call to 'vload_half' is ambiguous", CL_BUILD_PROGRAM_FAILURE (42 OpenCL Half tests in the O2 sweep of
     // 2026-10-27). The pointer is now cast to a half pointer in its own address space. Builds its own O2 context because
-    // the lane's accelerator runs at the default level.
+    // the lane's accelerator runs at the default level, which was O1 when this was written.
     [TestMethod]
     public async Task O2_EmulatedHalf_LoadStore_Builds()
     {

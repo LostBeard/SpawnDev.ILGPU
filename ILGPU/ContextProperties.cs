@@ -358,9 +358,16 @@ namespace ILGPU
         /// <summary>
         /// The current optimization level to use.
         /// </summary>
-        /// <remarks><see cref="OptimizationLevel.Release"/> by default.</remarks>
+        /// <remarks>
+        /// <see cref="OptimizationLevel.O2"/> by default since SpawnDev.ILGPU 5.4.9 (forks 2.4.8); upstream ILGPU and
+        /// earlier releases default to <see cref="OptimizationLevel.Release"/> (O1). Measured 2026-10-28 on an RTX 4070:
+        /// the full test suite passes at O2, the median test per lane takes 0 to 5 % longer (WebGL 15 %), compiling the
+        /// 434 SpawnDev.Codecs kernels takes 12.8 -> 12.1 s (WGSL, Wasm, PTX) and CUDA's ptxas 25.2 -> 20.4 s, and the
+        /// Codecs BC7 encoder runs 31 % faster on CUDA (137 -> 75 registers). <c>builder.Release()</c> or
+        /// <c>builder.Optimize(OptimizationLevel.O1)</c> selects O1.
+        /// </remarks>
         public OptimizationLevel OptimizationLevel { get; protected set; } =
-            OptimizationLevel.Release;
+            OptimizationLevel.O2;
 
         /// <summary>
         /// The current inlining mode to use.

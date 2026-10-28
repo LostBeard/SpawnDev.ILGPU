@@ -5,9 +5,9 @@ using SpawnDev.ILGPU;
 using SpawnDev.UnitTesting;
 
 /// <summary>
-/// Kernels compiled at <see cref="OptimizationLevel.O2"/>. Every test lane runs at the default level (O1), so these build
-/// their own O2 context. A full sweep with O2 as the default (2026-10-27) failed 50 tests that pass at O1; these guard
-/// the causes. The OpenCL one lives in <see cref="OpenCLTests"/> (the serialized opencl lane).
+/// Kernels compiled at <see cref="OptimizationLevel.O2"/> in their own context, so they guard O2 whatever the default is
+/// (it was O1 when they were written; O2 since 5.4.9). A full sweep with O2 as the default (2026-10-27) failed 50 tests
+/// that pass at O1; these guard the causes. The OpenCL one lives in <see cref="OpenCLTests"/> (the serialized opencl lane).
 /// </summary>
 public class OptimizationLevelO2Tests
 {

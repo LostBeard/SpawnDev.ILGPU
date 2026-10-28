@@ -500,7 +500,11 @@ namespace PlaywrightMultiTest
                             // pre-empted every WebRTC test that did real peer discovery, even when
                             // the test's own attribute granted 180s+. Bumping to 10 minutes
                             // restores the contract: "PMT respects test-method timeouts."
-                            var result = await ProcessRunner.Run(publishedBinary, rowTest.Name, timeout: 600_000).ConfigureAwait(false);
+                            // PMT_DESKTOP_TEST_TIMEOUT_SEC (default 1200) bounds one desktop test process. The 600 s it
+                            // replaced was within reach of the VelocityScalar2 radix sorts: 94-445 s on a quiet lane, at or
+                            // over 600 s when the cpu lane's other heavy tests overlapped them (two 5.4.9 sweeps, 2026-10-27).
+                            var desktopTimeoutMs = (int.TryParse(Environment.GetEnvironmentVariable("PMT_DESKTOP_TEST_TIMEOUT_SEC"), out var desktopSec) && desktopSec > 0 ? desktopSec : 1200) * 1000;
+                            var result = await ProcessRunner.Run(publishedBinary, rowTest.Name, timeout: desktopTimeoutMs).ConfigureAwait(false);
                             var resultLines = result.Text.Split(new[] { '\n', '\r' }, StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
                             var testResltTest = resultLines.LastOrDefault(o => o.StartsWith("TEST: "))?.Substring(6);
                             var unitTest = testResltTest != null ? JsonSerializer.Deserialize<UnitTest>(testResltTest) : null;
