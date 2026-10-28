@@ -281,6 +281,15 @@ namespace ILGPU.IR.Analyses
             {
                 startIndex = valueIndices[entry.Value];
             }
+            else
+            {
+                // Nothing that conflicts has been placed in the target block yet, so the value lands below every memory
+                // value up to the end of that block. blockRanges points AT the last one, and the sweep below starts one
+                // past its start index: without this, that last value was never checked. Code placement rebuilds a loop
+                // body bottom-up, so `acc += shared[j]` (placed first, as the operand of the loop phi) moved its shared
+                // load below the Group.Barrier() that ends the body (O2 only; a race on every backend).
+                ++startIndex;
+            }
 
             // Check for trivial cases
             if (startIndex == valueIndex)

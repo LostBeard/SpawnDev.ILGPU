@@ -517,7 +517,7 @@ namespace ILGPU.Backends.OpenCL
                 using var statement = BeginStatement(target);
                 statement.AppendCommand($"vload_half(");
                 statement.AppendArgument(f16Lea.Index);
-                statement.AppendCommand(", ");
+                statement.AppendCommand(", " + HalfPointerCast(load.Source.Type));
                 statement.AppendArgument(f16Lea.BasePtr);
                 statement.AppendCommand(")");
                 return;
@@ -530,7 +530,7 @@ namespace ILGPU.Backends.OpenCL
             if (IsFloat16PointerEmulated(load.Source.Type))
             {
                 using var statement = BeginStatement(target);
-                statement.AppendCommand("vload_half(0, ");
+                statement.AppendCommand("vload_half(0, " + HalfPointerCast(load.Source.Type));
                 statement.AppendArgument(address);
                 statement.AppendCommand(")");
                 return;
@@ -630,7 +630,7 @@ namespace ILGPU.Backends.OpenCL
                 statement.AppendArgument(value);
                 statement.AppendCommand(", ");
                 statement.AppendArgument(f16StoreLea.Index);
-                statement.AppendCommand(", ");
+                statement.AppendCommand(", " + HalfPointerCast(store.Target.Type));
                 statement.AppendArgument(f16StoreLea.BasePtr);
                 statement.AppendCommand(")");
                 return;
@@ -644,7 +644,7 @@ namespace ILGPU.Backends.OpenCL
             {
                 using var statement = BeginStatement("vstore_half(");
                 statement.AppendArgument(value);
-                statement.AppendCommand(", 0, ");
+                statement.AppendCommand(", 0, " + HalfPointerCast(store.Target.Type));
                 statement.AppendArgument(address);
                 statement.AppendCommand(")");
                 return;
@@ -736,6 +736,16 @@ namespace ILGPU.Backends.OpenCL
             statement2.AppendCommand(CLInstructions.AssignmentOperation);
             statement2.AppendArgument(value);
         }
+
+        // vload_half / vstore_half take a half pointer and are overloaded per address space. The emulated Half element
+        // pointer is a float pointer: generic, it converts to one overload; once O2 has inferred its address space
+        // (`global float*`), it converts to the generic and the global overload alike ("call to 'vload_half' is
+        // ambiguous", CL_BUILD_PROGRAM_FAILURE). A cast to a half pointer in the pointer's own address space matches
+        // one overload at every optimization level.
+        private static string HalfPointerCast(TypeNode pointerType) =>
+            pointerType is PointerType ptr
+                ? $"({CLInstructions.GetAddressSpacePrefix(ptr.AddressSpace)} half*)"
+                : string.Empty;
 
         private bool IsFloat16PointerEmulated(TypeNode type) =>
             type is PointerType ptr
