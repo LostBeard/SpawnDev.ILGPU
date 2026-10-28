@@ -68,5 +68,6 @@ stay foldable after unrolling (registers). Test: `FunctionArrayStore_SelectIndex
 
 ## Next
 
-Report upstream with the reproducer (Dawn / Chromium GPU, which maintains driver workaround toggles, and/or NVIDIA).
+Report upstream with the reproducer (Dawn / Chromium GPU, which maintains driver workaround toggles, and/or NVIDIA). A ready-to-file
+draft with a self-contained HTML reproducer: [nvidia-d3d12-function-array-store-upstream-report.md](nvidia-d3d12-function-array-store-upstream-report.md).
 Check again on new NVIDIA drivers; remove the workaround when fixed everywhere it matters.
