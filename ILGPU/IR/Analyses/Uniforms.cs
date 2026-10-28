@@ -248,6 +248,16 @@ namespace ILGPU.IR.Analyses
                 // Thread-dependent values are divergent by definition
                 LaneIdxValue _ => UniformKind.Divergent,
                 GroupIndexValue _ => UniformKind.Divergent,
+                // Values that can differ between the threads of a warp although every operand is uniform. This analysis
+                // follows data only, not control: a phi joins the paths of a branch that may be divergent (a loop
+                // counter that threads leave at different iterations, `c ? 1 : 2` with a divergent c); an atomic returns
+                // each thread its own old value; a load may run at different times in different threads (independent
+                // thread scheduling) and see another thread's store. Calling them uniform let the PTX backend emit
+                // `bra.uni` for divergent branches, which made SpawnDev.Codecs' CUDA JPEG Huffman kernels wrong at O2
+                // (5.4.9, 2026-10-28).
+                PhiValue _ => UniformKind.Divergent,
+                AtomicValue _ => UniformKind.Divergent,
+                Load _ => UniformKind.Divergent,
                 // (Device-wide) constants are uniform by definition
                 GridIndexValue _ => UniformKind.Uniform,
                 ConstantNode _ => UniformKind.Uniform,

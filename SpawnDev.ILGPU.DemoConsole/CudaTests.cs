@@ -12,6 +12,60 @@ public class CudaTests : BackendTestBase
     public CudaTests(IPortableCrypto crypto, SpawnDev.WebTorrent.WebTorrentClient webTorrentClient) : base(crypto, webTorrentClient) { }
     protected override string BackendName => "CUDA";
 
+    static void UniformsLoopCounterKernel(Index1D i, ArrayView<int> data, ArrayView<int> o)
+    {
+        int n = 0;
+        while (n < data[i])
+            n++;
+        if (n > 3) o[i] = n * 7;
+        else o[i] = -n;
+    }
+
+    static void UniformsAtomicSlotKernel(Index1D i, ArrayView<int> counter, ArrayView<int> o)
+    {
+        int slot = Atomic.Add(ref counter[0], 1);
+        if (slot < 5) o[i] = 1;
+        else o[i] = 2;
+    }
+
+    static void UniformsSharedWordKernel(Index1D i, ArrayView<int> state, ArrayView<int> o)
+    {
+        int cur = state[0];
+        if (cur > 3) o[i] = 1;
+        else o[i] = 2;
+    }
+
+    // At O2 (the default since 5.4.9) the PTX backend marks a branch `bra.uni` when ILGPU's Uniforms analysis calls its
+    // condition uniform, and ptxas may then compute that condition once per warp. The analysis followed data only, so a
+    // loop counter threads leave at different iterations (a phi of uniform values), an atomic's result and a load from
+    // one address all counted as uniform; SpawnDev.Codecs' CUDA JPEG Huffman kernels came out wrong (2026-10-28). Every
+    // branch in these kernels depends on the thread, so none may be `bra.uni`. Checks the PTX: a wrong `.uni` does not
+    // fail reliably at run time in a small kernel.
+    [TestMethod]
+    public async Task O2_PtxBranchesOnThreadDependentValues_AreNotUniform()
+    {
+        using var context = Context.Create(builder => builder.Cuda().Optimize(OptimizationLevel.O2));
+        if (context.GetCudaDevices().Count == 0)
+            throw new UnsupportedTestException("No CUDA devices found");
+        using var accelerator = context.CreateCudaAccelerator(0);
+        var bad = new List<string>();
+        foreach (var (name, method) in new (string, System.Reflection.MethodInfo)[]
+        {
+            ("loop counter", ((Action<Index1D, ArrayView<int>, ArrayView<int>>)UniformsLoopCounterKernel).Method),
+            ("atomic slot", ((Action<Index1D, ArrayView<int>, ArrayView<int>>)UniformsAtomicSlotKernel).Method),
+            ("load of one word", ((Action<Index1D, ArrayView<int>, ArrayView<int>>)UniformsSharedWordKernel).Method),
+        })
+        {
+            var ptx = ((ILGPU.Backends.PTX.PTXCompiledKernel)accelerator.CompileKernel(
+                ILGPU.Backends.EntryPoints.EntryPointDescription.FromImplicitlyGroupedKernel(method))).PTXAssembly;
+            // Conditional branches only: an unconditional `bra.uni` is uniform by definition.
+            int uni = System.Text.RegularExpressions.Regex.Matches(ptx, @"@!?%p\d+\s+bra\.uni\b").Count;
+            if (uni != 0) bad.Add($"{name}: {uni} conditional bra.uni");
+        }
+        await Task.CompletedTask;
+        if (bad.Count > 0) throw new Exception("thread-dependent branches emitted as uniform: " + string.Join("; ", bad));
+    }
+
     protected override Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()
     {
         var context = Context.Create(builder => builder.AllAccelerators().EnableAlgorithms());
