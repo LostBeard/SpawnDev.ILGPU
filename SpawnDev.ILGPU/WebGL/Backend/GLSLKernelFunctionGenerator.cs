@@ -2552,7 +2552,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     type = TypeGenerator[value.Type];
                     init = GetDefaultValue(type);
                 }
-                TryEmitDeclaration(variable.Name, type, init);
+                TryEmitDeclaration(variable.Name, type, init, initializerIsDefault: true);
             }
         }
 

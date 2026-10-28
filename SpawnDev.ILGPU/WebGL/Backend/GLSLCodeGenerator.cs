@@ -310,7 +310,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// Emit a typed GLSL variable declaration with initializer when this name is not yet
         /// declared in shader source. Returns true if a new declaration was emitted.
         /// </summary>
-        protected bool TryEmitDeclaration(string name, string glslType, string initializer)
+        protected bool TryEmitDeclaration(string name, string glslType, string initializer, bool initializerIsDefault = false)
         {
             if (!declaredVariables.Add(name))
                 return false;
@@ -319,10 +319,23 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 booleanVariables.Add(name);
 
             string line = $"{glslType} {name} = {initializer};";
-            if (HoistDeclarations)
+            if (!HoistDeclarations)
+                AppendLine(line);
+            else if (initializerIsDefault)
                 VariableBuilder.AppendLine($"    {line}");
             else
-                AppendLine(line);
+            {
+                // A hoisted declaration runs at function entry, so it gets a default and the value is assigned where
+                // it is computed. Hoisting `type v = expr;` itself evaluated expr before its operands were computed
+                // (they still held their defaults): the first copy of a helper the generator inlines read 0 for its
+                // 64-bit conversions, and SpawnDev.Codecs' AV1 16/32-point transforms came out wrong on WebGL
+                // (2026-10-28). A struct is declared without an initializer (`struct_N(0)` does not compile); the
+                // assignment below precedes every use.
+                VariableBuilder.AppendLine(glslType.StartsWith("struct_")
+                    ? $"    {glslType} {name};"
+                    : $"    {glslType} {name} = {GetDefaultValue(glslType)};");
+                AppendLine($"{name} = {initializer};");
+            }
             return true;
         }
 
