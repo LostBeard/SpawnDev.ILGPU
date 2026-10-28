@@ -564,16 +564,36 @@ namespace SpawnDev.ILGPU.Wasm
         }
 
         /// <inheritdoc/>
+        /// <remarks>
+        /// A fill is a host write: while dispatches are queued it is enqueued like <c>CopyFromCPU</c>
+        /// (<see cref="TryDeferHostWrite"/>), after them and before every dispatch queued later. It used to fill
+        /// <see cref="SharedBuffer"/> at once, under kernels still running: SpawnDev.Codecs' WebP decoder zeroes its
+        /// state at the start of each decode while the previous decode's kernels are in flight, and from the second
+        /// decode on it read garbage (2026-10-28). WebGPU and the desktop backends already order a memset after the
+        /// kernels before it.
+        /// </remarks>
         protected override void MemSet(
             AcceleratorStream stream,
             byte value,
             in ArrayView<byte> targetView)
         {
-            GuardHostBufferRace(nameof(MemSet));
             int offset = (int)targetView.LoadEffectiveAddressAsPtr();
             int length = (int)targetView.LengthInBytes;
+            if (TryDeferHostWrite(() =>
+                {
+                    var staged = new Uint8Array(length);
+                    if (value != 0)
+                        staged.JSRef!.CallVoid("fill", (int)value);
+                    return staged;
+                }, offset))
+            {
+                return;
+            }
+            GuardHostBufferRace(nameof(MemSet));
+            PrepareHostWrite();
             using var view = new Uint8Array(SharedBuffer, offset, length);
             view.JSRef!.CallVoid("fill", (int)value);
+            NotifyHostWrite();
         }
 
         /// <inheritdoc/>
