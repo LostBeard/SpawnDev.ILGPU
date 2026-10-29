@@ -683,14 +683,21 @@ namespace ILGPU.IR.Analyses
     public readonly struct InductionVariableOperation<T>
         where T : struct
     {
-        internal InductionVariableOperation(int index, Value value, T kind)
+        internal InductionVariableOperation(int index, Value value, T kind, bool isUnsigned = false)
         {
             Debug.Assert(index >= 0, "Invalid index");
 
             Index = index;
             Value = value;
             Kind = kind;
+            IsUnsigned = isUnsigned;
         }
+
+        /// <summary>
+        /// Returns true if the operation is unsigned (an unsigned division or shift, an
+        /// unsigned compare).
+        /// </summary>
+        public bool IsUnsigned { get; }
 
         /// <summary>
         /// Returns the operand index.
@@ -896,6 +903,88 @@ namespace ILGPU.IR.Analyses
             };
 
         /// <summary>
+        /// Counts the iterations of a multiplied / divided / shifted induction variable by
+        /// running its update and break compare (see <see cref="TryGetTripCount"/>).
+        /// </summary>
+        private int? SimulateTripCount(int initVal, int update, int breakVal, int doWhileOffset)
+        {
+            bool unsignedCompare = BreakOperation.IsUnsigned;
+            bool unsignedUpdate = UpdateOperation.IsUnsigned;
+            // The compare is `x kind bound`, or `bound kind x` when the bound is on the left
+            var kind = BreakOperation.Kind;
+            if (BreakOperation.IsLeft)
+            {
+                kind = kind switch
+                {
+                    CompareKind.LessThan => CompareKind.GreaterThan,
+                    CompareKind.LessEqual => CompareKind.GreaterEqual,
+                    CompareKind.GreaterThan => CompareKind.LessThan,
+                    CompareKind.GreaterEqual => CompareKind.LessEqual,
+                    _ => kind,
+                };
+            }
+            int x = initVal;
+            int count = 0;
+            while (true)
+            {
+                bool next;
+                if (unsignedCompare)
+                {
+                    uint ux = (uint)x, ub = (uint)breakVal;
+                    next = kind switch
+                    {
+                        CompareKind.Equal => ux == ub,
+                        CompareKind.NotEqual => ux != ub,
+                        CompareKind.LessThan => ux < ub,
+                        CompareKind.LessEqual => ux <= ub,
+                        CompareKind.GreaterThan => ux > ub,
+                        CompareKind.GreaterEqual => ux >= ub,
+                        _ => false,
+                    };
+                }
+                else
+                {
+                    next = kind switch
+                    {
+                        CompareKind.Equal => x == breakVal,
+                        CompareKind.NotEqual => x != breakVal,
+                        CompareKind.LessThan => x < breakVal,
+                        CompareKind.LessEqual => x <= breakVal,
+                        CompareKind.GreaterThan => x > breakVal,
+                        CompareKind.GreaterEqual => x >= breakVal,
+                        _ => false,
+                    };
+                }
+                if (!next)
+                    return count + doWhileOffset;
+                if (++count > 64)
+                    return null;
+                switch (UpdateKind)
+                {
+                    case UpdateOperationKind.UpMultiplied:
+                        x = unchecked(x * update);
+                        break;
+                    case UpdateOperationKind.DownMultiplied:
+                        if (update == 0)
+                            return null;
+                        if (unsignedUpdate)
+                            x = (int)((uint)x / (uint)update);
+                        else
+                            x = x == int.MinValue && update == -1 ? int.MinValue : x / update;
+                        break;
+                    case UpdateOperationKind.UpMultiplied2:
+                        x <<= update;
+                        break;
+                    case UpdateOperationKind.DownMultiplied2:
+                        x = unsignedUpdate ? (int)((uint)x >> update) : x >> update;
+                        break;
+                    default:
+                        return null;
+                }
+            }
+        }
+
+        /// <summary>
         /// Tries to compute the trip count of the loop.
         /// </summary>
         /// <param name="intBounds"></param>
@@ -930,16 +1019,19 @@ namespace ILGPU.IR.Analyses
             if (BreakOperation.Kind == CompareKind.Equal)
                 return 1 + doWhileOffset;
 
-            // Determine lastVal (might not be hit exactly)
+            // Determine lastVal (might not be hit exactly). The trip count is computed
+            // in 64 bits: breakVal +- 1, lastVal - initVal and |int.MinValue| overflow
+            // int (Math.Abs(int.MinValue) threw at compile time: an OverflowException out
+            // of LoopUnrolling for a loop bound that folded to int.MinValue).
             bool isDown = IsDownUpdate(UpdateKind);
-            int lastVal = BreakOperation.Kind == CompareKind.LessThan ||
+            long lastVal = BreakOperation.Kind == CompareKind.LessThan ||
                 BreakOperation.Kind == CompareKind.GreaterThan ||
                 BreakOperation.Kind == CompareKind.NotEqual
-                    ? isDown ? breakVal + 1 : breakVal - 1
+                    ? isDown ? (long)breakVal + 1 : (long)breakVal - 1
                     : breakVal;
 
             // Determine the update value
-            int update = intBounds.update.Value;
+            long update = intBounds.update.Value;
             // For shift updates (Shl/Shr), the per-iteration multiplier is
             // 2^shift_count, NOT 2*shift_count. The previous `*= 2` only
             // produced the correct multiplier for shift_count == 1; for any
@@ -953,15 +1045,11 @@ namespace ILGPU.IR.Analyses
             // doesn't run this unroller pass). Regression tests:
             //   BackendTestBase.Tests22.StaticStructReturnRefHelpers
             //   BackendTestBase.Tests23.UintCompareInLoop
-            if (IsMultiplied2Update(UpdateKind))
-            {
-                if (update < 1 || update >= 32)
-                    return null; // shift count out of valid range — bail
-                update = 1 << update;
-            }
+            if (IsMultiplied2Update(UpdateKind) && (update < 1 || update >= 32))
+                return null; // shift count out of valid range — bail
 
             // Compute the number of steps based on the kind of the update operation
-            int stepCount = 0;
+            long stepCount = 0;
             if (IsLinearUpdate(UpdateKind))
             {
                 // If this is a linear update,
@@ -973,36 +1061,19 @@ namespace ILGPU.IR.Analyses
                     return null;
 
                 // The trip count is one more than the step count
-                return stepCount + 1 + doWhileOffset;
+                long tripCount = stepCount + 1 + doWhileOffset;
+                return tripCount > int.MaxValue ? null : (int)tripCount;
             }
 
-            // Check for trivial endless loops
-            bool isNegativeUpdate = intBounds.update.Value < 0;
-            if (initVal == 0 ||
-                // Can we ever reach the end of the loop while multiplying
-                isDown && lastVal > initVal &&
-                (isNegativeUpdate && (BreakOperation.Kind == CompareKind.GreaterEqual ||
-                    BreakOperation.Kind == CompareKind.GreaterThan ||
-                    (!isNegativeUpdate && (BreakOperation.Kind == CompareKind.LessEqual ||
-                        BreakOperation.Kind == CompareKind.LessThan)))) ||
-                // Can we ever reach the end of the loop while dividing
-                !isDown && lastVal < initVal &&
-                (isNegativeUpdate && (BreakOperation.Kind == CompareKind.GreaterEqual ||
-                        BreakOperation.Kind == CompareKind.GreaterThan) ||
-                    (!isNegativeUpdate && (BreakOperation.Kind == CompareKind.LessEqual ||
-                        BreakOperation.Kind == CompareKind.LessThan))))
-            {
-                return null;
-            }
-
-            // Determine the length and the end offset
-            var (length, end) = isDown ? (initVal, lastVal) : (lastVal, initVal);
-            length = Math.Abs(length);
-            end = Math.Abs(end);
-            update = Math.Abs(update);
-            for (; length >= end; length /= update)
-                ++stepCount;
-            return stepCount + doWhileOffset;
+            // A multiplied, divided or shifted induction variable: run the loop's own
+            // arithmetic (32-bit, wrapping, signed or unsigned as the IR says) until the
+            // break condition fails. Its magnitude doubles or halves at least every
+            // step, so a loop that ends does so within 64 steps; one that does not (a
+            // factor of +-1, a value stuck at 0) has no trip count. The magnitude
+            // formula used before miscounted negative sequences whose bound is a power
+            // of two: `for (x = -1; x > -1024; x *= 2)` ran 11 times when unrolled
+            // (10 in IL), and Math.Abs(int.MinValue) threw at compile time.
+            return SimulateTripCount(initVal, intBounds.update.Value, breakVal, doWhileOffset);
         }
 
         #endregion
@@ -1114,7 +1185,8 @@ namespace ILGPU.IR.Analyses
             updateOperation = new InductionVariableOperation<BinaryArithmeticKind>(
                 stepValueIndex,
                 resolvedStepValue,
-                updateValue.Kind);
+                updateValue.Kind,
+                (updateValue.Flags & ArithmeticFlags.Unsigned) != 0);
             return true;
         }
 
@@ -1141,7 +1213,8 @@ namespace ILGPU.IR.Analyses
             breakOperation = new InductionVariableOperation<CompareKind>(
                 endValueIndex,
                 resolvedEndValue,
-                compareValue.Kind);
+                compareValue.Kind,
+                (compareValue.Flags & CompareFlags.UnsignedOrUnordered) != 0);
 
             return true;
         }
