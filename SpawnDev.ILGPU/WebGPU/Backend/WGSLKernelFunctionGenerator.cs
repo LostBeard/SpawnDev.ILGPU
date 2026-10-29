@@ -8982,8 +8982,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 if (visited.Contains(block)
                     && !(currentLoop == null && SpawnDev.ILGPU.CodeGen.StructuredReturnMerge.IsCodeFreeReturnPath(block)))
                 {
-                    // If we're inside a loop and this is the header, push phi values for the
-                    // back-edge and let the loop iterate naturally.
+                    // If we're inside a loop and this is the header, the phi values for the back-edge were pushed by
+                    // whoever sent us here; the loop iterates naturally from the top level of its body. Inside an
+                    // if-arm it must `continue` (see the UnconditionalBranch back-edge below).
+                    if (currentLoop != null && IsLoopHeader(block, currentLoop)
+                        && (stopBlock == null || !IsLoopHeader(stopBlock, currentLoop)))
+                        AppendLine("continue;");
                     break;
                 }
                 visited.Add(block);
@@ -9138,7 +9142,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // Check if this is a back-edge to the loop header (implicit continue)
                     if (currentLoop != null && IsLoopHeader(uBranch.Target, currentLoop))
                     {
-                        // Back-edge: phi values pushed, loop continues naturally
+                        // Back-edge: phi values pushed. At the top level of the loop body (stopBlock = the header) the
+                        // loop continues naturally. Inside an if-arm, code can follow the arm: ComputeIfMergeNode's
+                        // fallback picks a target that reaches the header as the merge even when the other arm goes
+                        // back to the header on its own, so that arm must `continue` or it falls into the merge's code.
+                        // (2026-10-29, Codecs CELT quant_partition as an explicit-stack loop: the "pop and resume
+                        // parent" arm fell into the "push second child" arm, and the walk never ended on WebGPU.)
+                        if (stopBlock == null || !IsLoopHeader(stopBlock, currentLoop))
+                            AppendLine("continue;");
                         block = null;
                     }
                     else

@@ -348,8 +348,8 @@ namespace ILGPU.Backends.Velocity
             // Disable all lanes
             masks.DisableAllLanes(Method, Emitter, Specializer);
 
-            // Emit code for each block
-            foreach (var block in Method.Blocks)
+            // Emit code for each block, every loop's body before its exits (see VelocityMasks.EmissionOrder)
+            foreach (var block in masks.EmissionOrder)
             {
                 // Mark the current label
                 Emitter.MarkLabel(blockLookup[block]);

@@ -87,18 +87,19 @@ namespace ILGPU.Backends.Velocity.Analyses
             loopBlocks = blocks.CreateSet();
             blockMasks = blocks.CreateMap<ILLocal>();
 
+            // Iterate over all loops and determine all body blocks and all back edges
+            var cfg = blocks.CreateCFG();
+            loops = cfg.CreateLoops();
+
             // The position of each block in the order the code is generated in
+            EmissionOrder = ComputeEmissionOrder(blocks, loops);
             var blockIndices = new Dictionary<BasicBlock, int>();
             var blockOrder = new List<BasicBlock>();
-            foreach (var block in blocks)
+            foreach (var block in EmissionOrder)
             {
                 blockIndices.Add(block, blockIndices.Count);
                 blockOrder.Add(block);
             }
-
-            // Iterate over all loops and determine all body blocks and all back edges
-            var cfg = blocks.CreateCFG();
-            loops = cfg.CreateLoops();
 
             loops.ProcessLoops(loop =>
             {
@@ -168,6 +169,64 @@ namespace ILGPU.Backends.Velocity.Analyses
                 var blockMask = emitter.DeclareLocal(specializer.WarpType32);
                 blockMasks[block] = blockMask;
             }
+        }
+
+        /// <summary>
+        /// The order the code generator emits the blocks in: reverse post order, with every loop's body contiguous and its
+        /// exits after it.
+        /// </summary>
+        public IReadOnlyList<BasicBlock> EmissionOrder { get; }
+
+        /// <summary>
+        /// Reverse post order, then for every loop the blocks that are not part of it but fall between its first and its
+        /// last member move behind its last member (keeping their order), until no loop has one.
+        /// </summary>
+        /// <remarks>
+        /// Execution falls through from block to block under the blocks' masks, and the branch builder relies on a loop's
+        /// exits coming after its whole body: once no lane is left in the loop it jumps to the first exit and continues from
+        /// there. Reverse post order breaks that when a loop has exits in different branches,
+        /// `while (true) { if (c) { ...; if (a) break; } else { ...; if (b) break; } }`: the depth-first search finishes the
+        /// first branch's exit block before it visits the other branch, so that exit lands between two body blocks. The
+        /// jump to it then fell through into the body again, whose branch jumped back to it, forever (a hang with a single
+        /// thread; SpawnDev.Codecs' CELT band recursion as an explicit-stack loop).
+        /// </remarks>
+        private static List<BasicBlock> ComputeEmissionOrder(
+            BasicBlockCollection<ReversePostOrder, Forwards> blocks,
+            Loops<ReversePostOrder, Forwards> loops)
+        {
+            var order = new List<BasicBlock>();
+            foreach (var block in blocks)
+                order.Add(block);
+            bool changed = true;
+            for (int round = 0; changed && round <= order.Count; round++)
+            {
+                changed = false;
+                loops.ProcessLoops(loop =>
+                {
+                    int first = -1, last = -1;
+                    for (int i = 0; i < order.Count; i++)
+                    {
+                        if (!loop.Contains(order[i]))
+                            continue;
+                        if (first < 0)
+                            first = i;
+                        last = i;
+                    }
+                    if (first < 0)
+                        return;
+                    var members = new List<BasicBlock>();
+                    var others = new List<BasicBlock>();
+                    for (int i = first; i <= last; i++)
+                        (loop.Contains(order[i]) ? members : others).Add(order[i]);
+                    if (others.Count == 0)
+                        return;
+                    order.RemoveRange(first, last - first + 1);
+                    members.AddRange(others);
+                    order.InsertRange(first, members);
+                    changed = true;
+                });
+            }
+            return order;
         }
 
         #endregion
