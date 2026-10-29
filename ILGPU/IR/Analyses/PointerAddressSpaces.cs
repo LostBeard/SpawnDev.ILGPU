@@ -508,11 +508,41 @@ namespace ILGPU.IR.Analyses
             AddressSpaceInfo.Merge(first, second);
 
         /// <summary>
-        /// Returns no analysis value.
+        /// A loaded value is unknown: its pointers are whatever was stored, not the address space of the pointer it was
+        /// loaded through. The generic merge used to give it that pointer's space, so a struct holding a global view, kept
+        /// in a local alloca (a struct method's `this`) and passed on by value, had its view inferred local: at O2,
+        /// InferKernelAddressSpaces specialized the callee's parameter to local, and CUDA read the view with ld.local
+        /// (illegal memory access), OpenCL through a __private pointer (wrong values). Found 2026-10-29 in SpawnDev.Codecs'
+        /// CELT band decode (CeltModeGpu passed into non-inlined helpers). Every other value returns no analysis value.
         /// </summary>
         protected override AnalysisValue<AddressSpaceInfo>? TryMerge<TContext>(
             Value value,
-            TContext context) => null;
+            TContext context) =>
+            value is Load load && load.Type.HasFlags(TypeFlags.AddressSpaceDependent)
+            ? UnknownAddressSpaces(load.Type)
+            : default(AnalysisValue<AddressSpaceInfo>?);
+
+        /// <summary>
+        /// Generic for every address-space dependent part of <paramref name="type"/>: merged with any other address space
+        /// it stays generic, so no specialization assumes where the value points.
+        /// </summary>
+        private static AnalysisValue<AddressSpaceInfo> UnknownAddressSpaces(TypeNode type)
+        {
+            AddressSpaceInfo generic = MemoryAddressSpace.Generic;
+            if (type is StructureType structureType)
+            {
+                var childData = new AddressSpaceInfo[structureType.NumFields];
+                foreach (var (fieldType, fieldAccess) in structureType)
+                {
+                    childData[fieldAccess.Index] =
+                        fieldType.HasFlags(TypeFlags.AddressSpaceDependent)
+                        ? generic
+                        : default;
+                }
+                return new AnalysisValue<AddressSpaceInfo>(generic, childData);
+            }
+            return AnalysisValue.Create(generic, type);
+        }
 
         /// <summary>
         /// Tries to convert the given type into an <see cref="AddressSpaceType"/>

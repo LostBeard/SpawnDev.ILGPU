@@ -33,6 +33,41 @@ public abstract partial class BackendTestBase
         o[i] = t.Get(i & 7) * 3 + t.Get((i + 1) & 7);
     }
 
+    // The same struct, by value through a helper that keeps it in a local alloca (for Get's `this`), then by value into a
+    // second helper that reads its view. At O2 the pointer analysis gave the reloaded struct's view the alloca's address
+    // space (local), InferKernelAddressSpaces specialized the second helper's parameter to local, and CUDA read the global
+    // table with ld.local (illegal memory access) while OpenCL read the wrong memory. Found 2026-10-29 in SpawnDev.Codecs'
+    // CELT band decode (CeltModeGpu into quant_partition); red-check: CUDA faulted and OpenCL got 64 of 64 wrong before.
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int StructViewReadAgain(ViewTableMethod t, int i) => t.Data[t.Base + (i & 7)];
+
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static int StructViewThroughHelper(ViewTableMethod t, int i) => t.Get((i + 1) & 7) * 3 + StructViewReadAgain(t, i);
+
+    private static void StructViewThroughHelpersKernel(Index1D i, ViewTableMethod t, ArrayView<int> o)
+    {
+        o[i] = StructViewThroughHelper(t, i);
+    }
+
+    [TestMethod]
+    public async Task StructView_ByValueThroughHelpers_MatchesHost() => await RunTest(async accelerator =>
+    {
+        const int n = 64, baseAt = 5;
+        var table = new int[baseAt + 8];
+        for (int k = 0; k < table.Length; k++) table[k] = 1000 * k + 17;
+        using var dTable = accelerator.Allocate1D(table);
+        using var dO = accelerator.Allocate1D<int>(n);
+        var t = new ViewTableMethod { Data = dTable.View, Base = baseAt };
+        accelerator.LoadAutoGroupedStreamKernel<Index1D, ViewTableMethod, ArrayView<int>>(StructViewThroughHelpersKernel)(n, t, dO.View);
+        await accelerator.SynchronizeAsync();
+        var got = await dO.CopyToHostAsync();
+        for (int k = 0; k < n; k++)
+        {
+            int want = table[baseAt + ((k + 1) & 7)] * 3 + table[baseAt + (k & 7)];
+            if (got[k] != want) throw new Exception($"thread {k}: {got[k]}, expected {want}");
+        }
+    });
+
     [TestMethod]
     public async Task StructViewMethod_LeftACall_MatchesHost() => await RunTest(async accelerator =>
     {
