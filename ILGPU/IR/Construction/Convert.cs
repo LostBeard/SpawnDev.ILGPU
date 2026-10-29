@@ -146,13 +146,14 @@ namespace ILGPU.IR.Construction
                 var targetBasicType = targetPrimitiveType.BasicValueType;
                 var innerBasicType = convert.Value.BasicValueType;
 
-                // The new conversion's source is the existing conversion's result. An
-                // 8 / 16-bit result is widened with that result's sign (on the IL stack
-                // it is already extended by its own type); a 32 / 64-bit one with the
-                // requested sign (IL conv.u8 / conv.r.un read the stack value unsigned).
-                bool outerSourceUnsigned = IsNarrowInt(sourceBasicType)
-                    ? convert.IsResultUnsigned
-                    : isSourceUnsigned;
+                // The new conversion's source is the existing conversion's result,
+                // widened with the requested sign: the caller knows the managed type
+                // it reads that result as (IL conv.u8 / conv.r.un read the stack value
+                // unsigned; a byte call result or load is zero-extended). The result's
+                // own sign can differ: a narrowing re-derived for a signed target, or
+                // the narrowing of a method's return value, leaves it signed while
+                // the caller reads a byte.
+                bool outerSourceUnsigned = isSourceUnsigned;
                 // A folded conversion starts from the existing conversion's source.
                 ConvertFlags foldedFlags =
                     convert.Flags & ConvertFlags.SourceUnsigned |

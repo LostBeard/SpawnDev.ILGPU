@@ -29,9 +29,15 @@ namespace ILGPU.Frontend
             }
             else
             {
+                // An unsigned return type narrows to an unsigned result, as arguments
+                // of unsigned parameter types do (PopMethodArgs)
                 Builder.CreateReturn(
                     Location,
-                    Block.Pop(returnType, ConvertFlags.None));
+                    Block.Pop(
+                        returnType,
+                        Method.GetReturnType().IsUnsignedInt()
+                            ? ConvertFlags.TargetUnsigned
+                            : ConvertFlags.None));
             }
         }
 
