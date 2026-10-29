@@ -9,6 +9,7 @@
 // Source License. See LICENSE.txt for details.
 // ---------------------------------------------------------------------------------------
 
+using ILGPU.IR;
 using ILGPU.IR.Values;
 
 namespace ILGPU.Backends.OpenCL
@@ -79,6 +80,9 @@ namespace ILGPU.Backends.OpenCL
                 AppendIndent();
                 Builder.AppendLine("}");
                 PopIndent();
+                // The false edge does not run the true edge's moves: its bindings must
+                // not read the temporaries those moves saved intermediate phis to.
+                ResetPhiBindingScope();
                 BindPhis(branch.BasicBlock, branch.FalseTarget);
                 GotoStatement(branch.FalseTarget);
             }
@@ -87,47 +91,43 @@ namespace ILGPU.Backends.OpenCL
         /// <summary cref="IBackendCodeGenerator.GenerateCode(SwitchBranch)"/>
         public void GenerateCode(SwitchBranch branch)
         {
-            // For a switch, each case + default takes a different edge, so phi bindings
-            // must be emitted per-case before the goto. Generate as nested if/else chain
-            // wrapped around the existing switch shape so that each branch can carry its
-            // own per-target bindings.
+            // Each case and the default take their own edge: every one binds the phis
+            // of its target before its goto. (Binding them after the switch statement
+            // left them unreachable: a case that jumped straight to a block with phis
+            // read stale values.)
             var condition = Load(branch.Condition);
-            var indentStr = new string('\t', Indent);
-
-            ResetPhiBindingScope();
-
-            using var statement = BeginStatement($"switch ({condition}) {{\n");
+            AppendIndent();
+            Builder.Append("switch (");
+            Builder.Append(condition.ToString());
+            Builder.AppendLine(") {");
             for (int i = 0, e = branch.NumCasesWithoutDefault; i < e; ++i)
             {
-                var caseTarget = branch.GetCaseTarget(i);
-                statement.AppendOperation("{0}case {1}: {{\n",
-                    indentStr,
-                    i);
-                // Emit per-case phi bindings inline as a string. Variable-capture
-                // through the statement builder is awkward here; instead we just emit
-                // the binding statements ad-hoc below. For now retain the original
-                // case-only emission — switch is rare in our kernels and the
-                // unconditional fall-back below preserves correctness for it.
-                statement.AppendOperation("{0}\t{1} {2};\n",
-                    indentStr,
-                    CLInstructions.GotoStatement,
-                    caseTarget);
-                statement.AppendOperation("{0}}}\n", indentStr);
+                AppendIndent();
+                Builder.Append("case ");
+                Builder.Append(i);
+                Builder.AppendLine(": {");
+                EmitSwitchEdge(branch.BasicBlock, branch.GetCaseTarget(i));
             }
-            statement.AppendOperation("{0}default: {{\n",
-                indentStr);
-            statement.AppendOperation("{0}\t{1} {2};\n",
-                indentStr,
-                CLInstructions.GotoStatement,
-                branch.Targets[0]);
-            statement.AppendOperation("{0}}}\n{0}}}", indentStr);
+            AppendIndent();
+            Builder.AppendLine("default: {");
+            EmitSwitchEdge(branch.BasicBlock, branch.DefaultBlock);
+            AppendIndent();
+            Builder.AppendLine("}");
+        }
 
-            // CONSERVATIVE FALLBACK for switch: emit ALL bindings once before the switch.
-            // This matches the legacy unconditional behavior. Most kernels don't use
-            // switches with phi bindings that need per-case isolation; if a regression
-            // surfaces here, refactor to interleave BindPhis(target) with each case
-            // body the way IfBranch does.
-            BindPhis(branch.BasicBlock, target: null);
+        /// <summary>
+        /// Emits the body of one switch case: the phi bindings of the edge to
+        /// <paramref name="target"/>, its goto and the closing brace of the case.
+        /// </summary>
+        private void EmitSwitchEdge(BasicBlock current, BasicBlock target)
+        {
+            PushIndent();
+            ResetPhiBindingScope();
+            BindPhis(current, target);
+            GotoStatement(target);
+            PopIndent();
+            AppendIndent();
+            Builder.AppendLine("}");
         }
     }
 }

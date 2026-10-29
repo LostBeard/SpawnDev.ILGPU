@@ -553,15 +553,22 @@ namespace ILGPU.Backends.PTX
                 this.GenerateCodeFor(block.Terminator.AsNotNull());
                 Builder.AppendLine();
 
-                // Free temporary registers
-                foreach (var register in intermediatePhiRegisters.Values)
-                    Free(register);
-                intermediatePhiRegisters.Clear();
+                FreeIntermediatePhiRegisters();
             }
 
             // Finish function and append register information
             Builder.AppendLine("}");
             Builder.Insert(registerOffset, GenerateRegisterInformation("\t"));
+        }
+
+        /// <summary>
+        /// Frees the temporary registers intermediate phi values were saved to.
+        /// </summary>
+        private void FreeIntermediatePhiRegisters()
+        {
+            foreach (var register in intermediatePhiRegisters.Values)
+                Free(register);
+            intermediatePhiRegisters.Clear();
         }
 
         /// <summary>

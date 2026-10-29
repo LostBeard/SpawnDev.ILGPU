@@ -698,9 +698,9 @@ namespace ILGPU.Backends.OpenCL
         private bool phiBindingsValid;
 
         /// <summary>
-        /// Intermediate phi variable cache; shared across BindPhis calls within a block
-        /// (a binding's source-temp save must be visible to the next BindPhis target call
-        /// from the same predecessor block).
+        /// Intermediate phi variable cache for the bindings of one edge. Reset before
+        /// each edge's bindings: an edge that does not run another edge's moves must not
+        /// read the temporaries they saved to.
         /// </summary>
         private Dictionary<Value, Variable>? intermediatePhiVariables;
 
@@ -716,12 +716,8 @@ namespace ILGPU.Backends.OpenCL
             if (!phiBindingsValid || intermediatePhiVariables == null) return;
             if (!phiBindings.TryGetBindings(currentBlock, out var bindings)) return;
 
-            // The intermediate-temp dict is per-block (scope of phi swap detection within
-            // one binding set). Each new block emit starts with a fresh dict; per-target
-            // calls within the SAME block share the dict so a save-then-load handoff
-            // works across two BindPhis calls (e.g. for an IfBranch with both targets).
-            // We clear when we re-enter a new currentBlock; the outer loop handles that
-            // via the call sequence.
+            // The intermediate-temp dict holds one edge's saves: the terminator emitters
+            // call ResetPhiBindingScope before each edge's bindings.
 
             foreach (var (phiValue, value) in bindings)
             {

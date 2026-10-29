@@ -125,6 +125,11 @@ namespace ILGPU.Backends.PTX
                     command.AppendLabel(targetLabel);
                 }
 
+                // The false edge does not run the true edge's moves: drop the
+                // temporaries they saved intermediate phis to, or the false bindings
+                // would read registers that were never written on this path
+                FreeIntermediatePhiRegisters();
+
                 // Mark the false case label and bind all values
                 MarkLabel(tempLabel);
                 BindPhis(bindings, falseTarget);
