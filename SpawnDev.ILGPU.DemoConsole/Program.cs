@@ -223,6 +223,7 @@ try
         typeof(UnsupportedKernelFeatureExceptionTests),
         typeof(OptimizationLevelO2Tests),
         typeof(ShaderGenerationDepthTests),   // shader generation on a small stack (a long kernel overflowed the browser's stack)   // kernels at OptimizationLevel.O2 (every lane runs at the default O1); the OpenCL one is in OpenCLTests
+        typeof(VelocityLocalLimitTests),   // a Velocity kernel with more IR values than IL has locals
 
         // Tier 2 (production-scale) Autolykos2 correctness, ~2GB real dataset - NOT registered by
         // default (this repo has no opt-in/category mechanism, so "commented out" is how a heavy

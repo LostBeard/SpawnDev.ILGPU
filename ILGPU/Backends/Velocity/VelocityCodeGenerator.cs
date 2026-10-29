@@ -126,6 +126,28 @@ namespace ILGPU.Backends.Velocity
         private BasicBlock? currentBlock;
 
         /// <summary>
+        /// Locals shared by the values used only in the block that defines them, per
+        /// vectorized type (all of them), and the ones free at this point of the current
+        /// block. A method's IL has at most 65536 locals (ldloc takes a 16-bit index),
+        /// and one local per IR value ran past that in big kernels (SpawnDev.Codecs'
+        /// CELT encoder: invalid IL, "Common Language Runtime detected an invalid
+        /// program"). Such a value is dead after its last use in the block, so a later
+        /// value of the block takes its local; blocks are emitted once each, and every
+        /// iteration of a loop recomputes a block's values before it uses them, so each
+        /// block starts with all of them free.
+        /// </summary>
+        private readonly Dictionary<Type, List<ILLocal>> blockLocalPool = new();
+        private readonly Dictionary<Type, Stack<ILLocal>> freeBlockLocals = new();
+        /// <summary>The values of the current block holding a shared local, by the
+        /// position in the block of their last use (the terminator's is the block's
+        /// value count).</summary>
+        private readonly Dictionary<Value, int> blockLocalLastUse = new();
+        private readonly Dictionary<int, List<Value>> blockLocalReleases = new();
+        /// <summary>Per shared local in use (by local index), how many live values of the
+        /// block hold it: the value it was taken for and the values aliasing it.</summary>
+        private readonly Dictionary<int, int> blockLocalHolders = new();
+
+        /// <summary>
         /// Temporary locals for initialization.
         /// </summary>
         private readonly Dictionary<TypeNode, ILLocal> nullLocals = new();
@@ -362,8 +384,13 @@ namespace ILGPU.Backends.Velocity
 
                 // Generate code for all values
                 currentBlock = block;
+                BeginBlockLocals(block);
+                int position = 0;
                 foreach (var value in block)
+                {
                     this.GenerateCodeFor(value);
+                    ReleaseBlockLocals(position++);
+                }
 
                 // Reset all intermediate phis
                 intermediatePhis.Clear();
@@ -690,9 +717,118 @@ namespace ILGPU.Backends.Velocity
                 return;
             }
 
-            var local = Emitter.DeclareLocal(GetVectorizedType(value.Type));
+            var local = DeclareValueLocal(value);
             locals.Add(value, local);
             Emitter.Emit(LocalOperation.Store, local);
+        }
+
+        /// <summary>
+        /// Frees every shared local and finds, for each value of <paramref name="block"/>
+        /// used only in it (no phi argument, no loop exit), the position of its last use.
+        /// </summary>
+        private void BeginBlockLocals(BasicBlock block)
+        {
+            foreach (var (type, pool) in blockLocalPool)
+            {
+                var free = freeBlockLocals[type];
+                free.Clear();
+                for (int i = pool.Count - 1; i >= 0; --i)
+                    free.Push(pool[i]);
+            }
+            blockLocalLastUse.Clear();
+            blockLocalReleases.Clear();
+            blockLocalHolders.Clear();
+            var positions = new Dictionary<Value, int>();
+            int count = 0;
+            foreach (var entry in block)
+                positions[entry.Value] = count++;
+            var terminator = block.Terminator;
+            foreach (var entry in block)
+            {
+                var value = entry.Value;
+                if (value.Type.IsVoidType || loopExitValues.ContainsKey(value))
+                    continue;
+                int last = -1;
+                foreach (var use in value.Uses)
+                {
+                    var user = use.Target;
+                    // A phi argument is read on an edge, and the phi lives on
+                    if (user is PhiValue || user.BasicBlock != block)
+                    {
+                        last = -2;
+                        break;
+                    }
+                    int at = user == terminator ? count : positions.TryGetValue(user, out var p) ? p : -2;
+                    if (at == -2)
+                    {
+                        last = -2;
+                        break;
+                    }
+                    last = Math.Max(last, at);
+                }
+                if (last < 0)
+                    continue;
+                blockLocalLastUse.Add(value, last);
+                if (!blockLocalReleases.TryGetValue(last, out var released))
+                    blockLocalReleases.Add(last, released = new List<Value>());
+                released.Add(value);
+            }
+        }
+
+        /// <summary>Returns the shared locals of the values last used at
+        /// <paramref name="position"/> of the current block.</summary>
+        private void ReleaseBlockLocals(int position)
+        {
+            if (!blockLocalReleases.TryGetValue(position, out var released))
+                return;
+            foreach (var value in released)
+            {
+                // Not stored, or not holding a shared local (a local of its own, a shared
+                // null, an alias of a value living past the block)
+                if (!locals.TryGetValue(value, out var local) ||
+                    !blockLocalHolders.TryGetValue(local.Index, out int holders))
+                {
+                    continue;
+                }
+                if (holders > 1)
+                {
+                    blockLocalHolders[local.Index] = holders - 1;
+                    continue;
+                }
+                blockLocalHolders.Remove(local.Index);
+                freeBlockLocals[local.VariableType].Push(local);
+            }
+        }
+
+        /// <summary>
+        /// The local of a value: a free shared local of the current block when every use
+        /// of the value is in its own block (<see cref="BeginBlockLocals"/>), otherwise a
+        /// local of its own.
+        /// </summary>
+        private ILLocal DeclareValueLocal(Value value)
+        {
+            var type = GetVectorizedType(value.Type);
+            if (currentBlock == null || value.BasicBlock != currentBlock ||
+                !blockLocalLastUse.ContainsKey(value))
+            {
+                return Emitter.DeclareLocal(type);
+            }
+            if (!blockLocalPool.TryGetValue(type, out var pool))
+            {
+                blockLocalPool.Add(type, pool = new List<ILLocal>());
+                freeBlockLocals.Add(type, new Stack<ILLocal>());
+            }
+            var free = freeBlockLocals[type];
+            ILLocal local;
+            if (free.Count > 0)
+                local = free.Pop();
+            else
+            {
+                local = Emitter.DeclareLocal(type);
+                pool.Add(local);
+            }
+            blockLocalHolders[local.Index] = 1;
+            return local;
         }
 
         /// <summary>
@@ -704,6 +840,21 @@ namespace ILGPU.Backends.Velocity
         {
             value.Assert(!locals.ContainsKey(value));
             locals.Add(value, local);
+            // An alias of a shared local holds it too: freed after the last holder's last
+            // use in the block, or never again when the alias lives past the block
+            if (blockLocalHolders.TryGetValue(local.Index, out int holders))
+            {
+                if (currentBlock != null && value.BasicBlock == currentBlock &&
+                    blockLocalLastUse.ContainsKey(value))
+                {
+                    blockLocalHolders[local.Index] = holders + 1;
+                }
+                else
+                {
+                    blockLocalHolders.Remove(local.Index);
+                    blockLocalPool[local.VariableType].Remove(local);
+                }
+            }
         }
 
         /// <summary>
