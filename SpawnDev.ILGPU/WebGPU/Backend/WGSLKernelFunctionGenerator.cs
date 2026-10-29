@@ -10292,6 +10292,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 PushPhiValues(uBranch.Target, headerBlock);
                 GenerateStructuredCodeRecursive(uBranch.Target, headerBlock, pd, visited, loopNode);
             }
+            else if (terminator is global::ILGPU.IR.Values.SwitchBranch headerSwitch)
+            {
+                // A header that ends in a switch (a do-while whose body starts with an inlined switch helper,
+                // libopus icwrs + CELT_PVQ_U_ROW): its arms are the body's first branches. Emit them like any
+                // switch in the body, then the rest of the body from their merge. This case was missing: the
+                // header's switch and the rest of the body were dropped, leaving `loop { }` with no exit (Tint:
+                // "loop does not exit"; SpawnDev.Codecs CeltEncoderGpu BandsKernel, 2026-10-29).
+                var next = EmitStructuredSwitch(headerSwitch, headerBlock, headerBlock, pd, visited, loopNode);
+                if (next != null && next != headerBlock)
+                    GenerateStructuredCodeRecursive(next, headerBlock, pd, visited, loopNode);
+            }
+            else
+            {
+                throw new NotSupportedException(
+                    $"WGSL structured codegen: unhandled loop header terminator {terminator?.GetType().Name ?? "null"} in {Method.Name}.");
+            }
 
             // If we used a synthetic counter, emit its increment
             // at the end of the loop body (before PopIndent/closing brace).
