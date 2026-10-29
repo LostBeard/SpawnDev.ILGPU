@@ -221,7 +221,8 @@ try
         typeof(CuRandTests),
         typeof(NvJpegTests),
         typeof(UnsupportedKernelFeatureExceptionTests),
-        typeof(OptimizationLevelO2Tests),   // kernels at OptimizationLevel.O2 (every lane runs at the default O1); the OpenCL one is in OpenCLTests
+        typeof(OptimizationLevelO2Tests),
+        typeof(ShaderGenerationDepthTests),   // shader generation on a small stack (a long kernel overflowed the browser's stack)   // kernels at OptimizationLevel.O2 (every lane runs at the default O1); the OpenCL one is in OpenCLTests
 
         // Tier 2 (production-scale) Autolykos2 correctness, ~2GB real dataset - NOT registered by
         // default (this repo has no opt-in/category mechanism, so "commented out" is how a heavy

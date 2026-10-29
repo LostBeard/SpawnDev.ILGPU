@@ -56,7 +56,9 @@ public class ProjectTest
     /// </summary>
     private static bool IsRuntimeDeathMessage(string text) =>
         text.Contains("[MONO] * Assertion", StringComparison.Ordinal)
-        || text.Contains(".NET runtime already exited", StringComparison.Ordinal);
+        || text.Contains(".NET runtime already exited", StringComparison.Ordinal)
+        // mono: an unhandled exception ends the runtime (a StackOverflowException in shader generation, 2026-10-28)
+        || text.Contains("FATAL UNHANDLED EXCEPTION", StringComparison.Ordinal);
 
     /// <summary>
     /// Checks if the Blazor error UI (#blazor-error-ui) is visible on the page.
@@ -140,6 +142,11 @@ public class ProjectTest
                 return await runButton.IsEnabledAsync();
             });
 
+            // The row before the run: a row unchanged afterwards never ran (a frozen page keeps its Run button enabled,
+            // so the wait below returns at once). Ported from SpawnDev.Codecs (Geordi, 2026-10-28).
+            var stateBefore = await row.Locator(".test-state").TextContentAsync();
+            var classBefore = await row.GetAttributeAsync("class");
+
             // click the button to start the process for this row (button will be disabled)
             await runButton.ClickAsync();
 
@@ -160,8 +167,19 @@ public class ProjectTest
             if (!hadPreExistingBlazorError)
                 blazorError = await DismissBlazorErrorIfVisible(page);
 
+            // After a Blazor unhandled error the app is in an unknown state, and a fatal one (a StackOverflowException in
+            // the page) leaves the DOM frozen, so the next test gets a fresh page.
+            if (blazorError != null)
+                PageRuntimeDead = true;
+
             // current state text
             var stateMessage = await row.Locator(".test-state").TextContentAsync();
+            if (stateMessage == stateBefore && await row.GetAttributeAsync("class") == classBefore)
+            {
+                Result = TestResult.Error;
+                PageRuntimeDead = true;
+                throw new Exception($"The test never ran: its row is unchanged after Run (the page's .NET runtime is not responding). {blazorError}");
+            }
 
             //  check for error  class
             var wasError = await row.EvaluateAsync<bool>("el => el.classList.contains('test-error')");

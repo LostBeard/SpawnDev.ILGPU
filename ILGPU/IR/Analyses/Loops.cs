@@ -685,46 +685,65 @@ namespace ILGPU.IR.Analyses
         /// <param name="nodeMapping">The current node mapping.</param>
         /// <param name="v">The current node.</param>
         /// <param name="index">The current index value.</param>
+        /// <remarks>
+        /// Iterative, with an explicit frame per node on the current path: the recursive form nested one call per block
+        /// on the deepest path, and a large kernel overflowed the browser's stack (the SpawnDev.Codecs VP8 encoder
+        /// wavefront kernel, about 350 frames deep, 2026-10-28). A frame resumes at its next successor once the child it
+        /// descended into is finished, and the child's low link is folded into it then, as after the recursive call.
+        /// </remarks>
         private void StrongConnect(
             List<NodeData> stack,
             Node? parent,
             ref BasicBlockMap<NodeData> nodeMapping,
-            NodeData v,
+            NodeData root,
             ref int index)
         {
-            Debug.Assert(!v.HasIndex);
-            v.Push(stack, ref index);
+            Debug.Assert(!root.HasIndex);
+            root.Push(stack, ref index);
+            var frames = new Stack<(NodeData V, int Next)>();
+            frames.Push((root, 0));
 
-            foreach (var wNode in v.Node.Successors)
+            while (frames.Count > 0)
             {
-                var w = nodeMapping[wNode];
-                if (w.IsHeader)
+                var (v, next) = frames.Pop();
+                bool descended = false;
+                while (next < v.Node.Successors.Count)
+                {
+                    var w = nodeMapping[v.Node.Successors[next++]];
+                    if (w.IsHeader)
+                        continue;
+
+                    if (!w.HasIndex)
+                    {
+                        // Resume v at its next successor after w and everything below it are done
+                        frames.Push((v, next));
+                        w.Push(stack, ref index);
+                        frames.Push((w, 0));
+                        descended = true;
+                        break;
+                    }
+                    if (w.OnStack)
+                        v.LowLink = IntrinsicMath.Min(v.LowLink, w.Index);
+                }
+                if (descended)
                     continue;
 
-                if (!w.HasIndex)
+                // We have found a new SCC root node (Tarjan's SCC algorithm)
+                if (v.LowLink == v.Index)
                 {
-                    StrongConnect(
+                    RegisterLoop(
                         stack,
                         parent,
                         ref nodeMapping,
-                        w,
-                        ref index);
-                    v.LowLink = IntrinsicMath.Min(v.LowLink, w.LowLink);
+                        v);
                 }
-                else if (w.OnStack)
-                {
-                    v.LowLink = IntrinsicMath.Min(v.LowLink, w.Index);
-                }
-            }
 
-            // We have found a new SCC root node (Tarjan's SCC algorithm)
-            if (v.LowLink == v.Index)
-            {
-                RegisterLoop(
-                    stack,
-                    parent,
-                    ref nodeMapping,
-                    v);
+                // v is finished: fold its low link into the node that descended into it
+                if (frames.Count > 0)
+                {
+                    var caller = frames.Peek().V;
+                    caller.LowLink = IntrinsicMath.Min(caller.LowLink, v.LowLink);
+                }
             }
         }
 

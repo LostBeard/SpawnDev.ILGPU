@@ -862,7 +862,22 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// <param name="stop">The block at which emission stops, or null.</param>
         protected void GenerateStructuredCode(BasicBlock current, BasicBlock? stop)
         {
-            if (current == null || current == stop) return;
+            // A block's continuation (the target of an unconditional branch, the merge after an if, the block after a
+            // loop) is emitted by iterating, not by recursing: a kernel made of N branches one after another nested the
+            // walker N calls deep, and a large one overflowed the browser's stack (StackOverflowException in
+            // BuildConvertExpression under EmitIfBranch, the SpawnDev.Codecs VP8 encoder wavefront kernel, 2026-10-28).
+            BasicBlock? next = current;
+            while (next != null)
+                next = GenerateStructuredStep(next, stop);
+        }
+
+        /// <summary>
+        /// Emits one block of <see cref="GenerateStructuredCode"/> (a loop with its body, or a block and its terminator)
+        /// and returns the block to continue with at the same nesting level, or null when there is none.
+        /// </summary>
+        private BasicBlock? GenerateStructuredStep(BasicBlock current, BasicBlock? stop)
+        {
+            if (current == null || current == stop) return null;
             if (_visitedBlocks.Contains(current))
             {
                 // Every early `return` of the function reaches the SAME exit, usually through code-free phi blocks.
@@ -880,10 +895,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                             hop = hopBranch.Target;
                         }
                         GenerateCode(sharedReturn);
-                        return;
+                        return null;
                     }
                 }
-                return;
+                return null;
             }
             // This walker also emits the code after a nested loop, i.e. INSIDE the enclosing loop. A block
             // outside that loop is a loop exit - it used to be emitted inline as if the loop had ended (an
@@ -892,7 +907,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (openLoop != null && !openLoop.Contains(current))
             {
                 EmitExitOfEnclosingLoop(current, openLoop);
-                return;
+                return null;
             }
             _visitedBlocks.Add(current);
 
@@ -954,7 +969,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     var enclosing = _activeLoopHeaders.Count > 0 ? FindLoopForHeader(_activeLoopHeaders.Peek()) : null;
                     EmitDivergentLoopExits(exitInfo, headerExitTarget ?? (loop.Exits.Length > 0 ? loop.Exits[0] : null),
                         stop, enclosing);
-                    return;
+                    return null;
                 }
 
                 // Continue with exit blocks after the loop.
@@ -993,11 +1008,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         }
                     }
                     if (exitBlock != null && exitBlock != stop && !_visitedBlocks.Contains(exitBlock))
-                    {
-                        GenerateStructuredCode(exitBlock, stop);
-                    }
+                        return exitBlock;
                 }
-                return;
+                return null;
             }
 
             // Not a loop header — emit the block's values
@@ -1013,11 +1026,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             else if (terminator is UnconditionalBranch ub)
             {
                 if (!EmitBranchTarget(ub.Target, current, stop))
-                    GenerateStructuredCode(ub.Target, stop);
+                    return ub.Target;
             }
             else if (terminator is IfBranch ib)
             {
-                EmitIfBranch(ib, current, stop);
+                return EmitIfBranch(ib, current, stop);
             }
             else if (terminator is SwitchBranch sb)
             {
@@ -1027,6 +1040,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             {
                 throw new NotSupportedException($"GLSL structured codegen: unhandled terminator {terminator.GetType().Name} in {Method.Name}.");
             }
+            return null;
         }
 
         /// <summary>
@@ -1363,7 +1377,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// <param name="ib">The IR if-branch terminator.</param>
         /// <param name="source">The block that ends in <paramref name="ib"/>.</param>
         /// <param name="stop">The block at which emission stops, or null.</param>
-        protected void EmitIfBranch(IfBranch ib, BasicBlock source, BasicBlock? stop)
+        protected BasicBlock? EmitIfBranch(IfBranch ib, BasicBlock source, BasicBlock? stop)
         {
             var trueTarget = ib.TrueTarget;
             var falseTarget = ib.FalseTarget;
@@ -1402,8 +1416,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         PopIndent();
                         AppendLine("}");
                         PushPhiValues(continuing, source);
-                        GenerateStructuredCode(continuing, stop);
-                        return;
+                        return continuing;
                     }
                 }
             }
@@ -1431,8 +1444,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             PopIndent();
             AppendLine("}");
 
-            if (merge != null && merge != stop)
-                GenerateStructuredCode(merge, stop);
+            return merge != null && merge != stop ? merge : null;
         }
 
         /// <summary>
