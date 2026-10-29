@@ -20,7 +20,7 @@
          check on push. Skipping (b) means consumers ship rc.N still pulling old Fork
          transitively and the fix is invisible. See the banner comment in
          SpawnDev.ILGPU.csproj for the full procedure. -->
-    <Version>2.4.11-local.4</Version>
+    <Version>2.4.11-local.5</Version>
     <IsPackable>true</IsPackable>
     <GeneratePackageOnBuild>true</GeneratePackageOnBuild>
   </PropertyGroup>

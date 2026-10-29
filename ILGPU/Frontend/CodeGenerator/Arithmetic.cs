@@ -216,6 +216,17 @@ namespace ILGPU.Frontend
             var value = Block.PopCompareOrArithmeticValue(
                 Location,
                 ConvertFlags.None);
+            // IL neg / not work on the int32 a comparison pushes (0 or 1): Roslyn
+            // keeps `c ? 1 : 0` as the raw clt / cgt / ceq, so -(c ? 1 : 0) is clt; neg
+            // and ~(c ? 1 : 0) is clt; not. The IR holds the comparison as a bool, and
+            // a Neg / Not of a bool is the logical not (Velocity gave 1 / 0 for 0 / -1).
+            if (value.BasicValueType == BasicValueType.Int1)
+            {
+                value = CreateConversion(
+                    value,
+                    Builder.GetPrimitiveType(BasicValueType.Int32),
+                    ConvertFlags.None);
+            }
             var arithmetic = Builder.CreateArithmetic(
                 Location,
                 value,
