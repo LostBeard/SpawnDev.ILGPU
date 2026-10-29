@@ -354,6 +354,15 @@ namespace PlaywrightMultiTest
                             try { HookPageConsole(newPage, newPage.Url); } catch { }
                         };
 
+                        // PMT_INIT_SCRIPT: a JS file every page of this context runs before its own scripts (recycled pages
+                        // too), e.g. a WebGPU call recorder for a driver-bug reproduction.
+                        var initScript = Environment.GetEnvironmentVariable("PMT_INIT_SCRIPT");
+                        if (!string.IsNullOrEmpty(initScript))
+                        {
+                            await testableProject.BrowserContext.AddInitScriptAsync(scriptPath: initScript).ConfigureAwait(false);
+                            LogStatus($"[PMT_INIT_SCRIPT] {initScript}");
+                        }
+
                         // new page
                         testableProject.Page = await testableProject.BrowserContext.NewPageAsync().ConfigureAwait(false);
                         HookPageConsole(testableProject.Page, "main");
