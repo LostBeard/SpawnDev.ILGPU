@@ -1182,6 +1182,26 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             EmitGetLocal(src);
 
+            // A sub-word source (Int8 / Int16, held in an i32) widened to i64 / f32 / f64 is first re-extended per
+            // SourceUnsigned: the i32 may hold it sign-extended (a byte load the codegen could not tie to a byte
+            // parameter - in a helper, or through a sub-view - is `i32.load8_s`), and i64.extend_i32_u of 0xFFFFFFA1 is
+            // not 0xA1. `(ulong)buf[pos] << shift` in a bool decoder helper filled its 64-bit window with 0xFF bytes
+            // (SpawnDev.Codecs VP8 keyframe decoder on Wasm, 2026-10-28). The i32 destination is re-extended below.
+            if (dstType != WasmOpCodes.I32)
+            {
+                var subWordSource = src.BasicValueType;
+                if (subWordSource == BasicValueType.Int8 || subWordSource == BasicValueType.Int16)
+                {
+                    if (isSourceUnsigned)
+                    {
+                        WasmModuleBuilder.EmitI32Const(Code, subWordSource == BasicValueType.Int8 ? 0xFF : 0xFFFF);
+                        Code.Add(WasmOpCodes.I32And);
+                    }
+                    else
+                        Code.Add(subWordSource == BasicValueType.Int8 ? WasmOpCodes.I32Extend8S : WasmOpCodes.I32Extend16S);
+                }
+            }
+
             // Float -> integer uses the SATURATING trunc_sat family (0xFC prefix): .NET 9+
             // conversions saturate (NaN -> 0, out of range -> MinValue/MaxValue), while the plain
             // trunc opcodes TRAP ("float unrepresentable in integer range") and killed the whole
