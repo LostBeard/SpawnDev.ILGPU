@@ -727,6 +727,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // assignments (32-47 % of the TRELLIS.2 attention/gemm shaders). DeadCodeElimination below drops them.
                     new RemoveDebugOperations(),
                     new InlineAddressParameterCalls(inlineBudgetSurvivors: true),
+                    // A call inlined here ran past SSA construction: a struct whose address it took (`this` of a struct
+                    // method, a `ref` argument) is still an alloca, and a struct alloca holding a view cannot be a WGSL
+                    // var (the view field came out as an i32 and was then indexed: naga "Invalid sub-access into type",
+                    // 2026-10-29, Codecs CELT band decode with CeltModeGpu.EBandsOf calls past the inlining budget).
+                    new SSAConstruction(),
+                    new LowerStructures(),
                     new SimplifyControlFlow(),
                     new DeadCodeElimination()));
             });

@@ -130,6 +130,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     // GLSL cannot implement assertions or debug output; drop them so their operands die in the DCE below.
                     new RemoveDebugOperations(),
                     new InlineAddressParameterCalls(),
+                    // As on WebGPU: a call inlined here ran past SSA construction, so a struct whose address it took is
+                    // still an alloca, and a struct alloca holding a view became a GLSL struct local built from an
+                    // undeclared view value with its field loads left out (StructViewMethod_LeftACall_MatchesHost).
+                    new SSAConstruction(),
+                    new LowerStructures(),
                     new SimplifyControlFlow(),
                     new DeadCodeElimination()));
             });
