@@ -20,6 +20,13 @@ namespace ILGPU.IR.Construction
     partial class IRBuilder
     {
         /// <summary>
+        /// True for the 8 / 16-bit integer types, which the IL evaluation stack holds
+        /// extended to 32 bits by their own sign.
+        /// </summary>
+        private static bool IsNarrowInt(BasicValueType type) =>
+            type == BasicValueType.Int8 || type == BasicValueType.Int16;
+
+        /// <summary>
         /// Creates a convert operation to a 32bit integer.
         /// </summary>
         /// <param name="location">The current location.</param>
@@ -88,9 +95,31 @@ namespace ILGPU.IR.Construction
             TypeNode targetType,
             ConvertFlags flags)
         {
+            bool isSourceUnsigned = (flags & ConvertFlags.SourceUnsigned) ==
+                ConvertFlags.SourceUnsigned;
+            bool isTargetUnsigned = (flags & ConvertFlags.TargetUnsigned) ==
+                ConvertFlags.TargetUnsigned;
+
             // Check for identity conversions
             if (node.Type == targetType)
+            {
+                // An 8 / 16-bit conversion result keeps its bits under a sign change,
+                // but its sign decides how it is widened later ((ushort)(short)x is
+                // zero-extended): re-derive the narrowing with the requested result sign.
+                if (node is ConvertValue sameType &&
+                    IsNarrowInt(node.BasicValueType) &&
+                    sameType.IsResultUnsigned != isTargetUnsigned &&
+                    sameType.Value.Type != targetType)
+                {
+                    return Append(new ConvertValue(
+                        GetInitializer(location),
+                        sameType.Value,
+                        targetType,
+                        sameType.Flags & ConvertFlags.SourceUnsigned |
+                        flags & ConvertFlags.TargetUnsigned));
+                }
                 return node;
+            }
 
             // Check for int to pointer casts
             if (targetType is PointerType pointerType &&
@@ -110,48 +139,61 @@ namespace ILGPU.IR.Construction
                     targetType);
             }
 
-            bool isSourceUnsigned = (flags & ConvertFlags.SourceUnsigned) ==
-                ConvertFlags.SourceUnsigned;
-            bool isTargetUnsigned = (flags & ConvertFlags.TargetUnsigned) ==
-                ConvertFlags.TargetUnsigned;
-
             // Match nested conversions
             if (node is ConvertValue convert)
             {
-                var canSimplify = false;
                 var sourceBasicType = convert.BasicValueType;
                 var targetBasicType = targetPrimitiveType.BasicValueType;
+                var innerBasicType = convert.Value.BasicValueType;
 
+                // The new conversion's source is the existing conversion's result. An
+                // 8 / 16-bit result is widened with that result's sign (on the IL stack
+                // it is already extended by its own type); a 32 / 64-bit one with the
+                // requested sign (IL conv.u8 / conv.r.un read the stack value unsigned).
+                bool outerSourceUnsigned = IsNarrowInt(sourceBasicType)
+                    ? convert.IsResultUnsigned
+                    : isSourceUnsigned;
+                // A folded conversion starts from the existing conversion's source.
+                ConvertFlags foldedFlags =
+                    convert.Flags & ConvertFlags.SourceUnsigned |
+                    flags & ~ConvertFlags.SourceUnsigned;
+
+                var canSimplify = false;
                 if (sourceBasicType == targetBasicType)
                 {
                     // The target conversion is the same basic type as the existing
                     // conversion. This indicates a sign change, because we have
-                    // already handled identity conversions.
-                    location.Assert(convert.TargetType !=
-                        targetBasicType.GetArithmeticBasicValueType(isTargetUnsigned));
+                    // already handled identity conversions: convert the existing
+                    // conversion's source directly, with its source sign.
                     canSimplify = true;
                 }
                 else if (targetBasicType.IsInt() && sourceBasicType.IsInt())
                 {
-                    // The target conversion and existing conversion are integer types,
-                    // but different sizes, attempt to consolidate them.
+                    // Both conversions are integer conversions of different sizes.
                     //
-                    // If the existing conversion converts the inner type into a
-                    // larger type, we can simplify this into a single conversion
-                    // - it does not matter if the target conversion makes it larger,
-                    // smaller or the same integer size.
+                    // An existing widening followed by a narrowing, or by a conversion
+                    // to the same size, is one conversion of the inner value. A
+                    // widening followed by a further widening is one only when both
+                    // extend the same way: a zero-extended value has a clear top bit,
+                    // so any extension of it is a zero extension; a sign-extended one
+                    // stays sign-extended only if the second widening is signed too
+                    // ((long)(uint)(short)x zero-extends a sign-extended short).
                     //
-                    // Otherwise, if the existing conversion converts the inner type
-                    // into a smaller (and truncated) type, normally, we could not
-                    // simplify this. However, if the target conversion is making the
-                    // inner type even smaller, this can be simplified because we
-                    // are truncating in one hit.
-                    var innerBasicType = convert.Value.BasicValueType;
-                    canSimplify = innerBasicType < sourceBasicType ||
-                        innerBasicType > sourceBasicType &&
-                        targetBasicType < sourceBasicType;
+                    // An existing narrowing followed by a smaller narrowing truncates
+                    // in one hit; followed by a widening it cannot be simplified.
+                    if (innerBasicType < sourceBasicType)
+                    {
+                        canSimplify = targetBasicType <= sourceBasicType ||
+                            convert.IsSourceUnsigned ||
+                            !outerSourceUnsigned;
+                    }
+                    else
+                    {
+                        canSimplify = innerBasicType > sourceBasicType &&
+                            targetBasicType < sourceBasicType;
+                    }
                 }
-                else if (convert.Value.BasicValueType.IsInt() &&
+                else if (innerBasicType.IsInt() &&
                     sourceBasicType.IsFloat() && targetBasicType.IsFloat() &&
                     targetBasicType < sourceBasicType)
                 {
@@ -162,22 +204,20 @@ namespace ILGPU.IR.Construction
                     canSimplify = true;
                 }
 
-                // If the existing conversion produces an unsigned result, mark that
-                // the source of the new conversion is unsigned.
-                ConvertFlags newFlags =
-                    convert.Flags.ToSourceUnsignedFlags() |
-                    flags & ~ConvertFlags.SourceUnsigned;
                 return canSimplify
                     ? CreateConvert(
                         location,
                         convert.Value,
                         targetType,
-                        newFlags)
+                        foldedFlags)
                     : (ValueReference)Append(new ConvertValue(
                         GetInitializer(location),
                         node,
                         targetType,
-                        newFlags));
+                        (outerSourceUnsigned
+                            ? ConvertFlags.SourceUnsigned
+                            : ConvertFlags.None) |
+                        flags & ~ConvertFlags.SourceUnsigned));
             }
 
             // Match X to bool

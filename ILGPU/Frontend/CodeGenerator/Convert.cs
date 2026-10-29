@@ -38,10 +38,26 @@ namespace ILGPU.Frontend
                 convertFlags |= ConvertFlags.TargetUnsigned;
             }
             var targetTypeNode = Builder.CreateType(targetType);
-            Block.Push(CreateConversion(
+            var result = CreateConversion(
                 value,
                 targetTypeNode,
-                convertFlags));
+                convertFlags);
+
+            // conv.i1 / u1 / i2 / u2 push their result extended to 32 bits by the
+            // target type's sign, as loads of these types do (LoadOntoEvaluationStack):
+            // a later conv.u8 / conv.r.un of it then reads that 32-bit value, and
+            // (long)(uint)(short)x zero-extends the sign-extended short.
+            if (result.BasicValueType == BasicValueType.Int8 ||
+                result.BasicValueType == BasicValueType.Int16)
+            {
+                result = CreateConversion(
+                    result,
+                    Builder.GetPrimitiveType(BasicValueType.Int32),
+                    targetType.IsUnsignedInt()
+                        ? ConvertFlags.SourceUnsigned
+                        : ConvertFlags.None);
+            }
+            Block.Push(result);
         }
 
         /// <summary>
