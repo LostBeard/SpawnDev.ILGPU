@@ -3,6 +3,7 @@
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 ## 5.4.12 (forks 2.4.11) - unreleased - Velocity: a loop that exits from both arms of an if no longer hangs; WebGPU: an if-arm that goes back to its loop's header no longer runs the code after the if
 
+- 5.4.12-local.9 (forks 2.4.11-local.8): the WGSL loop-header switch fix (`54a81d7`); `LoopHeaderSwitch_DoWhileStartingWithASwitch_MatchesHost` on all 9 lanes (9 passed, 0 failed); the WGSL of all 480 SpawnDev.Codecs kernels: exactly the 5 with exit-less loops change, none has an exit-less loop now.
 - 5.4.12-local.8 (forks 2.4.11-local.7): the return-value sign fix (`6aa4f62`); the 10 `SubWord*` tests on all 9 lanes: 90 passed, 2 skipped, 0 failed; the Velocity, VelocityScalar2 and Wasm lanes: 2,362 passed, 158 skipped, 0 failed (27m00s), each lane its earlier count plus the 3 new tests, no test changed outcome.
 - 5.4.12-local.7 (forks 2.4.11-local.6): the CUDA, OpenCL, WebGPU, WebGPUNoSubgroups and WebGL lanes (RTX 4070, Chrome 156, `9a157b5`): 4,125 test cases, 3,803 passed, 322 skipped, 0 failed (about 22 min); the Velocity, VelocityScalar2 and Wasm lanes passed on the trip-count change (2,355 passed, 158 skipped, 0 failed), and `EdgePhiBindings_*` on all 9 lanes.
 - 5.4.12-local.6 (forks 2.4.11-local.5): `ComparisonArithmetic_NegNotAddOfComparisons_MatchHost` on all 9 lanes (11 test cases, 0 failed); the frontend change touches only a neg / not of a comparison.
