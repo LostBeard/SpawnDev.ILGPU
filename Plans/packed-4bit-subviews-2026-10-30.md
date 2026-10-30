@@ -1,6 +1,7 @@
 # Packed 4-bit sub-views (QInt4 / QUInt4 / Float4E2M1) - 2026-10-30
 
-Status: KNOWN BUG, listed in CHANGELOG 5.4.13. Next ILGPU work after the 5.4.13 release (Data).
+Status: FIXED in 5.4.14-local.1 (CHANGELOG 5.4.14). Was a KNOWN BUG in 5.4.13. One more cause turned up while
+fixing it: OpenCL's `_qint4_store` assumed a word-aligned view base (misaligned atomic, CL error -9999).
 
 ## Symptom (measured 10-30, scratchpad probe `clsubview`, RTX 4070)
 

@@ -1225,10 +1225,13 @@ namespace SpawnDev.ILGPU.Wasm
                                 object viewObj = vinfo.BaseProp != null ? vinfo.BaseProp.GetValue(args[i])! : args[i];
                                 if (vinfo.ElemSize > 0)
                                     viewElemSizeForLength = vinfo.ElemSize;
-                                object? idx = viewObj is IContiguousArrayView contiguous
-                                    ? contiguous.Index
-                                    : vinfo.IndexProp?.GetValue(viewObj);
-                                if (idx is long longIdx)
+                                // IndexInBytes counts bits: a packed 4-bit view's element offset is half that
+                                // many bytes (Index * ElementSize put it twice too far)
+                                if (viewObj is IContiguousArrayView contiguous)
+                                {
+                                    subViewByteOffset = (int)contiguous.IndexInBytes;
+                                }
+                                else if (vinfo.IndexProp?.GetValue(viewObj) is long longIdx)
                                 {
                                     subViewByteOffset = (int)(longIdx * viewElemSizeForLength);
                                 }
@@ -3420,7 +3423,10 @@ namespace SpawnDev.ILGPU.Wasm
 
                     var indexProp = viewObj.GetType().GetProperty("Index",
                         BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Instance);
-                    if (indexProp?.GetValue(viewObj) is long longIdx)
+                    // IndexInBytes counts bits: a packed 4-bit view's element offset is half that many bytes
+                    if (viewObj is IContiguousArrayView contiguousView)
+                        subViewByteOffset = (int)contiguousView.IndexInBytes;
+                    else if (indexProp?.GetValue(viewObj) is long longIdx)
                         subViewByteOffset = (int)(longIdx * viewElemSizeForLength);
                 }
                 catch { }

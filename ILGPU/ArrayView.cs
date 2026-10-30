@@ -509,9 +509,18 @@ namespace ILGPU
         /// </summary>
         /// <param name="index">The relative element index.</param>
         /// <returns>The effective address.</returns>
+        /// <remarks>
+        /// A packed sub-byte type (<see cref="BitsPerElement"/> &lt; 8) addresses the byte holding the element: its
+        /// <see cref="ElementSize"/> is 1, but two 4-bit elements share a byte, so an element offset k is byte
+        /// k * BitsPerElement / 8. <see cref="SubView(long, long)"/> only creates packed views that start on a byte.
+        /// </remarks>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal readonly unsafe ref byte LoadEffectiveAddress(long index) =>
-            ref Interop.ComputeEffectiveAddress(
+            ref BitsPerElement < 8
+            ? ref Unsafe.Add(
+                ref Unsafe.AsRef<byte>(Buffer.NativePtr.ToPointer()),
+                (nint)((Index + index) * BitsPerElement / 8))
+            : ref Interop.ComputeEffectiveAddress(
                 ref Unsafe.AsRef<byte>(Buffer.NativePtr.ToPointer()),
                 Index + index,
                 ElementSize);
@@ -582,6 +591,16 @@ namespace ILGPU
                 "Index out of bounds");
             Trace.Assert(index + subViewLength <= Length, "Sub view out of range");
             index += Index;
+            // A device pointer cannot start in the middle of a byte, and every backend passes a view to a kernel as
+            // a pointer to its first element, so a packed sub-byte view must start on a byte (an even 4-bit offset).
+            // In a kernel this method is replaced by the GetSubView intrinsic: the check runs on the host only.
+            if (BitsPerElement < 8 && index * BitsPerElement % 8 != 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(index),
+                    $"A sub-view of a {BitsPerElement}-bit packed {typeof(T).Name} view must start on a byte " +
+                    $"(element offset {index} is not a multiple of {8 / BitsPerElement}).");
+            }
             return new ArrayView<T>(Buffer, index, subViewLength);
         }
 

@@ -301,14 +301,18 @@ namespace ILGPU.Backends.OpenCL
             // clobber. Do an ATOMIC word RMW: each thread only ever clears + sets ITS nibble, and
             // since the nibble masks across threads are disjoint the atomicAnd/atomicOr pair composes
             // correctly regardless of interleaving (same contract as the WebGPU/WebGL sub-word store).
-            // base must be 4-byte aligned (buffer allocations are); word = base[index>>3].
+            // The word is found from the element's absolute NIBBLE address (2 * byte address + index):
+            // base is a view's first byte, and a packed sub-view starts on any byte, so
+            // `(atomic_uint*)base + (index >> 3)` was a misaligned atomic (CL error -9999 on NVIDIA
+            // for a sub-view at byte 1). Little-endian: nibble n of a word is bits 4n..4n+3.
             // Generic-address-space C11 atomics (atomic_uint / atomic_fetch_*), matching the rest of
             // the backend's atomics - the buffer pointers are __generic, so a __global-qualified
-            // helper param would reject them. base[index>>3] is the containing 32-bit word.
+            // helper param would reject them.
             extensionBuilder.AppendLine(
                 "static inline void _qint4_store(uchar* base, int index, int value) {");
-            extensionBuilder.AppendLine("    volatile atomic_uint* w = (volatile atomic_uint*)base + (index >> 3);");
-            extensionBuilder.AppendLine("    int shift = (index & 7) << 2;");
+            extensionBuilder.AppendLine("    size_t nib = ((size_t)base << 1) + (size_t)index;");
+            extensionBuilder.AppendLine("    volatile atomic_uint* w = (volatile atomic_uint*)((nib >> 3) << 2);");
+            extensionBuilder.AppendLine("    int shift = (int)(nib & 7) << 2;");
             extensionBuilder.AppendLine("    atomic_fetch_and(w, ~(0xFu << shift));");
             extensionBuilder.AppendLine("    atomic_fetch_or(w, ((uint)(value & 0xF)) << shift);");
             extensionBuilder.AppendLine("}");

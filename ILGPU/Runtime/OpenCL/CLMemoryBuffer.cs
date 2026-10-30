@@ -98,8 +98,11 @@ namespace ILGPU.Runtime.OpenCL
                         stream,
                         target.NativePtr,
                         false,
-                        new IntPtr(targetView.Index * ArrayView<T>.ElementSize),
-                        new IntPtr(source.LengthInBytes),
+                        // Offsets and extent come from the VIEWS, in bytes: `Index * ElementSize` put a packed
+                        // 4-bit view (ElementSize 1, two elements per byte) twice too far, and the source BUFFER's
+                        // length copied all of it when the source view was a part of a larger host buffer.
+                        new IntPtr(targetView.GetIndexInBytes()),
+                        new IntPtr(sourceView.LengthInBytes),
                         sourceView.LoadEffectiveAddressAsPtr()));
                 return;
             }
@@ -115,8 +118,8 @@ namespace ILGPU.Runtime.OpenCL
                                 stream,
                                 source.NativePtr,
                                 false,
-                                new IntPtr(sourceView.Index * ArrayView<T>.ElementSize),
-                                new IntPtr(target.LengthInBytes),
+                                new IntPtr(sourceView.GetIndexInBytes()),
+                                new IntPtr(targetView.LengthInBytes),
                                 targetView.LoadEffectiveAddressAsPtr()));
                         return;
                     case AcceleratorType.OpenCL:
@@ -126,8 +129,8 @@ namespace ILGPU.Runtime.OpenCL
                                 stream,
                                 source.NativePtr,
                                 target.NativePtr,
-                                new IntPtr(sourceView.Index * ArrayView<T>.ElementSize),
-                                new IntPtr(targetView.Index * ArrayView<T>.ElementSize),
+                                new IntPtr(sourceView.GetIndexInBytes()),
+                                new IntPtr(targetView.GetIndexInBytes()),
                                 new IntPtr(targetView.LengthInBytes)));
                         return;
                 }

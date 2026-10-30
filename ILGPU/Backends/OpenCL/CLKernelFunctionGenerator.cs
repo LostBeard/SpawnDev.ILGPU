@@ -433,8 +433,18 @@ namespace ILGPU.Backends.OpenCL
                                     false,
                                     out var _));
 
+                            // A packed 4-bit view's offset counts elements, two per byte of its
+                            // uchar storage (ArrayView.SubView only creates byte-aligned ones)
+                            var viewElementType = EntryPoint.ViewParameters[viewIndex].ElementType;
+                            bool packed4 = viewElementType == typeof(QInt4)
+                                || viewElementType == typeof(QUInt4)
+                                || viewElementType == typeof(Float4E2M1);
+                            if (packed4)
+                                statement.AppendCommand("(");
                             statement.Append(sourceVariable);
                             statement.AppendField(access);
+                            if (packed4)
+                                statement.AppendCommand(" >> 1)");
                             statement.AppendCommand(")");
                         }
 
