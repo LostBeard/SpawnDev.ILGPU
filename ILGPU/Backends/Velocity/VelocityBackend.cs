@@ -92,7 +92,10 @@ namespace ILGPU.Backends.Velocity
                         Context.Properties.EnableAssertions,
                         enableIOOperations: false),
                     context.Properties.InliningMode,
-                    context.Properties.OptimizationLevel);
+                    context.Properties.OptimizationLevel,
+                    // The generated IL runs as placed: RyuJIT does not hoist the
+                    // warp-wide vector operations out of loops again
+                    keepValuesOutOfLoops: true);
 
                 // A loop exit that branches straight to a loop header gets a block of its
                 // own, so the branch builder sees an exit (see VelocityLoopExitSplitting)

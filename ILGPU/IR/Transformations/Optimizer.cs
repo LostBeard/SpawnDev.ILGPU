@@ -139,6 +139,34 @@ namespace ILGPU.IR.Transformations
             AcceleratorSpecializer acceleratorSpecializer,
             InliningMode inliningMode,
             OptimizationLevel level)
+            where TPlacementStrategy : struct, CodePlacement.IPlacementStrategy =>
+            builder.AddBackendOptimizations<TPlacementStrategy>(
+                acceleratorSpecializer,
+                inliningMode,
+                level,
+                keepValuesOutOfLoops: false);
+
+        /// <summary>
+        /// Adds general backend optimizations.
+        /// </summary>
+        /// <param name="builder">The transformation manager to populate.</param>
+        /// <param name="acceleratorSpecializer">
+        /// An instance of an <see cref="AcceleratorSpecializer"/> class.
+        /// </param>
+        /// <param name="inliningMode">The inlining mode to use.</param>
+        /// <param name="level">The desired optimization level.</param>
+        /// <param name="keepValuesOutOfLoops">
+        /// True, if the O2 code placement must not move values back into the loops
+        /// they were hoisted out of (see
+        /// <see cref="CodePlacement.KeepValuesOutOfLoops"/>): for a backend whose
+        /// output no later compiler hoists again.
+        /// </param>
+        public static void AddBackendOptimizations<TPlacementStrategy>(
+            this Transformer.Builder builder,
+            AcceleratorSpecializer acceleratorSpecializer,
+            InliningMode inliningMode,
+            OptimizationLevel level,
+            bool keepValuesOutOfLoops)
             where TPlacementStrategy : struct, CodePlacement.IPlacementStrategy
         {
             // Specialize accelerator properties, arrays and views
@@ -198,7 +226,8 @@ namespace ILGPU.IR.Transformations
                 builder.AddLoopOptimizations();
                 builder.Add(new DeadCodeElimination());
                 builder.Add(new CodePlacement<TPlacementStrategy>(
-                    CodePlacementMode.Aggressive));
+                    CodePlacementMode.Aggressive,
+                    keepValuesOutOfLoops));
             }
         }
 

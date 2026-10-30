@@ -18,6 +18,9 @@ using System.Diagnostics.CodeAnalysis;
 using System.Runtime.CompilerServices;
 using Dominators = ILGPU.IR.Analyses.Dominators<
     ILGPU.IR.Analyses.ControlFlowDirection.Forwards>;
+using Loops = ILGPU.IR.Analyses.Loops<
+    ILGPU.IR.Analyses.TraversalOrders.ReversePostOrder,
+    ILGPU.IR.Analyses.ControlFlowDirection.Forwards>;
 
 namespace ILGPU.IR.Transformations
 {
@@ -267,8 +270,21 @@ namespace ILGPU.IR.Transformations
         /// </summary>
         /// <param name="mode">The mode to use.</param>
         protected CodePlacement(CodePlacementMode mode)
+            : this(mode, keepValuesOutOfLoops: false)
+        { }
+
+        /// <summary>
+        /// Constructs a new instance while specifying the placement mode.
+        /// </summary>
+        /// <param name="mode">The mode to use.</param>
+        /// <param name="keepValuesOutOfLoops">
+        /// True, to never move a value into a loop that does not contain its source
+        /// block (see <see cref="KeepValuesOutOfLoops"/>).
+        /// </param>
+        protected CodePlacement(CodePlacementMode mode, bool keepValuesOutOfLoops)
         {
             Mode = mode;
+            KeepValuesOutOfLoops = keepValuesOutOfLoops;
         }
 
         #endregion
@@ -279,6 +295,19 @@ namespace ILGPU.IR.Transformations
         /// Returns the current placement mode.
         /// </summary>
         public CodePlacementMode Mode { get; }
+
+        /// <summary>
+        /// Returns true if values are never moved into a loop that does not contain
+        /// their source block. The placement puts a value at the common dominator of
+        /// its uses, which lies inside a loop whenever all uses do, so by default it
+        /// sinks the values <see cref="LoopInvariantCodeMotion"/> hoisted back into the
+        /// innermost loop that uses them. That shortens live ranges, and a backend whose
+        /// own compiler hoists again where it pays gains from it (CUDA: the SpawnDev.Codecs
+        /// BC7 encoder at O2 is 5.0 ms sinking and 5.7 ms keeping values out of loops,
+        /// OpenCL is equal). A backend whose output nothing re-hoists (Velocity's IL)
+        /// runs the values once per iteration instead.
+        /// </summary>
+        public bool KeepValuesOutOfLoops { get; }
 
         #endregion
     }
@@ -464,15 +493,28 @@ namespace ILGPU.IR.Transformations
             private readonly HashSet<Value> placed;
 
             /// <summary>
+            /// The loops of the method, used to keep values out of loops they did not
+            /// come from (null unless <see cref="KeepValuesOutOfLoops"/> is set).
+            /// </summary>
+            private readonly Loops? loops;
+
+            /// <summary>
             /// Constructs a new placer instance.
             /// </summary>
             /// <param name="mover">The parent mover.</param>
-            public Placer(Mover mover)
+            /// <param name="keepValuesOutOfLoops">
+            /// True, to never move a value into a loop that does not contain its source
+            /// block.
+            /// </param>
+            public Placer(Mover mover, bool keepValuesOutOfLoops)
             {
                 Mover = mover;
                 strategy = new TStrategy();
                 strategy.Init(mover.Dominators.CFG.Count);
                 placed = new HashSet<Value>();
+                loops = keepValuesOutOfLoops
+                    ? mover.Dominators.CFG.CreateLoops()
+                    : null;
             }
 
             /// <summary>
@@ -544,12 +586,46 @@ namespace ILGPU.IR.Transformations
                 var placementBlock = Dominators.GetImmediateCommonDominatorOfUses(
                     entry.Block,
                     entry.Value.Uses);
+                if (loops != null)
+                {
+                    placementBlock = KeepOutOfLoops(
+                        loops,
+                        placementBlock,
+                        entry.Value.BasicBlock);
+                }
 
                 // Push all child values
                 entry = new PlacementEntry(entry.Value, placementBlock);
                 strategy.EnqueueChildren(Mover, entry);
 
                 return true;
+            }
+
+            /// <summary>
+            /// Walks the placement block up the dominator tree until it is no longer
+            /// inside a loop that does not contain the source block. Without this,
+            /// Velocity ran SpawnDev.ILGPU.ML's naive Conv2D 1.74x slower at O2 than at
+            /// O1: the <c>% outW</c> and all address math sat in the innermost loop.
+            /// </summary>
+            /// <param name="loops">The loops of the method.</param>
+            /// <param name="placementBlock">The desired placement block.</param>
+            /// <param name="sourceBlock">
+            /// The block the value lives in before placement, which dominates the
+            /// desired block.
+            /// </param>
+            /// <returns>The block to place the value in.</returns>
+            private readonly BasicBlock KeepOutOfLoops(
+                Loops loops,
+                BasicBlock placementBlock,
+                BasicBlock sourceBlock)
+            {
+                while (placementBlock != sourceBlock &&
+                    loops.TryGetLoops(placementBlock, out var loop) &&
+                    !loop.Contains(sourceBlock))
+                {
+                    placementBlock = Dominators.GetImmediateDominator(placementBlock);
+                }
+                return placementBlock;
             }
 
             /// <summary>
@@ -661,6 +737,18 @@ namespace ILGPU.IR.Transformations
             : base(mode)
         { }
 
+        /// <summary>
+        /// Constructs a new instance while specifying the placement mode.
+        /// </summary>
+        /// <param name="mode">The mode to use.</param>
+        /// <param name="keepValuesOutOfLoops">
+        /// True, to never move a value into a loop that does not contain its source
+        /// block (see <see cref="CodePlacement.KeepValuesOutOfLoops"/>).
+        /// </param>
+        public CodePlacement(CodePlacementMode mode, bool keepValuesOutOfLoops)
+            : base(mode, keepValuesOutOfLoops)
+        { }
+
         #endregion
 
         #region Methods
@@ -674,7 +762,7 @@ namespace ILGPU.IR.Transformations
         {
             // Initialize new mover and placer instances
             var mover = new Mover(builder, Mode);
-            var placer = new Placer(mover);
+            var placer = new Placer(mover, KeepValuesOutOfLoops);
 
             // Iterate over all values and determine their actual position in post order
             var blocks = builder.SourceBlocks.AsOrder<PostOrder>();
