@@ -241,7 +241,11 @@ namespace ILGPU.Backends.OpenCL
             // since views have to be mapped by the driver to kernel arguments.
             for (int i = 0, e = viewParameters.Length; i < e; ++i)
             {
-                // Emit a specialized pointer type
+                // Emit a specialized pointer type. An emulated element type is declared by its
+                // STORAGE type, never by the float it computes in: GenerateArgumentMapping adds the
+                // view's element offset to this pointer, so its stride must be the element size.
+                // (FP8 was declared `global float*` and an emulated Half view's field is
+                // `global float*`; either way a sub-view started 2x or 4x too far.)
                 var elementType = viewParameters[i].ElementType;
                 string paramTypeName;
                 // When cl_khr_fp16 is not available, Float16 views still use half* for correct
@@ -257,6 +261,16 @@ namespace ILGPU.Backends.OpenCL
                     // bf16 is always emulated (no native OpenCL bf16 type): raw 2-byte storage.
                     // Load/Store convert via _bf16_bits_to_f32 / _f32_to_bf16_bits.
                     paramTypeName = "ushort";
+                }
+                else if (elementType == typeof(Float8E4M3)
+                    || elementType == typeof(Float8E5M2)
+                    || elementType == typeof(Float4E2M1)
+                    || elementType == typeof(QInt4)
+                    || elementType == typeof(QUInt4))
+                {
+                    // FP8 / FP4 / packed Int4: raw uchar storage, as their view fields
+                    // (CLTypeGenerator.GenerateTypeDeclarations)
+                    paramTypeName = "uchar";
                 }
                 else
                 {
@@ -398,10 +412,17 @@ namespace ILGPU.Backends.OpenCL
                     {
                         var viewIndex = viewMapping[specialParamIdx].Index;
 
-                        // Map the view pointer
+                        // Map the view pointer: add the view's element offset to the kernel
+                        // parameter BEFORE the cast. The parameter has the element's storage
+                        // type (an emulated Half view is `global half*`), the view field may not
+                        // (the emulated Half field is `global float*`), and a cast binds tighter
+                        // than `+`: `(global float*)view_0+offset` stepped 4 bytes per Half, so a
+                        // sub-view at element k started at byte 4k and its writes ran past the
+                        // buffer into neighbouring ones.
                         using (var statement = BeginStatement(targetVariable, access))
                         {
                             statement.AppendCast(structureType[access]);
+                            statement.AppendCommand("(");
                             statement.AppendOperation(
                                 string.Format(
                                     KernelViewNameFormat,
@@ -414,6 +435,7 @@ namespace ILGPU.Backends.OpenCL
 
                             statement.Append(sourceVariable);
                             statement.AppendField(access);
+                            statement.AppendCommand(")");
                         }
 
                         // Map the length
