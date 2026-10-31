@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using ILGPU.Runtime;
 using SpawnDev.ILGPU.WebGPU;
+using SpawnDev.ILGPU.WebGPU.Backend;
 
 namespace SpawnDev.ILGPU;
 
@@ -211,6 +212,8 @@ public static class CapabilityProfiles
             f64Mode = wgpu.Backend.F64Mode;
             if (f16Native) effectiveFeatures.Add("shader-f16");
             if (subGroups) effectiveFeatures.Add("subgroups");
+            // dot4I8Packed vs its expansion (WGSLCodeGenerator.GenerateDot4I8Packed); also keys the artifact cache
+            if (wgpu.Backend.HasPackedInt8Dot) effectiveFeatures.Add(WebGPUBackend.PackedInt8DotLanguageFeature);
         }
         else
         {

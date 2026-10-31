@@ -4591,6 +4591,58 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
+        /// <summary>
+        /// <see cref="global::ILGPU.IntrinsicMath.Dot4I8Packed(uint, uint, int)"/>: <c>acc + dot4I8Packed(a, b)</c> when
+        /// the WGSL compiler has the <c>packed_4x8_integer_dot_product</c> language feature, otherwise the same sum
+        /// with each byte sign-extended by mask and xor. WGSL i32 arithmetic wraps, like dp4a and the managed body.
+        /// The IR has no unsigned types, so every operand is bitcast to the type the builtin takes.
+        /// </summary>
+        public static void GenerateDot4I8Packed(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
+        {
+            if (value is not MethodCall methodCall) return;
+            var target = codeGenerator.LoadIntrinsicValue(value);
+            var a = codeGenerator.LoadIntrinsicValue(methodCall[0].Resolve());
+            var b = codeGenerator.LoadIntrinsicValue(methodCall[1].Resolve());
+            var acc = codeGenerator.LoadIntrinsicValue(methodCall[2].Resolve());
+            codeGenerator.Declare(target);
+            string dot;
+            if (backend.HasPackedInt8Dot)
+            {
+                dot = $"dot4I8Packed(bitcast<u32>({a}), bitcast<u32>({b}))";
+            }
+            else
+            {
+                // byte k sign-extended as ((byte ^ 0x80) - 0x80), the same form as IntrinsicMath.Dot4I8PackedSoftware
+                string A = $"bitcast<i32>({a})", B = $"bitcast<i32>({b})";
+                string S(string x, int shift) => $"(((({x} >> {shift}u) & 0xFF) ^ 0x80) - 0x80)";
+                dot = $"({S(A, 0)} * {S(B, 0)} + {S(A, 8)} * {S(B, 8)} + {S(A, 16)} * {S(B, 16)} + {S(A, 24)} * {S(B, 24)})";
+            }
+            codeGenerator.AppendLine($"{target} = bitcast<{target.Type}>(bitcast<i32>({acc}) + {dot});");
+        }
+
+        /// <summary>
+        /// <see cref="global::ILGPU.IntrinsicMath.Dot4U8Packed(uint, uint, uint)"/>: <c>acc + dot4U8Packed(a, b)</c> when
+        /// the WGSL compiler has the <c>packed_4x8_integer_dot_product</c> language feature, otherwise the same sum
+        /// from masked bytes. u32 arithmetic wraps.
+        /// </summary>
+        public static void GenerateDot4U8Packed(WebGPUBackend backend, WGSLCodeGenerator codeGenerator, Value value)
+        {
+            if (value is not MethodCall methodCall) return;
+            var target = codeGenerator.LoadIntrinsicValue(value);
+            var a = codeGenerator.LoadIntrinsicValue(methodCall[0].Resolve());
+            var b = codeGenerator.LoadIntrinsicValue(methodCall[1].Resolve());
+            var acc = codeGenerator.LoadIntrinsicValue(methodCall[2].Resolve());
+            codeGenerator.Declare(target);
+            string A = $"bitcast<u32>({a})", B = $"bitcast<u32>({b})";
+            string dot = backend.HasPackedInt8Dot
+                ? $"dot4U8Packed({A}, {B})"
+                : $"(({A} & 0xFFu) * ({B} & 0xFFu)"
+                    + $" + (({A} >> 8u) & 0xFFu) * (({B} >> 8u) & 0xFFu)"
+                    + $" + (({A} >> 16u) & 0xFFu) * (({B} >> 16u) & 0xFFu)"
+                    + $" + ({A} >> 24u) * ({B} >> 24u))";
+            codeGenerator.AppendLine($"{target} = bitcast<{target.Type}>(bitcast<u32>({acc}) + {dot});");
+        }
+
         /// <summary>Intrinsic handler for FusedMultiplyAdd: emits the emulated-f64 helper for emulated doubles, otherwise WGSL <c>fma(x, y, z)</c>.</summary>
         /// <param name="backend">The WebGPU backend.</param>
         /// <param name="codeGenerator">The code generator to emit into.</param>

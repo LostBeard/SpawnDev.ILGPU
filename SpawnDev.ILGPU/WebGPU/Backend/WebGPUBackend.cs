@@ -645,6 +645,29 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         public bool HasShaderF16 => !ForceEmulatedF16 && EnabledFeatures.Contains("shader-f16");
 
+        /// <summary>
+        /// The <see cref="EnabledFeatures"/> entry for the <c>packed_4x8_integer_dot_product</c> WGSL language
+        /// feature. Language features belong to the browser's WGSL compiler (<c>navigator.gpu.wgslLanguageFeatures</c>),
+        /// not to the device, so the accelerator adds this entry when it reads them.
+        /// </summary>
+        public const string PackedInt8DotLanguageFeature = "wgsl:packed_4x8_integer_dot_product";
+
+        /// <summary>
+        /// Test-only switch. While <c>true</c>, kernels compiled from then on do not use the
+        /// <c>packed_4x8_integer_dot_product</c> language feature:
+        /// <see cref="global::ILGPU.IntrinsicMath.Dot4I8Packed(uint, uint, int)"/> / <c>Dot4U8Packed</c> compile to their
+        /// shift / mask expansion (clear the kernel caches to recompile). An accelerator created while it is set
+        /// reports <see cref="global::ILGPU.Runtime.CapabilityContext.PackedInt8DotProduct"/> false.
+        /// Default: <c>false</c>.
+        /// </summary>
+        public static bool ForceEmulatedPackedInt8Dot { get; set; } = false;
+
+        /// <summary>
+        /// True if the WGSL compiler has <c>dot4I8Packed</c> / <c>dot4U8Packed</c> (the
+        /// <c>packed_4x8_integer_dot_product</c> language feature) and <see cref="ForceEmulatedPackedInt8Dot"/> is not set.
+        /// </summary>
+        public bool HasPackedInt8Dot => !ForceEmulatedPackedInt8Dot && EnabledFeatures.Contains(PackedInt8DotLanguageFeature);
+
         /// <summary>Returns true if subgroups are enabled and not force-disabled by options.</summary>
         public bool HasSubgroups => !Options.ForceDisableSubgroups && EnabledFeatures.Contains("subgroups");
 
@@ -707,6 +730,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // registered after it never reaches this backend's IR passes (RegisterMathIntrinsics' redirects only
             // take effect for a SECOND backend on the same Context - a known inconsistency, left as is here).
             RegisterExactRemainder();
+            RegisterPackedDot();
             InitIntrinsicProvider();
             RegisterMathIntrinsics();
 
@@ -878,6 +902,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// defines. The native lowering was <c>x - y * trunc(x / y)</c>, which is not exact - 0.3f % 0.1f gave 0 and
         /// 1e30f % 3.3f gave 0 (2026-10-01). Float64 is the emulated double-float type here and keeps its own f64_rem.
         /// </summary>
+        /// <summary>
+        /// <see cref="IntrinsicMath.Dot4I8Packed(uint, uint, int)"/> / <see cref="IntrinsicMath.Dot4U8Packed(uint, uint, uint)"/>:
+        /// <c>dot4I8Packed</c> / <c>dot4U8Packed</c> when the WGSL compiler has them, the expansion otherwise (one
+        /// handler each; it reads <see cref="HasPackedInt8Dot"/> per kernel). Called before InitIntrinsicProvider.
+        /// </summary>
+        private void RegisterPackedDot()
+        {
+            RegisterIntrinsic(typeof(IntrinsicMath).GetMethod(nameof(IntrinsicMath.Dot4I8Packed))!, WGSLCodeGenerator.GenerateDot4I8Packed);
+            RegisterIntrinsic(typeof(IntrinsicMath).GetMethod(nameof(IntrinsicMath.Dot4U8Packed))!, WGSLCodeGenerator.GenerateDot4U8Packed);
+        }
+
         private void RegisterExactRemainder()
         {
             var manager = GetIntrinsicManager(Context);
@@ -983,7 +1018,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             RegAll(typeof(IntrinsicMath), "Abs", WGSLCodeGenerator.GenerateAbs);
             RegAll(typeof(IntrinsicMath), "Min", WGSLCodeGenerator.GenerateMin);
             RegAll(typeof(IntrinsicMath), "Max", WGSLCodeGenerator.GenerateMax);
-
             // Register XMath functions from ILGPU.Algorithms
             try
             {
@@ -1352,6 +1386,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var features = new HashSet<string>(System.StringComparer.Ordinal);
             if (HasShaderF16) features.Add("shader-f16");
             if (HasSubgroups) features.Add("subgroups");
+            if (HasPackedInt8Dot) features.Add(PackedInt8DotLanguageFeature);
             return new CapabilityProfile
             {
                 Backend = AcceleratorType.WebGPU,

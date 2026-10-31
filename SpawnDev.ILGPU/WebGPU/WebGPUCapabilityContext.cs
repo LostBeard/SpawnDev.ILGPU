@@ -39,6 +39,8 @@ namespace SpawnDev.ILGPU.WebGPU
             Float16Native = enabledFeatures.Contains("shader-f16");
             Float64 = enabledFeatures.Contains("shader-float64");
             Int64 = enabledFeatures.Contains("shader-int64");
+            PackedInt8DotProduct = !Backend.WebGPUBackend.ForceEmulatedPackedInt8Dot
+                && enabledFeatures.Contains(Backend.WebGPUBackend.PackedInt8DotLanguageFeature);
         }
 
         /// <summary>

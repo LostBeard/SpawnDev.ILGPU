@@ -206,6 +206,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 }
             }
             catch { }
+            AddWgslLanguageFeatures(EnabledFeatures);
 
             // Listen for uncaptured GPU errors
             SubscribeUncapturedError();
@@ -214,6 +215,25 @@ namespace SpawnDev.ILGPU.WebGPU
             _ = MonitorDeviceLostAsync();
 
             if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log("[WebGPU] Accelerator created from external GPUDevice (shared with ORT)");
+        }
+
+        /// <summary>
+        /// Adds the WGSL language features the code generator uses to <paramref name="features"/>, prefixed
+        /// <c>wgsl:</c> (<see cref="WebGPUBackend.PackedInt8DotLanguageFeature"/>). They are properties of the
+        /// browser's WGSL compiler (<c>navigator.gpu.wgslLanguageFeatures</c>), not of the device, and are absent
+        /// on hosts without them (a missing <c>navigator.gpu</c> or set reads as none).
+        /// </summary>
+        private static void AddWgslLanguageFeatures(HashSet<string> features)
+        {
+            try
+            {
+                using var navigator = SpawnDev.SpawnJS.SpawnJSRuntime.Instance.Get<Navigator>("navigator");
+                using var gpu = navigator?.Gpu;
+                using var languageFeatures = gpu?.WGSLLanguageFeatures;
+                if (languageFeatures != null && languageFeatures.Has("packed_4x8_integer_dot_product"))
+                    features.Add(WebGPUBackend.PackedInt8DotLanguageFeature);
+            }
+            catch { }
         }
 
         /// <summary>
@@ -323,6 +343,7 @@ namespace SpawnDev.ILGPU.WebGPU
 
             // Store actually enabled features
             EnabledFeatures = new HashSet<string>(requestedFeatures, StringComparer.OrdinalIgnoreCase);
+            AddWgslLanguageFeatures(EnabledFeatures);
 
             // Listen for uncaptured GPU errors (e.g., Invalid ComputePipeline, validation errors)
             SubscribeUncapturedError();

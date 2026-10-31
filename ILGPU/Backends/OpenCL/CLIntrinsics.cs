@@ -54,6 +54,11 @@ namespace ILGPU.Backends.OpenCL
         /// <param name="manager">The target implementation manager.</param>
         public static void Register(IntrinsicImplementationManager manager)
         {
+            // Packed 8-bit dot products: the exact four-term form (cl_khr_integer_dot_product is not used)
+            IntrinsicMath.RegisterPackedDotSoftware(
+                manager,
+                target => new CLIntrinsic(target, IntrinsicImplementationMode.Redirect));
+
             // Atomics
             manager.RegisterGenericAtomic(
                 AtomicKind.Add,

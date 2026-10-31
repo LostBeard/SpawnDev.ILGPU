@@ -41,6 +41,10 @@ namespace ILGPU.Backends.Velocity
         {
             RegisterBroadcasts(manager);
             RegisterWarpShuffles(manager);
+            // no native packed dot product: the exact four-term form
+            IntrinsicMath.RegisterPackedDotSoftware(
+                manager,
+                target => new VelocityIntrinsic(target, IntrinsicImplementationMode.Redirect));
         }
 
         #endregion

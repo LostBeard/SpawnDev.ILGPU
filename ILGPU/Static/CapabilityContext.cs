@@ -49,6 +49,15 @@ namespace ILGPU.Runtime
         /// </summary>
         public bool Float16 { get; protected set; }
 
+        /// <summary>
+        /// True if <see cref="IntrinsicMath.Dot4I8Packed(uint, uint, int)"/> and
+        /// <see cref="IntrinsicMath.Dot4U8Packed(uint, uint, uint)"/> run as one native
+        /// instruction on this accelerator (CUDA sm_61+ <c>dp4a</c>, WebGPU with the
+        /// <c>packed_4x8_integer_dot_product</c> WGSL language feature). If false, they
+        /// still work and give the same bits, as a four-term multiply-add.
+        /// </summary>
+        public bool PackedInt8DotProduct { get; protected set; }
+
         #endregion
 
         #region Methods
@@ -132,6 +141,8 @@ namespace ILGPU.Runtime.Cuda
             Float16_Max = !Float16Native || arch >= CudaArchitecture.SM_80;
             Float16_TanH = arch >= CudaArchitecture.SM_80;
             Float32_TanH = arch >= CudaArchitecture.SM_75;
+            // dp4a (PTXIntrinsics.Dot4I8PackedPtx / Dot4U8PackedPtx)
+            PackedInt8DotProduct = arch >= CudaArchitecture.SM_61;
         }
 
         #endregion

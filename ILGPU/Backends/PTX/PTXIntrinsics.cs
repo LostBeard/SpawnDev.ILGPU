@@ -152,6 +152,7 @@ namespace ILGPU.Backends.PTX
             RegisterFP16(manager);
             RegisterBitFunctions(manager);
             RegisterMathFunctions(manager);
+            RegisterPackedDot(manager);
         }
 
         #endregion
@@ -393,6 +394,69 @@ namespace ILGPU.Backends.PTX
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static int TrailingZeroCountI64(long value) =>
             IntrinsicMath.BitOperations.TrailingZeroCount(value);
+
+        #endregion
+
+        #region Packed Dot
+
+        /// <summary>
+        /// Registers the packed 8-bit dot products: one dp4a on sm_61+, the managed
+        /// four-term form (same bits) below. The later registration wins where it can
+        /// handle the backend, so dp4a is registered after the fallback.
+        /// </summary>
+        /// <param name="manager">The target implementation manager.</param>
+        private static void RegisterPackedDot(IntrinsicImplementationManager manager)
+        {
+            const BindingFlags flags = BindingFlags.NonPublic | BindingFlags.Static;
+            manager.RegisterMethod(
+                typeof(IntrinsicMath).GetMethod(nameof(IntrinsicMath.Dot4I8Packed))
+                    .ThrowIfNull(),
+                new PTXIntrinsic(
+                    typeof(IntrinsicMath).GetMethod(
+                        nameof(IntrinsicMath.Dot4I8PackedSoftware)).ThrowIfNull(),
+                    IntrinsicImplementationMode.Redirect));
+            manager.RegisterMethod(
+                typeof(IntrinsicMath).GetMethod(nameof(IntrinsicMath.Dot4U8Packed))
+                    .ThrowIfNull(),
+                new PTXIntrinsic(
+                    typeof(IntrinsicMath).GetMethod(
+                        nameof(IntrinsicMath.Dot4U8PackedSoftware)).ThrowIfNull(),
+                    IntrinsicImplementationMode.Redirect));
+            manager.RegisterMethod(
+                typeof(IntrinsicMath).GetMethod(nameof(IntrinsicMath.Dot4I8Packed))
+                    .ThrowIfNull(),
+                new PTXIntrinsic(
+                    typeof(PTXIntrinsics).GetMethod(nameof(Dot4I8PackedPtx), flags)
+                        .ThrowIfNull(),
+                    IntrinsicImplementationMode.Redirect,
+                    CudaArchitecture.SM_61));
+            manager.RegisterMethod(
+                typeof(IntrinsicMath).GetMethod(nameof(IntrinsicMath.Dot4U8Packed))
+                    .ThrowIfNull(),
+                new PTXIntrinsic(
+                    typeof(PTXIntrinsics).GetMethod(nameof(Dot4U8PackedPtx), flags)
+                        .ThrowIfNull(),
+                    IntrinsicImplementationMode.Redirect,
+                    CudaArchitecture.SM_61));
+        }
+
+        /// <summary>
+        /// <see cref="IntrinsicMath.Dot4I8Packed(uint, uint, int)"/> as one dp4a.
+        /// </summary>
+        private static int Dot4I8PackedPtx(uint a, uint b, int acc)
+        {
+            CudaAsm.Emit("dp4a.s32.s32 %0, %1, %2, %3;", out int result, a, b, acc);
+            return result;
+        }
+
+        /// <summary>
+        /// <see cref="IntrinsicMath.Dot4U8Packed(uint, uint, uint)"/> as one dp4a.
+        /// </summary>
+        private static uint Dot4U8PackedPtx(uint a, uint b, uint acc)
+        {
+            CudaAsm.Emit("dp4a.u32.u32 %0, %1, %2, %3;", out uint result, a, b, acc);
+            return result;
+        }
 
         #endregion
     }

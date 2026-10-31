@@ -116,6 +116,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // registered after it never reaches this backend's IR passes (RegisterMathIntrinsics' redirects only
             // take effect for a SECOND backend on the same Context - a known inconsistency, left as is here).
             RegisterExactRemainder();
+            // IntrinsicMath.Dot4I8Packed / Dot4U8Packed: no native packed dot product, the exact four-term form
+            RegisterRedirect(typeof(global::ILGPU.IntrinsicMath).GetMethod(nameof(global::ILGPU.IntrinsicMath.Dot4I8Packed))!,
+                typeof(global::ILGPU.IntrinsicMath).GetMethod(nameof(global::ILGPU.IntrinsicMath.Dot4I8PackedSoftware))!);
+            RegisterRedirect(typeof(global::ILGPU.IntrinsicMath).GetMethod(nameof(global::ILGPU.IntrinsicMath.Dot4U8Packed))!,
+                typeof(global::ILGPU.IntrinsicMath).GetMethod(nameof(global::ILGPU.IntrinsicMath.Dot4U8PackedSoftware))!);
             InitIntrinsicProvider();
             RegisterMathIntrinsics();
 
