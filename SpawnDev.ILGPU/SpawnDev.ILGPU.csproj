@@ -4,9 +4,9 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.4.14-local.2</Version>
+		<Version>5.4.14</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>v5.4.13 (forks 2.4.12) - Velocity at O2 (the default) no longer runs loop-invariant code inside loops (up to 1.76x slower than O1 before). OpenCL: a Half sub-view passed to a kernel no longer writes past its end. Depends on SpawnJS 3.0.7. Full history: CHANGELOG.md</PackageReleaseNotes>
+		<PackageReleaseNotes>v5.4.14 (forks 2.4.13) - NEW: IntrinsicMath.Dot4I8Packed / Dot4U8Packed, packed 8-bit dot products (dp4a on CUDA, dot4I8Packed on WebGPU; Capabilities.PackedInt8DotProduct). FIXED: packed 4-bit sub-views passed to kernels. Full history: CHANGELOG.md</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -68,8 +68,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.4.13-local.2" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.4.13-local.2" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.4.13" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.4.13" />
 	</ItemGroup>
 
 	<ItemGroup>
