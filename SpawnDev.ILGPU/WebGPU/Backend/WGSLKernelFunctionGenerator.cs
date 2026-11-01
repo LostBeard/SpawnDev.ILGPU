@@ -8819,6 +8819,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         protected override bool IsAtomicPointer(Value ptr)
         {
+            // A view FIELD of a struct parameter (ArrayView1D<T, Stride1D.Dense> is one: its view is field 0) is atomic per
+            // field: the scan records it in _bodyStructAtomicFields, NOT _atomicParameters, and the binding is declared
+            // array<atomic<T>> (atomic<u32> for uint / float / emulated 64-bit) from that set. Checking only
+            // _atomicParameters here emitted a plain store into it as `*p = v` (and plain loads as `*p`) - an i32
+            // assigned to an atomic<i32>, which Tint rejects (naga accepts), so the pipeline was invalid and the launch
+            // silently did nothing (SpawnDev.ILGPU.ML face decode, Tuvok 2026-11-01;
+            // AtomicIntBuffer_AppendSlotAndPlainStore_MatchesOracle). Checked first: the plain resolve below walks the
+            // same GetField to the parameter and would answer for the whole struct.
+            if (_bodyStructAtomicFields.Count > 0
+                && ResolveToParameterWithFieldChain(ptr, out var fieldParam, out var fieldIdx) && fieldIdx >= 0)
+            {
+                if (_bodyStructAtomicFields.Contains((fieldParam!.Index, fieldIdx))) return true;
+            }
             // A pointer into a sub-view belongs to the parameter the sub-view was cut from.
             if (ResolveToParameter(ptr, throughSubViews: true) is global::ILGPU.IR.Values.Parameter param)
             {

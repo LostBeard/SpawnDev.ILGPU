@@ -256,7 +256,14 @@ namespace SpawnDev.ILGPU.WebGPU
         /// <c>OnSubmittedWorkDone</c> drain — so a profiled step accounts for ALL GPU-wait, not just the sync
         /// drain (a decode whose wait hides here reads ~0 in <see cref="WebGPUBackend.ProfileSyncWaitMs"/>).
         /// </summary>
-        private static async Task ProfiledMapReadAsync(GPUBuffer stagingBuffer, long bytes)
+        /// <remarks>
+        /// The readback is the fence (callers do not <c>SynchronizeAsync</c> before it), so it is also where a shader that failed
+        /// validation must surface: an invalid pipeline only WARNS in the browser console, the launch returns, the kernel does
+        /// nothing, and without this check the readback returned the buffer's old contents as if they were the result
+        /// (SpawnDev.ILGPU.ML face decode, Tuvok 2026-11-01). Same drain + throw as <c>SynchronizeAsync</c>; the staging buffer
+        /// is unmapped before throwing so the next readback can map it.
+        /// </remarks>
+        private async Task ProfiledMapReadAsync(GPUBuffer stagingBuffer, long bytes)
         {
             if (WebGPUBackend.EnableDispatchProfiling)
             {
@@ -270,6 +277,9 @@ namespace SpawnDev.ILGPU.WebGPU
             {
                 await stagingBuffer.MapAsync(GPUMapMode.Read);
             }
+            await Accelerator.DrainShaderChecksAsync();
+            try { Accelerator.ThrowIfGpuErrors(); }
+            catch { stagingBuffer.Unmap(); throw; }
         }
 
         /// <summary>

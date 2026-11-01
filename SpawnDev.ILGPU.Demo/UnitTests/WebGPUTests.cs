@@ -348,6 +348,50 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             smoothed[index] = Math.Min(Math.Max(blended, 0f), 1f);
         }
 
+        /// <summary>
+        /// An invalid shader must fail the READBACK when nothing synchronizes before it. The browser only warns about an invalid
+        /// pipeline ("[Invalid ComputePipeline] is invalid due to a previous error"), the launch returns and the kernel does
+        /// nothing; shader errors surfaced only in SynchronizeAsync, so a caller whose readback is its fence got the buffer's OLD
+        /// contents back as the result (SpawnDev.ILGPU.ML face decode, Tuvok 2026-11-01). The shader is the construct that hit
+        /// it: a plain i32 store into an array&lt;atomic&lt;i32&gt;&gt;. A second readback must then work (the staging buffer was unmapped).
+        /// </summary>
+        [TestMethod]
+        public async Task WebGPU_InvalidShader_FailsTheReadbackWithoutASync()
+        {
+            var (context, accelerator) = await CreateAcceleratorAsync(enableEmulation: false);
+            try
+            {
+                var native = ((WebGPUAccelerator)accelerator).NativeAccelerator;
+                const string wgsl = @"
+@group(0) @binding(0) var<storage, read_write> buf : array<atomic<i32>>;
+@compute @workgroup_size(1)
+fn main() {
+    let p = &buf[1];
+    *p = 5;
+}";
+                using var buffer = native.Allocate(new int[] { 11, 22, 33, 44 });
+                using var shader = native.CreateComputeShader(wgsl, "main", label: "InvalidOnPurpose");
+                shader.SetBuffer(0, buffer);
+                shader.Dispatch(1);
+                InvalidOperationException? caught = null;
+                try { await buffer.CopyToHostAsync(); }
+                catch (InvalidOperationException ex) { caught = ex; }
+                if (caught == null)
+                    throw new Exception("the readback after an invalid shader returned data instead of throwing (a silent no-op kernel)");
+                if (!caught.Message.Contains("failed validation") && !caught.Message.Contains("InvalidOnPurpose"))
+                    throw new Exception($"the readback threw, but not about the invalid shader: {caught.Message}");
+                // The error is consumed, and the staging buffer is usable again.
+                var again = await buffer.CopyToHostAsync();
+                if (again.Length != 4 || again[0] != 11 || again[3] != 44)
+                    throw new Exception($"second readback = [{string.Join(", ", again)}], expected [11, 22, 33, 44]");
+            }
+            finally
+            {
+                accelerator.Dispose();
+                context.Dispose();
+            }
+        }
+
         #endregion
 
         /// <summary>

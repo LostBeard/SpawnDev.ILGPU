@@ -2845,21 +2845,53 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var address = Load(value.Target);
             var atomicVal = Load(value.Value);
 
-            // Return value: approximate as 0 (WebGL Add vote pattern does not return old value)
+            // The vote is right only when ALL of these hold; anything else threw nothing and gave a silent wrong answer
+            // (AtomicIntBuffer_AppendSlotAndPlainStore_MatchesOracle, 2026-11-01: `slot = Atomic.Add(ref buf[0], 1);
+            // buf[1 + slot] = i` on an ArrayView1D read back counter = 0):
+            //  - the old value is unused: the vote cannot produce it, and every thread got 0 (a slot allocator then
+            //    writes every item to the same slot);
+            //  - the target param got a vote varying: only atomic-only params get one, so a buffer the kernel ALSO stores
+            //    to dropped the add entirely;
+            //  - the element is 32-bit integer: glWorker.js sums the votes as Int32 (float bits summed as ints are garbage);
+            //  - the target is element 0 of the view: glWorker.js adds the sum to the view's FIRST element (writeByteOffset
+            //    = the view's start), so `Atomic.Add(ref hist[bin], 1)` piled every bin into bin 0.
+            OutputVaryingInfo? atomicVarying = null;
+            string? why = null;
+            if (value.Uses.HasAny)
+                why = "the old value Atomic.Add returns is used (WebGL can only sum increments after the draw)";
+            else if (!_leaParamMap.TryGetValue(address.ToString(), out var paramIdx)
+                || !_atomicVoteIndex!.TryGetValue(paramIdx, out atomicVarying) || atomicVarying == null)
+                why = "the buffer is also written with plain stores (or could not be resolved to a kernel parameter)";
+            else if (atomicVarying.GlslType is not ("int" or "uint"))
+                why = $"the element type is {atomicVarying.GlslType} (the emulation sums 32-bit integers)";
+            else if (!IsElementZeroOfView(value.Target))
+                why = "the target element is not element 0 of the view (the emulation adds every thread's increment to element 0)";
+            if (why != null)
+                throw new SpawnDev.ILGPU.UnsupportedKernelFeatureException(
+                    feature: "Atomic.Add",
+                    backend: global::ILGPU.Runtime.AcceleratorType.WebGL,
+                    remediation: $"WebGL2 has no atomics; Atomic.Add is emulated only as a sum of 32-bit integer increments into element 0 " +
+                        $"of a buffer the kernel does not otherwise write, with the result unused. Here {why}. Use WebGPU, Wasm, or a " +
+                        "desktop backend; consumers can declare RequiresAtomics = true on AcceleratorRequirements to filter WebGL at selection time.");
+
             if (!_hoistedPrimitives.Contains(value))
                 Declare(target);
-            AppendLine($"{target} = {target.Type}(0); // atomic return (WebGL2 Add vote emulation)");
+            AppendLine($"{target} = {target.Type}(0); // atomic return (unused; WebGL2 Add vote emulation)");
 
             // Emit the increment to the atomic vote TF varying so JS can accumulate it
-            if (_leaParamMap.TryGetValue(address.ToString(), out var paramIdx))
-            {
-                _atomicVoteIndex!.TryGetValue(paramIdx, out var atomicVarying);
-                if (atomicVarying != null)
-                {
-                    string castVal = CastIfNeeded(atomicVal, atomicVarying.GlslType ?? "int");
-                    AppendLine($"{atomicVarying.VaryingName} = {castVal}; // atomic vote emit");
-                }
-            }
+            string castVal = CastIfNeeded(atomicVal, atomicVarying!.GlslType ?? "int");
+            AppendLine($"{atomicVarying.VaryingName} = {castVal}; // atomic vote emit");
+        }
+
+        /// <summary>True when <paramref name="ptr"/> addresses element 0 of its view: the view's own pointer, or an element address at constant 0.</summary>
+        private static bool IsElementZeroOfView(Value ptr)
+        {
+            var v = ptr.Resolve();
+            while (v is AddressSpaceCast cast) v = cast.Value.Resolve();
+            if (v is not LoadElementAddress lea) return true;
+            var offset = lea.Offset.Resolve();
+            while (offset is ConvertValue cv) offset = cv.Value.Resolve();
+            return offset is PrimitiveValue pv && pv.RawValue == 0;
         }
 
         /// <summary>

@@ -4,9 +4,9 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.4.14</Version>
+		<Version>5.4.15-local.1</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>v5.4.14 (forks 2.4.13) - NEW: IntrinsicMath.Dot4I8Packed / Dot4U8Packed, packed 8-bit dot products (dp4a on CUDA, dot4I8Packed on WebGPU; Capabilities.PackedInt8DotProduct). FIXED: packed 4-bit sub-views passed to kernels. Full history: CHANGELOG.md</PackageReleaseNotes>
+		<PackageReleaseNotes>v5.4.15 (forks 2.4.13, unchanged) - FIXED (WebGPU): plain loads/stores of an atomic view field (ArrayView1D) compile; an invalid shader fails the readback instead of returning the old buffer. FIXED (WebGL): Atomic.Add the emulation cannot do throws UnsupportedKernelFeatureException instead of a wrong answer. Full history: CHANGELOG.md</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>

@@ -1111,6 +1111,15 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 // WebGPU correctly rejected the kernel - binding limit enforced. PASS.
                 return;
             }
+            catch (UnsupportedKernelFeatureException) when (accelerator.AcceleratorType == AcceleratorType.WebGL)
+            {
+                // WebGL has no atomics and cannot return Atomic.Add's old value, which this kernel uses as its slot
+                // allocator. Until 5.4.15 it returned 0 to every thread: all 256 threads wrote slot 0, the counters still
+                // summed, and this test PASSED on that output. Refusing the kernel is the right answer.
+                throw new UnsupportedTestException("WebGL refuses Atomic.Add slot allocation (UnsupportedKernelFeatureException), as it must");
+            }
+            if (accelerator.AcceleratorType == AcceleratorType.WebGL)
+                throw new Exception("WebGL accepted a kernel that uses Atomic.Add's old value as a slot; it must throw UnsupportedKernelFeatureException");
 
             // Non-WebGPU backends: kernel ran, verify output
             var opaqueCount = await bufOpaqueCounter.CopyToHostAsync();
@@ -1121,24 +1130,33 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             if (waterCount[0] != size * 2)
                 throw new Exception($"Water counter: expected {size * 2}, got {waterCount[0]}");
 
-            // Verify vertex colors are valid palette values.
-            // Atomic.Add slot allocation means ANY thread can get slot 0, so we check
-            // that the color at opaqueVerts[2] matches paletteColors[blockId * 3] for
-            // SOME valid blockId, not specifically thread 0's blockId.
+            // Every thread wrote its own triple into the slots it claimed; slot order is the race's. So the written
+            // triples must be EXACTLY the multiset of per-thread triples. (Checking one value at slot 0 against "some
+            // palette color" passed WebGL's every-thread-gets-slot-0 output before 5.4.15.)
             var opaqueVerts = await bufOpaqueVerts.CopyToHostAsync();
-            float actualCr = opaqueVerts[2];
-            bool foundMatch = false;
+            var waterVerts = await bufWaterVerts.CopyToHostAsync();
+            var wantOpaque = new List<string>();
+            var wantWater = new List<string>();
             for (int i = 0; i < size; i++)
             {
-                float candidateCr = paletteColors[blockIds[i] * 3];
-                if (Math.Abs(actualCr - candidateCr) < 0.001f)
-                {
-                    foundMatch = true;
-                    break;
-                }
+                wantOpaque.Add($"{(float)(i % 16)}|{(float)heights[i]}|{paletteColors[blockIds[i] * 3]}");
+                wantWater.Add($"{(float)seabedHeights[i]}|{blockFlags[blockIds[i]]}");
             }
-            if (!foundMatch)
-                throw new Exception($"Opaque vertex color {actualCr} does not match any valid palette color");
+            var gotOpaque = new List<string>();
+            for (int s = 0; s < size; s++)
+                gotOpaque.Add($"{opaqueVerts[s * 3]}|{opaqueVerts[s * 3 + 1]}|{opaqueVerts[s * 3 + 2]}");
+            var gotWater = new List<string>();
+            for (int s = 0; s < size; s++)
+                gotWater.Add($"{waterVerts[s * 2]}|{waterVerts[s * 2 + 1]}");
+            wantOpaque.Sort(StringComparer.Ordinal); gotOpaque.Sort(StringComparer.Ordinal);
+            wantWater.Sort(StringComparer.Ordinal); gotWater.Sort(StringComparer.Ordinal);
+            for (int k = 0; k < size; k++)
+            {
+                if (gotOpaque[k] != wantOpaque[k])
+                    throw new Exception($"opaque vertices are not one triple per thread: sorted #{k} = {gotOpaque[k]}, expected {wantOpaque[k]}");
+                if (gotWater[k] != wantWater[k])
+                    throw new Exception($"water vertices are not one pair per thread: sorted #{k} = {gotWater[k]}, expected {wantWater[k]}");
+            }
         });
 
         // ==================== Index3D + ArrayView<short> BindGroupLayout Regression Tests ====================
