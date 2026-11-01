@@ -43,6 +43,18 @@ namespace SpawnDev.ILGPU.WebGL
         public string? glslType { get; init; }
     }
 
+    /// <summary>Re-creates a worker-side buffer's texture in another GLSL type, keeping its bytes (a buffer first allocated with the default type).</summary>
+    [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties)]
+    public sealed class GLWorkerRetypeBufferMessage
+    {
+        /// <summary>Always "retypeBuffer".</summary>
+        public string type => "retypeBuffer";
+        /// <summary>Worker buffer id.</summary>
+        public int bufferId { get; init; }
+        /// <summary>The GLSL element type the texture must have.</summary>
+        public string? glslType { get; init; }
+    }
+
     /// <summary>Uploads a whole buffer into a worker-side buffer.</summary>
     [DynamicallyAccessedMembers(DynamicallyAccessedMemberTypes.PublicProperties)]
     public class GLWorkerUploadBufferMessage

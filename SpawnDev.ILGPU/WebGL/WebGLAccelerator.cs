@@ -252,6 +252,7 @@ namespace SpawnDev.ILGPU.WebGL
         // and this method runs for every WebGL accelerator.
         [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(GLWorkerInitMessage))]
         [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(GLWorkerAllocBufferMessage))]
+        [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(GLWorkerRetypeBufferMessage))]
         [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(GLWorkerUploadBufferMessage))]
         [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(GLWorkerUploadRangeMessage))]
         [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties | DynamicallyAccessedMemberTypes.PublicConstructors, typeof(GLWorkerCopyBufferMessage))]
@@ -440,6 +441,15 @@ namespace SpawnDev.ILGPU.WebGL
                 });
                 memBuffer.IsAllocatedInWorker = true;
                 memBuffer.NeedsUpload = true; // Fresh alloc always needs initial data
+            }
+            else if (glslType != null && !string.Equals(memBuffer.GlslType, glslType, StringComparison.Ordinal))
+            {
+                // Allocated earlier with another type - typically the default "float" by a device copy, scatter or memset that ran
+                // before any kernel bound the buffer. Its texture must be the type this kernel samples it as, or the draw fails
+                // (an isampler2D over an R32F texture is INVALID_OPERATION): DeviceVectorIndex's grown int `valid` buffer read
+                // back all zeros (KernelOutput_AfterTwoGrowthsAndManySmallHostWrites_IsWritten). The worker keeps the bytes.
+                _glWorker.PostMessage(new GLWorkerRetypeBufferMessage { bufferId = memBuffer.WorkerBufferId, glslType = glslType });
+                memBuffer.GlslType = glslType;
             }
 
             if (memBuffer.NeedsUpload)

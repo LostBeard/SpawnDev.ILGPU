@@ -85,6 +85,10 @@ self.onmessage = function (e) {
             handleCopyBuffer(msg);
             break;
 
+        case 'retypeBuffer':
+            handleRetypeBuffer(msg);
+            break;
+
         case 'dispatch':
             try {
                 const result = dispatchKernel(msg);
@@ -260,6 +264,26 @@ function createTextureForEntry(entry) {
     return tex;
 }
 
+// GL error codes by name, for messages a person can act on.
+function glErrorName(e) {
+    switch (e) {
+        case 0x0500: return 'INVALID_ENUM';
+        case 0x0501: return 'INVALID_VALUE';
+        case 0x0502: return 'INVALID_OPERATION';
+        case 0x0505: return 'OUT_OF_MEMORY';
+        case 0x0506: return 'INVALID_FRAMEBUFFER_OPERATION';
+        case 0x9242: return 'CONTEXT_LOST_WEBGL';
+        default: return '0x' + e.toString(16);
+    }
+}
+
+// Every pending GL error, as names (empty when there are none). getError returns one flag per call until none is left.
+function drainGlErrors() {
+    const names = [];
+    for (let e = gl.getError(), guard = 0; e !== 0 && guard < 16; e = gl.getError(), guard++) names.push(glErrorName(e));
+    return names;
+}
+
 function uploadTextureData(tex, entry) {
     gl.bindTexture(gl.TEXTURE_2D, tex);
     const totalTexels = entry.width * entry.height;
@@ -273,6 +297,11 @@ function uploadTextureData(tex, entry) {
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.R32F, entry.width, entry.height, 0,
             gl.RED, gl.FLOAT, new Float32Array(entry.data.buffer, 0, totalTexels));
     }
+    // A failed upload (OUT_OF_MEMORY when many large textures are alive) leaves the texture without valid contents, and nothing used to
+    // say so: the error flag was discarded by the next dispatch's drain and kernels read the texture as if it were the buffer
+    // (DeviceVectorIndex after growth, 2026-11-01). Record it on the buffer; a dispatch that binds the buffer throws with it.
+    const errs = drainGlErrors();
+    entry.glError = errs.length > 0 ? errs.join(', ') + ' uploading its ' + entry.width + 'x' + entry.height + ' ' + (entry.glslType || 'float') + ' texture' : null;
 }
 
 function handleAllocBuffer(msg) {
@@ -314,6 +343,19 @@ function handleUploadBuffer(msg) {
 // Lazily refresh the CPU mirror (entry.data) from the GPU texture when it was last written by a
 // scatter (render-to-texture) and not yet read back. This is the ONLY readPixels — intermediate
 // scatter results stay GPU-side and are never read back.
+// A buffer created before any kernel bound it (by a device copy, a scatter, a memset) got the default 'float' texture; a kernel that
+// then reads it as int / uint binds an isampler2D / usampler2D to an R32F texture, and the draw fails with INVALID_OPERATION, which used
+// to read back as "nothing stored" (DeviceVectorIndex's grown valid buffer, 2026-11-01). Re-create the texture in the type the kernel
+// declares, from the same raw bytes: entry.data holds the 32-bit words whatever the format, so no value changes.
+function handleRetypeBuffer(msg) {
+    const entry = bufferRegistry[msg.bufferId];
+    if (!entry) { console.error('[GLWorker] retypeBuffer: unknown bufferId', msg.bufferId); return; }
+    if (entry.glslType === msg.glslType) return;
+    ensureCpuFresh(entry);                 // a scatter may have left the newest bytes only in the texture
+    entry.glslType = msg.glslType;
+    uploadTextureData(entry.texture, entry);
+}
+
 function ensureCpuFresh(entry) {
     if (!entry || !entry.dataStale) return;
     if (!scatterFBO) scatterFBO = gl.createFramebuffer();
@@ -470,8 +512,10 @@ function dispatchKernel(msg) {
     const { dispatchId, programId, source, varyingNames, totalVertices, dimX, dimY, dimZ, strides, outputs } = msg;
     const kernelParams = msg.params;
 
-    // Flush any pre-existing GL errors
-    while (gl.getError() !== 0) { }
+    // Errors left by earlier GL calls: they used to be discarded here without a trace. A failed texture upload is recorded on its buffer
+    // (and refuses the dispatch that binds it, below); anything else is reported so it cannot hide.
+    const staleErrors = drainGlErrors();
+    if (staleErrors.length > 0) console.error('[GLWorker] GL error(s) pending before dispatch ' + dispatchId + ': ' + staleErrors.join(', '));
 
     // ---- Step 1: Get or compile program ----
     const cached = getOrCompileProgram(programId, source, varyingNames);
@@ -524,6 +568,9 @@ function dispatchKernel(msg) {
             // GPU-resident buffer — bind existing texture from registry
             const entry = bufferRegistry[p.bufferId];
             if (!entry) throw new Error('Unknown bufferId: ' + p.bufferId);
+            if (entry.glError)
+                throw new Error('WebGL: buffer ' + p.bufferId + ' (kernel parameter ' + p.paramIndex + ') has no valid GPU texture (' + entry.glError
+                    + '), so this kernel cannot read it. Too many large buffers alive at once? Dispose buffers that are no longer needed.');
 
             const texUnit = textureUnit++;
             const uniformPrefix = resolveParamPrefix(p.paramIndex);
@@ -659,6 +706,9 @@ function dispatchKernel(msg) {
     gl.drawArrays(gl.POINTS, 0, totalVertices);
     if (transformFeedback) gl.endTransformFeedback();
     gl.disable(gl.RASTERIZER_DISCARD);
+    // A draw that FAILED wrote nothing, and its transform feedback buffer reads back as "no store site stored", so every output kept
+    // its old value and the dispatch looked successful (DeviceVectorIndex scores: all the fresh buffer's zeros, 2026-11-01).
+    const drawErrors = drainGlErrors();
 
     // Unbind TF before readback (WebGL2 spec requirement)
     if (transformFeedback) {
@@ -671,7 +721,17 @@ function dispatchKernel(msg) {
     // finish the GL state below: the error used to skip it, the TF buffer stayed bound, and the NEXT dispatch read this
     // dispatch's records (StoreAddress_OffSlotStore after StoreAddress_OneSiteManyElements).
     let readbackError = null;
-    if (tfBuffer && vNames.length > 0 && outputs && outputs.length > 0) {
+    if (drawErrors.length > 0) {
+        const src = cached.source || '';
+        const bound = bufferParamMap.map(function (b) {
+            const e = bufferRegistry[b.bufferId];
+            const m = src.match(new RegExp('uniform\\s+(?:highp\\s+|mediump\\s+|lowp\\s+)?(\\w*sampler2D)\\s+' + resolveParamPrefix(b.paramIndex) + '\\s*;'));
+            return resolveParamPrefix(b.paramIndex) + ': ' + (m ? m[1] : '?') + ' over ' + (e ? (e.glslType || 'float') + ' ' + e.width + 'x' + e.height : 'no buffer');
+        });
+        readbackError = new Error('WebGL: the kernel draw failed (' + drawErrors.join(', ') + ' over ' + totalVertices + ' vertices); its results were not written. '
+            + 'Bound buffers (shader sampler over texture format): ' + bound.join('; '));
+    }
+    if (!readbackError && tfBuffer && vNames.length > 0 && outputs && outputs.length > 0) {
         // gl.finish() blocks until all submitted GL commands (including TF) complete.
         // Note: ANGLE emits a cosmetic "READ-usage buffer" warning here because it
         // doesn't track gl.finish() as a fence. This warning is harmless — the GPU
