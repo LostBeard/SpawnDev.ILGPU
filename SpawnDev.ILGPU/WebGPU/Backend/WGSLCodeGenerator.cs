@@ -2248,6 +2248,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// <param name="loadVal">The IR load.</param>
         public virtual void GenerateCode(global::ILGPU.IR.Values.Load loadVal)
         {
+            if (TrySpanLoad(loadVal))
+                return;
             var target = Load(loadVal);
             var source = Load(loadVal.Source);
             Declare(target);
@@ -2290,6 +2292,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// <param name="storeVal">The IR store.</param>
         public virtual void GenerateCode(global::ILGPU.IR.Values.Store storeVal)
         {
+            if (TrySpanStore(storeVal))
+                return;
             var address = Load(storeVal.Target);
             var val = Load(storeVal.Value);
 
@@ -2545,8 +2549,79 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// <c>&amp;(*p).field_N</c> (x/y/z on index types).
         /// </summary>
         /// <param name="value">The IR value.</param>
+        // A field address spanning several flattened fields (a nested struct inside a struct element, e.g. `buf[i].Inner`): WGSL
+        // structs are flattened (every leaf a field_N), so there is no pointer to the nested struct. Such an address is kept as
+        // (struct expression, first flattened field, field count); loads assemble the nested value from its fields, stores
+        // scatter it, and a field address inside it offsets into it. Before 5.4.15-local.3 it became `&(*p).field_K` (one
+        // leaf) and the load `let v : struct_N = *v_K;`: invalid WGSL (found by BackendTestBase.VectorAccess's 20-byte struct).
+        protected readonly Dictionary<string, (string Base, int Start, int Span)> _spanFieldAddrs = new();
+
+        /// <summary>
+        /// Handles <paramref name="value"/> when it spans several flattened fields or is a field inside such an address
+        /// (see <see cref="_spanFieldAddrs"/>). Returns false for an ordinary single-field address.
+        /// </summary>
+        protected bool TrySpanFieldAddress(LoadFieldAddress value)
+        {
+            var target = Load(value);
+            var source = Load(value.Source);
+            string baseExpr;
+            int start;
+            if (_spanFieldAddrs.TryGetValue(source.Name, out var parent))
+            {
+                baseExpr = parent.Base;
+                start = parent.Start + value.FieldSpan.Index;
+            }
+            else if (value.FieldSpan.Span > 1 && !IsIndexType(value.Source.Type))
+            {
+                baseExpr = _localAllocaVarNames.Contains(source.Name) ? source.Name : $"(*{source})";
+                start = value.FieldSpan.Index;
+            }
+            else
+                return false;
+            if (value.FieldSpan.Span > 1)
+            {
+                _spanFieldAddrs[target.Name] = (baseExpr, start, value.FieldSpan.Span);
+                return true;
+            }
+            AppendLine($"let {target.Name} = &{baseExpr}.field_{start};");
+            return true;
+        }
+
+        /// <summary>A load through a spanning field address: the nested value built from its flattened fields.</summary>
+        protected bool TrySpanLoad(global::ILGPU.IR.Values.Load loadVal)
+        {
+            var source = Load(loadVal.Source);
+            if (!_spanFieldAddrs.TryGetValue(source.Name, out var span))
+                return false;
+            var target = Load(loadVal);
+            Declare(target);
+            var fields = new System.Text.StringBuilder();
+            for (int k = 0; k < span.Span; k++)
+            {
+                if (k > 0) fields.Append(", ");
+                fields.Append($"{span.Base}.field_{span.Start + k}");
+            }
+            AppendLine($"{target} = {TypeGenerator[loadVal.Type]}({fields});");
+            return true;
+        }
+
+        /// <summary>A store through a spanning field address: the value's fields written to the flattened fields.</summary>
+        protected bool TrySpanStore(global::ILGPU.IR.Values.Store storeVal)
+        {
+            var address = Load(storeVal.Target);
+            if (!_spanFieldAddrs.TryGetValue(address.Name, out var span))
+                return false;
+            var val = Load(storeVal.Value);
+            bool vec4 = TypeGenerator.IsVec4Element(storeVal.Value.Type);
+            for (int k = 0; k < span.Span; k++)
+                AppendLine($"{span.Base}.field_{span.Start + k} = {val}.{(vec4 ? "xyzw"[k].ToString() : "field_" + k)};");
+            return true;
+        }
+
         public virtual void GenerateCode(LoadFieldAddress value)
         {
+            if (TrySpanFieldAddress(value))
+                return;
             var target = Load(value);
             var source = Load(value.Source);
             AppendIndent();

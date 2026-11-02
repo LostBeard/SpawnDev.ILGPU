@@ -613,9 +613,61 @@ namespace ILGPU.Backends.OpenCL
                 return;
             }
 
+            // A global structure of four (two) 32-bit fields at an address aligned to its size: one float4 / int4
+            // (float2 / int2) load, unpacked into the fields (the PTX backend's ld.v4 / ld.v2 from the same analysis).
+            if (TryGetVectorAccess(load.Source, load.Type, out string? loadVector, out int loadCount))
+            {
+                Declare(target);
+                for (int i = 0; i < loadCount; ++i)
+                {
+                    using var statement = BeginStatement(target, new FieldAccess(i));
+                    statement.AppendCommand("(*(global " + loadVector + "*)");
+                    statement.Append(address);
+                    statement.AppendCommand(")." + VectorComponents[i]);
+                }
+                return;
+            }
+
             using var statement2 = BeginStatement(target);
             statement2.AppendCommand(CLInstructions.DereferenceOperation);
             statement2.AppendArgument(address);
+        }
+
+        // vector components in field order
+        private static readonly string[] VectorComponents = { "x", "y", "z", "w" };
+
+        /// <summary>
+        /// True when an access of <paramref name="valueType"/> through <paramref name="pointer"/> can be one vector access: a
+        /// global pointer, a structure of two or four fields of one 32-bit type (float or int, no padding), and an address the
+        /// pointer alignment analysis proves aligned to the structure's size. Never decided by the type alone: an unaligned
+        /// vector access is undefined in OpenCL C (and faults on some devices).
+        /// </summary>
+        private bool TryGetVectorAccess(Value pointer, TypeNode valueType, out string? vectorType, out int count)
+        {
+            vectorType = null;
+            count = 0;
+            if (PointerAlignments.IsEmpty ||
+                pointer.Type is not AddressSpaceType pointerType ||
+                pointerType.AddressSpace != MemoryAddressSpace.Global ||
+                valueType is not StructureType structureType)
+                return false;
+            int n = structureType.NumFields;
+            if (n != 2 && n != 4 || structureType.Size != n * 4)
+                return false;
+            var basic = structureType.Fields[0].BasicValueType;
+            if (basic != BasicValueType.Float32 && basic != BasicValueType.Int32)
+                return false;
+            for (int i = 1; i < n; ++i)
+            {
+                if (structureType.Fields[i].BasicValueType != basic)
+                    return false;
+            }
+            int alignment = PointerAlignments.GetAlignment(pointer, pointerType.ElementType.Alignment);
+            if (alignment < n * 4)
+                return false;
+            vectorType = (basic == BasicValueType.Float32 ? "float" : "int") + n;
+            count = n;
+            return true;
         }
 
         /// <summary cref="IBackendCodeGenerator.GenerateCode(Store)"/>
@@ -728,6 +780,25 @@ namespace ILGPU.Backends.OpenCL
                 statement.AppendArgument(int4StoreLea.Index);
                 statement.AppendCommand(", ");
                 statement.AppendArgument(value);
+                statement.AppendCommand(")");
+                return;
+            }
+
+            // the store counterpart of the vector load: one float4 / int4 (float2 / int2) store built from the fields
+            if (TryGetVectorAccess(store.Target, store.Value.Type, out string? storeVector, out int storeCount))
+            {
+                using var statement = BeginStatement(CLInstructions.DereferenceOperation);
+                statement.AppendCommand("(global " + storeVector + "*)");
+                statement.Append(address);
+                statement.AppendCommand(CLInstructions.AssignmentOperation);
+                statement.AppendCommand("(" + storeVector + ")(");
+                for (int i = 0; i < storeCount; ++i)
+                {
+                    if (i > 0)
+                        statement.AppendCommand(",");
+                    statement.Append(value);
+                    statement.AppendField(new FieldAccess(i));
+                }
                 statement.AppendCommand(")");
                 return;
             }

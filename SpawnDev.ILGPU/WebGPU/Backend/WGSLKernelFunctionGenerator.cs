@@ -6784,6 +6784,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         public override void GenerateCode(global::ILGPU.IR.Values.Load loadVal)
         {
+            if (TrySpanLoad(loadVal))
+                return;
             var target = Load(loadVal);
             var source = Load(loadVal.Source);
 
@@ -7055,6 +7057,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         public override void GenerateCode(global::ILGPU.IR.Values.Store storeVal)
         {
+            if (TrySpanStore(storeVal))
+                return;
             var address = Load(storeVal.Target);
             var val = Load(storeVal.Value);
 

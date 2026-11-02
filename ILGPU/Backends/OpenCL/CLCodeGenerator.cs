@@ -40,9 +40,11 @@ namespace ILGPU.Backends.OpenCL
                 CLTypeGenerator typeGenerator,
                 SeparateViewEntryPoint entryPoint,
                 in AllocaKindInformation sharedAllocations,
-                in AllocaKindInformation dynamicSharedAllocations)
+                in AllocaKindInformation dynamicSharedAllocations,
+                PointerAlignments.AlignmentInfo pointerAlignments)
             {
                 Backend = backend;
+                PointerAlignments = pointerAlignments;
                 TypeGenerator = typeGenerator;
                 EntryPoint = entryPoint;
                 KernelTypeGenerator = new CLKernelTypeGenerator(
@@ -77,6 +79,12 @@ namespace ILGPU.Backends.OpenCL
             /// Returns all dynamic shared allocations.
             /// </summary>
             public AllocaKindInformation DynamicSharedAllocations { get; }
+
+            /// <summary>
+            /// Returns the pointer alignment information of the kernel (empty below O1): global loads and stores of four (two)
+            /// 32-bit fields whose address is aligned to their size are emitted as one float4 / int4 (float2 / int2) access.
+            /// </summary>
+            public PointerAlignments.AlignmentInfo PointerAlignments { get; }
 
             /// <summary>
             /// Returns the current kernel-type generator.
@@ -235,6 +243,7 @@ namespace ILGPU.Backends.OpenCL
             : base(args.TypeGenerator)
         {
             Backend = args.Backend;
+            PointerAlignments = args.PointerAlignments;
             Method = method;
             EntryPoint = args.EntryPoint;
             ImplementationProvider = Backend.IntrinsicProvider;
@@ -281,6 +290,11 @@ namespace ILGPU.Backends.OpenCL
         /// Returns the associated string builder.
         /// </summary>
         public StringBuilder Builder { get; private set; }
+
+        /// <summary>
+        /// Returns the pointer alignment information (see <see cref="GeneratorArgs.PointerAlignments"/>).
+        /// </summary>
+        public PointerAlignments.AlignmentInfo PointerAlignments { get; }
 
         /// <summary>
         /// Returns the associated string builder.

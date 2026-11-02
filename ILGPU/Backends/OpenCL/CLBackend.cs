@@ -31,6 +31,12 @@ namespace ILGPU.Backends.OpenCL
             CLCodeGenerator,
             StringBuilder>
     {
+        /// <summary>
+        /// The global memory alignment the pointer alignment analysis assumes for global views (bytes): the size of the
+        /// widest vector access the code generator emits (float4 / int4).
+        /// </summary>
+        public const int GlobalMemoryAlignment = 16;
+
         #region Static
 
         /// <summary>
@@ -388,12 +394,22 @@ namespace ILGPU.Backends.OpenCL
 
             var typeGenerator = new CLTypeGenerator(Context.TypeContext, Capabilities);
 
+            // Pointer alignment information (O1 and above, as the PTX backend): lets Load / Store emit float4 / int4 accesses
+            // where the address is provably aligned. A view's element index is in whole elements from its buffer's start
+            // (ArrayView.Cast keeps whole elements), and OpenCL buffers start at CL_DEVICE_MEM_BASE_ADDR_ALIGN (at least the
+            // largest built-in type: 128 bytes), so global views are assumed GlobalMemoryAlignment-aligned, the 16 bytes a
+            // vector access needs. Shared / private arrays are not declared with a vector alignment: only global accesses use it.
+            var alignments = Context.Properties.OptimizationLevel >= OptimizationLevel.O1
+                ? PointerAlignments.Apply(backendContext.KernelMethod, GlobalMemoryAlignment)
+                : PointerAlignments.AlignmentInfo.Empty;
+
             data = new CLCodeGenerator.GeneratorArgs(
                 this,
                 typeGenerator,
                 entryPoint.AsNotNullCast<SeparateViewEntryPoint>(),
                 backendContext.SharedAllocations,
-                backendContext.DynamicSharedAllocations);
+                backendContext.DynamicSharedAllocations,
+                alignments);
             return builder;
         }
 

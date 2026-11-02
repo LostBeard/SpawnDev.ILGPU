@@ -1275,27 +1275,36 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         continue;
                     if (viewType.ElementType is not global::ILGPU.IR.Types.StructureType elemStruct)
                         continue;
-                    if (IsFourFloat32Struct(elemStruct, typeGenerator))
-                        typeGenerator.ForceVec4Element(elemStruct);
+                    if (TryGetFourLaneScalar(elemStruct, typeGenerator, out string scalar))
+                        typeGenerator.ForceVec4Element(elemStruct, scalar);
                 }
             }
         }
 
         /// <summary>
-        /// True if the struct is exactly a 16-byte, 4-lane all-f32 value (its flattened leaf
-        /// fields are four Float32s) - the WGSL <c>vec4&lt;f32&gt;</c> layout. Classifies fields
-        /// through the type generator (matching <c>ComputePackedLayout</c>) so a struct built from
-        /// nested 2×f32 sub-structs also qualifies.
+        /// True if the struct is exactly a 16-byte, 4-lane value of one 32-bit scalar (its flattened
+        /// leaf fields are four f32, four i32 or four u32): the WGSL <c>vec4&lt;f32|i32|u32&gt;</c>
+        /// layout, <paramref name="scalar"/> its lane type. Classifies fields through the type
+        /// generator (matching <c>ComputePackedLayout</c>) so a struct built from nested 2-lane
+        /// sub-structs also qualifies. i32 / u32 since 5.4.15-local.3: SpawnDev.ILGPU.ML's Q4_K
+        /// GEMV reads its weights as a 4×i32 struct through AsAligned16 (Data 2026-11-02: WebGPU
+        /// gained 1% where CUDA gained 3x, the weight loads were four 32-bit loads).
         /// </summary>
-        private static bool IsFourFloat32Struct(
+        private static bool TryGetFourLaneScalar(
             global::ILGPU.IR.Types.StructureType structType,
-            WGSLTypeGenerator typeGenerator)
+            WGSLTypeGenerator typeGenerator,
+            out string scalar)
         {
+            scalar = "";
             if (structType.NumFields != 4)
                 return false;
-            for (int i = 0; i < structType.NumFields; i++)
-                if (typeGenerator[structType.Fields[i]] != "f32")
+            string first = typeGenerator[structType.Fields[0]];
+            if (first is not ("f32" or "i32" or "u32"))
+                return false;
+            for (int i = 1; i < structType.NumFields; i++)
+                if (typeGenerator[structType.Fields[i]] != first)
                     return false;
+            scalar = first;
             return true;
         }
 

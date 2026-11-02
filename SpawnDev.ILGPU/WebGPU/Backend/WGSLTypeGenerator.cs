@@ -192,13 +192,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// run - see <see cref="WebGPUBackend"/>'s AsAligned scan in CreateKernelBuilder) so the
         /// mapping is consistent across binding, element load, and struct construction.
         /// </summary>
-        public void ForceVec4Element(StructureType structType)
+        public void ForceVec4Element(StructureType structType, string scalar = "f32")
         {
             readerWriterLock.EnterWriteLock();
             try
             {
                 vec4Structs.Add(structType);
-                mapping[structType] = "vec4<f32>";
+                mapping[structType] = "vec4<" + scalar + ">";
             }
             finally
             {

@@ -721,6 +721,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         public override void GenerateCode(LoadFieldAddress value)
         {
+            if (TrySpanFieldAddress(value))
+                return;
             var target = Load(value);
             var source = Load(value.Source);
 
@@ -766,6 +768,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         public override void GenerateCode(global::ILGPU.IR.Values.Load loadVal)
         {
+            if (TrySpanLoad(loadVal))
+                return;
             // Case (1): Load(viewParam) returns a pointer alias.
             if (loadVal.Source.Resolve() is Parameter param
                 && param.Type is ViewType)
@@ -907,6 +911,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         public override void GenerateCode(global::ILGPU.IR.Values.Store storeVal)
         {
+            if (TrySpanStore(storeVal))
+                return;
             var address = Load(storeVal.Target);
 
             // Cross-block field address: substitute the dereffed expression on the

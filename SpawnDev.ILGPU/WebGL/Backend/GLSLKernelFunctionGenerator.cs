@@ -3970,6 +3970,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             {
                 isLoadedStructFromBuffer = true;
             }
+            // A value loaded through a FIELD address (a nested struct inside a struct element, `buf[i].Inner`) is element data,
+            // never the view parameter. Before 5.4.15-local.3 its fields resolved back to the view and read as the buffer alias,
+            // 0 and u_paramN_length (BackendTestBase.VectorAccess's 20-byte struct: invalid GLSL).
+            if (value.ObjectValue.Resolve() is global::ILGPU.IR.Values.Load fieldLoad
+                && fieldLoad.Source.Resolve() is LoadFieldAddress)
+            {
+                isLoadedStructFromBuffer = true;
+            }
             if (!isLoadedStructFromBuffer &&
                 ResolveToParameter(value.ObjectValue) is global::ILGPU.IR.Values.Parameter param)
             {
