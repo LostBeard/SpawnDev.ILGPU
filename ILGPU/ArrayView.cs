@@ -614,11 +614,25 @@ namespace ILGPU
         public readonly ArrayView<TOther> Cast<TOther>()
             where TOther : unmanaged
         {
-            var castContext = StrideExtensions.CreateCastContext(
-                ElementSize,
-                ArrayView<TOther>.ElementSize);
-            long newExtent = castContext.ComputeNewExtent(Extent);
-            long newIndex = castContext.ComputeNewExtent(Index);
+            // Computed in BITS, not ElementSize: a packed sub-byte view (QInt4, Float4E2M1) has ElementSize 1 but 4 bits per element,
+            // and the old Index * ElementSize / NewElementSize gave a packed view of N nibbles a byte view of N bytes (twice the data,
+            // past the buffer) starting at the wrong byte. For whole-byte types this is the same arithmetic as before.
+            long startBits = Index * (long)BitsPerElement;
+            int newBits = ArrayView<TOther>.BitsPerElement;
+            // A view whose first element does not start on a TOther boundary has no exact TOther view: integer division used to
+            // round the start DOWN silently, so float view at element 1 .Cast<long>() began at float 0 and every read was shifted
+            // by 4 bytes. On a device the same cast is a misaligned pointer. Fail here instead. In a kernel this method is
+            // replaced by the CastView intrinsic: the check runs on the host (and on the CPU backend, which runs the IL itself).
+            if (startBits % newBits != 0)
+            {
+                throw new ArgumentException(
+                    $"Cannot cast a {typeof(T).Name} view starting at element {Index} to {typeof(TOther).Name}: its first " +
+                    $"element is at bit {startBits}, which is not a multiple of the {newBits}-bit {typeof(TOther).Name}. " +
+                    $"Take the SubView after the Cast instead (cast the whole view, then sub-view in {typeof(TOther).Name} units).");
+            }
+            long newIndex = startBits / newBits;
+            // A trailing partial TOther is dropped (as before): the view covers whole TOther elements only.
+            long newExtent = Extent * BitsPerElement / newBits;
             return new ArrayView<TOther>(Buffer, newIndex, newExtent);
         }
 

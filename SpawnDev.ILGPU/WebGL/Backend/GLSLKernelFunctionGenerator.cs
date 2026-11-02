@@ -3326,8 +3326,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 bool emuSamplerIsInt = _bufferGlslTypes.TryGetValue(emulInfo.ParamIndex, out var emuSamplerType)
                     && (emuSamplerType == "int" || emuSamplerType == "uint");
                 string emuBn = GetParamBindingName(emulInfo.ParamIndex);
-                string emuFetchLo = $"texelFetch({emuBn}, ivec2(({baseIdxVar} + {emuBn}_offset) % {emuBn}_tileW, ({baseIdxVar} + {emuBn}_offset) / {emuBn}_tileW), 0).r";
-                string emuFetchHi = $"texelFetch({emuBn}, ivec2(({baseIdxVar} + 1 + {emuBn}_offset) % {emuBn}_tileW, ({baseIdxVar} + 1 + {emuBn}_offset) / {emuBn}_tileW), 0).r";
+                // u_paramN_offset is the view's first ELEMENT (64-bit), and each element is TWO texels, so the offset is scaled by 2
+                // like the index (base_idx = index * 2). It was added unscaled, so a 64-bit sub-view at element k read from element
+                // k/2, half a long early for odd k: a long view cast from an int buffer at ints 2..5 read ints 1..2 (ViewCast_*,
+                // 2026-11-02). The store side was right: glWorker.js places stores at writeByteOffset = Index * ElementSize.
+                // base_idx itself stays view-relative because the store path derives the element index from it.
+                string emuFetchLo = $"texelFetch({emuBn}, ivec2(({baseIdxVar} + {emuBn}_offset * 2) % {emuBn}_tileW, ({baseIdxVar} + {emuBn}_offset * 2) / {emuBn}_tileW), 0).r";
+                string emuFetchHi = $"texelFetch({emuBn}, ivec2(({baseIdxVar} + 1 + {emuBn}_offset * 2) % {emuBn}_tileW, ({baseIdxVar} + 1 + {emuBn}_offset * 2) / {emuBn}_tileW), 0).r";
                 // Integer samplers already return int/uint; float samplers need floatBitsToUint
                 string emuValLo = emuSamplerIsInt ? $"uint({emuFetchLo})" : $"floatBitsToUint({emuFetchLo})";
                 string emuValHi = emuSamplerIsInt ? $"uint({emuFetchHi})" : $"floatBitsToUint({emuFetchHi})";
