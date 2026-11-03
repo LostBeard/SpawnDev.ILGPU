@@ -2455,6 +2455,22 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public override void GenerateCode(SubViewValue value) =>
             EmitElementAddress(value, value.Source, value.Offset);
 
+        /// <summary>Values whose local holds a packed 4-bit NIBBLE address (2*byte + index), not a byte address.</summary>
+        private readonly HashSet<Value> _packedNibbleAddresses = new();
+
+        /// <summary>Whether <paramref name="source"/> (through address-space casts) is a nibble address made by
+        /// <see cref="EmitElementAddress"/> for a packed view, rather than a view's byte base.</summary>
+        private bool IsPackedNibbleAddress(Value source)
+        {
+            var cur = source.Resolve();
+            for (int depth = 0; cur != null && depth < 8; depth++)
+            {
+                if (_packedNibbleAddresses.Contains(cur)) return true;
+                cur = cur is AddressSpaceCast asc ? asc.Value.Resolve() : null;
+            }
+            return false;
+        }
+
         private void EmitElementAddress(Value value, Value sourceValue, Value offsetValue)
         {
             // Packed 4-bit (QInt4): the buffer is 2 nibbles/byte. The DIRECT-param path below encodes a
@@ -2564,18 +2580,27 @@ namespace SpawnDev.ILGPU.Wasm.Backend
 
             // Packed 4-bit (QInt4): emit the NIBBLE ADDRESS = 2*source + index. The Load/Store recover
             // byte = addr>>1 and nibble parity = addr&1 (2*source is even, so the low bit is index&1).
+            // A source that is ITSELF a nibble address - an in-kernel SubView or element address of a packed
+            // view (`view.SubView(off, n)[i]`) - only adds the index: doubling it again gave 2*(2*b + off) + i,
+            // so element i of a sub-view at off read element 2*off + i (found 2026-11-02 by PackedQUInt4_InKernelSubView_ReadsItsOwnElements: "got 7,
+            // expected 13 (element 524 holds 7)" for a sub-view at 262).
             if (isPacked4View)
             {
+                bool sourceIsNibbleAddress = IsPackedNibbleAddress(source);
                 EmitGetLocal(source);
                 if (GetWasmTypeFromIR(source.Type) == WasmOpCodes.I64)
                     Code.Add(WasmOpCodes.I32WrapI64);
-                WasmModuleBuilder.EmitI32Const(Code, 2);
-                Code.Add(WasmOpCodes.I32Mul);          // 2*source
+                if (!sourceIsNibbleAddress)
+                {
+                    WasmModuleBuilder.EmitI32Const(Code, 2);
+                    Code.Add(WasmOpCodes.I32Mul);      // 2*source (a byte address)
+                }
                 EmitGetLocal(index);
                 if (GetWasmTypeFromIR(index.Type) == WasmOpCodes.I64)
                     Code.Add(WasmOpCodes.I32WrapI64);
-                Code.Add(WasmOpCodes.I32Add);          // 2*source + index
+                Code.Add(WasmOpCodes.I32Add);          // nibble address + index
                 WasmModuleBuilder.EmitLocalSet(Code, target);
+                _packedNibbleAddresses.Add(value);
                 return;
             }
 

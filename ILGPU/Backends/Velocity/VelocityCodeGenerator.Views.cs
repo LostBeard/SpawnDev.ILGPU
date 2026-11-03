@@ -62,6 +62,28 @@ namespace ILGPU.Backends.Velocity
         public void GenerateCode(AddressSpaceCast value) =>
             AliasOrStore(value, value.Value);
 
+        /// <summary>
+        /// Whether <paramref name="source"/> (through pointer and address-space casts) is the element address of
+        /// a packed 4-bit view, which counts nibbles, rather than a view's byte base.
+        /// </summary>
+        private static bool IsPackedNibbleAddress(Value source)
+        {
+            var cur = source.Resolve();
+            for (int depth = 0; cur != null && depth < 8; depth++)
+            {
+                if (cur is LoadElementAddress lea)
+                    return lea.Source.Type is AddressSpaceType ast
+                        && ast.ElementType.BasicValueType.IsPackedNibble();
+                cur = cur switch
+                {
+                    AddressSpaceCast asc => asc.Value.Resolve(),
+                    PointerCast pc => pc.Value.Resolve(),
+                    _ => null,
+                };
+            }
+            return false;
+        }
+
         /// <inheritdoc />
         public void GenerateCode(LoadElementAddress value)
         {
@@ -69,7 +91,24 @@ namespace ILGPU.Backends.Velocity
             if (sourceType.ElementType.BasicValueType.IsPackedNibble())
             {
                 // Packed 4bit elements (two per byte): the address counts nibbles, the
-                // loads and stores of these types split it into byte and nibble
+                // loads and stores of these types split it into byte and nibble.
+                // A source that is ITSELF a packed element address (an in-kernel SubView:
+                // `view.SubView(off, n)[i]`) already counts nibbles and only adds the offset;
+                // doubling it again read element 2*off + i (found 2026-11-02 by
+                // PackedQUInt4_InKernelSubView_ReadsItsOwnElements).
+                if (IsPackedNibbleAddress(value.Source))
+                {
+                    Load(value.Offset);
+                    if (value.Is32BitAccess)
+                        Specializer.Convert32To64(Emitter, VelocityWarpOperationMode.I);
+                    Load(value.Source);
+                    Specializer.BinaryOperation64(
+                        Emitter,
+                        BinaryArithmeticKind.Add,
+                        VelocityWarpOperationMode.U);
+                    Store(value);
+                    return;
+                }
                 Load(value.Source);
                 Emitter.EmitConstant(2L);
                 Specializer.ConvertScalarTo64(Emitter, VelocityWarpOperationMode.U);

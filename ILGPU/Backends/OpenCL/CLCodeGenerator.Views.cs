@@ -89,12 +89,20 @@ namespace ILGPU.Backends.OpenCL
                 && !TypeGenerator.Capabilities.Float16Native)
             {
                 var target = AllocatePointerType(ptrType);
-                // Still emit the &source[idx] for the variable binding (won't be dereferenced)
+                // The element's ADDRESS, computed in half (2-byte) units: (float*)((half*)source + idx). The pointer
+                // variable is typed `float*` (the emulated element computes in float), so `&source[idx]` stepped 4 bytes
+                // per element. A Load / Store of THIS address uses the tracked (source, idx) below and was right, but an
+                // address that becomes the BASE of another one - an in-kernel SubView (`kc.SubView(off, n)[i]`) - carried
+                // the doubled offset: element i of a sub-view at off was read from 2 * off + i (SpawnDev.ILGPU.ML's
+                // batch decoder, F16 KV cache on OpenCL: NaN logits and out-of-range reads, 2026-11-02).
                 using (var statement = BeginStatement(target))
                 {
-                    statement.AppendCommand(CLInstructions.AddressOfOperation);
+                    statement.AppendCast(ptrType);
+                    statement.AppendCommand("(" + HalfPointerCast(ptrType));
                     statement.Append(source);
-                    statement.AppendIndexer(elementIndex);
+                    statement.AppendCommand(" + ");
+                    statement.Append(elementIndex);
+                    statement.AppendCommand(")");
                 }
                 Bind(value, target);
                 // Track for vload_half/vstore_half: base pointer + element index
@@ -147,11 +155,17 @@ namespace ILGPU.Backends.OpenCL
                 && ptElemFp4.BasicValueType == BasicValueType.Float4E2M1)
             {
                 var targetFp4 = AllocatePointerType(ptrTypeFp4);
+                // The element's address is the BYTE holding its nibble, idx >> 1 (two elements per uchar). `&source[idx]`
+                // gave byte idx, which is wrong wherever this address is used directly or as the base of another one (an
+                // in-kernel SubView); the tracked (source, idx) below keeps the nibble for the Load / Store of this address.
+                // A sub-view must start on a byte (an even element), as ArrayView.SubView requires on the host.
                 using (var statement = BeginStatement(targetFp4))
                 {
                     statement.AppendCommand(CLInstructions.AddressOfOperation);
                     statement.Append(source);
-                    statement.AppendIndexer(elementIndex);
+                    statement.AppendCommand("[(");
+                    statement.Append(elementIndex);
+                    statement.AppendCommand(") >> 1]");
                 }
                 Bind(value, targetFp4);
                 _fp4EmulatedLEAs[targetFp4.ToString()] = (source, elementIndex);
@@ -166,11 +180,17 @@ namespace ILGPU.Backends.OpenCL
                 && ptElemQInt4.BasicValueType == BasicValueType.QInt4)
             {
                 var targetInt4 = AllocatePointerType(ptrTypeInt4);
+                // The element's address is the BYTE holding its nibble, idx >> 1 (two elements per uchar). `&source[idx]`
+                // gave byte idx, which is wrong wherever this address is used directly or as the base of another one (an
+                // in-kernel SubView); the tracked (source, idx) below keeps the nibble for the Load / Store of this address.
+                // A sub-view must start on a byte (an even element), as ArrayView.SubView requires on the host.
                 using (var statement = BeginStatement(targetInt4))
                 {
                     statement.AppendCommand(CLInstructions.AddressOfOperation);
                     statement.Append(source);
-                    statement.AppendIndexer(elementIndex);
+                    statement.AppendCommand("[(");
+                    statement.Append(elementIndex);
+                    statement.AppendCommand(") >> 1]");
                 }
                 Bind(value, targetInt4);
                 // BasicValueType.QInt4 does not carry signedness (QInt4 and QUInt4 both lower to it),
