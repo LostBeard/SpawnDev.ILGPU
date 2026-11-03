@@ -15,6 +15,7 @@ namespace SpawnDev.ILGPU.WebGL.Rendering
     {
         private readonly WebGLAccelerator _accelerator;
         private CanvasRenderingContext2D? _displayCtx;
+        private DisplayCanvasSize _displaySize;
         private bool _disposed;
 
         /// <summary>Creates a renderer that presents buffers of <paramref name="accelerator"/>.</summary>
@@ -31,6 +32,7 @@ namespace SpawnDev.ILGPU.WebGL.Rendering
         {
             _displayCtx?.Dispose();
             _displayCtx = canvas.GetContext<CanvasRenderingContext2D>("2d");
+            _displaySize.Attach(_displayCtx);
         }
 
         /// <inheritdoc/>
@@ -42,6 +44,7 @@ namespace SpawnDev.ILGPU.WebGL.Rendering
             var memBuf = _accelerator.GetWebGLMemoryBuffer(buffer);
             if (memBuf == null) return;
             var ctx = _displayCtx;
+            _displaySize.Ensure(width, height);
             await _accelerator.BlitAndDrawAsync(memBuf, width, height, bitmap => ctx.DrawImage(bitmap));
         }
 
@@ -54,6 +57,7 @@ namespace SpawnDev.ILGPU.WebGL.Rendering
             var memBuf = _accelerator.GetWebGLMemoryBuffer(buffer);
             if (memBuf == null) return;
             var ctx = _displayCtx;
+            _displaySize.Ensure(width, height);
             await _accelerator.BlitAndDrawAsync(memBuf, width, height,
                 bitmap => ctx.DrawImage(bitmap));
         }
@@ -65,6 +69,7 @@ namespace SpawnDev.ILGPU.WebGL.Rendering
             _disposed = true;
             _displayCtx?.Dispose();
             _displayCtx = null;
+            _displaySize.Detach();
         }
     }
 }

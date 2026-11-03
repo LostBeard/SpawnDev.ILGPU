@@ -19,6 +19,7 @@ namespace SpawnDev.ILGPU.WebGPU.Rendering
 
         private HTMLCanvasElement? _internalCanvas;
         private CanvasRenderingContext2D? _displayCtx;
+        private DisplayCanvasSize _displaySize;
         private GPUCanvasContext? _canvasCtx;
         private GPURenderPipeline? _pipeline;
         private GPUBindGroupLayout? _bindGroupLayout;
@@ -84,6 +85,7 @@ fn fs_main(@builtin(position) pos : vec4<f32>) -> @location(0) vec4<f32> {
 
             // Display canvas always uses 2d context — no context-type conflict when switching backends.
             _displayCtx = canvas.GetContext<CanvasRenderingContext2D>("2d");
+            _displaySize.Attach(_displayCtx);
 
             using var navigator = SpawnJSRuntime.Instance.Get<Navigator>("navigator");
             using var gpu = navigator.Gpu;
@@ -258,7 +260,8 @@ fn fs_main(@builtin(position) pos : vec4<f32>) -> @location(0) vec4<f32> {
             _submitArray[0] = commandBuffer;
             Queue.Submit(_submitArray);
 
-            // Blit internal WebGPU canvas to the display canvas via 2d context.
+            // Blit internal WebGPU canvas to the display canvas via 2d context, at the frame's size.
+            _displaySize.Ensure((int)width, (int)height);
             _displayCtx.DrawImage(_internalCanvas);
 
             return Task.CompletedTask;
@@ -272,6 +275,7 @@ fn fs_main(@builtin(position) pos : vec4<f32>) -> @location(0) vec4<f32> {
             _canvasCtx?.Unconfigure(); _canvasCtx?.Dispose(); _canvasCtx = null;
             _internalCanvas?.Dispose(); _internalCanvas = null;
             _displayCtx?.Dispose(); _displayCtx = null;
+            _displaySize.Detach();
             _lastWidth = 0; _lastHeight = 0;
         }
 

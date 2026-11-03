@@ -230,6 +230,8 @@ renderer.Dispose();
 
 `AttachCanvas` can be called multiple times (e.g., when the Blazor component re-renders and the element changes). The previous context is disposed and replaced. The renderer keeps its own reference to the context, so disposing your `HTMLCanvasElement` wrapper after `AttachCanvas` (the `using var` above) is fine.
 
+`PresentAsync` sets the canvas's drawing-buffer size (its `width` / `height`) to the frame's size whenever the frame size changes (5.4.15+), so the whole frame is drawn whatever size the canvas started at. CSS still decides how big it is displayed. Before 5.4.15 the renderers left the canvas at its size, and a frame larger than an unsized canvas (300x150 by default) showed only its top-left corner.
+
 > With the [SpawnDev.SpawnJS.Blazor](https://github.com/LostBeard/SpawnDev.SpawnJS) package you can also capture the element with `@ref`: declare `ElementRef<HTMLCanvasElement> _canvas;`, put `@ref="_canvas"` on the `<canvas>`, and call `using var canvas = _canvas.Get();` after the first render.
 
 ---

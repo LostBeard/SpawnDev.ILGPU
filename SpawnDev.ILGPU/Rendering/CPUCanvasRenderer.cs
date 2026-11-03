@@ -14,6 +14,7 @@ namespace SpawnDev.ILGPU.Rendering
         private readonly Accelerator _accelerator;
 
         private CanvasRenderingContext2D? _ctx;
+        private DisplayCanvasSize _displaySize;
         private ImageData? _imageData;
         private Uint8ClampedArray? _destPixels;
         private int _cachedWidth;
@@ -37,6 +38,7 @@ namespace SpawnDev.ILGPU.Rendering
         {
             DisposeRenderingResources();
             _ctx = canvas.GetContext<CanvasRenderingContext2D>("2d");
+            _displaySize.Attach(_ctx);
         }
 
         /// <summary>
@@ -101,6 +103,7 @@ namespace SpawnDev.ILGPU.Rendering
 
         private void EnsureImageData(int width, int height)
         {
+            _displaySize.Ensure(width, height);
             if (_imageData != null && _cachedWidth == width && _cachedHeight == height) return;
             _destPixels?.Dispose();
             _imageData?.Dispose();
@@ -115,6 +118,7 @@ namespace SpawnDev.ILGPU.Rendering
             _destPixels?.Dispose(); _destPixels = null;
             _imageData?.Dispose(); _imageData = null;
             _ctx?.Dispose(); _ctx = null;
+            _displaySize.Detach();
             _cachedWidth = 0; _cachedHeight = 0;
         }
 
