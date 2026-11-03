@@ -4,7 +4,7 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.4.15-local.5</Version>
+		<Version>5.4.15</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
 		<PackageReleaseNotes>v5.4.15 (forks 2.4.13, unchanged) - FIXED (WebGL): a buffer first written by a device copy kept a float texture and an int kernel read it as nothing; GL errors throw instead of zeros. FIXED (WebGPU): plain loads/stores of an atomic view field (ArrayView1D) compile; an invalid shader fails the readback instead of returning the old buffer. FIXED (WebGL): Atomic.Add the emulation cannot do throws UnsupportedKernelFeatureException instead of a wrong answer. Full history: CHANGELOG.md</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
@@ -68,8 +68,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.4.14-local.3" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.4.14-local.3" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.4.14" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.4.14" />
 	</ItemGroup>
 
 	<ItemGroup>
