@@ -328,9 +328,28 @@ namespace ILGPU.Frontend.Intrinsic
             {
                 case nameof(Unsafe.As):
                     return ConvertUnsafeAs(ref context);
+                case nameof(Unsafe.AsPointer):
+                    return ConvertUnsafeAsPointer(ref context);
             }
             throw context.Location.GetNotSupportedException(
                 ErrorMessages.NotSupportedIntrinsic, context.Method.Name);
+        }
+
+        /// <summary>
+        /// <c>Unsafe.AsPointer(ref T)</c>: the address the reference holds, as a 64-bit integer (a <see cref="PointerAsIntCast"/>). Use it as
+        /// <c>(ulong)Unsafe.AsPointer(ref x)</c>. On CUDA it is the pointer's own register: for an element of a <c>SharedMemory</c> allocation, a
+        /// shared-state-space address, the operand inline PTX that addresses shared memory takes (<c>ldmatrix</c>, <c>cp.async</c>'s destination,
+        /// <c>ld.shared</c>); for a global view element, the view's (global) address. Added 2026-11-05 for the tensor-core GEMMs. Other backends
+        /// have no flat addresses to hand out: there the value is backend-defined and must not be used.
+        /// </summary>
+        /// <param name="context">The current invocation context.</param>
+        private static Value ConvertUnsafeAsPointer(ref InvocationContext context)
+        {
+            var location = context.Location;
+            var source = context[0];
+            if (!source.Type.IsPointerType)
+                throw location.GetNotSupportedException(ErrorMessages.NotSupportedIntrinsic, context.Method.Name);
+            return context.Builder.CreatePointerAsIntCast(location, source, BasicValueType.Int64);
         }
 
         /// <summary>

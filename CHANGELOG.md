@@ -1,6 +1,16 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.16-local.1 (forks 2.4.15-local.1) - 2026-11-05 (local feed) - Unsafe.AsPointer in kernels (inline PTX can address shared memory)
+
+- **NEW (every backend's frontend; meaningful on CUDA; forks): `(ulong)Unsafe.AsPointer(ref x)` inside a kernel** gives the address the
+  reference holds as an integer (a `PointerAsIntCast`). On CUDA a `SharedMemory` allocation's pointer is a shared-state-space address, so
+  this is the operand inline PTX needs to ADDRESS memory: `ldmatrix`, `cp.async`'s destination, `ld.shared`. `CudaAsm` could not express it
+  before (its ref-parameter mode loads the value, not the address), which kept SpawnDev.ILGPU.ML's tensor-core GEMMs on scalar shared loads
+  and register-staged copies. Other backends have no flat addresses to hand out; there the value is backend-defined and must not be used.
+  `CudaAsm_SharedAddress_FromAsPointer` (CUDA): `ld.shared` through the address over 2 groups, and `ldmatrix.x1`'s fragment layout lane by
+  lane (sm_75+). Found by Tuvok tuning SpawnDev.ILGPU.ML's LoRA training GEMMs (2026-11-05).
+
 ## 5.4.15 (forks 2.4.14) - 2026-11-03 - in-kernel sub-views of emulated Half (OpenCL) and packed 4-bit views (OpenCL, Velocity, Wasm) start at the right element; ArrayView.Cast throws on a misaligned start and counts bits for packed views; WebGL: 64-bit sub-views at a nonzero element; ICanvasRenderer sizes the canvas to the frame; OpenCL: aligned 16 / 8-byte struct loads and stores are vector accesses; WebGPU: AsAligned16 int4 / uint4 views load as vec4; a nested struct field of a struct element loads and stores on WebGPU and WebGL; WebGPU: plain loads and stores of an atomic view field compile; an invalid shader fails the readback; WebGL: Atomic.Add it cannot emulate throws, a buffer first written by a device copy reads as its real type, GL errors throw
 
 - Release sweep (RTX 4070, Chrome 156, all lanes, code = 5.4.15): 7,700 test cases, 7,125 passed, 575 skipped, 0 failed (46m07s; 5.4.14 was 7,032/0/568 in 48m00s). Against the 5.4.12 gate no test is gone; against the 5.4.15-local.5 sweep nothing changed outcome and the 9 new cases are CanvasRenderer_SizesTheCanvasToTheFrame on 9 lanes. Real-hardware check of the consumer stack: SpawnDev.AI.Server 1.4.0-local.18 on 5.4.15-local.5 passed Vertex's GPU category on an RTX 2060 (sm_75), 77/0.
