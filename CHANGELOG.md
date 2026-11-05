@@ -1,7 +1,7 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.16-local.1 (forks 2.4.15-local.1) - 2026-11-05 (local feed) - Unsafe.AsPointer in kernels (inline PTX can address shared memory)
+## 5.4.16 (forks 2.4.15) - 2026-11-05 - Unsafe.AsPointer in kernels (inline PTX can address shared memory)
 
 - **NEW (every backend's frontend; meaningful on CUDA; forks): `(ulong)Unsafe.AsPointer(ref x)` inside a kernel** gives the address the
   reference holds as an integer (a `PointerAsIntCast`). On CUDA a `SharedMemory` allocation's pointer is a shared-state-space address, so
@@ -10,6 +10,11 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   and register-staged copies. Other backends have no flat addresses to hand out; there the value is backend-defined and must not be used.
   `CudaAsm_SharedAddress_FromAsPointer` (CUDA): `ld.shared` through the address over 2 groups, and `ldmatrix.x1`'s fragment layout lane by
   lane (sm_75+). Found by Tuvok tuning SpawnDev.ILGPU.ML's LoRA training GEMMs (2026-11-05).
+- SpawnDev.SpawnJS 3.0.7 -> 3.0.8 (adds DisplayMediaStreamOptions.WindowAudio; no change ILGPU uses).
+- Release sweep (RTX 4070, Chrome 156, all lanes, code = 5.4.16): 7,709 test cases, 7,126 passed, 583 skipped, 0 failed. Against the
+  5.4.15 sweep no test is gone and nothing changed outcome; the 9 new cases are CudaAsm_SharedAddress_FromAsPointer on 9 lanes (runs on
+  CUDA). The first full run's browser lanes never started (Chrome ERR_CACHE_READ_FAILURE on the `_framework` .wasm files from the
+  persistent PMT profile's HTTP cache); its desktop lanes stand, and the browser lanes and DefaultTests were rerun after clearing that cache.
 
 ## 5.4.15 (forks 2.4.14) - 2026-11-03 - in-kernel sub-views of emulated Half (OpenCL) and packed 4-bit views (OpenCL, Velocity, Wasm) start at the right element; ArrayView.Cast throws on a misaligned start and counts bits for packed views; WebGL: 64-bit sub-views at a nonzero element; ICanvasRenderer sizes the canvas to the frame; OpenCL: aligned 16 / 8-byte struct loads and stores are vector accesses; WebGPU: AsAligned16 int4 / uint4 views load as vec4; a nested struct field of a struct element loads and stores on WebGPU and WebGL; WebGPU: plain loads and stores of an atomic view field compile; an invalid shader fails the readback; WebGL: Atomic.Add it cannot emulate throws, a buffer first written by a device copy reads as its real type, GL errors throw
 
