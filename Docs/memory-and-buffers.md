@@ -388,6 +388,9 @@ using var buffer = accelerator.Allocate1D<float>(1024);
 2. **Dispose buffers before their accelerator** — disposing out of order causes errors
 3. **Views don't need disposal** — `ArrayView<T>` is a lightweight struct (like `Span<T>`)
 4. **Don't access disposed buffers** — `CopyToHostAsync` on a disposed buffer throws `ObjectDisposedException`
+5. **Cast a whole view, then take the sub-view** — `ArrayView.Cast<T2>()` on a view that does not start on a whole `T2`
+   throws `ArgumentException` (5.4.15+; before that it silently started early). Cast first, then `SubView` in `T2`
+   units. A packed 4-bit view (`QInt4`, `QUInt4`, `Float4E2M1`) casts by bits: N nibbles become N / 2 bytes.
 
 ## Zero-Allocation Hot Path
 

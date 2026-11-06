@@ -136,6 +136,41 @@ static void AtomicCountKernel(Index1D index, ArrayView<int> data, ArrayView<int>
 | `Interop.FloatAsInt(float)` | Reinterpret float bits as int | Bitcast |
 | `Interop.IntAsFloat(int)` | Reinterpret int bits as float | Bitcast |
 
+### Inline PTX on CUDA (`CudaAsm`)
+
+`ILGPU.Runtime.Cuda.CudaAsm.Emit` writes a PTX instruction into the kernel. Operands are `%0`, `%1`, ... in argument
+order: `out` arguments are outputs, the rest are inputs. It is CUDA only, so check the accelerator before loading a
+kernel that uses it.
+
+To ADDRESS memory from PTX (`ld.shared`, `ldmatrix`, `cp.async`), pass the address as an integer with
+`(ulong)Unsafe.AsPointer(ref x)` (5.4.16+). A `ref` argument to `CudaAsm` loads the VALUE, not the address. On CUDA the
+pointer of a `SharedMemory` allocation is a shared-state-space address, which is the operand these instructions take:
+
+```csharp
+using System.Runtime.CompilerServices;
+using ILGPU.Runtime.Cuda;
+
+static unsafe void NeighbourKernel(ArrayView<uint> output)
+{
+    var sh = SharedMemory.Allocate<uint>(256);
+    int t = Group.IdxX;
+    sh[t] = (uint)(t * 7 + 3);
+    Group.Barrier();
+    // each thread reads its neighbour's slot through inline ld.shared
+    ulong addr = (ulong)Unsafe.AsPointer(ref sh[(t + 1) & 255]);
+    CudaAsm.Emit("ld.shared.u32 %0, [%1];", out uint v, addr);
+    output[Grid.IdxX * 256 + t] = v;
+}
+
+// ldmatrix needs sm_75 or newer: lane r supplies the address of row r of an 8 x 8 b16 matrix
+ulong rowAddr = (ulong)Unsafe.AsPointer(ref sh[(lane & 7) * 4]);
+CudaAsm.Emit("ldmatrix.sync.aligned.m8n8.x1.shared.b16 {%0}, [%1];", out uint fragment, rowAddr);
+```
+
+`Unsafe.AsPointer` compiles on every backend, but only CUDA has flat addresses to hand out; elsewhere the value is
+backend-defined and must not be used. The kernel needs an `unsafe` context. Tested by
+`CudaAsm_SharedAddress_FromAsPointer` (`ld.shared` over two groups, and `ldmatrix.x1`'s fragment layout lane by lane).
+
 ## ILGPU Algorithms in the Browser
 
 ILGPU.Algorithms provides high-level primitives like RadixSort, Scan, Reduce, and Histogram. **WebGPU** fully supports these in the browser — same API as desktop, zero code changes.

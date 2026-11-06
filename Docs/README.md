@@ -19,7 +19,7 @@ Comprehensive documentation for SpawnDev.ILGPU — run ILGPU C# kernels on WebGP
 - **[Canvas Rendering & Image Input](canvas-rendering.md)** - `ICanvasRenderer` (GPU buffer -> canvas) and `IExternalImageCopier` (video / image -> GPU buffer)
 
 ### Advanced
-- **[Advanced Patterns](advanced-patterns.md)** - GPU intrinsics, ILGPU Algorithms (RadixSort, Scan, Reduce), GPU device sharing, external buffers, render loops
+- **[Advanced Patterns](advanced-patterns.md)** - GPU intrinsics, inline PTX on CUDA (`CudaAsm` + `Unsafe.AsPointer` addresses), ILGPU Algorithms (RadixSort, Scan, Reduce), GPU device sharing, external buffers, render loops
 - **[Precompiled Shaders](precompiled-shaders.md)** - Offline codegen, build-time precompilation, the runtime shader cache, and session shader export/import
 - **[WebGPU Dispatch-Plan Capture / Replay](dispatch-plan-capture-replay.md)** - Record a fixed WebGPU dispatch sequence once and replay it with a single interop crossing (the browser twin of CUDA graph capture); parameterized replay for a moving loop variable, timing helpers, and the validity contract
 - **[Wasm SIMD128 (v128)](wasm-simd.md)** — Automatic WebAssembly SIMD vectorization of the Wasm backend: how `kernel_simd` is generated and selected, what vectorizes, cross-mode determinism, and the `ForceScalar`/`ForceSimd` knobs

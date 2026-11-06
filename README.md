@@ -299,7 +299,7 @@ Self-contained console projects under [`Examples/`](Examples/README.md). Each re
 | [Canvas rendering and image input](Docs/canvas-rendering.md) | `ICanvasRenderer` and `IExternalImageCopier` |
 | [Dispatch-plan capture and replay](Docs/dispatch-plan-capture-replay.md) | Record a WebGPU dispatch sequence once, replay it with one crossing |
 | [Precompiled shaders](Docs/precompiled-shaders.md) | Offline code generation, build-time precompilation, the runtime cache |
-| [Advanced patterns](Docs/advanced-patterns.md) | Device sharing, external buffers, GPU intrinsics, render loops |
+| [Advanced patterns](Docs/advanced-patterns.md) | Device sharing, external buffers, GPU intrinsics, inline PTX on CUDA, render loops |
 | [CUDA libraries](Docs/cuda-libraries.md) | nvJPEG, cuRand, cuBLAS, cuFFT, NVML |
 | [QR codes](Docs/qr-codes.md) | GPU QR encoder, decoder and renderer |
 | [Limitations](Docs/limitations.md) | Blazor WebAssembly constraints and browser compatibility |
