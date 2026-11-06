@@ -654,6 +654,24 @@ namespace SpawnDev.ILGPU.WebGPU
 
         #region Helpers
 
+        /// <summary>
+        /// The device for an operation that is about to call into it, or a NAMED exception when it cannot be used. A disposed
+        /// SpawnJS wrapper has a null JSRef, so calling through one throws a bare NullReferenceException from inside the
+        /// wrapper - and the interpreter inlines those one-line wrappers, so the stack names only the caller. This says which
+        /// object was gone instead (2026-11-06: one such NRE in WebGPUComputeShader's constructor, ~2,250 tests into an ML
+        /// sweep's shared-page WebGPU lane, not reproducible alone).
+        /// </summary>
+        internal GPUDevice RequireDevice(string operation)
+        {
+            if (_disposed)
+                throw new ObjectDisposedException(nameof(WebGPUNativeAccelerator), $"{operation}: this WebGPU accelerator has been disposed.");
+            var device = _gpuDevice ?? throw new InvalidOperationException($"{operation}: GPU device not initialized.");
+            if (device.IsWrapperDisposed)
+                throw new ObjectDisposedException(nameof(GPUDevice),
+                    $"{operation}: the accelerator's GPUDevice wrapper was disposed while the accelerator was not (IsDeviceLost={IsDeviceLost}). Something outside the accelerator disposed its NativeDevice.");
+            return device;
+        }
+
         private void EnsureInitialized()
         {
             if (!_isInitialized)

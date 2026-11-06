@@ -1,6 +1,19 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## Unreleased
+
+- **FIXED (WebGPU): creating a compute shader on a device that cannot be used threw a bare `NullReferenceException`.**
+  A disposed SpawnJS wrapper has a null `JSRef`, and every GPU wrapper method is a one-line `JSRef!.Call(...)` that the
+  interpreter inlines, so a dead `GPUDevice` (or a null pipeline) surfaced as an NRE naming only `WebGPUComputeShader`'s
+  constructor. Both constructors now get the device through `WebGPUNativeAccelerator.RequireDevice`, which throws
+  `ObjectDisposedException` naming either the disposed accelerator or a `GPUDevice` wrapper disposed behind a live
+  accelerator, and they check `createShaderModule` / `createComputePipeline(Async)` / `getBindGroupLayout(0)` for null.
+  Found as one intermittent in SpawnDev.ILGPU.ML 5.8.4's full sweep (`Vad_SpeechPad_MovesTheSegmentStartEarlier`, ~2,250
+  tests into the shared-page WebGPU lane, not reproducible alone); the next occurrence will say which object was gone.
+  `WebGPU_DisposedAccelerator_ShaderCreationThrowsObjectDisposed` (both WebGPU lanes): launching on a disposed accelerator
+  throws `ObjectDisposedException`. Red-checked: without the change both lanes fail with `NullReferenceException`.
+
 ## 5.4.16 (forks 2.4.15) - 2026-11-05 - Unsafe.AsPointer in kernels (inline PTX can address shared memory)
 
 - **NEW (every backend's frontend; meaningful on CUDA; forks): `(ulong)Unsafe.AsPointer(ref x)` inside a kernel** gives the address the

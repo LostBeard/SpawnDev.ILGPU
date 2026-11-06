@@ -38,9 +38,7 @@ namespace SpawnDev.ILGPU.WebGPU
             WGSLSource = wgslSource ?? throw new ArgumentNullException(nameof(wgslSource));
             EntryPoint = entryPoint ?? throw new ArgumentNullException(nameof(entryPoint));
 
-            var device = accelerator.NativeDevice;
-            if (device == null)
-                throw new InvalidOperationException("GPU device not initialized");
+            var device = accelerator.RequireDevice($"Creating compute shader '{label ?? entryPoint}'");
 
             // Create shader module from WGSL source
             accelerator._lastCompiledWGSL = wgslSource;
@@ -56,7 +54,8 @@ namespace SpawnDev.ILGPU.WebGPU
             {
                 Code = wgslSource
             };
-            _shaderModule = device.CreateShaderModule(shaderDescriptor);
+            _shaderModule = device.CreateShaderModule(shaderDescriptor)
+                ?? throw new InvalidOperationException($"createShaderModule returned null for '{label ?? entryPoint}'.");
 
             // Create compute pipeline with optional override constants
             var programmableStage = new GPUProgrammableStage
@@ -75,10 +74,12 @@ namespace SpawnDev.ILGPU.WebGPU
                 // time by (webgpuDispatchPlan.js replayTimed reads pipeline.label).
                 Label = label ?? entryPoint
             };
-            _pipeline = device.CreateComputePipeline(pipelineDescriptor);
+            _pipeline = device.CreateComputePipeline(pipelineDescriptor)
+                ?? throw new InvalidOperationException($"createComputePipeline returned null for '{label ?? entryPoint}'.");
 
             // Get bind group layout
-            _bindGroupLayout = _pipeline.GetBindGroupLayout(0);
+            _bindGroupLayout = _pipeline.GetBindGroupLayout(0)
+                ?? throw new InvalidOperationException($"getBindGroupLayout(0) returned null for '{label ?? entryPoint}'.");
 
             // Background shader validation. Errors fed into _pendingGpuErrors via AddShaderError
             // so ThrowIfGpuErrors() surfaces them on the NEXT Synchronize. Track the Task so
@@ -101,8 +102,9 @@ namespace SpawnDev.ILGPU.WebGPU
             Dictionary<string, object>? overrideConstants = null,
             string? label = null)
         {
-            var device = accelerator.NativeDevice ?? throw new InvalidOperationException("GPU device not initialized");
-            var module = device.CreateShaderModule(new GPUShaderModuleDescriptor { Code = wgslSource });
+            var device = accelerator.RequireDevice($"Precompiling compute shader '{label ?? entryPoint}'");
+            var module = device.CreateShaderModule(new GPUShaderModuleDescriptor { Code = wgslSource })
+                ?? throw new InvalidOperationException($"createShaderModule returned null for '{label ?? entryPoint}'.");
             GPUComputePipeline pipeline;
             try
             {
@@ -127,8 +129,9 @@ namespace SpawnDev.ILGPU.WebGPU
             WGSLSource = wgslSource;
             EntryPoint = entryPoint;
             _shaderModule = module;
-            _pipeline = pipeline;
-            _bindGroupLayout = pipeline.GetBindGroupLayout(0);
+            _pipeline = pipeline ?? throw new InvalidOperationException($"createComputePipelineAsync returned null for '{entryPoint}'.");
+            _bindGroupLayout = pipeline.GetBindGroupLayout(0)
+                ?? throw new InvalidOperationException($"getBindGroupLayout(0) returned null for '{entryPoint}'.");
         }
 
         #endregion
