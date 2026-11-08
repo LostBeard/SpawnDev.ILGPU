@@ -11,6 +11,10 @@ try
     if (args.Length > 0 && args[0] == "autolykos2-bench")
         return await Autolykos2Bench.Run(args);
 
+    // 5.4.18 strict-float default vs EnableFloatingPointContraction on CUDA/OpenCL (measured cost). Release build.
+    if (args.Length > 0 && args[0] == "fma-ab")
+        return await FmaContractionBench.Run(args);
+
     // CPU per-launch latency probe (GGUFDecodeKVCache slowness). No browser, no ML.
     if (args.Length > 0 && args[0] == "cpu-launch-lat")
         return await CpuLaunchLatencyProbe.Run(args);

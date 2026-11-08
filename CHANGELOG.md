@@ -10,7 +10,10 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   as .NET, the CPU accelerator, Velocity, Wasm and WebGPU already did. Found by Geordi (SpawnDev.Codecs FLAC LPC: 2 of 26
   files differed from FFmpeg on CUDA and OpenCL, the same bytes on both). **Opt back in** with
   `Context.Builder.EnableFloatingPointContraction()` (`ContextProperties.FloatingPointContraction`) - separate from
-  `MathMode.Fast`, which also swaps in approximate transcendentals.
+  `MathMode.Fast`, which also swaps in approximate transcendentals. **Measured cost** (RTX 4070, `DemoConsole -- fma-ab`,
+  median of 20): a dependent `acc = acc * m + c` chain, no difference (CUDA 0.607 vs 0.600 ms, OpenCL 0.612 vs 0.602 ms);
+  a 4096 x 4096 GEMV `sum += a * x`, CUDA 1.340 ms strict vs 1.085 ms with contraction (+23%), OpenCL 0.454 vs 0.480 ms
+  (none). `float.MultiplyAddEstimate` under the strict default runs at the fused speed (CUDA 0.599 ms).
 - **FIXED (forks + every backend): `Math.FusedMultiplyAdd` / `MathF.FusedMultiplyAdd` in a kernel round once, bit-identical
   to .NET.** They had no device mapping on CUDA / OpenCL / Velocity, and the frontend could not handle a three-argument
   math intrinsic at all ("The math intrinsic with 3 arguments is not supported"), so `IntrinsicMath.CPUOnly.FMA` was never
