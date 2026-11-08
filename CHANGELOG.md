@@ -3,6 +3,16 @@
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 ## Unreleased
 
+- **FIXED (forks, every IR backend): a constant-folded unsigned 32-bit integer converted to float came out sign-extended.**
+  `IRBuilder.CreateConvert` folded an Int8/16/32/64 constant to Float32/Float64 through `UInt64Value` / `Int64Value`, but
+  the raw value of an Int32 constant is its sign-extended long: `(float)x` of a folded uint 3000000000 (raw -1294967296)
+  under `conv.r.un` became `(ulong)-1294967296` = 1.8446744E+19. Any uint >= 2^31 that ILGPU could fold was wrong on CUDA,
+  OpenCL, Velocity, WebGPU, WebGL and Wasm; loaded or non-foldable values, and the CPU accelerator (which runs the IL),
+  were right. The fold now reads the constant at its own width (signed or unsigned), as the integer-target fold already
+  did. Found by Lore through SpawnGen's GLSL-to-ILGPU compiler (ComfyUI's Film Grain shader hashes with uint and divides by
+  `float(0xffffffffu)`). `Conversion_FoldedIntegerConstantToFloat_MatchesHost` (all lanes): 14 folded cases, signed and
+  unsigned 8/16/32/64-bit, bit-exact against .NET. Red-checked: without the fix 5 of 14 are wrong on all 8 IR lanes.
+  `PMT_FILTER=Conv`: 146 passed, 0 failed.
 - **FIXED (WebGPU): a dispatch-plan recording captured OTHER async flows' work.** `BeginDispatchCapture` set an
   accelerator-wide slot and a plain static, and every dispatch/copy/clear/upload site consulted them, so any flow that
   dispatched during the capture window was recorded and re-run by every replay. In AssistZ (Riker, ML 5.8.5, RX 590,

@@ -306,64 +306,83 @@ namespace ILGPU.IR.Construction
                     case BasicValueType.Int16:
                     case BasicValueType.Int32:
                     case BasicValueType.Int64:
+                        // Read the constant AT ITS OWN WIDTH, signed or unsigned. ⚠️ Not UInt64Value /
+                        // Int64Value: the raw value of an Int32 constant is its sign-extended long, so the
+                        // uint 3000000000 (raw -1294967296) folded to (ulong)-1294967296 = 1.8446744E+19
+                        // under conv.r.un (Lore, SpawnGen Film Grain shader, 2026-11-08). The integer-target
+                        // default case below was already width-aware.
+                        long signedSource = value.BasicValueType switch
+                        {
+                            BasicValueType.Int8 => value.Int8Value,
+                            BasicValueType.Int16 => value.Int16Value,
+                            BasicValueType.Int32 => value.Int32Value,
+                            _ => value.Int64Value,
+                        };
+                        ulong unsignedSource = value.BasicValueType switch
+                        {
+                            BasicValueType.Int8 => value.UInt8Value,
+                            BasicValueType.Int16 => value.UInt16Value,
+                            BasicValueType.Int32 => value.UInt32Value,
+                            _ => value.UInt64Value,
+                        };
                         switch (targetBasicValueType)
                         {
                             case BasicValueType.Float16:
                                 return isSourceUnsigned
                                     ? CreatePrimitiveValue(
                                         location,
-                                        (Half)value.UInt64Value)
+                                        (Half)unsignedSource)
                                     : (ValueReference)CreatePrimitiveValue(
                                         location,
-                                        (Half)value.Int64Value);
+                                        (Half)signedSource);
                             case BasicValueType.BFloat16:
                                 return isSourceUnsigned
                                     ? CreatePrimitiveValue(
                                         location,
-                                        (BFloat16)(float)value.UInt64Value)
+                                        (BFloat16)(float)unsignedSource)
                                     : (ValueReference)CreatePrimitiveValue(
                                         location,
-                                        (BFloat16)(float)value.Int64Value);
+                                        (BFloat16)(float)signedSource);
                             case BasicValueType.Float8E4M3:
                                 return isSourceUnsigned
                                     ? CreatePrimitiveValue(
                                         location,
-                                        (Float8E4M3)(float)value.UInt64Value)
+                                        (Float8E4M3)(float)unsignedSource)
                                     : (ValueReference)CreatePrimitiveValue(
                                         location,
-                                        (Float8E4M3)(float)value.Int64Value);
+                                        (Float8E4M3)(float)signedSource);
                             case BasicValueType.Float8E5M2:
                                 return isSourceUnsigned
                                     ? CreatePrimitiveValue(
                                         location,
-                                        (Float8E5M2)(float)value.UInt64Value)
+                                        (Float8E5M2)(float)unsignedSource)
                                     : (ValueReference)CreatePrimitiveValue(
                                         location,
-                                        (Float8E5M2)(float)value.Int64Value);
+                                        (Float8E5M2)(float)signedSource);
                             case BasicValueType.Float4E2M1:
                                 return isSourceUnsigned
                                     ? CreatePrimitiveValue(
                                         location,
-                                        (Float4E2M1)(float)value.UInt64Value)
+                                        (Float4E2M1)(float)unsignedSource)
                                     : (ValueReference)CreatePrimitiveValue(
                                         location,
-                                        (Float4E2M1)(float)value.Int64Value);
+                                        (Float4E2M1)(float)signedSource);
                             case BasicValueType.Float32:
                                 return isSourceUnsigned
                                     ? CreatePrimitiveValue(
                                         location,
-                                        Convert.ToSingle(value.UInt64Value))
+                                        Convert.ToSingle(unsignedSource))
                                     : (ValueReference)CreatePrimitiveValue(
                                         location,
-                                        Convert.ToSingle(value.Int64Value));
+                                        Convert.ToSingle(signedSource));
                             case BasicValueType.Float64:
                                 return isSourceUnsigned
                                     ? CreatePrimitiveValue(
                                         location,
-                                        Convert.ToDouble(value.UInt64Value))
+                                        Convert.ToDouble(unsignedSource))
                                     : (ValueReference)CreatePrimitiveValue(
                                         location,
-                                        Convert.ToDouble(value.Int64Value));
+                                        Convert.ToDouble(signedSource));
                             default:
                                 var rawValue = value.BasicValueType switch
                                 {
