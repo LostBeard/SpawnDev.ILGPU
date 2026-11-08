@@ -1,7 +1,7 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## Unreleased
+## 5.4.17 (forks 2.4.16) - 2026-11-08 - WebGPU dispatch-plan capture scoped to its async flow; folded uint -> float fix
 
 - **FIXED (forks, every IR backend): a constant-folded unsigned 32-bit integer converted to float came out sign-extended.**
   `IRBuilder.CreateConvert` folded an Int8/16/32/64 constant to Float32/Float64 through `UInt64Value` / `Int64Value`, but
