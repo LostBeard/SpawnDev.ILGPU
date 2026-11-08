@@ -1700,9 +1700,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var third = Load(value.Third);
             Declare(target);
 
+            // Emulated f64 (Dekker vec2 / Ozaki vec4) has no fma(): Math.FusedMultiplyAdd reaches this
+            // op through RemappedIntrinsics since 5.4.18 (it used to hit the emulated-f64 intrinsic
+            // handler), so it must emit the same f64 helper that handler does.
+            if ((value.Kind == TernaryArithmeticKind.MultiplyAdd || value.Kind == TernaryArithmeticKind.MultiplyAddEstimate)
+                && Backend.EnableF64Emulation
+                && TypeGenerator[value.First.Resolve().Type] == "emu_f64")
+            {
+                AppendLine($"{target} = f64_add(f64_mul({first}, {second}), {third});");
+                return;
+            }
+
             string result = value.Kind switch
             {
                 TernaryArithmeticKind.MultiplyAdd => $"fma({first}, {second}, {third})",
+                // float/double.MultiplyAddEstimate: the hardware fma, one instruction.
+                TernaryArithmeticKind.MultiplyAddEstimate => $"fma({first}, {second}, {third})",
                 _ => $"({first} * {second} + {third})"
             };
 

@@ -671,6 +671,21 @@ namespace ILGPU.Backends.PTX
                 { (TernaryArithmeticKind.MultiplyAdd, ArithmeticBasicValueType.Float16), "fma.rn.f16" },
                 { (TernaryArithmeticKind.MultiplyAdd, ArithmeticBasicValueType.Float32), "fma.rn.f32" },
                 { (TernaryArithmeticKind.MultiplyAdd, ArithmeticBasicValueType.Float64), "fma.rn.f64" },
+
+                // MultiplyAddEstimate (float/double.MultiplyAddEstimate): the same hardware fma / mad.
+                { (TernaryArithmeticKind.MultiplyAddEstimate, ArithmeticBasicValueType.Int8), "mad.lo.s16" },
+                { (TernaryArithmeticKind.MultiplyAddEstimate, ArithmeticBasicValueType.Int16), "mad.lo.s16" },
+                { (TernaryArithmeticKind.MultiplyAddEstimate, ArithmeticBasicValueType.Int32), "mad.lo.s32" },
+                { (TernaryArithmeticKind.MultiplyAddEstimate, ArithmeticBasicValueType.Int64), "mad.lo.s64" },
+
+                { (TernaryArithmeticKind.MultiplyAddEstimate, ArithmeticBasicValueType.UInt8), "mad.lo.u16" },
+                { (TernaryArithmeticKind.MultiplyAddEstimate, ArithmeticBasicValueType.UInt16), "mad.lo.u16" },
+                { (TernaryArithmeticKind.MultiplyAddEstimate, ArithmeticBasicValueType.UInt32), "mad.lo.u32" },
+                { (TernaryArithmeticKind.MultiplyAddEstimate, ArithmeticBasicValueType.UInt64), "mad.lo.u64" },
+
+                { (TernaryArithmeticKind.MultiplyAddEstimate, ArithmeticBasicValueType.Float16), "fma.rn.f16" },
+                { (TernaryArithmeticKind.MultiplyAddEstimate, ArithmeticBasicValueType.Float32), "fma.rn.f32" },
+                { (TernaryArithmeticKind.MultiplyAddEstimate, ArithmeticBasicValueType.Float64), "fma.rn.f64" },
             };
 
         private static readonly Dictionary<(AtomicKind, bool), string> AtomicOperations =

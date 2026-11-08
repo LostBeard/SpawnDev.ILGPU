@@ -443,6 +443,8 @@ namespace ILGPU.Backends.OpenCL
             new Dictionary<(TernaryArithmeticKind, bool), string>()
             {
                 { (TernaryArithmeticKind.MultiplyAdd, true), "fma" },
+                // MultiplyAddEstimate: the hardware fma (fused, correctly rounded on OpenCL).
+                { (TernaryArithmeticKind.MultiplyAddEstimate, true), "fma" },
             };
 
         private static readonly Dictionary<AtomicKind, string> AtomicOperations =

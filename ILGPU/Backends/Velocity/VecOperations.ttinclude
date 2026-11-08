@@ -591,10 +591,9 @@ namespace ILGPU.Backends.Velocity.<#= vecNamespace #>
             var b = <#= GetCastIToX32(prefix, "second") #>;
             var c = <#= GetCastIToX32(prefix, "third") #>;
 
-            var result = <#= op.Velocity.Velocity128.GetImplementation(
-                op,
-                null,
-                "a", "b", "c") #>;
+            var result = <#= prefix == "F"
+                ? op.Velocity.Velocity128.GetFloatImplementation(op, "a", "b", "c")
+                : op.Velocity.Velocity128.GetImplementation(op, null, "a", "b", "c") #>;
 
             return <#= GetCastXToI32(prefix, "result") #>;
         }
@@ -612,14 +611,12 @@ namespace ILGPU.Backends.Velocity.<#= vecNamespace #>
             var b = <#= GetCastIToX64(prefix, "second") #>;
             var c = <#= GetCastIToX64(prefix, "third") #>;
 
-            var result1 = <#= op.Velocity.Velocity128.GetImplementation(
-                op,
-                null,
-                "a.Item1", "b.Item1", "c.Item1") #>;
-            var result2 = <#= op.Velocity.Velocity128.GetImplementation(
-                op,
-                null,
-                "a.Item2", "b.Item2", "c.Item2") #>;
+            var result1 = <#= prefix == "F"
+                ? op.Velocity.Velocity128.GetFloatImplementation(op, "a.Item1", "b.Item1", "c.Item1")
+                : op.Velocity.Velocity128.GetImplementation(op, null, "a.Item1", "b.Item1", "c.Item1") #>;
+            var result2 = <#= prefix == "F"
+                ? op.Velocity.Velocity128.GetFloatImplementation(op, "a.Item2", "b.Item2", "c.Item2")
+                : op.Velocity.Velocity128.GetImplementation(op, null, "a.Item2", "b.Item2", "c.Item2") #>;
 
             return <#= GetCastXToI64(prefix, "(result1, result2)") #>;
         }

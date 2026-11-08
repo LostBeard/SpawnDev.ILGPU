@@ -382,6 +382,23 @@ namespace ILGPU
         public MathMode MathMode { get; protected set; } = MathMode.Default;
 
         /// <summary>
+        /// True to let the device compilers contract a floating-point multiply and a
+        /// following add into one fused multiply-add (CUDA: PTX add/sub/mul without a
+        /// rounding modifier; OpenCL: <c>FP_CONTRACT</c> left at its default).
+        /// </summary>
+        /// <remarks>
+        /// False by default: every floating-point add, subtract and multiply rounds on
+        /// its own, as .NET, the CPU accelerator, Velocity and Wasm do, so a kernel gives
+        /// the same bits on CUDA and OpenCL as on the CPU. A fused multiply-add rounds
+        /// once and can differ in the last bit; write
+        /// <see cref="System.MathF.FusedMultiplyAdd(float, float, float)"/> or
+        /// <see cref="System.Math.FusedMultiplyAdd(double, double, double)"/> where a
+        /// fused operation is wanted. Independent of <see cref="MathMode"/>, which also
+        /// swaps in approximate transcendental functions.
+        /// </remarks>
+        public bool FloatingPointContraction { get; protected set; }
+
+        /// <summary>
         /// Defines how to deal with static fields.
         /// </summary>
         /// <remarks><see cref="MathMode.Default"/> by default.</remarks>
@@ -480,6 +497,7 @@ namespace ILGPU
                 OptimizationLevel = OptimizationLevel,
                 InliningMode = InliningMode,
                 MathMode = MathMode,
+                FloatingPointContraction = FloatingPointContraction,
                 StaticFieldMode = StaticFieldMode,
                 ArrayMode = ArrayMode,
                 CachingMode = CachingMode,

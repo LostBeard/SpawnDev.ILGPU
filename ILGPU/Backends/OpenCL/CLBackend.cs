@@ -97,6 +97,15 @@ namespace ILGPU.Backends.OpenCL
                 extensionBuilder.AppendLine(" : enable");
             }
 
+            // ⚠️ OpenCL C lets the compiler contract a * b + c into one fma by DEFAULT, which
+            // rounds once: OpenCL then disagreed with .NET, the CPU accelerator, Velocity and
+            // Wasm in the last bit (Geordi, SpawnDev.Codecs FLAC LPC, 2026-11-08). Off unless
+            // the context opted in; an explicit Math(F).FusedMultiplyAdd still emits fma().
+            extensionBuilder.AppendLine(
+                context.Properties.FloatingPointContraction
+                    ? "#pragma OPENCL FP_CONTRACT ON"
+                    : "#pragma OPENCL FP_CONTRACT OFF");
+
             // Emit Float16 emulation helpers when cl_khr_fp16 is unavailable. CLTypeGenerator
             // promotes Half values to float for compute, so Interop.FloatAsInt(Half) needs to
             // convert the f32 VALUE back to the 16-bit Half BIT PATTERN (not the f32 bits),

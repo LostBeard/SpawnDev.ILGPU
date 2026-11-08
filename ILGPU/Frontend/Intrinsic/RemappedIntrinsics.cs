@@ -151,6 +151,7 @@ namespace ILGPU.Frontend.Intrinsic
                 // Type may not exist in WASM runtime
             }
             RegisterCopySignRemappings();
+            RegisterFusedMultiplyAddRemappings();
             RegisterInterlockedRemappings();
         }
 
@@ -313,6 +314,50 @@ namespace ILGPU.Frontend.Intrinsic
                 typeof(BitConverter),
                 nameof(System.BitConverter.Int32BitsToSingle),
                 typeof(int));
+        }
+
+        #endregion
+
+        #region FusedMultiplyAdd remappings
+
+        /// <summary>
+        /// Math(F).FusedMultiplyAdd -> the MultiplyAdd intrinsic (PTX fma.rn, OpenCL fma,
+        /// Velocity Vector*.FusedMultiplyAdd, CPU Math(F).FusedMultiplyAdd): rounds once, as
+        /// .NET does. Before 5.4.18 these BCL calls had no device mapping on the IR backends.
+        /// </summary>
+        private static void RegisterFusedMultiplyAddRemappings()
+        {
+            AddRemapping(
+                typeof(Math),
+                CPUMathType,
+                "FusedMultiplyAdd",
+                typeof(double),
+                typeof(double),
+                typeof(double));
+            AddRemapping(
+                typeof(MathF),
+                CPUMathType,
+                "FusedMultiplyAdd",
+                typeof(float),
+                typeof(float),
+                typeof(float));
+
+            // float/double.MultiplyAddEstimate -> the MultiplyAddEstimate intrinsic: the hardware
+            // fma where there is one (CUDA, OpenCL, WebGPU, Velocity), a * b + c on Wasm / WebGL.
+            AddRemapping(
+                typeof(float),
+                CPUMathType,
+                "MultiplyAddEstimate",
+                typeof(float),
+                typeof(float),
+                typeof(float));
+            AddRemapping(
+                typeof(double),
+                CPUMathType,
+                "MultiplyAddEstimate",
+                typeof(double),
+                typeof(double),
+                typeof(double));
         }
 
         #endregion

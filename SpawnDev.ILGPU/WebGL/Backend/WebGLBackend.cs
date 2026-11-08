@@ -121,6 +121,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 typeof(global::ILGPU.IntrinsicMath).GetMethod(nameof(global::ILGPU.IntrinsicMath.Dot4I8PackedSoftware))!);
             RegisterRedirect(typeof(global::ILGPU.IntrinsicMath).GetMethod(nameof(global::ILGPU.IntrinsicMath.Dot4U8Packed))!,
                 typeof(global::ILGPU.IntrinsicMath).GetMethod(nameof(global::ILGPU.IntrinsicMath.Dot4U8PackedSoftware))!);
+            RegisterSoftFusedMultiplyAdd();
             InitIntrinsicProvider();
             RegisterMathIntrinsics();
 
@@ -160,6 +161,22 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         #endregion
 
         #region Methods
+
+        /// <summary>
+        /// The IR multiply-add (Math(F).FusedMultiplyAdd) rounds ONCE. GLSL ES 3.0 has no fma() (the old path was a * b + c, two roundings),  so an f32 multiply-add compiles
+        /// <see cref="SoftFma.FusedMultiplyAddF32Integer"/> (integer arithmetic only, which no shader compiler
+        /// contracts), bit-identical to .NET. MultiplyAddEstimate keeps the fast a * b + c. Emulated f64 is not IEEE
+        /// binary64, so its multiply-add stays the f64 helper. Registered BEFORE InitIntrinsicProvider.
+        /// </summary>
+        private void RegisterSoftFusedMultiplyAdd()
+        {
+            GetIntrinsicManager(Context).RegisterTernaryArithmetic(
+                global::ILGPU.IR.Values.TernaryArithmeticKind.MultiplyAdd,
+                BasicValueType.Float32,
+                new WebGLIntrinsic(
+                    typeof(SoftFma).GetMethod(nameof(SoftFma.FusedMultiplyAddF32Integer))!,
+                    IntrinsicImplementationMode.Redirect));
+        }
 
         private static IntrinsicImplementationManager GetIntrinsicManager(Context context)
         {

@@ -327,6 +327,7 @@ namespace ILGPU.Backends.PTX
 
             Architecture = args.Backend.Architecture;
             FastMath = args.Properties.MathMode >= MathMode.Fast;
+            FloatingPointContraction = args.Properties.FloatingPointContraction;
 
             labelPrefix = "L_" + Method.Id.ToString();
             ReturnParamName = "retval_" + Method.Id;
@@ -393,6 +394,12 @@ namespace ILGPU.Backends.PTX
         /// Returns true if fast math is active.
         /// </summary>
         public bool FastMath { get; }
+
+        /// <summary>
+        /// True if float add/sub/mul may be contracted into fma by ptxas
+        /// (<see cref="ContextProperties.FloatingPointContraction"/>).
+        /// </summary>
+        public bool FloatingPointContraction { get; }
 
         /// <summary>
         /// Returns the associated string builder.

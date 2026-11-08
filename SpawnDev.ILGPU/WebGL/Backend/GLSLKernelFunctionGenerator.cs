@@ -4333,6 +4333,17 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 return;
             }
 
+            if (value.Kind == BinaryArithmeticKind.Mul && resultGlslType == "float"
+                && !Backend.Context.Properties.FloatingPointContraction)
+            {
+            // ⚠️ ANGLE's D3D compiler contracts a * b + c into one mad (rounding once), and GLSL ES 3.0 has no
+            // `precise`: FloatContraction_PlainMulAdd failed 1024 of 1024 on WebGL (2026-11-08). OR-ing the product's bits
+            // with a zero the compiler cannot prove (gl_VertexID >> 31: the vertex shader's id is never negative) makes the
+            // rounded product opaque, so it is never fused. Skipped when the context opts in to contraction.
+                AppendLine($"{prefix}{target} = uintBitsToFloat(floatBitsToUint({left} * {right}) | uint(gl_VertexID >> 31));");
+                return;
+            }
+
             AppendLine($"{prefix}{target} = {left} {op} {right};");
         }
 

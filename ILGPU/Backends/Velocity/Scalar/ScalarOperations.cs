@@ -2987,6 +2987,102 @@ namespace ILGPU.Backends.Velocity.Scalar
             return CastFToI64(result);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static (int, int) MultiplyAddEstimateI32(
+            (int, int) first,
+            (int, int) second,
+            (int, int) third)
+        {
+            var source = CastIToI32(first);
+            var add = CastIToI32(second);
+            var mul = CastIToI32(third);
+            Unsafe.SkipInit(out (int, int) result);
+
+            result.Item1 = IntrinsicMath.CPUOnly.MultiplyAddEstimate(source.Item1, add.Item1, mul.Item1);
+            result.Item2 = IntrinsicMath.CPUOnly.MultiplyAddEstimate(source.Item2, add.Item2, mul.Item2);
+            return CastIToI32(result);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static (int, int) MultiplyAddEstimateU32(
+            (int, int) first,
+            (int, int) second,
+            (int, int) third)
+        {
+            var source = CastIToU32(first);
+            var add = CastIToU32(second);
+            var mul = CastIToU32(third);
+            Unsafe.SkipInit(out (uint, uint) result);
+
+            result.Item1 = IntrinsicMath.CPUOnly.MultiplyAddEstimate(source.Item1, add.Item1, mul.Item1);
+            result.Item2 = IntrinsicMath.CPUOnly.MultiplyAddEstimate(source.Item2, add.Item2, mul.Item2);
+            return CastUToI32(result);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static (int, int) MultiplyAddEstimateF32(
+            (int, int) first,
+            (int, int) second,
+            (int, int) third)
+        {
+            var source = CastIToF32(first);
+            var add = CastIToF32(second);
+            var mul = CastIToF32(third);
+            Unsafe.SkipInit(out (float, float) result);
+
+            result.Item1 = IntrinsicMath.CPUOnly.MultiplyAddEstimate(source.Item1, add.Item1, mul.Item1);
+            result.Item2 = IntrinsicMath.CPUOnly.MultiplyAddEstimate(source.Item2, add.Item2, mul.Item2);
+            return CastFToI32(result);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static (long, long) MultiplyAddEstimateI64(
+            (long, long) first,
+            (long, long) second,
+            (long, long) third)
+        {
+            var source = CastIToI64(first);
+            var add = CastIToI64(second);
+            var mul = CastIToI64(third);
+            Unsafe.SkipInit(out (long, long) result);
+
+            result.Item1 = IntrinsicMath.CPUOnly.MultiplyAddEstimate(source.Item1, add.Item1, mul.Item1);
+            result.Item2 = IntrinsicMath.CPUOnly.MultiplyAddEstimate(source.Item2, add.Item2, mul.Item2);
+            return CastIToI64(result);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static (long, long) MultiplyAddEstimateU64(
+            (long, long) first,
+            (long, long) second,
+            (long, long) third)
+        {
+            var source = CastIToU64(first);
+            var add = CastIToU64(second);
+            var mul = CastIToU64(third);
+            Unsafe.SkipInit(out (ulong, ulong) result);
+
+            result.Item1 = IntrinsicMath.CPUOnly.MultiplyAddEstimate(source.Item1, add.Item1, mul.Item1);
+            result.Item2 = IntrinsicMath.CPUOnly.MultiplyAddEstimate(source.Item2, add.Item2, mul.Item2);
+            return CastUToI64(result);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static (long, long) MultiplyAddEstimateF64(
+            (long, long) first,
+            (long, long) second,
+            (long, long) third)
+        {
+            var source = CastIToF64(first);
+            var add = CastIToF64(second);
+            var mul = CastIToF64(third);
+            Unsafe.SkipInit(out (double, double) result);
+
+            result.Item1 = IntrinsicMath.CPUOnly.MultiplyAddEstimate(source.Item1, add.Item1, mul.Item1);
+            result.Item2 = IntrinsicMath.CPUOnly.MultiplyAddEstimate(source.Item2, add.Item2, mul.Item2);
+            return CastFToI64(result);
+        }
+
 
         private static readonly Dictionary<
             (TernaryArithmeticKind, VelocityWarpOperationMode), MethodInfo>
@@ -3016,6 +3112,25 @@ namespace ILGPU.Backends.Velocity.Scalar
             TernaryOperations64.Add(
                 (TernaryArithmeticKind.MultiplyAdd, VelocityWarpOperationMode.F),
                 GetMethod(nameof(MultiplyAddF64)));
+            TernaryOperations32.Add(
+                (TernaryArithmeticKind.MultiplyAddEstimate, VelocityWarpOperationMode.I),
+                GetMethod(nameof(MultiplyAddEstimateI32)));
+            TernaryOperations32.Add(
+                (TernaryArithmeticKind.MultiplyAddEstimate, VelocityWarpOperationMode.U),
+                GetMethod(nameof(MultiplyAddEstimateU32)));
+            TernaryOperations32.Add(
+                (TernaryArithmeticKind.MultiplyAddEstimate, VelocityWarpOperationMode.F),
+                GetMethod(nameof(MultiplyAddEstimateF32)));
+
+            TernaryOperations64.Add(
+                (TernaryArithmeticKind.MultiplyAddEstimate, VelocityWarpOperationMode.I),
+                GetMethod(nameof(MultiplyAddEstimateI64)));
+            TernaryOperations64.Add(
+                (TernaryArithmeticKind.MultiplyAddEstimate, VelocityWarpOperationMode.U),
+                GetMethod(nameof(MultiplyAddEstimateU64)));
+            TernaryOperations64.Add(
+                (TernaryArithmeticKind.MultiplyAddEstimate, VelocityWarpOperationMode.F),
+                GetMethod(nameof(MultiplyAddEstimateF64)));
         }
 
         public static MethodInfo GetTernaryOperation32(

@@ -67,9 +67,6 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         [MethodImpl(MethodImplOptions.NoInlining)]
         public static float Clamp(float value, float min, float max) => value < min ? min : value > max ? max : value;
 
-        /// <summary>Computes (x * y) + z with a single rounding.</summary>
-        [MethodImpl(MethodImplOptions.NoInlining)]
-        public static float FusedMultiplyAdd(float x, float y, float z) => x * y + z;
 
         // ── Unary int ──
 

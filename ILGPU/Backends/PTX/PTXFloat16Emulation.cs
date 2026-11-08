@@ -52,7 +52,7 @@ namespace ILGPU.Backends.PTX
             RegexOptions.CultureInvariant);
 
         private static readonly Regex BinaryRegex = new Regex(
-            @"^(?<base>add|sub|mul|min|max)(?<ftz>\.ftz)?\.f16$",
+            @"^(?<base>add|sub|mul|min|max)(?<rn>\.rn)?(?<ftz>\.ftz)?\.f16$",
             RegexOptions.CultureInvariant);
 
         private static readonly Regex CompareRegex = new Regex(

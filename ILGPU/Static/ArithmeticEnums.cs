@@ -268,6 +268,11 @@ namespace ILGPU.IR.Values
         /// </summary>
         MultiplyAdd,
 
+        /// <summary>
+        /// a * b + c: one hardware fma where there is one (CUDA, OpenCL, WebGPU, Velocity), multiply then add where not (Wasm, WebGL).
+        /// </summary>
+        MultiplyAddEstimate,
+
     }
 
     /// <summary>
@@ -358,5 +363,6 @@ namespace ILGPU.Frontend.Intrinsic
         _TernaryFunctions,
 
         MultiplyAdd,
+        MultiplyAddEstimate,
     }
 }

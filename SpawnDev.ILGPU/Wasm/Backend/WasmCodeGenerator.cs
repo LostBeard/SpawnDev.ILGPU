@@ -2135,13 +2135,6 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     bool handled = true;
                     switch (sourceName)
                     {
-                        case "FusedMultiplyAdd":
-                            EmitGetLocal(argValues[0]);
-                            EmitGetLocal(argValues[1]);
-                            Code.Add(wasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Mul : WasmOpCodes.F32Mul);
-                            EmitGetLocal(argValues[2]);
-                            Code.Add(wasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Add : WasmOpCodes.F32Add);
-                            break;
                         case "Sqrt":
                             EmitGetLocal(argValues[0]);
                             Code.Add(wasmType == WasmOpCodes.F64 ? WasmOpCodes.F64Sqrt : WasmOpCodes.F32Sqrt);

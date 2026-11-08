@@ -333,6 +333,27 @@ public class Velocity128Config
     public string Implementation { get; set; }
 
     /// <summary>
+    /// Optional float/double implementation (used instead of Implementation for the F
+    /// warp mode), e.g. a fused multiply-add where the integer forms multiply and add.
+    /// </summary>
+    [XmlElement]
+    public string FloatImplementation { get; set; }
+
+    /// <summary>
+    /// The float/double implementation: FloatImplementation when given, else Implementation.
+    /// </summary>
+    public string GetFloatImplementation(MathOp mathOp, params string[] variables)
+    {
+        if (string.IsNullOrWhiteSpace(FloatImplementation))
+            return GetImplementation(mathOp, null, variables);
+        var result = new StringBuilder(FloatImplementation);
+        result.Replace("[Field]", string.Empty);
+        for (int i = 0; i < variables.Length; ++i)
+            result.Replace("{Value" + i + "}", variables[i]);
+        return result.ToString().Replace("Vector128", VectorName);
+    }
+
+    /// <summary>
     /// The vector type the expressions are written for is Vector128: templates of wider
     /// vectors (Vector256, Vector512) set the name that replaces it.
     /// </summary>
@@ -427,6 +448,27 @@ public class MathOp
 
     [XmlIgnore]
     public bool HasImplementation => Implementation != null;
+
+    /// <summary>
+    /// Optional float/double implementation that replaces Implementation for floats
+    /// (a fused multiply-add rounds once; the integer form multiplies and adds).
+    /// </summary>
+    [XmlElement]
+    public string FloatImplementation { get; set; }
+
+    public string GetFloatImplementation(
+        string typeName,
+        string mathTypeName,
+        string const1, string const2,
+        params string[] variables)
+    {
+        if (FloatImplementation == null)
+            return GetImplementation(typeName, mathTypeName, const1, const2, variables);
+        var saved = Implementation;
+        Implementation = FloatImplementation;
+        try { return GetImplementation(typeName, mathTypeName, const1, const2, variables); }
+        finally { Implementation = saved; }
+    }
 
     [XmlIgnore]
     public bool HasCall => Call != null;

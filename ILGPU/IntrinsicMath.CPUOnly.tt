@@ -68,8 +68,19 @@ namespace ILGPU
             /// <param name="third">The third operand.</param>
             [MathIntrinsic(MathIntrinsicKind.<#= op.Name #>)]
             public static double <#= op.MethodName #>(double first, double second, double third) =>
-                <#= op.GetImplementation("double", "Math", "1.0", "2.0", "first", "second", "third") #>;
+                <#= op.GetFloatImplementation("double", "Math", "1.0", "2.0", "first", "second", "third") #>;
 <# } #>
+
+            /// <summary>
+            /// <see cref="Math.FusedMultiplyAdd(double, double, double)"/> in a kernel: the
+            /// MultiplyAdd intrinsic, which rounds once (RemappedIntrinsics maps the BCL call here).
+            /// </summary>
+            /// <param name="first">The first factor.</param>
+            /// <param name="second">The second factor.</param>
+            /// <param name="third">The addend.</param>
+            [MathIntrinsic(MathIntrinsicKind.MultiplyAdd)]
+            public static double FusedMultiplyAdd(double first, double second, double third) =>
+                Math.FusedMultiplyAdd(first, second, third);
             #endregion
 
             #region Single Precision
@@ -104,8 +115,19 @@ namespace ILGPU
             /// <param name="third">The third operand.</param>
             [MathIntrinsic(MathIntrinsicKind.<#= op.Name #>)]
             public static float <#= op.MethodName #>(float first, float second, float third) =>
-                <#= op.GetImplementation("double", "MathF", "1.0f", "2.0f", "first", "second", "third") #>;
+                <#= op.GetFloatImplementation("float", "MathF", "1.0f", "2.0f", "first", "second", "third") #>;
 <# } #>
+
+            /// <summary>
+            /// <see cref="MathF.FusedMultiplyAdd(float, float, float)"/> in a kernel: the
+            /// MultiplyAdd intrinsic, which rounds once (RemappedIntrinsics maps the BCL call here).
+            /// </summary>
+            /// <param name="first">The first factor.</param>
+            /// <param name="second">The second factor.</param>
+            /// <param name="third">The addend.</param>
+            [MathIntrinsic(MathIntrinsicKind.MultiplyAdd)]
+            public static float FusedMultiplyAdd(float first, float second, float third) =>
+                MathF.FusedMultiplyAdd(first, second, third);
 
             #endregion
 

@@ -283,6 +283,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // registered after it never reaches this backend's IR passes (RegisterMathIntrinsics' redirects only
             // take effect for a SECOND backend on the same Context - a known inconsistency, left as is here).
             RegisterExactRemainder();
+            RegisterSoftFusedMultiplyAdd();
             // IntrinsicMath.Dot4I8Packed / Dot4U8Packed: the exact four-term form (the relaxed-SIMD dot product may
             // differ from scalar, which the cross-mode determinism rule forbids)
             RegisterRedirect(typeof(global::ILGPU.IntrinsicMath).GetMethod(nameof(global::ILGPU.IntrinsicMath.Dot4I8Packed))!,
@@ -415,6 +416,33 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
         }
 
+        /// <summary>
+        /// The IR multiply-add (Math(F).FusedMultiplyAdd) rounds ONCE, but Wasm has no fused float instruction
+        /// (relaxed-SIMD madd may or may not fuse): f32 / f64 multiply-adds compile <see cref="SoftFma"/> in their
+        /// place, bit-identical to .NET. MultiplyAddEstimate stays a plain multiply then add.
+        /// </summary>
+        /// <remarks>
+        /// ⚠️ Before 5.4.18 a Wasm "FusedMultiplyAdd" was f32.mul + f32.add: two roundings, so it differed from
+        /// .NET, CUDA and OpenCL in the last bit (FloatContraction_ExplicitFusedMultiplyAdd_RoundsOnceLikeDotNet).
+        /// Registered BEFORE InitIntrinsicProvider, which snapshots the implementations.
+        /// </remarks>
+        private void RegisterSoftFusedMultiplyAdd()
+        {
+            var manager = GetIntrinsicManager(Context);
+            manager.RegisterTernaryArithmetic(
+                TernaryArithmeticKind.MultiplyAdd,
+                BasicValueType.Float32,
+                new global::ILGPU.Backends.Wasm.WasmIntrinsic(
+                    typeof(SoftFma).GetMethod(nameof(SoftFma.FusedMultiplyAddF32))!,
+                    IntrinsicImplementationMode.Redirect));
+            manager.RegisterTernaryArithmetic(
+                TernaryArithmeticKind.MultiplyAdd,
+                BasicValueType.Float64,
+                new global::ILGPU.Backends.Wasm.WasmIntrinsic(
+                    typeof(SoftFma).GetMethod(nameof(SoftFma.FusedMultiplyAddF64))!,
+                    IntrinsicImplementationMode.Redirect));
+        }
+
         private void RegisterRedirect(MethodInfo original, MethodInfo target)
         {
             if (original == null || target == null) return;
@@ -532,8 +560,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             // Ternary
             RegAll(typeof(Math), "Clamp");
             RegAll(typeof(MathF), "Clamp");
-            RegAll(typeof(Math), "FusedMultiplyAdd");
-            RegAll(typeof(MathF), "FusedMultiplyAdd");
+            // Math(F).FusedMultiplyAdd is NOT wrapped here: RemappedIntrinsics turns it into the IR multiply-add,
+            // which RegisterSoftFusedMultiplyAdd redirects to the exact SoftFma (the old wrapper multiplied then added).
 
             // IntrinsicMath (targets of RemappedIntrinsics)
             RegAll(typeof(IntrinsicMath), "Abs");

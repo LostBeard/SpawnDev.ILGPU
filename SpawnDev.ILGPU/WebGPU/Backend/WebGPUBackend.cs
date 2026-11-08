@@ -731,6 +731,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // take effect for a SECOND backend on the same Context - a known inconsistency, left as is here).
             RegisterExactRemainder();
             RegisterPackedDot();
+            RegisterSoftFusedMultiplyAdd();
             InitIntrinsicProvider();
             RegisterMathIntrinsics();
 
@@ -784,6 +785,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// <summary>
         /// Gets the intrinsic manager via reflection as it is internal.
         /// </summary>
+        /// <summary>
+        /// The IR multiply-add (Math(F).FusedMultiplyAdd) rounds ONCE. WGSL fma() does not promise it (the spec lets it round the product),  so an f32 multiply-add compiles
+        /// <see cref="SoftFma.FusedMultiplyAddF32Integer"/> (integer arithmetic only, which no shader compiler
+        /// contracts), bit-identical to .NET. MultiplyAddEstimate keeps the fast WGSL fma(). Emulated f64 is not IEEE
+        /// binary64, so its multiply-add stays the f64 helper. Registered BEFORE InitIntrinsicProvider.
+        /// </summary>
+        private void RegisterSoftFusedMultiplyAdd()
+        {
+            GetIntrinsicManager(Context).RegisterTernaryArithmetic(
+                global::ILGPU.IR.Values.TernaryArithmeticKind.MultiplyAdd,
+                BasicValueType.Float32,
+                new WebGPUIntrinsic(
+                    typeof(SoftFma).GetMethod(nameof(SoftFma.FusedMultiplyAddF32Integer))!,
+                    IntrinsicImplementationMode.Redirect));
+        }
+
         private static IntrinsicImplementationManager GetIntrinsicManager(Context context)
         {
             var prop = typeof(Context).GetProperty("IntrinsicManager", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);

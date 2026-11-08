@@ -274,7 +274,27 @@ namespace ILGPU
             /// <param name="third">The third operand.</param>
             [MathIntrinsic(MathIntrinsicKind.MultiplyAdd)]
             public static double FMA(double first, double second, double third) =>
-                first * second + third;
+                Math.FusedMultiplyAdd(first, second, third);
+            /// <summary>
+            /// a * b + c: one hardware fma where there is one (CUDA, OpenCL, WebGPU, Velocity), multiply then add where not (Wasm, WebGL).
+            /// </summary>
+            /// <param name="first">The first operand.</param>
+            /// <param name="second">The second operand.</param>
+            /// <param name="third">The third operand.</param>
+            [MathIntrinsic(MathIntrinsicKind.MultiplyAddEstimate)]
+            public static double MultiplyAddEstimate(double first, double second, double third) =>
+                double.MultiplyAddEstimate(first, second, third);
+
+            /// <summary>
+            /// <see cref="Math.FusedMultiplyAdd(double, double, double)"/> in a kernel: the
+            /// MultiplyAdd intrinsic, which rounds once (RemappedIntrinsics maps the BCL call here).
+            /// </summary>
+            /// <param name="first">The first factor.</param>
+            /// <param name="second">The second factor.</param>
+            /// <param name="third">The addend.</param>
+            [MathIntrinsic(MathIntrinsicKind.MultiplyAdd)]
+            public static double FusedMultiplyAdd(double first, double second, double third) =>
+                Math.FusedMultiplyAdd(first, second, third);
             #endregion
 
             #region Single Precision
@@ -517,7 +537,27 @@ namespace ILGPU
             /// <param name="third">The third operand.</param>
             [MathIntrinsic(MathIntrinsicKind.MultiplyAdd)]
             public static float FMA(float first, float second, float third) =>
-                first * second + third;
+                MathF.FusedMultiplyAdd(first, second, third);
+            /// <summary>
+            /// a * b + c: one hardware fma where there is one (CUDA, OpenCL, WebGPU, Velocity), multiply then add where not (Wasm, WebGL).
+            /// </summary>
+            /// <param name="first">The first operand.</param>
+            /// <param name="second">The second operand.</param>
+            /// <param name="third">The third operand.</param>
+            [MathIntrinsic(MathIntrinsicKind.MultiplyAddEstimate)]
+            public static float MultiplyAddEstimate(float first, float second, float third) =>
+                float.MultiplyAddEstimate(first, second, third);
+
+            /// <summary>
+            /// <see cref="MathF.FusedMultiplyAdd(float, float, float)"/> in a kernel: the
+            /// MultiplyAdd intrinsic, which rounds once (RemappedIntrinsics maps the BCL call here).
+            /// </summary>
+            /// <param name="first">The first factor.</param>
+            /// <param name="second">The second factor.</param>
+            /// <param name="third">The addend.</param>
+            [MathIntrinsic(MathIntrinsicKind.MultiplyAdd)]
+            public static float FusedMultiplyAdd(float first, float second, float third) =>
+                MathF.FusedMultiplyAdd(first, second, third);
 
             #endregion
 
@@ -795,6 +835,46 @@ namespace ILGPU
             /// <param name="third">The third operand.</param>
             [MathIntrinsic(MathIntrinsicKind.MultiplyAdd)]
             public static ulong FMA(ulong first, ulong second, ulong third) =>
+                first * second + third;
+
+            /// <summary>
+            /// a * b + c: one hardware fma where there is one (CUDA, OpenCL, WebGPU, Velocity), multiply then add where not (Wasm, WebGL).
+            /// </summary>
+            /// <param name="first">The first operand.</param>
+            /// <param name="second">The second operand.</param>
+            /// <param name="third">The third operand.</param>
+            [MathIntrinsic(MathIntrinsicKind.MultiplyAddEstimate)]
+            public static int MultiplyAddEstimate(int first, int second, int third) =>
+                first * second + third;
+
+            /// <summary>
+            /// a * b + c: one hardware fma where there is one (CUDA, OpenCL, WebGPU, Velocity), multiply then add where not (Wasm, WebGL).
+            /// </summary>
+            /// <param name="first">The first operand.</param>
+            /// <param name="second">The second operand.</param>
+            /// <param name="third">The third operand.</param>
+            [MathIntrinsic(MathIntrinsicKind.MultiplyAddEstimate)]
+            public static uint MultiplyAddEstimate(uint first, uint second, uint third) =>
+                first * second + third;
+
+            /// <summary>
+            /// a * b + c: one hardware fma where there is one (CUDA, OpenCL, WebGPU, Velocity), multiply then add where not (Wasm, WebGL).
+            /// </summary>
+            /// <param name="first">The first operand.</param>
+            /// <param name="second">The second operand.</param>
+            /// <param name="third">The third operand.</param>
+            [MathIntrinsic(MathIntrinsicKind.MultiplyAddEstimate)]
+            public static long MultiplyAddEstimate(long first, long second, long third) =>
+                first * second + third;
+
+            /// <summary>
+            /// a * b + c: one hardware fma where there is one (CUDA, OpenCL, WebGPU, Velocity), multiply then add where not (Wasm, WebGL).
+            /// </summary>
+            /// <param name="first">The first operand.</param>
+            /// <param name="second">The second operand.</param>
+            /// <param name="third">The third operand.</param>
+            [MathIntrinsic(MathIntrinsicKind.MultiplyAddEstimate)]
+            public static ulong MultiplyAddEstimate(ulong first, ulong second, ulong third) =>
                 first * second + third;
 
 

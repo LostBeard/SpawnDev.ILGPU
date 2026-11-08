@@ -223,6 +223,20 @@ namespace ILGPU
             }
 
             /// <summary>
+            /// Lets (or stops) the CUDA and OpenCL device compilers contract a
+            /// floating-point multiply and add into one fused multiply-add. Off by
+            /// default, so CUDA and OpenCL round every operation as .NET and the CPU
+            /// accelerator do. See <see cref="ContextProperties.FloatingPointContraction"/>.
+            /// </summary>
+            /// <param name="enable">True to allow contraction.</param>
+            /// <returns>The current builder instance.</returns>
+            public Builder EnableFloatingPointContraction(bool enable = true)
+            {
+                FloatingPointContraction = enable;
+                return this;
+            }
+
+            /// <summary>
             /// Specifies how to deal with static fields.
             /// </summary>
             /// <param name="fieldMode">The static field mode to use.</param>

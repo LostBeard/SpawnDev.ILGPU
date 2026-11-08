@@ -297,8 +297,25 @@ namespace ILGPU.IR.Construction
             TernaryArithmeticKind kind,
             ArithmeticFlags flags)
         {
+            // ⚠️ A float MultiplyAdd rounds ONCE (Math(F).FusedMultiplyAdd): folding its constant product first and
+            // adding after would round twice. Only integers and MultiplyAddEstimate (which may be unfused) split.
+            bool fusedFloat = kind == TernaryArithmeticKind.MultiplyAdd && ILGPU.Util.TypeExtensions.IsFloat(first.BasicValueType);
+            if (fusedFloat)
+            {
+                if (first is PrimitiveValue f && second is PrimitiveValue s && third is PrimitiveValue t)
+                {
+                    if (f.BasicValueType == BasicValueType.Float32)
+                        return CreatePrimitiveValue(
+                            location,
+                            MathF.FusedMultiplyAdd(f.Float32Value, s.Float32Value, t.Float32Value));
+                    if (f.BasicValueType == BasicValueType.Float64)
+                        return CreatePrimitiveValue(
+                            location,
+                            Math.FusedMultiplyAdd(f.Float64Value, s.Float64Value, t.Float64Value));
+                }
+            }
             // Check for constants
-            if (first is PrimitiveValue firstValue &&
+            else if (first is PrimitiveValue firstValue &&
                 second is PrimitiveValue secondValue)
             {
                 var value = BinaryArithmeticFoldConstants(

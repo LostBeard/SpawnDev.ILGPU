@@ -76,6 +76,18 @@ namespace ILGPU.Frontend.Intrinsic
                         context[1],
                         (BinaryArithmeticKind)kindIndex,
                         attribute.IntrinsicFlags);
+                case 3:
+                    // Ternary math intrinsics (MultiplyAdd, MultiplyAddEstimate). Before 5.4.18 this case was
+                    // missing, so IntrinsicMath.CPUOnly.FMA could not be called from a kernel at all.
+                    var ternaryIndex = attribute.IntrinsicKind -
+                        MathIntrinsicKind._TernaryFunctions - 1;
+                    return context.Builder.CreateArithmetic(
+                        context.Location,
+                        context[0],
+                        context[1],
+                        context[2],
+                        (TernaryArithmeticKind)ternaryIndex,
+                        attribute.IntrinsicFlags);
                 default:
                     throw context.Location.GetNotSupportedException(
                         ErrorMessages.NotSupportedMathIntrinsic,

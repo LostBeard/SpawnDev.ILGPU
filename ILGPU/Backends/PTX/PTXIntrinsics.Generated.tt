@@ -34,6 +34,7 @@ var fp16Ops = new (string, string, string, string)[]
     ("Binary", "Max", "MaxFP32", "SM_80"),
 
     ("Ternary", "MultiplyAdd", "FmaFP32", "SM_53"),
+    ("Ternary", "MultiplyAddEstimate", "FmaFP32", "SM_53"),
 };
 
 var unaryMathFunctions = new (string, string, TypeInformation)[]

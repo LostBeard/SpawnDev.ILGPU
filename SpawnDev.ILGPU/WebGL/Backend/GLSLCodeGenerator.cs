@@ -2107,6 +2107,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 else
                     AppendLine($"{target} = uint({leftExpr}) {op} uint({rightExpr});");
             }
+            else if (value.Kind == BinaryArithmeticKind.Mul && target.Type == "float"
+                && !Backend.Context.Properties.FloatingPointContraction)
+            {
+            // ⚠️ ANGLE's D3D compiler contracts a * b + c into one mad (rounding once), and GLSL ES 3.0 has no
+            // `precise`: FloatContraction_PlainMulAdd failed 1024 of 1024 on WebGL (2026-11-08). OR-ing the product's bits
+            // with a zero the compiler cannot prove (gl_VertexID >> 31: the vertex shader's id is never negative) makes the
+            // rounded product opaque, so it is never fused. Skipped when the context opts in to contraction.
+                AppendLine($"{target} = uintBitsToFloat(floatBitsToUint({leftExpr} * {rightExpr}) | uint(gl_VertexID >> 31));");
+            }
             else
             {
                 AppendLine($"{target} = {leftExpr} {op} {rightExpr};");
@@ -2240,8 +2249,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 UnaryArithmeticKind.SqrtF => $"sqrt({operand})",
                 UnaryArithmeticKind.RsqrtF => $"inversesqrt({operand})",
                 UnaryArithmeticKind.RcpF => $"1.0 / {operand}",
-                UnaryArithmeticKind.FloorF => $"floor({operand})",
-                UnaryArithmeticKind.CeilingF => $"ceil({operand})",
+                UnaryArithmeticKind.FloorF => $"floor({OpaqueFloat(operand.ToString())})",
+                UnaryArithmeticKind.CeilingF => $"ceil({OpaqueFloat(operand.ToString())})",
                 UnaryArithmeticKind.IsNaNF => $"(isnan({operand}) ? 1 : 0)",
                 UnaryArithmeticKind.IsInfF => $"(isinf({operand}) ? 1 : 0)",
                 UnaryArithmeticKind.IsFinF => $"((!isnan({operand}) && !isinf({operand})) ? 1 : 0)",
@@ -2500,6 +2509,17 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         /// <summary>Emits a type conversion using <see cref="BuildConvertExpression"/>.</summary>
         /// <param name="value">The IR value.</param>
+        /// <summary>
+        /// <paramref name="x"/> with its bits ORed with a zero the shader compiler cannot prove (gl_VertexID &gt;&gt; 31: a vertex id is
+        /// never negative), so the compiler can make no assumption about the value.
+        /// </summary>
+        /// <remarks>
+        /// ⚠️ ANGLE's D3D compile of a value built in a loop nest from loop indices plus a buffer load treated it as a whole number:
+        /// floor(x) and float(int(x)) both came back as x (SpawnDev.ILGPU.ML DeformConv on WebGL, 2026-11-08: the bilinear +1 corners
+        /// got no weight; DeformConv_Bisect_V1Decomposed_MatchesCpu). The same GLSL outside a loop was right.
+        /// </remarks>
+        protected static string OpaqueFloat(string x) => $"uintBitsToFloat(floatBitsToUint({x}) | uint(gl_VertexID >> 31))";
+
         public virtual void GenerateCode(ConvertValue value)
         {
             var target = Load(value);
@@ -2687,9 +2707,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 return $"float(uint({source}))";
 
             // Build the cast expression. Skip redundant cast when types match.
+            // float -> int / uint through OpaqueFloat: in a loop nest ANGLE's D3D compile dropped the conversion and kept the
+            // fraction (float(int(-0.5)) came back -0.5) - see OpaqueFloat.
             string castExpr = (targetType == sourceType)
                 ? source.ToString()
-                : $"{targetType}({source})";
+                : sourceType == "float" && (targetType == "int" || targetType == "uint")
+                    ? $"{targetType}({OpaqueFloat(source.ToString())})"
+                    : $"{targetType}({source})";
 
             // Sub-word narrowing for Int16 / Int8 targets - same pattern as
             // WGSL + Wasm fixes. GLSL has no native int16/int8 so `int(int_val)`

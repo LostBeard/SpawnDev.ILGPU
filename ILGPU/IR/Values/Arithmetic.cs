@@ -406,6 +406,7 @@ namespace ILGPU.IR.Values
             kind switch
             {
                 TernaryArithmeticKind.MultiplyAdd => BinaryArithmeticKind.Mul,
+                TernaryArithmeticKind.MultiplyAddEstimate => BinaryArithmeticKind.Mul,
                 _ => throw new ArgumentOutOfRangeException(nameof(kind)),
             };
 
@@ -420,6 +421,7 @@ namespace ILGPU.IR.Values
             kind switch
             {
                 TernaryArithmeticKind.MultiplyAdd => BinaryArithmeticKind.Add,
+                TernaryArithmeticKind.MultiplyAddEstimate => BinaryArithmeticKind.Add,
                 _ => throw new ArgumentOutOfRangeException(nameof(kind)),
             };
 

@@ -133,7 +133,8 @@ namespace ILGPU.Backends.PTX
                     value.Kind,
                     value.ArithmeticBasicValueType,
                     Backend.Capabilities,
-                    FastMath));
+                    FastMath,
+                    FloatingPointContraction));
             command.AppendArgument(targetRegister);
             // PTX copysign.type d, a, b copies sign of 'a' to magnitude of 'b'.
             // The IR stores Left=magnitude, Right=sign (matching C convention),

@@ -1,6 +1,39 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.18 (forks 2.4.17) - 2026-11-08 - float math rounds like .NET on every backend; exact FusedMultiplyAdd; MultiplyAddEstimate; WebGL floor/int in loop nests
+
+- **CHANGED (forks; CUDA, OpenCL, WebGL): a float multiply followed by an add is no longer contracted into one fused
+  multiply-add by default.** PTX add/sub/mul carry `.rn` (ptxas may not fuse them), OpenCL C sets
+  `#pragma OPENCL FP_CONTRACT OFF`, and WebGL hides each f32 product from ANGLE's D3D compiler (a bit round-trip through an
+  integer OR with a value it cannot prove zero) - GLSL ES 3.0 has no `precise`. Every float operation now rounds on its own,
+  as .NET, the CPU accelerator, Velocity, Wasm and WebGPU already did. Found by Geordi (SpawnDev.Codecs FLAC LPC: 2 of 26
+  files differed from FFmpeg on CUDA and OpenCL, the same bytes on both). **Opt back in** with
+  `Context.Builder.EnableFloatingPointContraction()` (`ContextProperties.FloatingPointContraction`) - separate from
+  `MathMode.Fast`, which also swaps in approximate transcendentals.
+- **FIXED (forks + every backend): `Math.FusedMultiplyAdd` / `MathF.FusedMultiplyAdd` in a kernel round once, bit-identical
+  to .NET.** They had no device mapping on CUDA / OpenCL / Velocity, and the frontend could not handle a three-argument
+  math intrinsic at all ("The math intrinsic with 3 arguments is not supported"), so `IntrinsicMath.CPUOnly.FMA` was never
+  callable either; Wasm and WebGL multiplied then added. Now: PTX `fma.rn`, OpenCL `fma`, Velocity
+  `Vector*.FusedMultiplyAdd`, CPU `Math(F).FusedMultiplyAdd`; Wasm, WebGL and WebGPU f32 compile `SoftFma` (new, public):
+  `FusedMultiplyAddF32` (round-to-odd through f64, Wasm), `FusedMultiplyAddF32Integer` (integer arithmetic only, WebGL and
+  WebGPU - WGSL `fma()` does not promise one rounding) and `FusedMultiplyAddF64` (Wasm; ported from Go's `math.FMA`, BSD
+  licence notice in the file). Host-verified bit-exact against .NET on 16M cases each, ~0.5M of them exact ties.
+  Also: `IRBuilder` folded a float multiply-add with constant factors as a product THEN an add (two roundings); it now
+  folds all-constant f32/f64 with `Math(F).FusedMultiplyAdd` and never splits a float `MultiplyAdd`.
+- **NEW (forks + every backend): `float.MultiplyAddEstimate` / `double.MultiplyAddEstimate` in kernels** - a new IR op
+  (`TernaryArithmeticKind.MultiplyAddEstimate`): one hardware fma where there is one (CUDA `fma.rn`, OpenCL `fma`, WebGPU
+  `fma`, Velocity `Vector*.MultiplyAddEstimate`), multiply then add where there is not (Wasm, WebGL). The fast form for
+  hot loops that do not need bit-exactness (SpawnDev.ILGPU.ML is moving its GEMM/attention loops to it).
+- **FIXED (WebGL): `floor` / `ceil` and float -> int conversions were dropped inside loop nests.** ANGLE's D3D compile treated
+  a value built in a loop from loop indices plus a buffer load as a whole number: `floor(-0.5)` came back -0.5 and
+  `(int)-0.5` kept its fraction, from correct GLSL (the same code outside a loop was right). It broke
+  SpawnDev.ILGPU.ML's DeformConv on WebGL for every fractional offset (Tuvok, ML 5.8.7 release sweep). Their operands now
+  go through the same opaque bit round-trip. `DeformConv_FractionalOffsets_BilinearCorners_MatchCpu` (a copy of the ML
+  kernel with per-step probes), `DeformConv_Bisect_*`. Red-checked: without the change, fy - floor(fy) was 0 for 25 of 25.
+- Tests: `FloatContraction_PlainMulAdd_RoundsEachOperationLikeDotNet`, `..._ExplicitFusedMultiplyAdd_RoundsOnceLikeDotNet`,
+  `..._MultiplyAddEstimate_IsHardwareFmaOrMultiplyAdd`, `..._OptIn_ChangesGeneratedCode` (all lanes; 31/31 pass where they run).
+
 ## 5.4.17 (forks 2.4.16) - 2026-11-08 - WebGPU dispatch-plan capture scoped to its async flow; folded uint -> float fix
 
 - **FIXED (forks, every IR backend): a constant-folded unsigned 32-bit integer converted to float came out sign-extended.**

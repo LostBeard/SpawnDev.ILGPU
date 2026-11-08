@@ -2615,7 +2615,7 @@ namespace ILGPU.Backends.Velocity.Vec128
             var b = CastIToF32(second);
             var c = CastIToF32(third);
 
-            var result = Vector128.Add(Vector128.Multiply(a, b), c);
+            var result = Vector128.FusedMultiplyAdd(a, b, c);
 
             return CastFToI32(result);
         }
@@ -2662,8 +2662,101 @@ namespace ILGPU.Backends.Velocity.Vec128
             var b = CastIToF64(second);
             var c = CastIToF64(third);
 
+            var result1 = Vector128.FusedMultiplyAdd(a.Item1, b.Item1, c.Item1);
+            var result2 = Vector128.FusedMultiplyAdd(a.Item2, b.Item2, c.Item2);
+
+            return CastFToI64((result1, result2));
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static Vector128<int> MultiplyAddEstimateI32(
+            Vector128<int> first,
+            Vector128<int> second,
+            Vector128<int> third)
+        {
+            var a = first;
+            var b = second;
+            var c = third;
+
+            var result = Vector128.Add(Vector128.Multiply(a, b), c);
+
+            return result;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static Vector128<int> MultiplyAddEstimateU32(
+            Vector128<int> first,
+            Vector128<int> second,
+            Vector128<int> third)
+        {
+            var a = CastIToU32(first);
+            var b = CastIToU32(second);
+            var c = CastIToU32(third);
+
+            var result = Vector128.Add(Vector128.Multiply(a, b), c);
+
+            return CastUToI32(result);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static Vector128<int> MultiplyAddEstimateF32(
+            Vector128<int> first,
+            Vector128<int> second,
+            Vector128<int> third)
+        {
+            var a = CastIToF32(first);
+            var b = CastIToF32(second);
+            var c = CastIToF32(third);
+
+            var result = Vector128.MultiplyAddEstimate(a, b, c);
+
+            return CastFToI32(result);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static (Vector128<long>, Vector128<long>) MultiplyAddEstimateI64(
+            (Vector128<long>, Vector128<long>) first,
+            (Vector128<long>, Vector128<long>) second,
+            (Vector128<long>, Vector128<long>) third)
+        {
+            var a = first;
+            var b = second;
+            var c = third;
+
             var result1 = Vector128.Add(Vector128.Multiply(a.Item1, b.Item1), c.Item1);
             var result2 = Vector128.Add(Vector128.Multiply(a.Item2, b.Item2), c.Item2);
+
+            return (result1, result2);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static (Vector128<long>, Vector128<long>) MultiplyAddEstimateU64(
+            (Vector128<long>, Vector128<long>) first,
+            (Vector128<long>, Vector128<long>) second,
+            (Vector128<long>, Vector128<long>) third)
+        {
+            var a = CastIToU64(first);
+            var b = CastIToU64(second);
+            var c = CastIToU64(third);
+
+            var result1 = Vector128.Add(Vector128.Multiply(a.Item1, b.Item1), c.Item1);
+            var result2 = Vector128.Add(Vector128.Multiply(a.Item2, b.Item2), c.Item2);
+
+            return CastUToI64((result1, result2));
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static (Vector128<long>, Vector128<long>) MultiplyAddEstimateF64(
+            (Vector128<long>, Vector128<long>) first,
+            (Vector128<long>, Vector128<long>) second,
+            (Vector128<long>, Vector128<long>) third)
+        {
+            var a = CastIToF64(first);
+            var b = CastIToF64(second);
+            var c = CastIToF64(third);
+
+            var result1 = Vector128.MultiplyAddEstimate(a.Item1, b.Item1, c.Item1);
+            var result2 = Vector128.MultiplyAddEstimate(a.Item2, b.Item2, c.Item2);
 
             return CastFToI64((result1, result2));
         }
@@ -2697,6 +2790,25 @@ namespace ILGPU.Backends.Velocity.Vec128
             TernaryOperations64.Add(
                 (TernaryArithmeticKind.MultiplyAdd, VelocityWarpOperationMode.F),
                 GetMethod(nameof(MultiplyAddF64)));
+            TernaryOperations32.Add(
+                (TernaryArithmeticKind.MultiplyAddEstimate, VelocityWarpOperationMode.I),
+                GetMethod(nameof(MultiplyAddEstimateI32)));
+            TernaryOperations32.Add(
+                (TernaryArithmeticKind.MultiplyAddEstimate, VelocityWarpOperationMode.U),
+                GetMethod(nameof(MultiplyAddEstimateU32)));
+            TernaryOperations32.Add(
+                (TernaryArithmeticKind.MultiplyAddEstimate, VelocityWarpOperationMode.F),
+                GetMethod(nameof(MultiplyAddEstimateF32)));
+
+            TernaryOperations64.Add(
+                (TernaryArithmeticKind.MultiplyAddEstimate, VelocityWarpOperationMode.I),
+                GetMethod(nameof(MultiplyAddEstimateI64)));
+            TernaryOperations64.Add(
+                (TernaryArithmeticKind.MultiplyAddEstimate, VelocityWarpOperationMode.U),
+                GetMethod(nameof(MultiplyAddEstimateU64)));
+            TernaryOperations64.Add(
+                (TernaryArithmeticKind.MultiplyAddEstimate, VelocityWarpOperationMode.F),
+                GetMethod(nameof(MultiplyAddEstimateF64)));
         }
 
         public static MethodInfo GetTernaryOperation32(

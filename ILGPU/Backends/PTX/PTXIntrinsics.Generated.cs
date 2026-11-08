@@ -596,6 +596,12 @@ namespace ILGPU.Backends.PTX
                 CreateFP16Intrinsic(
                     nameof(HalfExtensions.FmaFP32),
                     CudaArchitecture.SM_53));
+            manager.RegisterTernaryArithmetic(
+                TernaryArithmeticKind.MultiplyAddEstimate,
+                BasicValueType.Float16,
+                CreateFP16Intrinsic(
+                    nameof(HalfExtensions.FmaFP32),
+                    CudaArchitecture.SM_53));
         }
 
         #endregion

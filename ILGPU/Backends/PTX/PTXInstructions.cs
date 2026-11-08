@@ -149,12 +149,18 @@ namespace ILGPU.Backends.PTX
         /// <param name="type">The operation type.</param>
         /// <param name="capabilities">The supported capabilities.</param>
         /// <param name="fastMath">True, to use a fast-math operation.</param>
+        /// <param name="allowContraction">
+        /// True to let ptxas contract a float add/sub/mul with a neighbour into an fma
+        /// (<see cref="ContextProperties.FloatingPointContraction"/>). False (default)
+        /// emits an explicit <c>.rn</c>, which forbids it.
+        /// </param>
         /// <returns>The resolved arithmetic operation.</returns>
         public static string GetArithmeticOperation(
             BinaryArithmeticKind kind,
             ArithmeticBasicValueType type,
             CudaCapabilityContext capabilities,
-            bool fastMath)
+            bool fastMath,
+            bool allowContraction = false)
         {
             if (type == ArithmeticBasicValueType.BFloat16 ||
                 type == ArithmeticBasicValueType.Float8E4M3 ||
@@ -175,13 +181,49 @@ namespace ILGPU.Backends.PTX
             }
 
             var key = (kind, type);
-            return fastMath &&
+            if (!(fastMath &&
                 BinaryArithmeticOperationsFastMath.TryGetValue(
                     key,
                     out string? operation) ||
-                BinaryArithmeticOperations.TryGetValue(key, out operation)
-                ? operation
-                : throw new NotSupportedIntrinsicException(kind.ToString());
+                BinaryArithmeticOperations.TryGetValue(key, out operation)))
+            {
+                throw new NotSupportedIntrinsicException(kind.ToString());
+            }
+            return allowContraction ? operation : WithoutContraction(kind, type, operation);
+        }
+
+        /// <summary>
+        /// Adds <c>.rn</c> to a float add/sub/mul that has no rounding modifier
+        /// (<c>add.f32</c> -> <c>add.rn.f32</c>, <c>mul.ftz.f32</c> -> <c>mul.rn.ftz.f32</c>).
+        /// </summary>
+        /// <remarks>
+        /// ⚠️ PTX lets ptxas contract an add/sub/mul WITHOUT a rounding modifier with a
+        /// neighbour into an fma, which rounds once: CUDA then disagreed with .NET, the CPU
+        /// accelerator, Velocity and Wasm in the last bit (Geordi, SpawnDev.Codecs FLAC LPC,
+        /// 2026-11-08: 2 of 26 files differed from FFmpeg on CUDA and OpenCL). An explicit
+        /// <c>.rn</c> is the same rounding and forbids the contraction.
+        /// </remarks>
+        private static string WithoutContraction(
+            BinaryArithmeticKind kind,
+            ArithmeticBasicValueType type,
+            string operation)
+        {
+            if (kind != BinaryArithmeticKind.Add &&
+                kind != BinaryArithmeticKind.Sub &&
+                kind != BinaryArithmeticKind.Mul)
+                return operation;
+            if (type != ArithmeticBasicValueType.Float16 &&
+                type != ArithmeticBasicValueType.Float32 &&
+                type != ArithmeticBasicValueType.Float64)
+                return operation;
+            // add / sub / mul are three characters; a rounding modifier follows directly.
+            if (operation.Length < 4 || operation[3] != '.' ||
+                operation.Contains(".rn", System.StringComparison.Ordinal) ||
+                operation.Contains(".rz", System.StringComparison.Ordinal) ||
+                operation.Contains(".rm", System.StringComparison.Ordinal) ||
+                operation.Contains(".rp", System.StringComparison.Ordinal))
+                return operation;
+            return operation.Substring(0, 3) + ".rn" + operation.Substring(3);
         }
 
         /// <summary>

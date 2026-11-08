@@ -5,9 +5,25 @@
         <Flags>IntsAndFloats</Flags>
         <Call>IntrinsicMath.CPUOnly.FMA</Call>
         <Implementation>{Value0} * {Value1} + {Value2}</Implementation>
+        <!-- Floats round ONCE, as Math(F).FusedMultiplyAdd and PTX fma.rn / OpenCL fma do. -->
+        <FloatImplementation>{MathType}.FusedMultiplyAdd({Value0}, {Value1}, {Value2})</FloatImplementation>
         <Velocity>
             <Velocity128>
                 <Implementation>Vector128.Add(Vector128.Multiply({Value0}, {Value1}), {Value2})</Implementation>
+                <FloatImplementation>Vector128.FusedMultiplyAdd({Value0}, {Value1}, {Value2})</FloatImplementation>
+            </Velocity128>
+        </Velocity>
+    </Operation>
+    <Operation Name="MultiplyAddEstimate">
+        <Summary>a * b + c: one hardware fma where there is one (CUDA, OpenCL, WebGPU, Velocity), multiply then add where not (Wasm, WebGL).</Summary>
+        <Flags>IntsAndFloats</Flags>
+        <Call>IntrinsicMath.CPUOnly.MultiplyAddEstimate</Call>
+        <Implementation>{Value0} * {Value1} + {Value2}</Implementation>
+        <FloatImplementation>{TypeName}.MultiplyAddEstimate({Value0}, {Value1}, {Value2})</FloatImplementation>
+        <Velocity>
+            <Velocity128>
+                <Implementation>Vector128.Add(Vector128.Multiply({Value0}, {Value1}), {Value2})</Implementation>
+                <FloatImplementation>Vector128.MultiplyAddEstimate({Value0}, {Value1}, {Value2})</FloatImplementation>
             </Velocity128>
         </Velocity>
     </Operation>
