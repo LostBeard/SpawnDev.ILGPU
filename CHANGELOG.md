@@ -36,6 +36,9 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   kernel with per-step probes), `DeformConv_Bisect_*`. Red-checked: without the change, fy - floor(fy) was 0 for 25 of 25.
 - Tests: `FloatContraction_PlainMulAdd_RoundsEachOperationLikeDotNet`, `..._ExplicitFusedMultiplyAdd_RoundsOnceLikeDotNet`,
   `..._MultiplyAddEstimate_IsHardwareFmaOrMultiplyAdd`, `..._OptIn_ChangesGeneratedCode` (all lanes; 31/31 pass where they run).
+- Release sweep (RTX 4070, all lanes, default exclusions, code = 5.4.18): 7,808 test cases, 7,197 passed, 611 skipped, 0 failed,
+  52.6 min. Against the 5.4.17 sweep no test is gone and nothing changed outcome; the 63 new cases are the 7 new tests on 9
+  lanes (56 pass, 7 skip: the generated-code check runs on CUDA and OpenCL only).
 
 ## 5.4.17 (forks 2.4.16) - 2026-11-08 - WebGPU dispatch-plan capture scoped to its async flow; folded uint -> float fix
 
