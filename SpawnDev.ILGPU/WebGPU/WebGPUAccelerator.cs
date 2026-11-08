@@ -1831,7 +1831,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 // queue - scalar uploads, coalesce copies, the pass - becomes a record, submitted in one crossing.
                 // Not under capture (the plan records real bind groups) or bind-group caching (the cache owns them).
                 var batchStream = stream as WebGPUStream ?? (WebGPUStream)webGpuAccel.DefaultStream;
-                bool batchMode = !bgUseCache && webGpuAccel._activeDispatchPlan == null && batchStream.BatchingAvailable;
+                bool batchMode = !bgUseCache && webGpuAccel.RecordingPlan == null && batchStream.BatchingAvailable;
                 // The stream holds either a record batch or a legacy encoder, never both: switching submits the
                 // open one, so submission order stays dispatch order.
                 if (batchMode) batchStream.EnsureNoOpenEncoder();
@@ -2077,7 +2077,7 @@ namespace SpawnDev.ILGPU.WebGPU
                                 else batchStream.BatchCopy(srcBuffer, srcByteOffset, coalescedBuffer, runningByteOffset, copySize);
                                 // Dispatch-plan capture: the coalesce gather reads tensor data that is
                                 // recomputed on every replay - the copy must re-run in captured order.
-                                webGpuAccel._activeDispatchPlan?.RecordCopy(srcBuffer, srcByteOffset, coalescedBuffer, runningByteOffset, copySize);
+                                webGpuAccel.RecordingPlan?.RecordCopy(srcBuffer, srcByteOffset, coalescedBuffer, runningByteOffset, copySize);
                             }
 
                             // Per-field offset within coalesced buffer, expressed in u32 slots.
@@ -2660,7 +2660,7 @@ namespace SpawnDev.ILGPU.WebGPU
                     packedDataForCache = packedData;
                     // Snapshot the scalar upload for the dispatch plan's patch surface (attached to
                     // the Record() below; no-op unless the plan opted into snapshots).
-                    webGpuAccel._activeDispatchPlan?.NoteScalarUpload(packedBuffer, packedData);
+                    webGpuAccel.RecordingPlan?.NoteScalarUpload(packedBuffer, packedData);
 
                     entries.Add(new GPUBindGroupEntry
                     {
@@ -3019,7 +3019,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 // the .NET wrapper disposal below), and the plan takes OWNERSHIP of this dispatch's
                 // scalar/coalesced param buffers - returning a scalar buffer to the pool would let a
                 // later dispatch overwrite it, and destroying a coalesce buffer would break replay.
-                var capturePlan = webGpuAccel._activeDispatchPlan;
+                var capturePlan = webGpuAccel.RecordingPlan;
                 if (capturePlan != null)
                 {
                     capturePlan.Record(shader.Pipeline!, bindGroup!, workX, workY, workZ);
@@ -3214,10 +3214,33 @@ namespace SpawnDev.ILGPU.WebGPU
         public void FlushPendingCommands() => ((WebGPUStream)DefaultStream).FlushPending();
 
         // ── Dispatch-plan capture (the WebGPU twin of CUDA graph capture) ─────────────────────
+        // Accelerator-wide slot: "a capture exists on this accelerator" (one at a time). It is NOT what
+        // the dispatch/copy/clear/upload sites consult - they use RecordingPlan, which is scoped to the async
+        // flow that called BeginDispatchCapture. ⚠️ Do not read _activeDispatchPlan at a record site: with a
+        // video or audio loop dispatching concurrently, the accelerator-wide slot baked the OTHER loop's kernels
+        // into the plan (Riker, AssistZ 2026-11-06: 280 recorded dispatches where a quiet capture gives 250) and
+        // made the other loop's frame copy throw "cannot run while a WebGPU dispatch plan is recording".
         private WebGPUDispatchPlan? _activeDispatchPlan;
 
-        /// <summary>The dispatch plan currently recording, or null. See <see cref="BeginDispatchCapture"/>.</summary>
-        public WebGPUDispatchPlan? ActiveDispatchPlan => _activeDispatchPlan;
+        /// <summary>
+        /// The plan recording for the CURRENT async flow on this accelerator, or null. Other flows (a
+        /// concurrent video/audio loop) see null and dispatch normally, batching included.
+        /// </summary>
+        internal WebGPUDispatchPlan? RecordingPlan
+        {
+            get
+            {
+                var plan = WebGPUDispatchPlan.Recording;
+                return plan != null && ReferenceEquals(plan, _activeDispatchPlan) ? plan : null;
+            }
+        }
+
+        /// <summary>
+        /// The dispatch plan recording for the calling async flow, or null. Scoped like
+        /// <see cref="BeginDispatchCapture"/>: a flow that did not begin the capture sees null even while
+        /// another flow is recording.
+        /// </summary>
+        public WebGPUDispatchPlan? ActiveDispatchPlan => RecordingPlan;
 
         /// <summary>
         /// Starts recording every subsequent kernel dispatch (in addition to executing it normally)
@@ -3225,32 +3248,57 @@ namespace SpawnDev.ILGPU.WebGPU
         /// valid under a stable-buffer regime at a fixed shape - see the plan's validity contract.
         /// Bind-group caching must be off (a cache-hit rewrites its owned scalar buffer, corrupting
         /// earlier plan entries).
+        /// <para>
+        /// The recording is scoped to the calling ASYNC FLOW (an <see cref="System.Threading.AsyncLocal{T}"/>):
+        /// work this method's caller does after it - including across awaits, and in tasks it starts - is
+        /// recorded; work from any other flow (a loop started before the capture) executes normally and is not
+        /// recorded. Begin, the captured work and <see cref="EndDispatchCapture"/> must therefore run in one
+        /// flow: calling this from inside an <c>async</c> helper does NOT carry the recording back to that
+        /// helper's caller (an async method's AsyncLocal changes are undone when it returns), and the
+        /// mismatched <see cref="EndDispatchCapture"/> then throws.
+        /// </para>
         /// </summary>
         public WebGPUDispatchPlan BeginDispatchCapture()
         {
             if (_activeDispatchPlan != null)
-                throw new InvalidOperationException("A dispatch capture is already active.");
+                throw new InvalidOperationException("A dispatch capture is already active on this accelerator (one capture at a time).");
             if (WebGPUBackend.EnableBindGroupCaching)
                 throw new InvalidOperationException(
                     "Dispatch capture requires WebGPUBackend.EnableBindGroupCaching = false: a bind-group " +
                     "cache hit rewrites its owned scalar buffer, which would retroactively corrupt earlier " +
                     "plan entries. Disable caching for the capture pass.");
-            _activeDispatchPlan = new WebGPUDispatchPlan(this);
-            WebGPUDispatchPlan.Recording = _activeDispatchPlan;
-            return _activeDispatchPlan;
+            var plan = new WebGPUDispatchPlan(this);
+            _activeDispatchPlan = plan;
+            WebGPUDispatchPlan.SetRecordingForCurrentFlow(plan);
+            return plan;
         }
 
         /// <summary>
         /// Stops recording and seals the active plan for replay. The caller owns the returned plan
-        /// (dispose it to release its retained buffers).
+        /// (dispose it to release its retained buffers). Must be called from the async flow that called
+        /// <see cref="BeginDispatchCapture"/> (or a task it started); from any other flow the capture is
+        /// discarded (disposed, the accelerator freed for the next capture) and this throws, because that
+        /// plan recorded none of the caller's work.
         /// </summary>
         public WebGPUDispatchPlan EndDispatchCapture()
         {
             var plan = _activeDispatchPlan
                 ?? throw new InvalidOperationException("No dispatch capture is active.");
+            bool ownerFlow = ReferenceEquals(RecordingPlan, plan);
             _activeDispatchPlan = null;
-            WebGPUDispatchPlan.Recording = null;
             plan.IsSealed = true;
+            // Clears only THIS flow's slot; a stale value left in another flow (the owner, when a child task
+            // ended the capture) is inert: WebGPUDispatchPlan.Recording ignores a sealed plan.
+            WebGPUDispatchPlan.SetRecordingForCurrentFlow(null);
+            if (!ownerFlow)
+            {
+                plan.Dispose();
+                throw new InvalidOperationException(
+                    "EndDispatchCapture was called from an async flow that did not call BeginDispatchCapture, so the " +
+                    "plan recorded none of this flow's work; it has been discarded. Call Begin, the captured work and " +
+                    "End in one flow - not BeginDispatchCapture inside an async helper method (its AsyncLocal change " +
+                    "is undone when the helper returns).");
+            }
             return plan;
         }
 
@@ -3276,7 +3324,7 @@ namespace SpawnDev.ILGPU.WebGPU
         internal bool TryBatchUpload(AcceleratorStream stream, GPUBuffer buffer, long byteOffset, IntPtr src, int length)
         {
             var webGpuStream = stream as WebGPUStream ?? (WebGPUStream)DefaultStream;
-            return _activeDispatchPlan == null && webGpuStream.BatchingActive
+            return RecordingPlan == null && webGpuStream.BatchingActive
                 && webGpuStream.BatchUpload(buffer, byteOffset, src, length);
         }
 
@@ -3289,7 +3337,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 webGpuStream.GetOrCreateEncoder().CopyBufferToBuffer(src, srcOffset, dst, dstOffset, size);
             // Dispatch-plan capture: device copies during a forward (Concat assembly, cache writes) move data
             // recomputed by earlier replayed dispatches - a replay must re-run them.
-            _activeDispatchPlan?.RecordCopy(src, srcOffset, dst, dstOffset, size);
+            RecordingPlan?.RecordCopy(src, srcOffset, dst, dstOffset, size);
         }
 
         internal void RecordClearBuffer(AcceleratorStream stream, GPUBuffer buffer, ulong offset, ulong size)
@@ -3303,7 +3351,7 @@ namespace SpawnDev.ILGPU.WebGPU
             var encoder = webGpuStream.GetOrCreateEncoder();
             encoder.ClearBuffer(buffer, offset, size);
             // Dispatch-plan capture: a replay must re-zero this region or kernels read stale data.
-            _activeDispatchPlan?.RecordClear(buffer, offset, size);
+            RecordingPlan?.RecordClear(buffer, offset, size);
         }
 
         /// <summary>

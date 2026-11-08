@@ -161,15 +161,22 @@ public sealed class WebGPUDispatchPlan : IDisposable
     public int ScalarParamWriteCount { get; private set; }
 
     /// <summary>
-    /// The plan currently recording, if any - reachable from the buffer layer.
+    /// The plan recording for the CURRENT async flow, if any - reachable from the buffer layer.
     /// </summary>
     /// <remarks>
     /// ⚠️ Static because the CPU-&gt;GPU upload path lives on <c>WebGPUNativeAccelerator</c>, which has no
-    /// reference to the <c>WebGPUAccelerator</c> that owns the capture. Capture is a single-threaded,
-    /// one-at-a-time operation (<c>BeginDispatchCapture</c> throws if one is already active), so one slot
-    /// is exact rather than approximate.
+    /// reference to the <c>WebGPUAccelerator</c> that owns the capture. ⚠️ AsyncLocal, NOT a plain static:
+    /// a plain static made every concurrent flow (a video loop's frame copy, an audio loop's kernels) part of
+    /// the recording (Riker, AssistZ 2026-11-06). Blazor WASM is single-threaded but the ExecutionContext
+    /// still flows per await chain, so a loop started before the capture does not see it. A sealed plan
+    /// reads as null, so a value left behind in a flow that did not end the capture is inert.
     /// </remarks>
-    internal static WebGPUDispatchPlan? Recording { get; set; }
+    internal static WebGPUDispatchPlan? Recording => _recordingForFlow.Value is { IsSealed: false } plan ? plan : null;
+
+    private static readonly System.Threading.AsyncLocal<WebGPUDispatchPlan?> _recordingForFlow = new();
+
+    /// <summary>Sets (or clears) the recording plan for the calling async flow. Begin/EndDispatchCapture only.</summary>
+    internal static void SetRecordingForCurrentFlow(WebGPUDispatchPlan? plan) => _recordingForFlow.Value = plan;
 
     /// <summary>Called from the CPU-&gt;GPU upload paths while a plan is recording. See <see cref="HostWriteCount"/>.</summary>
     internal void NoteHostWrite(long bytes)

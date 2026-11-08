@@ -3,6 +3,22 @@
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 ## Unreleased
 
+- **FIXED (WebGPU): a dispatch-plan recording captured OTHER async flows' work.** `BeginDispatchCapture` set an
+  accelerator-wide slot and a plain static, and every dispatch/copy/clear/upload site consulted them, so any flow that
+  dispatched during the capture window was recorded and re-run by every replay. In AssistZ (Riker, ML 5.8.5, RX 590,
+  2026-11-06) YOLO's capture recorded 280 dispatches where a quiet capture gives 250 while the video and audio loops ran,
+  and the video loop's `WebGPUExternalImageCopier.CopyToBuffer` threw "cannot run while a WebGPU dispatch plan is
+  recording" from a flow that recorded nothing. The recording is now scoped to the async flow that called
+  `BeginDispatchCapture` (`AsyncLocal`): the record sites use `RecordingPlan` (this flow's plan, if it is this
+  accelerator's active one), other flows dispatch normally with batching, and the copier refuses only inside the
+  recording flow. `ActiveDispatchPlan` is flow-scoped too. Still one capture per accelerator at a time.
+  `EndDispatchCapture` from a flow that did not begin the capture (e.g. Begin inside an `async` helper, whose AsyncLocal
+  change is undone on return) now disposes the plan, frees the accelerator and throws, instead of returning a plan
+  that recorded none of the caller's work. Tests (both WebGPU lanes): `DispatchPlan_Capture_IgnoresOtherAsyncFlows`
+  (a flow started before the capture dispatches mid-window: plan = 3 dispatches, replay leaves its output untouched,
+  it sees no active plan) and `DispatchPlan_EndFromNonOwnerFlow_ThrowsAndFreesAccelerator`. Red-checked: with the
+  accelerator-wide slot restored the plan records 5, not 3. Requested by Tuvok for SpawnDev.ILGPU.ML (which scopes its
+  own capture statics the same way).
 - **FIXED (WebGPU): creating a compute shader on a device that cannot be used threw a bare `NullReferenceException`.**
   A disposed SpawnJS wrapper has a null `JSRef`, and every GPU wrapper method is a one-line `JSRef!.Call(...)` that the
   interpreter inlines, so a dead `GPUDevice` (or a null pipeline) surfaced as an NRE naming only `WebGPUComputeShader`'s

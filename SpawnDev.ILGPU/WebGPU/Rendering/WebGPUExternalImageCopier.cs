@@ -78,7 +78,8 @@ namespace SpawnDev.ILGPU.WebGPU.Rendering
             ExternalImageCopier.Validate(width, height, destination);
             // A queue-timeline copy is not a dispatch and cannot be replayed by a recorded dispatch plan: a frame copied
             // inside a capture window would be baked in once and never refreshed. Fail loud instead of freezing frames.
-            if (WebGPUDispatchPlan.Recording != null)
+            // Scoped to THIS flow (RecordingPlan): a video loop copying frames while another flow records is not in the plan.
+            if (_accelerator.RecordingPlan != null)
                 throw new InvalidOperationException($"{nameof(WebGPUExternalImageCopier)}.{nameof(CopyToBuffer)} cannot run while a WebGPU dispatch plan is recording. Copy the frame before the captured work.");
 
             var baseView = (IContiguousArrayView)destination.BaseView;
