@@ -40,6 +40,11 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   `WebGPU_DisposedAccelerator_ShaderCreationThrowsObjectDisposed` (both WebGPU lanes): launching on a disposed accelerator
   throws `ObjectDisposedException`. Red-checked: without the change both lanes fail with `NullReferenceException`.
 
+- Release sweep (RTX 4070, all lanes, default exclusions, code = 5.4.17): 7,745 test cases, 7,141 passed, 604 skipped, 0 failed,
+  53 min. Against the 5.4.16 sweep no test is gone and nothing changed outcome; the 36 new cases are the 4 new tests on 9 lanes.
+  Packages verified before the push: every DLL stamped `+530bde53`, and the folded-uint repro run against the `ILGPU.dll` extracted
+  from the Fork nupkg (SpawnDev.ILGPU.Fork 2.4.16-local.1 had shipped a stale DLL without that fix).
+
 ## 5.4.16 (forks 2.4.15) - 2026-11-05 - Unsafe.AsPointer in kernels (inline PTX can address shared memory)
 
 - **NEW (every backend's frontend; meaningful on CUDA; forks): `(ulong)Unsafe.AsPointer(ref x)` inside a kernel** gives the address the
