@@ -29,17 +29,33 @@ public class StrictFloat64WireTests
         return Task.CompletedTask;
     }
 
+    // 5.4.19: strict f64 on WebGPU is the Ieee mode (per-operation binary64). Ozaki keeps ~96 bits between operations,
+    // so a WebGPU peer that offers only Dekker/Ozaki (pre-5.4.19) cannot give .NET's results.
     [TestMethod]
-    public Task PeerCapabilities_WebGPU_OzakiAdvertised_SupportsStrictFloat64()
+    public Task PeerCapabilities_WebGPU_IeeeAdvertised_SupportsStrictFloat64()
+    {
+        var caps = new PeerCapabilities
+        {
+            PreferredBackend = "WebGPU",
+            F64ModesSupported = new[] { "Dekker", "Ozaki", "Ieee" },
+        };
+        if (!caps.SupportsStrictFloat64())
+            throw new Exception(
+                "WebGPU peer advertising Ieee should report SupportsStrictFloat64()=true.");
+        return Task.CompletedTask;
+    }
+
+    [TestMethod]
+    public Task PeerCapabilities_WebGPU_OzakiOnly_DoesNotSupportStrict()
     {
         var caps = new PeerCapabilities
         {
             PreferredBackend = "WebGPU",
             F64ModesSupported = new[] { "Dekker", "Ozaki" },
         };
-        if (!caps.SupportsStrictFloat64())
+        if (caps.SupportsStrictFloat64())
             throw new Exception(
-                "WebGPU peer advertising Ozaki should report SupportsStrictFloat64()=true.");
+                "WebGPU peer without Ieee (Ozaki is not per-operation IEEE) must not satisfy strict-f64.");
         return Task.CompletedTask;
     }
 
@@ -54,7 +70,7 @@ public class StrictFloat64WireTests
         };
         if (caps.SupportsStrictFloat64())
             throw new Exception(
-                "WebGL peer without Ozaki in F64ModesSupported must not satisfy strict-f64.");
+                "WebGL peer without Ieee in F64ModesSupported must not satisfy strict-f64.");
         return Task.CompletedTask;
     }
 

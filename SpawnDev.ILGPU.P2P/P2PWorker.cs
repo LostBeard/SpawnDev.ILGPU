@@ -399,16 +399,16 @@ public class P2PWorker : IAsyncDisposable
 
     private string[]? GetF64ModesSupported()
     {
-        // Browser backends (WebGPU/WebGL) support both Dekker (default fast path) and
-        // Ozaki (strict IEEE 754) since rc.10. Native-f64 backends (CPU/CUDA/OpenCL/Wasm)
+        // Browser backends (WebGPU/WebGL) support Dekker (default fast path) and Ozaki (quad-float) since
+        // rc.10; both also Ieee (per-operation binary64, bit-identical to .NET) since 5.4.19. Native-f64 backends (CPU/CUDA/OpenCL/Wasm)
         // are always strict regardless and don't need to advertise modes - the
         // coordinator's pre-flight check skips F64ModesSupported when the peer's
         // PreferredBackend is native-f64.
         if (_accelerator == null) return null;
         return _accelerator.AcceleratorType switch
         {
-            AcceleratorType.WebGPU => new[] { "Dekker", "Ozaki" },
-            AcceleratorType.WebGL => new[] { "Dekker", "Ozaki" },
+            AcceleratorType.WebGPU => new[] { "Dekker", "Ozaki", "Ieee" },
+            AcceleratorType.WebGL => new[] { "Dekker", "Ozaki", "Ieee" },
             _ => null,
         };
     }

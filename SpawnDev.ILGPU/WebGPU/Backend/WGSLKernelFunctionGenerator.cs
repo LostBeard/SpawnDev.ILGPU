@@ -2277,7 +2277,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 builder.AppendLine("// ============ Emulation Library ============");
                 builder.AppendLine(WGSLEmulationLibrary.GetMinimalEmulationLibrary(
                     needsF64Emulation,
-                    Backend.UseOzakiF64Emulation,
+                    Backend.F64Mode,
                     needsI64Emulation,
                     needsF16Emulation,
                     emulScanBody,
@@ -5695,6 +5695,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     {
                         if (Backend.UseOzakiF64Emulation)
                             init = " = emu_f64(0.0, 0.0, 0.0, 0.0)";
+                        else if (Backend.UseIeeeF64Emulation)
+                            init = " = emu_f64(0u, 0u)";
                         else
                             init = " = emu_f64(0.0, 0.0)";
                     }
@@ -8067,7 +8069,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (value.IsUnsignedOrUnordered && value.Kind != CompareKind.NotEqual)
                     {
                         AppendLine(
-                            $"{prefix}{target} = (_f32_is_nan_bits({left}.x) || _f32_is_nan_bits({right}.x)) || {emulFunc}({left}, {right});");
+                            $"{prefix}{target} = (f64_is_nan({left}) || f64_is_nan({right})) || {emulFunc}({left}, {right});");
                     }
                     else
                     {

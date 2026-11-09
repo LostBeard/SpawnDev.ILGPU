@@ -34,7 +34,9 @@
     }; #>
 using ILGPU.Util;
 using System;
+using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Threading.Tasks;
 
 #pragma warning disable IDE0046 // Convert to conditional expression
 
@@ -47,6 +49,17 @@ namespace ILGPU.Runtime
     /// </summary>
     public static class KernelLoaders
     {
+        /// <summary>True when a parameter of <paramref name="method"/> is a DelegateSpecialization (a synthetic kernel is compiled).</summary>
+        private static bool HasDelegateSpecialization(MethodInfo method)
+        {
+            foreach (var parameter in method.GetParameters())
+            {
+                if (parameter.ParameterType.IsDelegateSpecializedType())
+                    return true;
+            }
+            return false;
+        }
+
 <# foreach (var delegateParams in delegateRange) { #>
 <#      // LoadKernel #>
         /// <summary>
@@ -453,6 +466,55 @@ namespace ILGPU.Runtime
                 out kernelInfo);
             return (TIndex index, <#= delegateParams.DefaultStreamLambdaParams #>) =>
                 baseKernel(accelerator.DefaultStream, index, <#= delegateParams.DefaultStreamArgs #>);
+        }
+
+        /// <summary>
+        /// <see cref="LoadAutoGroupedStreamKernel{TIndex, <#= delegateParams.TypeParams #>}(Accelerator, Action{TIndex, <#= delegateParams.TypeParams #>})"/>
+        /// that does not hold the browser's thread for the whole load: it returns to the browser's event loop before the
+        /// (synchronous) IL compile, and on WebGPU builds the pipeline off the main thread (createComputePipelineAsync)
+        /// instead of synchronously at the first launch. Same launcher delegate as the synchronous loader. On the desktop
+        /// backends it completes once the kernel is compiled.
+        /// </summary>
+        /// <typeparam name="TIndex">The index type.</typeparam>
+        /// <#= delegateParams.TypeParamDocumentation #>
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<TIndex, <#= delegateParams.TypeParams #>>> LoadAutoGroupedStreamKernelAsync<TIndex, <#= delegateParams.TypeParams #>>(
+            this Accelerator accelerator,
+            Action<TIndex, <#= delegateParams.TypeParams #>> action)
+            where TIndex : struct, IIndex
+            <#= delegateParams.TypeRestrictions #>
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            var launcher = accelerator.LoadAutoGroupedStreamKernel<TIndex, <#= delegateParams.TypeParams #>>(action);
+            // Captured state and DelegateSpecialization arguments compile a different (synthetic) kernel than action.Method.
+            if (!action.Method.IsCapturingLambda() && !HasDelegateSpecialization(action.Method))
+                await accelerator.AfterAutoGroupedKernelLoadAsync(action.Method).ConfigureAwait(true);
+            return launcher;
+        }
+
+        /// <summary>
+        /// <see cref="LoadStreamKernel{<#= delegateParams.TypeParams #>}(Accelerator, Action{<#= delegateParams.TypeParams #>})"/>
+        /// that returns to the browser's event loop before the (synchronous) IL compile. The group size of an explicitly
+        /// grouped kernel is known only at its launch, so WebGPU still builds its pipeline at the first launch (or use
+        /// WebGPUAccelerator.PrecompileAsync with the group size).
+        /// </summary>
+        /// <#= delegateParams.TypeParamDocumentation #>
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<KernelConfig, <#= delegateParams.TypeParams #>>> LoadStreamKernelAsync<<#= delegateParams.TypeParams #>>(
+            this Accelerator accelerator,
+            Action<<#= delegateParams.TypeParams #>> action)
+            <#= delegateParams.TypeRestrictions #>
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            return accelerator.LoadStreamKernel<<#= delegateParams.TypeParams #>>(action);
         }
 
 <#  } #>

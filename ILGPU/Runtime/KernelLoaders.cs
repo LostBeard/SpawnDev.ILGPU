@@ -22,7 +22,9 @@
 
 using ILGPU.Util;
 using System;
+using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Threading.Tasks;
 
 #pragma warning disable IDE0046 // Convert to conditional expression
 
@@ -35,6 +37,17 @@ namespace ILGPU.Runtime
     /// </summary>
     public static class KernelLoaders
     {
+        /// <summary>True when a parameter of <paramref name="method"/> is a DelegateSpecialization (a synthetic kernel is compiled).</summary>
+        private static bool HasDelegateSpecialization(MethodInfo method)
+        {
+            foreach (var parameter in method.GetParameters())
+            {
+                if (parameter.ParameterType.IsDelegateSpecializedType())
+                    return true;
+            }
+            return false;
+        }
+
         /// <summary>
         /// Loads the given explicitly grouped kernel and returns a launcher delegate
         /// that can receive arbitrary accelerator streams (first parameter).
@@ -453,6 +466,57 @@ namespace ILGPU.Runtime
                 out kernelInfo);
             return (TIndex index, T1 param1) =>
                 baseKernel(accelerator.DefaultStream, index, param1);
+        }
+
+        /// <summary>
+        /// <see cref="LoadAutoGroupedStreamKernel{TIndex, T1}(Accelerator, Action{TIndex, T1})"/>
+        /// that does not hold the browser's thread for the whole load: it returns to the browser's event loop before the
+        /// (synchronous) IL compile, and on WebGPU builds the pipeline off the main thread (createComputePipelineAsync)
+        /// instead of synchronously at the first launch. Same launcher delegate as the synchronous loader. On the desktop
+        /// backends it completes once the kernel is compiled.
+        /// </summary>
+        /// <typeparam name="TIndex">The index type.</typeparam>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<TIndex, T1>> LoadAutoGroupedStreamKernelAsync<TIndex, T1>(
+            this Accelerator accelerator,
+            Action<TIndex, T1> action)
+            where TIndex : struct, IIndex
+            where T1 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            var launcher = accelerator.LoadAutoGroupedStreamKernel<TIndex, T1>(action);
+            // Captured state and DelegateSpecialization arguments compile a different (synthetic) kernel than action.Method.
+            if (!action.Method.IsCapturingLambda() && !HasDelegateSpecialization(action.Method))
+                await accelerator.AfterAutoGroupedKernelLoadAsync(action.Method).ConfigureAwait(true);
+            return launcher;
+        }
+
+        /// <summary>
+        /// <see cref="LoadStreamKernel{T1}(Accelerator, Action{T1})"/>
+        /// that returns to the browser's event loop before the (synchronous) IL compile. The group size of an explicitly
+        /// grouped kernel is known only at its launch, so WebGPU still builds its pipeline at the first launch (or use
+        /// WebGPUAccelerator.PrecompileAsync with the group size).
+        /// </summary>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<KernelConfig, T1>> LoadStreamKernelAsync<T1>(
+            this Accelerator accelerator,
+            Action<T1> action)
+            where T1 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            return accelerator.LoadStreamKernel<T1>(action);
         }
 
         /// <summary>
@@ -889,6 +953,59 @@ namespace ILGPU.Runtime
                 out kernelInfo);
             return (TIndex index, T1 param1, T2 param2) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2);
+        }
+
+        /// <summary>
+        /// <see cref="LoadAutoGroupedStreamKernel{TIndex, T1, T2}(Accelerator, Action{TIndex, T1, T2})"/>
+        /// that does not hold the browser's thread for the whole load: it returns to the browser's event loop before the
+        /// (synchronous) IL compile, and on WebGPU builds the pipeline off the main thread (createComputePipelineAsync)
+        /// instead of synchronously at the first launch. Same launcher delegate as the synchronous loader. On the desktop
+        /// backends it completes once the kernel is compiled.
+        /// </summary>
+        /// <typeparam name="TIndex">The index type.</typeparam>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<TIndex, T1, T2>> LoadAutoGroupedStreamKernelAsync<TIndex, T1, T2>(
+            this Accelerator accelerator,
+            Action<TIndex, T1, T2> action)
+            where TIndex : struct, IIndex
+            where T1 : struct where T2 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            var launcher = accelerator.LoadAutoGroupedStreamKernel<TIndex, T1, T2>(action);
+            // Captured state and DelegateSpecialization arguments compile a different (synthetic) kernel than action.Method.
+            if (!action.Method.IsCapturingLambda() && !HasDelegateSpecialization(action.Method))
+                await accelerator.AfterAutoGroupedKernelLoadAsync(action.Method).ConfigureAwait(true);
+            return launcher;
+        }
+
+        /// <summary>
+        /// <see cref="LoadStreamKernel{T1, T2}(Accelerator, Action{T1, T2})"/>
+        /// that returns to the browser's event loop before the (synchronous) IL compile. The group size of an explicitly
+        /// grouped kernel is known only at its launch, so WebGPU still builds its pipeline at the first launch (or use
+        /// WebGPUAccelerator.PrecompileAsync with the group size).
+        /// </summary>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<KernelConfig, T1, T2>> LoadStreamKernelAsync<T1, T2>(
+            this Accelerator accelerator,
+            Action<T1, T2> action)
+            where T1 : struct where T2 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            return accelerator.LoadStreamKernel<T1, T2>(action);
         }
 
         /// <summary>
@@ -1341,6 +1458,61 @@ namespace ILGPU.Runtime
                 out kernelInfo);
             return (TIndex index, T1 param1, T2 param2, T3 param3) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3);
+        }
+
+        /// <summary>
+        /// <see cref="LoadAutoGroupedStreamKernel{TIndex, T1, T2, T3}(Accelerator, Action{TIndex, T1, T2, T3})"/>
+        /// that does not hold the browser's thread for the whole load: it returns to the browser's event loop before the
+        /// (synchronous) IL compile, and on WebGPU builds the pipeline off the main thread (createComputePipelineAsync)
+        /// instead of synchronously at the first launch. Same launcher delegate as the synchronous loader. On the desktop
+        /// backends it completes once the kernel is compiled.
+        /// </summary>
+        /// <typeparam name="TIndex">The index type.</typeparam>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<TIndex, T1, T2, T3>> LoadAutoGroupedStreamKernelAsync<TIndex, T1, T2, T3>(
+            this Accelerator accelerator,
+            Action<TIndex, T1, T2, T3> action)
+            where TIndex : struct, IIndex
+            where T1 : struct where T2 : struct where T3 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            var launcher = accelerator.LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3>(action);
+            // Captured state and DelegateSpecialization arguments compile a different (synthetic) kernel than action.Method.
+            if (!action.Method.IsCapturingLambda() && !HasDelegateSpecialization(action.Method))
+                await accelerator.AfterAutoGroupedKernelLoadAsync(action.Method).ConfigureAwait(true);
+            return launcher;
+        }
+
+        /// <summary>
+        /// <see cref="LoadStreamKernel{T1, T2, T3}(Accelerator, Action{T1, T2, T3})"/>
+        /// that returns to the browser's event loop before the (synchronous) IL compile. The group size of an explicitly
+        /// grouped kernel is known only at its launch, so WebGPU still builds its pipeline at the first launch (or use
+        /// WebGPUAccelerator.PrecompileAsync with the group size).
+        /// </summary>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<KernelConfig, T1, T2, T3>> LoadStreamKernelAsync<T1, T2, T3>(
+            this Accelerator accelerator,
+            Action<T1, T2, T3> action)
+            where T1 : struct where T2 : struct where T3 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            return accelerator.LoadStreamKernel<T1, T2, T3>(action);
         }
 
         /// <summary>
@@ -1809,6 +1981,63 @@ namespace ILGPU.Runtime
                 out kernelInfo);
             return (TIndex index, T1 param1, T2 param2, T3 param3, T4 param4) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3, param4);
+        }
+
+        /// <summary>
+        /// <see cref="LoadAutoGroupedStreamKernel{TIndex, T1, T2, T3, T4}(Accelerator, Action{TIndex, T1, T2, T3, T4})"/>
+        /// that does not hold the browser's thread for the whole load: it returns to the browser's event loop before the
+        /// (synchronous) IL compile, and on WebGPU builds the pipeline off the main thread (createComputePipelineAsync)
+        /// instead of synchronously at the first launch. Same launcher delegate as the synchronous loader. On the desktop
+        /// backends it completes once the kernel is compiled.
+        /// </summary>
+        /// <typeparam name="TIndex">The index type.</typeparam>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+        /// <typeparam name="T4">Parameter type of parameter 4.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<TIndex, T1, T2, T3, T4>> LoadAutoGroupedStreamKernelAsync<TIndex, T1, T2, T3, T4>(
+            this Accelerator accelerator,
+            Action<TIndex, T1, T2, T3, T4> action)
+            where TIndex : struct, IIndex
+            where T1 : struct where T2 : struct where T3 : struct where T4 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            var launcher = accelerator.LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3, T4>(action);
+            // Captured state and DelegateSpecialization arguments compile a different (synthetic) kernel than action.Method.
+            if (!action.Method.IsCapturingLambda() && !HasDelegateSpecialization(action.Method))
+                await accelerator.AfterAutoGroupedKernelLoadAsync(action.Method).ConfigureAwait(true);
+            return launcher;
+        }
+
+        /// <summary>
+        /// <see cref="LoadStreamKernel{T1, T2, T3, T4}(Accelerator, Action{T1, T2, T3, T4})"/>
+        /// that returns to the browser's event loop before the (synchronous) IL compile. The group size of an explicitly
+        /// grouped kernel is known only at its launch, so WebGPU still builds its pipeline at the first launch (or use
+        /// WebGPUAccelerator.PrecompileAsync with the group size).
+        /// </summary>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+        /// <typeparam name="T4">Parameter type of parameter 4.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<KernelConfig, T1, T2, T3, T4>> LoadStreamKernelAsync<T1, T2, T3, T4>(
+            this Accelerator accelerator,
+            Action<T1, T2, T3, T4> action)
+            where T1 : struct where T2 : struct where T3 : struct where T4 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            return accelerator.LoadStreamKernel<T1, T2, T3, T4>(action);
         }
 
         /// <summary>
@@ -2293,6 +2522,65 @@ namespace ILGPU.Runtime
                 out kernelInfo);
             return (TIndex index, T1 param1, T2 param2, T3 param3, T4 param4, T5 param5) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3, param4, param5);
+        }
+
+        /// <summary>
+        /// <see cref="LoadAutoGroupedStreamKernel{TIndex, T1, T2, T3, T4, T5}(Accelerator, Action{TIndex, T1, T2, T3, T4, T5})"/>
+        /// that does not hold the browser's thread for the whole load: it returns to the browser's event loop before the
+        /// (synchronous) IL compile, and on WebGPU builds the pipeline off the main thread (createComputePipelineAsync)
+        /// instead of synchronously at the first launch. Same launcher delegate as the synchronous loader. On the desktop
+        /// backends it completes once the kernel is compiled.
+        /// </summary>
+        /// <typeparam name="TIndex">The index type.</typeparam>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+        /// <typeparam name="T4">Parameter type of parameter 4.</typeparam>
+        /// <typeparam name="T5">Parameter type of parameter 5.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<TIndex, T1, T2, T3, T4, T5>> LoadAutoGroupedStreamKernelAsync<TIndex, T1, T2, T3, T4, T5>(
+            this Accelerator accelerator,
+            Action<TIndex, T1, T2, T3, T4, T5> action)
+            where TIndex : struct, IIndex
+            where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            var launcher = accelerator.LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3, T4, T5>(action);
+            // Captured state and DelegateSpecialization arguments compile a different (synthetic) kernel than action.Method.
+            if (!action.Method.IsCapturingLambda() && !HasDelegateSpecialization(action.Method))
+                await accelerator.AfterAutoGroupedKernelLoadAsync(action.Method).ConfigureAwait(true);
+            return launcher;
+        }
+
+        /// <summary>
+        /// <see cref="LoadStreamKernel{T1, T2, T3, T4, T5}(Accelerator, Action{T1, T2, T3, T4, T5})"/>
+        /// that returns to the browser's event loop before the (synchronous) IL compile. The group size of an explicitly
+        /// grouped kernel is known only at its launch, so WebGPU still builds its pipeline at the first launch (or use
+        /// WebGPUAccelerator.PrecompileAsync with the group size).
+        /// </summary>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+        /// <typeparam name="T4">Parameter type of parameter 4.</typeparam>
+        /// <typeparam name="T5">Parameter type of parameter 5.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<KernelConfig, T1, T2, T3, T4, T5>> LoadStreamKernelAsync<T1, T2, T3, T4, T5>(
+            this Accelerator accelerator,
+            Action<T1, T2, T3, T4, T5> action)
+            where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            return accelerator.LoadStreamKernel<T1, T2, T3, T4, T5>(action);
         }
 
         /// <summary>
@@ -2793,6 +3081,67 @@ namespace ILGPU.Runtime
                 out kernelInfo);
             return (TIndex index, T1 param1, T2 param2, T3 param3, T4 param4, T5 param5, T6 param6) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3, param4, param5, param6);
+        }
+
+        /// <summary>
+        /// <see cref="LoadAutoGroupedStreamKernel{TIndex, T1, T2, T3, T4, T5, T6}(Accelerator, Action{TIndex, T1, T2, T3, T4, T5, T6})"/>
+        /// that does not hold the browser's thread for the whole load: it returns to the browser's event loop before the
+        /// (synchronous) IL compile, and on WebGPU builds the pipeline off the main thread (createComputePipelineAsync)
+        /// instead of synchronously at the first launch. Same launcher delegate as the synchronous loader. On the desktop
+        /// backends it completes once the kernel is compiled.
+        /// </summary>
+        /// <typeparam name="TIndex">The index type.</typeparam>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+        /// <typeparam name="T4">Parameter type of parameter 4.</typeparam>
+        /// <typeparam name="T5">Parameter type of parameter 5.</typeparam>
+        /// <typeparam name="T6">Parameter type of parameter 6.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<TIndex, T1, T2, T3, T4, T5, T6>> LoadAutoGroupedStreamKernelAsync<TIndex, T1, T2, T3, T4, T5, T6>(
+            this Accelerator accelerator,
+            Action<TIndex, T1, T2, T3, T4, T5, T6> action)
+            where TIndex : struct, IIndex
+            where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            var launcher = accelerator.LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3, T4, T5, T6>(action);
+            // Captured state and DelegateSpecialization arguments compile a different (synthetic) kernel than action.Method.
+            if (!action.Method.IsCapturingLambda() && !HasDelegateSpecialization(action.Method))
+                await accelerator.AfterAutoGroupedKernelLoadAsync(action.Method).ConfigureAwait(true);
+            return launcher;
+        }
+
+        /// <summary>
+        /// <see cref="LoadStreamKernel{T1, T2, T3, T4, T5, T6}(Accelerator, Action{T1, T2, T3, T4, T5, T6})"/>
+        /// that returns to the browser's event loop before the (synchronous) IL compile. The group size of an explicitly
+        /// grouped kernel is known only at its launch, so WebGPU still builds its pipeline at the first launch (or use
+        /// WebGPUAccelerator.PrecompileAsync with the group size).
+        /// </summary>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+        /// <typeparam name="T4">Parameter type of parameter 4.</typeparam>
+        /// <typeparam name="T5">Parameter type of parameter 5.</typeparam>
+        /// <typeparam name="T6">Parameter type of parameter 6.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<KernelConfig, T1, T2, T3, T4, T5, T6>> LoadStreamKernelAsync<T1, T2, T3, T4, T5, T6>(
+            this Accelerator accelerator,
+            Action<T1, T2, T3, T4, T5, T6> action)
+            where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            return accelerator.LoadStreamKernel<T1, T2, T3, T4, T5, T6>(action);
         }
 
         /// <summary>
@@ -3309,6 +3658,69 @@ namespace ILGPU.Runtime
                 out kernelInfo);
             return (TIndex index, T1 param1, T2 param2, T3 param3, T4 param4, T5 param5, T6 param6, T7 param7) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3, param4, param5, param6, param7);
+        }
+
+        /// <summary>
+        /// <see cref="LoadAutoGroupedStreamKernel{TIndex, T1, T2, T3, T4, T5, T6, T7}(Accelerator, Action{TIndex, T1, T2, T3, T4, T5, T6, T7})"/>
+        /// that does not hold the browser's thread for the whole load: it returns to the browser's event loop before the
+        /// (synchronous) IL compile, and on WebGPU builds the pipeline off the main thread (createComputePipelineAsync)
+        /// instead of synchronously at the first launch. Same launcher delegate as the synchronous loader. On the desktop
+        /// backends it completes once the kernel is compiled.
+        /// </summary>
+        /// <typeparam name="TIndex">The index type.</typeparam>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+        /// <typeparam name="T4">Parameter type of parameter 4.</typeparam>
+        /// <typeparam name="T5">Parameter type of parameter 5.</typeparam>
+        /// <typeparam name="T6">Parameter type of parameter 6.</typeparam>
+        /// <typeparam name="T7">Parameter type of parameter 7.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<TIndex, T1, T2, T3, T4, T5, T6, T7>> LoadAutoGroupedStreamKernelAsync<TIndex, T1, T2, T3, T4, T5, T6, T7>(
+            this Accelerator accelerator,
+            Action<TIndex, T1, T2, T3, T4, T5, T6, T7> action)
+            where TIndex : struct, IIndex
+            where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            var launcher = accelerator.LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3, T4, T5, T6, T7>(action);
+            // Captured state and DelegateSpecialization arguments compile a different (synthetic) kernel than action.Method.
+            if (!action.Method.IsCapturingLambda() && !HasDelegateSpecialization(action.Method))
+                await accelerator.AfterAutoGroupedKernelLoadAsync(action.Method).ConfigureAwait(true);
+            return launcher;
+        }
+
+        /// <summary>
+        /// <see cref="LoadStreamKernel{T1, T2, T3, T4, T5, T6, T7}(Accelerator, Action{T1, T2, T3, T4, T5, T6, T7})"/>
+        /// that returns to the browser's event loop before the (synchronous) IL compile. The group size of an explicitly
+        /// grouped kernel is known only at its launch, so WebGPU still builds its pipeline at the first launch (or use
+        /// WebGPUAccelerator.PrecompileAsync with the group size).
+        /// </summary>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+        /// <typeparam name="T4">Parameter type of parameter 4.</typeparam>
+        /// <typeparam name="T5">Parameter type of parameter 5.</typeparam>
+        /// <typeparam name="T6">Parameter type of parameter 6.</typeparam>
+        /// <typeparam name="T7">Parameter type of parameter 7.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<KernelConfig, T1, T2, T3, T4, T5, T6, T7>> LoadStreamKernelAsync<T1, T2, T3, T4, T5, T6, T7>(
+            this Accelerator accelerator,
+            Action<T1, T2, T3, T4, T5, T6, T7> action)
+            where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            return accelerator.LoadStreamKernel<T1, T2, T3, T4, T5, T6, T7>(action);
         }
 
         /// <summary>
@@ -3841,6 +4253,71 @@ namespace ILGPU.Runtime
                 out kernelInfo);
             return (TIndex index, T1 param1, T2 param2, T3 param3, T4 param4, T5 param5, T6 param6, T7 param7, T8 param8) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3, param4, param5, param6, param7, param8);
+        }
+
+        /// <summary>
+        /// <see cref="LoadAutoGroupedStreamKernel{TIndex, T1, T2, T3, T4, T5, T6, T7, T8}(Accelerator, Action{TIndex, T1, T2, T3, T4, T5, T6, T7, T8})"/>
+        /// that does not hold the browser's thread for the whole load: it returns to the browser's event loop before the
+        /// (synchronous) IL compile, and on WebGPU builds the pipeline off the main thread (createComputePipelineAsync)
+        /// instead of synchronously at the first launch. Same launcher delegate as the synchronous loader. On the desktop
+        /// backends it completes once the kernel is compiled.
+        /// </summary>
+        /// <typeparam name="TIndex">The index type.</typeparam>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+        /// <typeparam name="T4">Parameter type of parameter 4.</typeparam>
+        /// <typeparam name="T5">Parameter type of parameter 5.</typeparam>
+        /// <typeparam name="T6">Parameter type of parameter 6.</typeparam>
+        /// <typeparam name="T7">Parameter type of parameter 7.</typeparam>
+        /// <typeparam name="T8">Parameter type of parameter 8.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<TIndex, T1, T2, T3, T4, T5, T6, T7, T8>> LoadAutoGroupedStreamKernelAsync<TIndex, T1, T2, T3, T4, T5, T6, T7, T8>(
+            this Accelerator accelerator,
+            Action<TIndex, T1, T2, T3, T4, T5, T6, T7, T8> action)
+            where TIndex : struct, IIndex
+            where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct where T8 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            var launcher = accelerator.LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3, T4, T5, T6, T7, T8>(action);
+            // Captured state and DelegateSpecialization arguments compile a different (synthetic) kernel than action.Method.
+            if (!action.Method.IsCapturingLambda() && !HasDelegateSpecialization(action.Method))
+                await accelerator.AfterAutoGroupedKernelLoadAsync(action.Method).ConfigureAwait(true);
+            return launcher;
+        }
+
+        /// <summary>
+        /// <see cref="LoadStreamKernel{T1, T2, T3, T4, T5, T6, T7, T8}(Accelerator, Action{T1, T2, T3, T4, T5, T6, T7, T8})"/>
+        /// that returns to the browser's event loop before the (synchronous) IL compile. The group size of an explicitly
+        /// grouped kernel is known only at its launch, so WebGPU still builds its pipeline at the first launch (or use
+        /// WebGPUAccelerator.PrecompileAsync with the group size).
+        /// </summary>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+        /// <typeparam name="T4">Parameter type of parameter 4.</typeparam>
+        /// <typeparam name="T5">Parameter type of parameter 5.</typeparam>
+        /// <typeparam name="T6">Parameter type of parameter 6.</typeparam>
+        /// <typeparam name="T7">Parameter type of parameter 7.</typeparam>
+        /// <typeparam name="T8">Parameter type of parameter 8.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<KernelConfig, T1, T2, T3, T4, T5, T6, T7, T8>> LoadStreamKernelAsync<T1, T2, T3, T4, T5, T6, T7, T8>(
+            this Accelerator accelerator,
+            Action<T1, T2, T3, T4, T5, T6, T7, T8> action)
+            where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct where T8 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            return accelerator.LoadStreamKernel<T1, T2, T3, T4, T5, T6, T7, T8>(action);
         }
 
         /// <summary>
@@ -4389,6 +4866,73 @@ namespace ILGPU.Runtime
                 out kernelInfo);
             return (TIndex index, T1 param1, T2 param2, T3 param3, T4 param4, T5 param5, T6 param6, T7 param7, T8 param8, T9 param9) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3, param4, param5, param6, param7, param8, param9);
+        }
+
+        /// <summary>
+        /// <see cref="LoadAutoGroupedStreamKernel{TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9}(Accelerator, Action{TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9})"/>
+        /// that does not hold the browser's thread for the whole load: it returns to the browser's event loop before the
+        /// (synchronous) IL compile, and on WebGPU builds the pipeline off the main thread (createComputePipelineAsync)
+        /// instead of synchronously at the first launch. Same launcher delegate as the synchronous loader. On the desktop
+        /// backends it completes once the kernel is compiled.
+        /// </summary>
+        /// <typeparam name="TIndex">The index type.</typeparam>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+        /// <typeparam name="T4">Parameter type of parameter 4.</typeparam>
+        /// <typeparam name="T5">Parameter type of parameter 5.</typeparam>
+        /// <typeparam name="T6">Parameter type of parameter 6.</typeparam>
+        /// <typeparam name="T7">Parameter type of parameter 7.</typeparam>
+        /// <typeparam name="T8">Parameter type of parameter 8.</typeparam>
+        /// <typeparam name="T9">Parameter type of parameter 9.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9>> LoadAutoGroupedStreamKernelAsync<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9>(
+            this Accelerator accelerator,
+            Action<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9> action)
+            where TIndex : struct, IIndex
+            where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct where T8 : struct where T9 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            var launcher = accelerator.LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9>(action);
+            // Captured state and DelegateSpecialization arguments compile a different (synthetic) kernel than action.Method.
+            if (!action.Method.IsCapturingLambda() && !HasDelegateSpecialization(action.Method))
+                await accelerator.AfterAutoGroupedKernelLoadAsync(action.Method).ConfigureAwait(true);
+            return launcher;
+        }
+
+        /// <summary>
+        /// <see cref="LoadStreamKernel{T1, T2, T3, T4, T5, T6, T7, T8, T9}(Accelerator, Action{T1, T2, T3, T4, T5, T6, T7, T8, T9})"/>
+        /// that returns to the browser's event loop before the (synchronous) IL compile. The group size of an explicitly
+        /// grouped kernel is known only at its launch, so WebGPU still builds its pipeline at the first launch (or use
+        /// WebGPUAccelerator.PrecompileAsync with the group size).
+        /// </summary>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+        /// <typeparam name="T4">Parameter type of parameter 4.</typeparam>
+        /// <typeparam name="T5">Parameter type of parameter 5.</typeparam>
+        /// <typeparam name="T6">Parameter type of parameter 6.</typeparam>
+        /// <typeparam name="T7">Parameter type of parameter 7.</typeparam>
+        /// <typeparam name="T8">Parameter type of parameter 8.</typeparam>
+        /// <typeparam name="T9">Parameter type of parameter 9.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<KernelConfig, T1, T2, T3, T4, T5, T6, T7, T8, T9>> LoadStreamKernelAsync<T1, T2, T3, T4, T5, T6, T7, T8, T9>(
+            this Accelerator accelerator,
+            Action<T1, T2, T3, T4, T5, T6, T7, T8, T9> action)
+            where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct where T8 : struct where T9 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            return accelerator.LoadStreamKernel<T1, T2, T3, T4, T5, T6, T7, T8, T9>(action);
         }
 
         /// <summary>
@@ -4953,6 +5497,75 @@ namespace ILGPU.Runtime
                 out kernelInfo);
             return (TIndex index, T1 param1, T2 param2, T3 param3, T4 param4, T5 param5, T6 param6, T7 param7, T8 param8, T9 param9, T10 param10) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3, param4, param5, param6, param7, param8, param9, param10);
+        }
+
+        /// <summary>
+        /// <see cref="LoadAutoGroupedStreamKernel{TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10}(Accelerator, Action{TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10})"/>
+        /// that does not hold the browser's thread for the whole load: it returns to the browser's event loop before the
+        /// (synchronous) IL compile, and on WebGPU builds the pipeline off the main thread (createComputePipelineAsync)
+        /// instead of synchronously at the first launch. Same launcher delegate as the synchronous loader. On the desktop
+        /// backends it completes once the kernel is compiled.
+        /// </summary>
+        /// <typeparam name="TIndex">The index type.</typeparam>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+        /// <typeparam name="T4">Parameter type of parameter 4.</typeparam>
+        /// <typeparam name="T5">Parameter type of parameter 5.</typeparam>
+        /// <typeparam name="T6">Parameter type of parameter 6.</typeparam>
+        /// <typeparam name="T7">Parameter type of parameter 7.</typeparam>
+        /// <typeparam name="T8">Parameter type of parameter 8.</typeparam>
+        /// <typeparam name="T9">Parameter type of parameter 9.</typeparam>
+        /// <typeparam name="T10">Parameter type of parameter 10.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>> LoadAutoGroupedStreamKernelAsync<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>(
+            this Accelerator accelerator,
+            Action<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10> action)
+            where TIndex : struct, IIndex
+            where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct where T8 : struct where T9 : struct where T10 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            var launcher = accelerator.LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>(action);
+            // Captured state and DelegateSpecialization arguments compile a different (synthetic) kernel than action.Method.
+            if (!action.Method.IsCapturingLambda() && !HasDelegateSpecialization(action.Method))
+                await accelerator.AfterAutoGroupedKernelLoadAsync(action.Method).ConfigureAwait(true);
+            return launcher;
+        }
+
+        /// <summary>
+        /// <see cref="LoadStreamKernel{T1, T2, T3, T4, T5, T6, T7, T8, T9, T10}(Accelerator, Action{T1, T2, T3, T4, T5, T6, T7, T8, T9, T10})"/>
+        /// that returns to the browser's event loop before the (synchronous) IL compile. The group size of an explicitly
+        /// grouped kernel is known only at its launch, so WebGPU still builds its pipeline at the first launch (or use
+        /// WebGPUAccelerator.PrecompileAsync with the group size).
+        /// </summary>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+        /// <typeparam name="T4">Parameter type of parameter 4.</typeparam>
+        /// <typeparam name="T5">Parameter type of parameter 5.</typeparam>
+        /// <typeparam name="T6">Parameter type of parameter 6.</typeparam>
+        /// <typeparam name="T7">Parameter type of parameter 7.</typeparam>
+        /// <typeparam name="T8">Parameter type of parameter 8.</typeparam>
+        /// <typeparam name="T9">Parameter type of parameter 9.</typeparam>
+        /// <typeparam name="T10">Parameter type of parameter 10.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<KernelConfig, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>> LoadStreamKernelAsync<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>(
+            this Accelerator accelerator,
+            Action<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10> action)
+            where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct where T8 : struct where T9 : struct where T10 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            return accelerator.LoadStreamKernel<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10>(action);
         }
 
         /// <summary>
@@ -5533,6 +6146,77 @@ namespace ILGPU.Runtime
                 out kernelInfo);
             return (TIndex index, T1 param1, T2 param2, T3 param3, T4 param4, T5 param5, T6 param6, T7 param7, T8 param8, T9 param9, T10 param10, T11 param11) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3, param4, param5, param6, param7, param8, param9, param10, param11);
+        }
+
+        /// <summary>
+        /// <see cref="LoadAutoGroupedStreamKernel{TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11}(Accelerator, Action{TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11})"/>
+        /// that does not hold the browser's thread for the whole load: it returns to the browser's event loop before the
+        /// (synchronous) IL compile, and on WebGPU builds the pipeline off the main thread (createComputePipelineAsync)
+        /// instead of synchronously at the first launch. Same launcher delegate as the synchronous loader. On the desktop
+        /// backends it completes once the kernel is compiled.
+        /// </summary>
+        /// <typeparam name="TIndex">The index type.</typeparam>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+        /// <typeparam name="T4">Parameter type of parameter 4.</typeparam>
+        /// <typeparam name="T5">Parameter type of parameter 5.</typeparam>
+        /// <typeparam name="T6">Parameter type of parameter 6.</typeparam>
+        /// <typeparam name="T7">Parameter type of parameter 7.</typeparam>
+        /// <typeparam name="T8">Parameter type of parameter 8.</typeparam>
+        /// <typeparam name="T9">Parameter type of parameter 9.</typeparam>
+        /// <typeparam name="T10">Parameter type of parameter 10.</typeparam>
+        /// <typeparam name="T11">Parameter type of parameter 11.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11>> LoadAutoGroupedStreamKernelAsync<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11>(
+            this Accelerator accelerator,
+            Action<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11> action)
+            where TIndex : struct, IIndex
+            where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct where T8 : struct where T9 : struct where T10 : struct where T11 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            var launcher = accelerator.LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11>(action);
+            // Captured state and DelegateSpecialization arguments compile a different (synthetic) kernel than action.Method.
+            if (!action.Method.IsCapturingLambda() && !HasDelegateSpecialization(action.Method))
+                await accelerator.AfterAutoGroupedKernelLoadAsync(action.Method).ConfigureAwait(true);
+            return launcher;
+        }
+
+        /// <summary>
+        /// <see cref="LoadStreamKernel{T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11}(Accelerator, Action{T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11})"/>
+        /// that returns to the browser's event loop before the (synchronous) IL compile. The group size of an explicitly
+        /// grouped kernel is known only at its launch, so WebGPU still builds its pipeline at the first launch (or use
+        /// WebGPUAccelerator.PrecompileAsync with the group size).
+        /// </summary>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+        /// <typeparam name="T4">Parameter type of parameter 4.</typeparam>
+        /// <typeparam name="T5">Parameter type of parameter 5.</typeparam>
+        /// <typeparam name="T6">Parameter type of parameter 6.</typeparam>
+        /// <typeparam name="T7">Parameter type of parameter 7.</typeparam>
+        /// <typeparam name="T8">Parameter type of parameter 8.</typeparam>
+        /// <typeparam name="T9">Parameter type of parameter 9.</typeparam>
+        /// <typeparam name="T10">Parameter type of parameter 10.</typeparam>
+        /// <typeparam name="T11">Parameter type of parameter 11.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<KernelConfig, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11>> LoadStreamKernelAsync<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11>(
+            this Accelerator accelerator,
+            Action<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11> action)
+            where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct where T8 : struct where T9 : struct where T10 : struct where T11 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            return accelerator.LoadStreamKernel<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11>(action);
         }
 
         /// <summary>
@@ -6129,6 +6813,79 @@ namespace ILGPU.Runtime
                 out kernelInfo);
             return (TIndex index, T1 param1, T2 param2, T3 param3, T4 param4, T5 param5, T6 param6, T7 param7, T8 param8, T9 param9, T10 param10, T11 param11, T12 param12) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3, param4, param5, param6, param7, param8, param9, param10, param11, param12);
+        }
+
+        /// <summary>
+        /// <see cref="LoadAutoGroupedStreamKernel{TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12}(Accelerator, Action{TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12})"/>
+        /// that does not hold the browser's thread for the whole load: it returns to the browser's event loop before the
+        /// (synchronous) IL compile, and on WebGPU builds the pipeline off the main thread (createComputePipelineAsync)
+        /// instead of synchronously at the first launch. Same launcher delegate as the synchronous loader. On the desktop
+        /// backends it completes once the kernel is compiled.
+        /// </summary>
+        /// <typeparam name="TIndex">The index type.</typeparam>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+        /// <typeparam name="T4">Parameter type of parameter 4.</typeparam>
+        /// <typeparam name="T5">Parameter type of parameter 5.</typeparam>
+        /// <typeparam name="T6">Parameter type of parameter 6.</typeparam>
+        /// <typeparam name="T7">Parameter type of parameter 7.</typeparam>
+        /// <typeparam name="T8">Parameter type of parameter 8.</typeparam>
+        /// <typeparam name="T9">Parameter type of parameter 9.</typeparam>
+        /// <typeparam name="T10">Parameter type of parameter 10.</typeparam>
+        /// <typeparam name="T11">Parameter type of parameter 11.</typeparam>
+        /// <typeparam name="T12">Parameter type of parameter 12.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12>> LoadAutoGroupedStreamKernelAsync<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12>(
+            this Accelerator accelerator,
+            Action<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12> action)
+            where TIndex : struct, IIndex
+            where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct where T8 : struct where T9 : struct where T10 : struct where T11 : struct where T12 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            var launcher = accelerator.LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12>(action);
+            // Captured state and DelegateSpecialization arguments compile a different (synthetic) kernel than action.Method.
+            if (!action.Method.IsCapturingLambda() && !HasDelegateSpecialization(action.Method))
+                await accelerator.AfterAutoGroupedKernelLoadAsync(action.Method).ConfigureAwait(true);
+            return launcher;
+        }
+
+        /// <summary>
+        /// <see cref="LoadStreamKernel{T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12}(Accelerator, Action{T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12})"/>
+        /// that returns to the browser's event loop before the (synchronous) IL compile. The group size of an explicitly
+        /// grouped kernel is known only at its launch, so WebGPU still builds its pipeline at the first launch (or use
+        /// WebGPUAccelerator.PrecompileAsync with the group size).
+        /// </summary>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+        /// <typeparam name="T4">Parameter type of parameter 4.</typeparam>
+        /// <typeparam name="T5">Parameter type of parameter 5.</typeparam>
+        /// <typeparam name="T6">Parameter type of parameter 6.</typeparam>
+        /// <typeparam name="T7">Parameter type of parameter 7.</typeparam>
+        /// <typeparam name="T8">Parameter type of parameter 8.</typeparam>
+        /// <typeparam name="T9">Parameter type of parameter 9.</typeparam>
+        /// <typeparam name="T10">Parameter type of parameter 10.</typeparam>
+        /// <typeparam name="T11">Parameter type of parameter 11.</typeparam>
+        /// <typeparam name="T12">Parameter type of parameter 12.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<KernelConfig, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12>> LoadStreamKernelAsync<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12>(
+            this Accelerator accelerator,
+            Action<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12> action)
+            where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct where T8 : struct where T9 : struct where T10 : struct where T11 : struct where T12 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            return accelerator.LoadStreamKernel<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12>(action);
         }
 
         /// <summary>
@@ -6741,6 +7498,81 @@ namespace ILGPU.Runtime
                 out kernelInfo);
             return (TIndex index, T1 param1, T2 param2, T3 param3, T4 param4, T5 param5, T6 param6, T7 param7, T8 param8, T9 param9, T10 param10, T11 param11, T12 param12, T13 param13) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3, param4, param5, param6, param7, param8, param9, param10, param11, param12, param13);
+        }
+
+        /// <summary>
+        /// <see cref="LoadAutoGroupedStreamKernel{TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13}(Accelerator, Action{TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13})"/>
+        /// that does not hold the browser's thread for the whole load: it returns to the browser's event loop before the
+        /// (synchronous) IL compile, and on WebGPU builds the pipeline off the main thread (createComputePipelineAsync)
+        /// instead of synchronously at the first launch. Same launcher delegate as the synchronous loader. On the desktop
+        /// backends it completes once the kernel is compiled.
+        /// </summary>
+        /// <typeparam name="TIndex">The index type.</typeparam>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+        /// <typeparam name="T4">Parameter type of parameter 4.</typeparam>
+        /// <typeparam name="T5">Parameter type of parameter 5.</typeparam>
+        /// <typeparam name="T6">Parameter type of parameter 6.</typeparam>
+        /// <typeparam name="T7">Parameter type of parameter 7.</typeparam>
+        /// <typeparam name="T8">Parameter type of parameter 8.</typeparam>
+        /// <typeparam name="T9">Parameter type of parameter 9.</typeparam>
+        /// <typeparam name="T10">Parameter type of parameter 10.</typeparam>
+        /// <typeparam name="T11">Parameter type of parameter 11.</typeparam>
+        /// <typeparam name="T12">Parameter type of parameter 12.</typeparam>
+        /// <typeparam name="T13">Parameter type of parameter 13.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13>> LoadAutoGroupedStreamKernelAsync<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13>(
+            this Accelerator accelerator,
+            Action<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13> action)
+            where TIndex : struct, IIndex
+            where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct where T8 : struct where T9 : struct where T10 : struct where T11 : struct where T12 : struct where T13 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            var launcher = accelerator.LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13>(action);
+            // Captured state and DelegateSpecialization arguments compile a different (synthetic) kernel than action.Method.
+            if (!action.Method.IsCapturingLambda() && !HasDelegateSpecialization(action.Method))
+                await accelerator.AfterAutoGroupedKernelLoadAsync(action.Method).ConfigureAwait(true);
+            return launcher;
+        }
+
+        /// <summary>
+        /// <see cref="LoadStreamKernel{T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13}(Accelerator, Action{T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13})"/>
+        /// that returns to the browser's event loop before the (synchronous) IL compile. The group size of an explicitly
+        /// grouped kernel is known only at its launch, so WebGPU still builds its pipeline at the first launch (or use
+        /// WebGPUAccelerator.PrecompileAsync with the group size).
+        /// </summary>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+        /// <typeparam name="T4">Parameter type of parameter 4.</typeparam>
+        /// <typeparam name="T5">Parameter type of parameter 5.</typeparam>
+        /// <typeparam name="T6">Parameter type of parameter 6.</typeparam>
+        /// <typeparam name="T7">Parameter type of parameter 7.</typeparam>
+        /// <typeparam name="T8">Parameter type of parameter 8.</typeparam>
+        /// <typeparam name="T9">Parameter type of parameter 9.</typeparam>
+        /// <typeparam name="T10">Parameter type of parameter 10.</typeparam>
+        /// <typeparam name="T11">Parameter type of parameter 11.</typeparam>
+        /// <typeparam name="T12">Parameter type of parameter 12.</typeparam>
+        /// <typeparam name="T13">Parameter type of parameter 13.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<KernelConfig, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13>> LoadStreamKernelAsync<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13>(
+            this Accelerator accelerator,
+            Action<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13> action)
+            where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct where T8 : struct where T9 : struct where T10 : struct where T11 : struct where T12 : struct where T13 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            return accelerator.LoadStreamKernel<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13>(action);
         }
 
         /// <summary>
@@ -7369,6 +8201,83 @@ namespace ILGPU.Runtime
                 out kernelInfo);
             return (TIndex index, T1 param1, T2 param2, T3 param3, T4 param4, T5 param5, T6 param6, T7 param7, T8 param8, T9 param9, T10 param10, T11 param11, T12 param12, T13 param13, T14 param14) =>
                 baseKernel(accelerator.DefaultStream, index, param1, param2, param3, param4, param5, param6, param7, param8, param9, param10, param11, param12, param13, param14);
+        }
+
+        /// <summary>
+        /// <see cref="LoadAutoGroupedStreamKernel{TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14}(Accelerator, Action{TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14})"/>
+        /// that does not hold the browser's thread for the whole load: it returns to the browser's event loop before the
+        /// (synchronous) IL compile, and on WebGPU builds the pipeline off the main thread (createComputePipelineAsync)
+        /// instead of synchronously at the first launch. Same launcher delegate as the synchronous loader. On the desktop
+        /// backends it completes once the kernel is compiled.
+        /// </summary>
+        /// <typeparam name="TIndex">The index type.</typeparam>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+        /// <typeparam name="T4">Parameter type of parameter 4.</typeparam>
+        /// <typeparam name="T5">Parameter type of parameter 5.</typeparam>
+        /// <typeparam name="T6">Parameter type of parameter 6.</typeparam>
+        /// <typeparam name="T7">Parameter type of parameter 7.</typeparam>
+        /// <typeparam name="T8">Parameter type of parameter 8.</typeparam>
+        /// <typeparam name="T9">Parameter type of parameter 9.</typeparam>
+        /// <typeparam name="T10">Parameter type of parameter 10.</typeparam>
+        /// <typeparam name="T11">Parameter type of parameter 11.</typeparam>
+        /// <typeparam name="T12">Parameter type of parameter 12.</typeparam>
+        /// <typeparam name="T13">Parameter type of parameter 13.</typeparam>
+        /// <typeparam name="T14">Parameter type of parameter 14.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14>> LoadAutoGroupedStreamKernelAsync<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14>(
+            this Accelerator accelerator,
+            Action<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14> action)
+            where TIndex : struct, IIndex
+            where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct where T8 : struct where T9 : struct where T10 : struct where T11 : struct where T12 : struct where T13 : struct where T14 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            var launcher = accelerator.LoadAutoGroupedStreamKernel<TIndex, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14>(action);
+            // Captured state and DelegateSpecialization arguments compile a different (synthetic) kernel than action.Method.
+            if (!action.Method.IsCapturingLambda() && !HasDelegateSpecialization(action.Method))
+                await accelerator.AfterAutoGroupedKernelLoadAsync(action.Method).ConfigureAwait(true);
+            return launcher;
+        }
+
+        /// <summary>
+        /// <see cref="LoadStreamKernel{T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14}(Accelerator, Action{T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14})"/>
+        /// that returns to the browser's event loop before the (synchronous) IL compile. The group size of an explicitly
+        /// grouped kernel is known only at its launch, so WebGPU still builds its pipeline at the first launch (or use
+        /// WebGPUAccelerator.PrecompileAsync with the group size).
+        /// </summary>
+        /// <typeparam name="T1">Parameter type of parameter 1.</typeparam>
+        /// <typeparam name="T2">Parameter type of parameter 2.</typeparam>
+        /// <typeparam name="T3">Parameter type of parameter 3.</typeparam>
+        /// <typeparam name="T4">Parameter type of parameter 4.</typeparam>
+        /// <typeparam name="T5">Parameter type of parameter 5.</typeparam>
+        /// <typeparam name="T6">Parameter type of parameter 6.</typeparam>
+        /// <typeparam name="T7">Parameter type of parameter 7.</typeparam>
+        /// <typeparam name="T8">Parameter type of parameter 8.</typeparam>
+        /// <typeparam name="T9">Parameter type of parameter 9.</typeparam>
+        /// <typeparam name="T10">Parameter type of parameter 10.</typeparam>
+        /// <typeparam name="T11">Parameter type of parameter 11.</typeparam>
+        /// <typeparam name="T12">Parameter type of parameter 12.</typeparam>
+        /// <typeparam name="T13">Parameter type of parameter 13.</typeparam>
+        /// <typeparam name="T14">Parameter type of parameter 14.</typeparam>
+
+        /// <param name="accelerator">The current accelerator.</param>
+        /// <param name="action">The action to compile into a kernel.</param>
+        /// <returns>The loaded kernel-launcher delegate.</returns>
+        public static async Task<Action<KernelConfig, T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14>> LoadStreamKernelAsync<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14>(
+            this Accelerator accelerator,
+            Action<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14> action)
+            where T1 : struct where T2 : struct where T3 : struct where T4 : struct where T5 : struct where T6 : struct where T7 : struct where T8 : struct where T9 : struct where T10 : struct where T11 : struct where T12 : struct where T13 : struct where T14 : struct
+        {
+            ArgumentNullException.ThrowIfNull(accelerator);
+            ArgumentNullException.ThrowIfNull(action);
+            await accelerator.BeforeKernelCompileAsync().ConfigureAwait(true);
+            return accelerator.LoadStreamKernel<T1, T2, T3, T4, T5, T6, T7, T8, T9, T10, T11, T12, T13, T14>(action);
         }
 
     }

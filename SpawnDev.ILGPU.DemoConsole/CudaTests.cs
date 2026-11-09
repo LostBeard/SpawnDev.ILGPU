@@ -66,6 +66,42 @@ public class CudaTests : BackendTestBase
         if (bad.Count > 0) throw new Exception("thread-dependent branches emitted as uniform: " + string.Join("; ", bad));
     }
 
+    static void LibDeviceCosF64Kernel(Index1D i, ArrayView<double> x, ArrayView<double> y) => y[i] = Math.Cos(x[i]);
+
+    // Double Math.Cos on PTX comes from LibDevice (CUDA toolkit) or from Algorithms' software math. CUDA 13 on Windows
+    // moved nvvm64_*.dll into nvvm\bin\x64 and the auto-detection searched nvvm\bin only, so a plain Cuda() context
+    // silently had no LibDevice and this kernel failed to compile (Geordi, SpawnDev.Codecs, 2026-11-08). No Algorithms here
+    // on purpose: the toolkit is what must be found. Skips only on a machine without the toolkit (CUDA_PATH unset).
+    [TestMethod]
+    public async Task LibDevice_AutoDetected_DoubleCosCompilesWithoutAlgorithms()
+    {
+        var cudaPath = Environment.GetEnvironmentVariable("CUDA_PATH");
+        if (string.IsNullOrEmpty(cudaPath) || !Directory.Exists(Path.Combine(cudaPath, "nvvm", "libdevice")))
+            throw new UnsupportedTestException("No CUDA toolkit (CUDA_PATH with nvvm\\libdevice) on this machine");
+        using var context = Context.Create(builder => builder.Cuda());
+        if (context.GetCudaDevices().Count == 0)
+            throw new UnsupportedTestException("No CUDA devices found");
+        if (string.IsNullOrEmpty(context.Properties.LibNvvmPath) || string.IsNullOrEmpty(context.Properties.LibDevicePath))
+            throw new Exception($"LibDevice not auto-detected under {cudaPath} (LibNvvmPath='{context.Properties.LibNvvmPath}', " +
+                $"LibDevicePath='{context.Properties.LibDevicePath}')");
+        using var accelerator = context.CreateCudaAccelerator(0);
+        const int n = 4096;
+        var x = new double[n];
+        for (int i = 0; i < n; i++) x[i] = (i - n / 2) * 0.01234567890123;
+        using var xb = accelerator.Allocate1D(x);
+        using var yb = accelerator.Allocate1D<double>(n);
+        var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<double>, ArrayView<double>>(LibDeviceCosF64Kernel);
+        kernel(n, xb.View, yb.View);
+        await accelerator.SynchronizeAsync();
+        var y = await yb.CopyToHostAsync<double>();
+        for (int i = 0; i < n; i++)
+        {
+            double want = Math.Cos(x[i]);
+            if (Math.Abs(y[i] - want) > 1e-15)
+                throw new Exception($"[{i}] cos({x[i]:R}) = {y[i]:R}, host {want:R}");
+        }
+    }
+
     protected override Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()
     {
         var context = Context.Create(builder => builder.AllAccelerators().EnableAlgorithms());

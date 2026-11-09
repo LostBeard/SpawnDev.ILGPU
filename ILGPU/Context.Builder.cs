@@ -414,8 +414,17 @@ namespace ILGPU
                     RuntimeInformation.IsOSPlatform(OSPlatform.Windows)
                     ? "nvvm64*.dll"
                     : "libnvvm*.so";
-                var nvvmFiles = Directory.EnumerateFiles(nvvmBinDir, nvvmSearchPattern);
-                var libNvvmPath = nvvmFiles.FirstOrDefault();
+                // CUDA 13 on Windows moved the DLL into nvvm\bin\x64 (nvvm\bin keeps only cicc.exe): searching nvvm\bin
+                // alone found nothing, so the silent auto-detection turned LibDevice OFF and a double Math.Cos (any
+                // LibDevice-backed f64 math) failed to compile on CUDA unless Algorithms was enabled (Geordi, 2026-11-08).
+                // A missing directory is "not found", never a DirectoryNotFoundException out of Context.Create.
+                string? libNvvmPath = null;
+                foreach (var dir in new[] { nvvmBinDir, Path.Combine(nvvmBinDir, "x64") })
+                {
+                    if (!Directory.Exists(dir)) continue;
+                    libNvvmPath = Directory.EnumerateFiles(dir, nvvmSearchPattern).FirstOrDefault();
+                    if (libNvvmPath is not null) break;
+                }
                 if (libNvvmPath is null)
                 {
                     return throwIfNotFound
@@ -427,10 +436,9 @@ namespace ILGPU
 
                 // Find the LibDevice Bitcode.
                 var libDeviceDir = Path.Combine(nvvmRoot, "libdevice");
-                var libDeviceFiles = Directory.EnumerateFiles(
-                    libDeviceDir,
-                    "libdevice.*.bc");
-                var libDevicePath = libDeviceFiles.FirstOrDefault();
+                var libDevicePath = Directory.Exists(libDeviceDir)
+                    ? Directory.EnumerateFiles(libDeviceDir, "libdevice.*.bc").FirstOrDefault()
+                    : null;
                 if (libDevicePath is null)
                 {
                     return throwIfNotFound

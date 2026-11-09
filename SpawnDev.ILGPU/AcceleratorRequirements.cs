@@ -150,14 +150,14 @@ public sealed class AcceleratorRequirements
     /// Distinct from <see cref="RequiresFloat64Native"/>: every backend can satisfy strict
     /// f64, just not all at the same speed.
     ///   - CPU / CUDA / OpenCL / Wasm: strict f64 is native; accepted unchanged.
-    ///   - WebGPU / WebGL: strict f64 requires <see cref="F64EmulationMode.Ozaki"/>
-    ///     (full IEEE 754, vec4&lt;f32&gt;). The default <see cref="F64EmulationMode.Dekker"/>
-    ///     (~48-53 bit mantissa, vec2&lt;f32&gt;) is REJECTED because it diverges from
-    ///     IEEE 754 53-bit semantics.
+    ///   - WebGPU / WebGL: strict f64 uses <see cref="F64EmulationMode.Ieee"/> (binary64 in integer arithmetic,
+    ///     every operation bit-identical to .NET). The default <see cref="F64EmulationMode.Dekker"/> (~48-53 bit
+    ///     mantissa) and <see cref="F64EmulationMode.Ozaki"/> (~96 bits between operations, rounded only on stores)
+    ///     do not give .NET's per-operation results.
     ///
     /// <para>Selection accepts every backend except an OpenCL device without fp64. When
-    /// <c>CreatePreferredAcceleratorAsync(requirements)</c> picks WebGPU or WebGL, it creates the
-    /// accelerator with <c>F64Emulation = Ozaki</c>. The synchronous
+    /// <c>CreatePreferredAcceleratorAsync(requirements)</c> picks WebGPU or WebGL it creates the accelerator with
+    /// <c>F64Emulation = Ieee</c>. The synchronous
     /// <see cref="AcceleratorRequirementsExtensions.CreatePreferredAccelerator"/> does not configure the
     /// browser backends. An existing <c>WebGPUAccelerator</c> / <c>WebGLAccelerator</c> can switch with its
     /// <c>F64Mode</c> property (affects kernels compiled afterwards). P2P dispatch carries the requested

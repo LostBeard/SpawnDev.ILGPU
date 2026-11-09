@@ -99,7 +99,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // The emulated-f64 type depends on the mode (Dekker vec2, Ozaki vec4). A prototype
             // with the wrong one clashes with the definition ("differ only in return type"), so
             // any helper under Ozaki failed to compile when these were hard-coded vec2.
-            string f64t = Backend.UseOzakiF64Emulation ? "vec4" : "vec2";
+            string f64t = Backend.F64TypeName;
             Builder.AppendLine($"{f64t} f64_from_ieee754_bits(uint lo, uint hi);");
             Builder.AppendLine($"uvec2 f64_to_ieee754_bits({f64t} v);");
             Builder.AppendLine($"{f64t} f64_from_u64(uvec2 v);");
@@ -114,6 +114,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             Builder.AppendLine($"{f64t} f64_from_f32(float v);");
             Builder.AppendLine($"float f64_to_f32({f64t} v);");
             Builder.AppendLine($"{f64t} f64_new(float hi, float lo);");
+            Builder.AppendLine($"{f64t} f64_fma({f64t} a, {f64t} b, {f64t} c);");
+            if (Backend.UseIeeeF64Emulation)
+                Builder.AppendLine($"{f64t} f64_select(bool c, {f64t} t, {f64t} f);");
             Builder.AppendLine($"{f64t} f64_neg({f64t} a);");
             Builder.AppendLine($"{f64t} f64_abs({f64t} a);");
             Builder.AppendLine($"{f64t} f64_floor({f64t} v);");

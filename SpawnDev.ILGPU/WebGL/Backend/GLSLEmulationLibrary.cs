@@ -26,23 +26,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// GLSL helper functions for emu_f64 emulation.
         /// Uses the double-float technique where emu_f64 = vec2(high, low).
         /// </summary>
-        public const string F64Functions = @"
-// ============================================================================
-// emu_f64 Emulation Functions (Double-Float: vec2 where x=high, y=low)
-// ============================================================================
-// ANTI-OPTIMIZATION: Uses the luma.gl/deck.gl 'ONE' technique to prevent
-// GLSL compilers (especially ANGLE/D3D11) from optimizing away the error
-// terms in double-float arithmetic. The uniform u_one is set to 1.0 at
-// runtime but is unknown to the compiler at compile time, so the compiler
-// cannot simplify expressions like (s * u_one - a) into (s - a).
-// Without this, ANGLE collapses the two-sum error computation, reducing
-// ~48-bit precision back to ~24-bit (regular float).
-// ============================================================================
-
-// Runtime constant: always 1.0, but opaque to the compiler
-uniform highp float u_one;
-
-// ---- exact f64 <-> bits core (same text in the Dekker and Ozaki families) ----
+        /// <summary>
+        /// Integer-domain helpers shared by every f64 family (Dekker, Ozaki, Ieee): 64-bit add/sub/shift/msb on uvec2,
+        /// round-to-nearest-even shift, u64 -> double bits, trunc magnitude, and Floor/Ceiling/Round on the IEEE bit pattern.
+        /// </summary>
+        public const string F64IntegerCoreFunctions = @"
+// ---- exact f64 <-> bits core (shared by every f64 family) ----
 uvec2 _f64u_add(uvec2 a, uvec2 b) {
     uint lo = a.x + b.x;
     return uvec2(lo, a.y + b.y + (lo < a.x ? 1u : 0u));
@@ -213,6 +202,63 @@ uvec3 _f64_bits_trunc_mag(uvec2 b) {
     uvec3 sat = e >= 64u ? uvec3(0xFFFFFFFFu, 0xFFFFFFFFu, 1u) : r;
     return exponent < 1023u ? uvec3(0u, 0u, 0u) : sat;
 }
+
+// ---- exact Floor / Ceiling / Round on the IEEE bit pattern ----
+uvec2 _f64_bits_round_int(uvec2 b, bool ceil_mode) {
+    uint exponent = (b.y >> 20u) & 0x7FFu;
+    bool neg = (b.y & 0x80000000u) != 0u;
+    uvec2 small_neg = ceil_mode ? uvec2(0u, 0x80000000u) : uvec2(0u, 0xBFF00000u);
+    uvec2 small_pos = ceil_mode ? uvec2(0u, 0x3FF00000u) : uvec2(0u, 0u);
+    uvec2 small = neg ? small_neg : small_pos;
+    uvec2 small_r = ((b.x | (b.y & 0x7FFFFFFFu)) == 0u) ? b : small;
+    uint fracbits = 1075u - exponent;
+    uvec2 kept = _f64u_shl(_f64u_shr(b, fracbits), fracbits);
+    uvec2 plus = _f64u_add(kept, _f64u_shl(uvec2(1u, 0u), fracbits));
+    uvec2 bumped = (neg != ceil_mode) ? plus : kept;
+    uvec2 mid = (kept.x == b.x && kept.y == b.y) ? b : bumped;
+    uvec2 r = exponent < 1023u ? small_r : mid;
+    return (exponent == 0x7FFu || exponent >= 1075u) ? b : r;
+}
+
+// Nearest integer on the IEEE bit pattern; a tie goes to EVEN or AWAY from zero (rounding the
+// components separately is wrong: 2.5000000001 = 2.5 + 1e-10 -> 2).
+uvec2 _f64_bits_round_nearest(uvec2 b, bool away) {
+    uint exponent = (b.y >> 20u) & 0x7FFu;
+    uvec2 sign_only = uvec2(0u, b.y & 0x80000000u);
+    uvec2 half_range = (!away && b.x == 0u && (b.y & 0xFFFFFu) == 0u) ? sign_only : uvec2(0u, sign_only.y | 0x3FF00000u);
+    uint fracbits = 1075u - exponent;
+    uvec2 one = _f64u_shl(uvec2(1u, 0u), fracbits);
+    uvec2 kept = _f64u_shl(_f64u_shr(b, fracbits), fracbits);
+    uvec2 frac = _f64u_sub(b, kept);
+    uvec2 half_v = _f64u_shl(uvec2(1u, 0u), fracbits - 1u);
+    bool above = frac.y > half_v.y || (frac.y == half_v.y && frac.x > half_v.x);
+    bool tie = frac.x == half_v.x && frac.y == half_v.y;
+    bool odd = ((kept.x & one.x) | (kept.y & one.y)) != 0u;
+    uvec2 plus = _f64u_add(kept, one);
+    uvec2 mid = (above || (tie && (away || odd))) ? plus : kept;
+    uvec2 r = exponent == 1022u ? half_range : mid;
+    r = exponent < 1022u ? sign_only : r;
+    return (exponent == 0x7FFu || exponent >= 1075u) ? b : r;
+}
+";
+
+        public const string F64Functions = @"
+// ============================================================================
+// emu_f64 Emulation Functions (Double-Float: vec2 where x=high, y=low)
+// ============================================================================
+// ANTI-OPTIMIZATION: Uses the luma.gl/deck.gl 'ONE' technique to prevent
+// GLSL compilers (especially ANGLE/D3D11) from optimizing away the error
+// terms in double-float arithmetic. The uniform u_one is set to 1.0 at
+// runtime but is unknown to the compiler at compile time, so the compiler
+// cannot simplify expressions like (s * u_one - a) into (s - a).
+// Without this, ANGLE collapses the two-sum error computation, reducing
+// ~48-bit precision back to ~24-bit (regular float).
+// ============================================================================
+
+// Runtime constant: always 1.0, but opaque to the compiler
+uniform highp float u_one;
+
+" + F64IntegerCoreFunctions + @"
 
 vec2 f64_from_ieee754_bits(uint lo, uint hi) {
     vec4 c = _f64_bits_to_components(lo, hi);
@@ -489,22 +535,6 @@ uint f64_to_u32(vec2 v) {
 }
 
 
-// ---- exact Floor / Ceiling / Round on the IEEE bit pattern ----
-uvec2 _f64_bits_round_int(uvec2 b, bool ceil_mode) {
-    uint exponent = (b.y >> 20u) & 0x7FFu;
-    bool neg = (b.y & 0x80000000u) != 0u;
-    uvec2 small_neg = ceil_mode ? uvec2(0u, 0x80000000u) : uvec2(0u, 0xBFF00000u);
-    uvec2 small_pos = ceil_mode ? uvec2(0u, 0x3FF00000u) : uvec2(0u, 0u);
-    uvec2 small = neg ? small_neg : small_pos;
-    uvec2 small_r = ((b.x | (b.y & 0x7FFFFFFFu)) == 0u) ? b : small;
-    uint fracbits = 1075u - exponent;
-    uvec2 kept = _f64u_shl(_f64u_shr(b, fracbits), fracbits);
-    uvec2 plus = _f64u_add(kept, _f64u_shl(uvec2(1u, 0u), fracbits));
-    uvec2 bumped = (neg != ceil_mode) ? plus : kept;
-    uvec2 mid = (kept.x == b.x && kept.y == b.y) ? b : bumped;
-    uvec2 r = exponent < 1023u ? small_r : mid;
-    return (exponent == 0x7FFu || exponent >= 1075u) ? b : r;
-}
 
 // Integer rounding of a normalized pair (|lo| <= ulp(hi) / 2) in f32 arithmetic: a NON-integral
 // hi (|hi| < 2^23) is at least one ULP from every integer, so lo cannot carry the value across
@@ -561,26 +591,6 @@ vec2 f64_ceil(vec2 v) {
     return (ch == v.x && fin) ? with_lo : vec2(ch, 0.0);
 }
 
-// Nearest integer on the IEEE bit pattern; a tie goes to EVEN or AWAY from zero (rounding the
-// components separately is wrong: 2.5000000001 = 2.5 + 1e-10 -> 2).
-uvec2 _f64_bits_round_nearest(uvec2 b, bool away) {
-    uint exponent = (b.y >> 20u) & 0x7FFu;
-    uvec2 sign_only = uvec2(0u, b.y & 0x80000000u);
-    uvec2 half_range = (!away && b.x == 0u && (b.y & 0xFFFFFu) == 0u) ? sign_only : uvec2(0u, sign_only.y | 0x3FF00000u);
-    uint fracbits = 1075u - exponent;
-    uvec2 one = _f64u_shl(uvec2(1u, 0u), fracbits);
-    uvec2 kept = _f64u_shl(_f64u_shr(b, fracbits), fracbits);
-    uvec2 frac = _f64u_sub(b, kept);
-    uvec2 half_v = _f64u_shl(uvec2(1u, 0u), fracbits - 1u);
-    bool above = frac.y > half_v.y || (frac.y == half_v.y && frac.x > half_v.x);
-    bool tie = frac.x == half_v.x && frac.y == half_v.y;
-    bool odd = ((kept.x & one.x) | (kept.y & one.y)) != 0u;
-    uvec2 plus = _f64u_add(kept, one);
-    uvec2 mid = (above || (tie && (away || odd))) ? plus : kept;
-    uvec2 r = exponent == 1022u ? half_range : mid;
-    r = exponent < 1022u ? sign_only : r;
-    return (exponent == 0x7FFu || exponent >= 1075u) ? b : r;
-}
 
 vec2 f64_round_even(vec2 v) {
     return _f64_round_nearest(v, false);
@@ -634,6 +644,11 @@ vec2 f64_pow(vec2 a, vec2 b) {
 
 vec2 f64_atan2(vec2 a, vec2 b) {
     return f64_from_f32(atan(f64_to_f32(a), f64_to_f32(b)));
+}
+
+// Math.FusedMultiplyAdd: multiply, then add, in the emulated precision (two roundings; exact only in the Ieee family).
+vec2 f64_fma(vec2 a, vec2 b, vec2 c) {
+    return f64_add(f64_mul(a, b), c);
 }
 
 ";
@@ -969,6 +984,485 @@ uvec2 f32_to_u64(float f) {
 
         #endregion
 
+        #region emu_f64 Emulation (Ieee: software binary64 in the emu_f64i struct)
+
+        /// <summary>
+        /// The GLSL type of an Ieee emulated double: the IEEE-754 bit pattern, x = low word, y = high word. A struct, not a
+        /// uvec2 (which is the emulated 64-bit integer), so the code generator can tell the two apart by type name.
+        /// Declared in the shader header (WebGLBackend) because helper prototypes precede the emulation library.
+        /// </summary>
+        public const string IeeeF64StructDeclaration = "struct emu_f64i { uint x; uint y; };";
+
+        /// <summary>
+        /// <see cref="F64EmulationMode.Ieee"/> for WebGL: the WGSL Ieee library (WGSLEmulationLibrary.IeeeF64Functions,
+        /// checked against .NET on the host) in GLSL ES 3.00, on uvec2 internally with emu_f64i at the API. Loop bounds go
+        /// through the u_loopLimit uniform so ANGLE's D3D compiler (FXC) cannot see a trip count (see WebGL/CLAUDE.md).
+        /// </summary>
+        public const string IeeeF64Functions = F64IntegerCoreFunctions + @"
+// ============================================================================
+// emu_f64 Emulation Functions (Ieee: binary64 bit pattern in emu_f64i)
+// ============================================================================
+uvec2 _ie_u(emu_f64i v) { return uvec2(v.x, v.y); }
+emu_f64i _ie_w(uvec2 v) { return emu_f64i(v.x, v.y); }
+
+bool _ie_ge(uvec2 a, uvec2 b) { return a.y > b.y || (a.y == b.y && a.x >= b.x); }
+bool _ie_is_zero(uvec2 a) { return (a.x | a.y) == 0u; }
+uvec2 _ie_shl1(uvec2 a) { return uvec2(a.x << 1u, (a.y << 1u) | (a.x >> 31u)); }
+bool _ie_is_nan(uvec2 a) {
+    uint h = a.y & 0x7FFFFFFFu;
+    return h > 0x7FF00000u || (h == 0x7FF00000u && a.x != 0u);
+}
+bool _ie_is_inf(uvec2 a) { return (a.y & 0x7FFFFFFFu) == 0x7FF00000u && a.x == 0u; }
+bool _ie_is_zero_mag(uvec2 a) { return a.x == 0u && (a.y & 0x7FFFFFFFu) == 0u; }
+uvec2 _ie_qnan(uvec2 a) { return uvec2(a.x, a.y | 0x00080000u); }
+
+uvec2 _ie_shr_jam(uvec2 a, uint n) {
+    uvec2 q = _f64u_shr(a, n);
+    uvec2 back = _f64u_shl(q, n);
+    return uvec2(q.x | (back != a ? 1u : 0u), q.y);
+}
+
+uvec2 _ie_mul_wide(uint a, uint b) {
+    uint al = a & 0xFFFFu; uint ah = a >> 16u; uint bl = b & 0xFFFFu; uint bh = b >> 16u;
+    uint p0 = al * bl; uint p1 = al * bh; uint p2 = ah * bl; uint p3 = ah * bh;
+    uint mid = p1 + p2;
+    uint mid_c = mid < p1 ? 1u : 0u;
+    uint lo = p0 + (mid << 16u);
+    uint lo_c = lo < p0 ? 1u : 0u;
+    return uvec2(lo, p3 + (mid >> 16u) + (mid_c << 16u) + lo_c);
+}
+
+uvec2 _ie_round_pack(uint sign, int e_in, uvec2 m_in) {
+    bool tiny = e_in < 1;
+    uvec2 m = tiny ? _ie_shr_jam(m_in, uint(clamp(1 - e_in, 0, 64))) : m_in;
+    int e = tiny ? 1 : e_in;
+    uint low = m.x & 7u;
+    uvec2 m3 = _f64u_shr(m, 3u);
+    bool up = low > 4u || (low == 4u && (m3.x & 1u) == 1u);
+    uvec2 mr = up ? _f64u_add(m3, uvec2(1u, 0u)) : m3;
+    uint hi = (uint(e - 1) << 20u) + mr.y;
+    bool ovf = e >= 2047 || hi >= 0x7FF00000u;
+    return ovf ? uvec2(0u, sign | 0x7FF00000u) : uvec2(mr.x, sign | hi);
+}
+
+uvec2 _ie_mant(uvec2 a) { return uvec2(a.x, (a.y & 0xFFFFFu) | ((a.y & 0x7FF00000u) != 0u ? 0x100000u : 0u)); }
+int _ie_exp(uvec2 a) { return int(max((a.y >> 20u) & 0x7FFu, 1u)); }
+uvec3 _ie_norm(uvec2 a) {
+    uvec2 m = _ie_mant(a);
+    uint s = 52u - _f64u_msb(_ie_is_zero(m) ? uvec2(1u, 0u) : m);
+    return uvec3(_f64u_shl(m, s), uint(_ie_exp(a) - int(s)));
+}
+
+uvec2 _ie_add(uvec2 a, uvec2 b) {
+    uvec2 am = uvec2(a.x, a.y & 0x7FFFFFFFu);
+    uvec2 bm = uvec2(b.x, b.y & 0x7FFFFFFFu);
+    bool swap = !_ie_ge(am, bm);
+    uvec2 big = swap ? b : a;
+    uvec2 small = swap ? a : b;
+    int eb = _ie_exp(big);
+    int es = _ie_exp(small);
+    uvec2 mb = _f64u_shl(_ie_mant(big), 3u);
+    uvec2 ms = _ie_shr_jam(_f64u_shl(_ie_mant(small), 3u), uint(min(eb - es, 64)));
+    bool subtract = ((a.y ^ b.y) & 0x80000000u) != 0u;
+    uvec2 sum = _f64u_add(mb, ms);
+    bool carry = (sum.y >> 24u) != 0u;
+    uvec2 sum_n = carry ? _ie_shr_jam(sum, 1u) : sum;
+    int e_sum = eb + (carry ? 1 : 0);
+    uvec2 diff = _f64u_sub(mb, ms);
+    uint lz = 55u - _f64u_msb(_ie_is_zero(diff) ? uvec2(1u, 0u) : diff);
+    uint sh = min(lz, uint(eb - 1));
+    uvec2 diff_n = _f64u_shl(diff, sh);
+    int e_diff = eb - int(sh);
+    uvec2 r = _ie_round_pack(big.y & 0x80000000u, subtract ? e_diff : e_sum, subtract ? diff_n : sum_n);
+    r = (subtract && _ie_is_zero(diff)) ? uvec2(0u, 0u) : r;
+    bool a_inf = _ie_is_inf(a);
+    bool b_inf = _ie_is_inf(b);
+    r = b_inf ? b : r;
+    r = a_inf ? a : r;
+    r = (a_inf && b_inf && subtract) ? uvec2(0u, 0xFFF80000u) : r;
+    r = _ie_is_nan(b) ? _ie_qnan(b) : r;
+    return _ie_is_nan(a) ? _ie_qnan(a) : r;
+}
+
+uvec4 _ie_mul_sig(uvec2 ma, uvec2 mb) {
+    uvec2 p00 = _ie_mul_wide(ma.x, mb.x);
+    uvec2 p01 = _ie_mul_wide(ma.x, mb.y);
+    uvec2 p10 = _ie_mul_wide(ma.y, mb.x);
+    uvec2 p11 = _ie_mul_wide(ma.y, mb.y);
+    uvec2 mid = _f64u_add(p01, p10);
+    uint w1 = p00.y + mid.x;
+    uint c1 = w1 < mid.x ? 1u : 0u;
+    uvec2 upper = _f64u_add(_f64u_add(p11, uvec2(mid.y, 0u)), uvec2(c1, 0u));
+    return uvec4(p00.x, w1, upper.x, upper.y);
+}
+
+uvec2 _ie_mul(uvec2 a, uvec2 b) {
+    uint sign = (a.y ^ b.y) & 0x80000000u;
+    uvec3 na = _ie_norm(a);
+    uvec3 nb = _ie_norm(b);
+    uvec4 p = _ie_mul_sig(na.xy, nb.xy);
+    uvec2 upper = p.zw;
+    bool top = (upper.y >> 9u) != 0u;
+    uint s = top ? 50u : 49u;
+    uvec2 hi_part = _f64u_shl(upper, 64u - s);
+    uvec2 lo_part = _ie_shr_jam(p.xy, s);
+    uvec2 m = uvec2(hi_part.x | lo_part.x, hi_part.y | lo_part.y);
+    int e = int(na.z) + int(nb.z) - 1023 + (top ? 1 : 0);
+    uvec2 r = _ie_round_pack(sign, e, m);
+    bool a_inf = _ie_is_inf(a);
+    bool b_inf = _ie_is_inf(b);
+    bool a_zero = _ie_is_zero_mag(a);
+    bool b_zero = _ie_is_zero_mag(b);
+    r = (a_zero || b_zero) ? uvec2(0u, sign) : r;
+    r = (a_inf || b_inf) ? uvec2(0u, sign | 0x7FF00000u) : r;
+    r = ((a_inf && b_zero) || (b_inf && a_zero)) ? uvec2(0u, 0xFFF80000u) : r;
+    r = _ie_is_nan(b) ? _ie_qnan(b) : r;
+    return _ie_is_nan(a) ? _ie_qnan(a) : r;
+}
+
+uvec2 _ie_div(uvec2 a, uvec2 b) {
+    uint sign = (a.y ^ b.y) & 0x80000000u;
+    uvec3 na = _ie_norm(a);
+    uvec3 nb = _ie_norm(b);
+    uvec2 mb = nb.xy;
+    bool lt = !_ie_ge(na.xy, mb);
+    uvec2 rem = lt ? _ie_shl1(na.xy) : na.xy;
+    int e = int(na.z) - int(nb.z) + 1023 - (lt ? 1 : 0);
+    uvec2 q = uvec2(0u, 0u);
+    int steps = min(56, u_loopLimit);
+    for (int i = 0; i < steps; i++) {
+        bool ge = _ie_ge(rem, mb);
+        rem = ge ? _f64u_sub(rem, mb) : rem;
+        q = _ie_shl1(q);
+        q.x = q.x | (ge ? 1u : 0u);
+        rem = _ie_shl1(rem);
+    }
+    q.x = q.x | (_ie_is_zero(rem) ? 0u : 1u);
+    uvec2 r = _ie_round_pack(sign, e, q);
+    bool a_inf = _ie_is_inf(a);
+    bool b_inf = _ie_is_inf(b);
+    bool a_zero = _ie_is_zero_mag(a);
+    bool b_zero = _ie_is_zero_mag(b);
+    r = (a_zero || b_inf) ? uvec2(0u, sign) : r;
+    r = (a_inf || b_zero) ? uvec2(0u, sign | 0x7FF00000u) : r;
+    r = ((a_inf && b_inf) || (a_zero && b_zero)) ? uvec2(0u, 0xFFF80000u) : r;
+    r = _ie_is_nan(b) ? _ie_qnan(b) : r;
+    return _ie_is_nan(a) ? _ie_qnan(a) : r;
+}
+
+uvec2 _ie_sqrt(uvec2 a) {
+    uvec3 na = _ie_norm(a);
+    int k0 = int(na.z) - 1075;
+    bool odd = (k0 & 1) != 0;
+    uvec2 m = odd ? _ie_shl1(na.xy) : na.xy;
+    int k = k0 - (odd ? 1 : 0);
+    uvec2 cur = _f64u_shl(m, 10u);
+    uvec2 q = uvec2(0u, 0u);
+    uvec2 rem = uvec2(0u, 0u);
+    int steps = min(56, u_loopLimit);
+    for (int i = 0; i < steps; i++) {
+        rem = _ie_shl1(_ie_shl1(rem));
+        rem.x = rem.x | (cur.y >> 30u);
+        cur = _ie_shl1(_ie_shl1(cur));
+        uvec2 t = _ie_shl1(_ie_shl1(q));
+        t.x = t.x | 1u;
+        bool ge = _ie_ge(rem, t);
+        rem = ge ? _f64u_sub(rem, t) : rem;
+        q = _ie_shl1(q);
+        q.x = q.x | (ge ? 1u : 0u);
+    }
+    q.x = q.x | (_ie_is_zero(rem) ? 0u : 1u);
+    uvec2 r = _ie_round_pack(0u, (k >> 1) + 1049, q);
+    r = ((a.y & 0x80000000u) != 0u) ? uvec2(0u, 0xFFF80000u) : r;
+    r = (_ie_is_zero_mag(a) || (a.y == 0x7FF00000u && a.x == 0u)) ? a : r;
+    return _ie_is_nan(a) ? _ie_qnan(a) : r;
+}
+
+uint _ie_w4(uvec4 a, uint k) { return k == 0u ? a.x : (k == 1u ? a.y : (k == 2u ? a.z : (k == 3u ? a.w : 0u))); }
+uvec4 _ie_add4(uvec4 a, uvec4 b) {
+    uint x = a.x + b.x; uint c0 = x < a.x ? 1u : 0u;
+    uint y1 = a.y + b.y; uint y = y1 + c0; uint c1 = (y1 < a.y || y < y1) ? 1u : 0u;
+    uint z1 = a.z + b.z; uint z = z1 + c1; uint c2 = (z1 < a.z || z < z1) ? 1u : 0u;
+    return uvec4(x, y, z, a.w + b.w + c2);
+}
+uvec4 _ie_sub4(uvec4 a, uvec4 b) {
+    uint x = a.x - b.x; uint b0 = a.x < b.x ? 1u : 0u;
+    uint y1 = a.y - b.y; uint y = y1 - b0; uint b1 = (a.y < b.y || y1 < b0) ? 1u : 0u;
+    uint z1 = a.z - b.z; uint z = z1 - b1; uint b2 = (a.z < b.z || z1 < b1) ? 1u : 0u;
+    return uvec4(x, y, z, a.w - b.w - b2);
+}
+bool _ie_ge4(uvec4 a, uvec4 b) {
+    return a.w > b.w || (a.w == b.w && (a.z > b.z || (a.z == b.z && (a.y > b.y || (a.y == b.y && a.x >= b.x)))));
+}
+uint _ie_shr_word4(uvec4 a, uint k, uint n) {
+    uint ws = n >> 5u; uint bs = n & 31u;
+    uint hi = _ie_w4(a, k + ws + 1u) << ((32u - bs) & 31u);
+    uint v = (_ie_w4(a, k + ws) >> bs) | (bs == 0u ? 0u : hi);
+    return n >= 128u ? 0u : v;
+}
+uvec4 _ie_shr4(uvec4 a, uint n) {
+    return uvec4(_ie_shr_word4(a, 0u, n), _ie_shr_word4(a, 1u, n), _ie_shr_word4(a, 2u, n), _ie_shr_word4(a, 3u, n));
+}
+uint _ie_shl_word4(uvec4 a, uint k, uint n) {
+    uint ws = n >> 5u; uint bs = n & 31u;
+    uint hi = ws <= k ? _ie_w4(a, k - ws) : 0u;
+    uint lo = ws + 1u <= k ? _ie_w4(a, k - ws - 1u) : 0u;
+    uint v = (hi << bs) | (bs == 0u ? 0u : (lo >> ((32u - bs) & 31u)));
+    return n >= 128u ? 0u : v;
+}
+uvec4 _ie_shl4(uvec4 a, uint n) {
+    return uvec4(_ie_shl_word4(a, 0u, n), _ie_shl_word4(a, 1u, n), _ie_shl_word4(a, 2u, n), _ie_shl_word4(a, 3u, n));
+}
+uvec4 _ie_shr_jam4(uvec4 a, uint n) {
+    uvec4 q = _ie_shr4(a, n);
+    uvec4 back = _ie_shl4(q, min(n, 128u));
+    return uvec4(q.x | (back != a ? 1u : 0u), q.y, q.z, q.w);
+}
+uint _ie_msb4(uvec4 a) {
+    return a.w != 0u ? 96u + _f64_msb32(a.w) : (a.z != 0u ? 64u + _f64_msb32(a.z) : (a.y != 0u ? 32u + _f64_msb32(a.y) : _f64_msb32(a.x)));
+}
+
+uvec2 _ie_fma(uvec2 a, uvec2 b, uvec2 c) {
+    uint psign = (a.y ^ b.y) & 0x80000000u;
+    uint csign = c.y & 0x80000000u;
+    uvec3 na = _ie_norm(a);
+    uvec3 nb = _ie_norm(b);
+    uvec3 nc = _ie_norm(c);
+    uvec4 p = _ie_mul_sig(na.xy, nb.xy);
+    uint msb_p = _ie_msb4(p);
+    uvec4 wp = _ie_shl4(p, 125u - msb_p);
+    int ep = int(na.z) + int(nb.z) - 2150 - int(125u - msb_p);
+    uvec4 wc = _ie_shl4(uvec4(nc.x, nc.y, 0u, 0u), 73u);
+    int ec = int(nc.z) - 1075 - 73;
+    bool c_big = ec > ep || (ec == ep && _ie_ge4(wc, wp) && wc != wp);
+    uvec4 wb = c_big ? wc : wp;
+    uvec4 ws = c_big ? wp : wc;
+    int eb = c_big ? ec : ep;
+    int es = c_big ? ep : ec;
+    uint sb = c_big ? csign : psign;
+    uvec4 ws_a = _ie_shr_jam4(ws, uint(min(eb - es, 128)));
+    bool subtract = psign != csign;
+    uvec4 sum = _ie_add4(wb, ws_a);
+    bool carry = (sum.w >> 30u) != 0u;
+    uvec4 sum_n = carry ? _ie_shr_jam4(sum, 1u) : sum;
+    int e_sum = eb + (carry ? 1 : 0);
+    uvec4 diff = _ie_sub4(wb, ws_a);
+    bool diff_zero = diff == uvec4(0u);
+    uint lz = 125u - _ie_msb4(diff_zero ? uvec4(1u, 0u, 0u, 0u) : diff);
+    uvec4 diff_n = _ie_shl4(diff, lz);
+    int e_diff = eb - int(lz);
+    uvec4 w = subtract ? diff_n : sum_n;
+    uvec4 m4 = _ie_shr_jam4(w, 70u);
+    uvec2 r = _ie_round_pack(sb, (subtract ? e_diff : e_sum) + 1148, m4.xy);
+    r = (subtract && diff_zero) ? uvec2(0u, 0u) : r;
+    bool a_inf = _ie_is_inf(a);
+    bool b_inf = _ie_is_inf(b);
+    bool c_inf = _ie_is_inf(c);
+    bool a_zero = _ie_is_zero_mag(a);
+    bool b_zero = _ie_is_zero_mag(b);
+    r = _ie_is_zero_mag(c) ? _ie_mul(a, b) : r;
+    r = (a_zero || b_zero) ? _ie_add(uvec2(0u, psign), c) : r;
+    r = c_inf ? c : r;
+    bool p_inf = a_inf || b_inf;
+    r = p_inf ? uvec2(0u, psign | 0x7FF00000u) : r;
+    r = ((p_inf && c_inf && psign != csign) || (a_inf && b_zero) || (b_inf && a_zero)) ? uvec2(0u, 0xFFF80000u) : r;
+    r = _ie_is_nan(c) ? _ie_qnan(c) : r;
+    r = _ie_is_nan(b) ? _ie_qnan(b) : r;
+    return _ie_is_nan(a) ? _ie_qnan(a) : r;
+}
+
+// |a| mod |b|: (remainder significand, exponent, last quotient bit, unused)
+uvec4 _ie_mod_core(uvec2 a, uvec2 b) {
+    uvec3 na = _ie_norm(a);
+    uvec3 nb = _ie_norm(b);
+    uvec2 mx = na.xy;
+    uvec2 my = nb.xy;
+    int ex = int(na.z);
+    int ey = int(nb.z);
+    for (int it = 0; it < u_loopLimit; it++) {
+        if (ex <= ey) break;
+        bool ge = _ie_ge(mx, my);
+        mx = _ie_shl1(ge ? _f64u_sub(mx, my) : mx);
+        ex = ex - 1;
+    }
+    bool ge2 = _ie_ge(mx, my);
+    mx = ge2 ? _f64u_sub(mx, my) : mx;
+    return uvec4(mx, uint(ex), ge2 ? 1u : 0u);
+}
+
+uvec2 _ie_rem(uvec2 a, uvec2 b) {
+    uint sign = a.y & 0x80000000u;
+    uvec2 am = uvec2(a.x, a.y & 0x7FFFFFFFu);
+    uvec2 bm = uvec2(b.x, b.y & 0x7FFFFFFFu);
+    uvec4 mc = _ie_mod_core(am, bm);
+    uvec2 m = mc.xy;
+    int e = int(mc.z);
+    uint lz = 52u - _f64u_msb(_ie_is_zero(m) ? uvec2(1u, 0u) : m);
+    uint sh = uint(min(int(lz), max(e - 1, 0)));
+    uvec2 mn = _f64u_shl(m, sh);
+    int en = e - int(sh);
+    bool tiny = en < 1;
+    mn = tiny ? _f64u_shr(mn, uint(clamp(1 - en, 0, 64))) : mn;
+    en = tiny ? 1 : en;
+    uvec2 r = uvec2(mn.x, sign | ((uint(en - 1) << 20u) + mn.y));
+    r = _ie_is_zero(m) ? uvec2(0u, sign) : r;
+    bool a_inf = _ie_is_inf(a);
+    bool b_inf = _ie_is_inf(b);
+    r = (!_ie_ge(am, bm) || b_inf) ? a : r;
+    r = (a_inf || _ie_is_zero(bm)) ? uvec2(0u, 0xFFF80000u) : r;
+    r = _ie_is_nan(b) ? _ie_qnan(b) : r;
+    return _ie_is_nan(a) ? _ie_qnan(a) : r;
+}
+
+bool _ie_both_zero(uvec2 a, uvec2 b) { return (a.x | b.x | ((a.y | b.y) & 0x7FFFFFFFu)) == 0u; }
+uvec2 _ie_key(uvec2 a) { return (a.y & 0x80000000u) != 0u ? uvec2(~a.x, ~a.y) : uvec2(a.x, a.y | 0x80000000u); }
+bool _ie_lt(uvec2 a, uvec2 b) { return !(_ie_is_nan(a) || _ie_is_nan(b)) && !_ie_both_zero(a, b) && !_ie_ge(_ie_key(a), _ie_key(b)); }
+bool _ie_le(uvec2 a, uvec2 b) { return !(_ie_is_nan(a) || _ie_is_nan(b)) && (_ie_both_zero(a, b) || _ie_ge(_ie_key(b), _ie_key(a))); }
+bool _ie_eq(uvec2 a, uvec2 b) { return !(_ie_is_nan(a) || _ie_is_nan(b)) && (_ie_both_zero(a, b) || a == b); }
+
+uvec2 _ie_ieee_rem(uvec2 a, uvec2 b) {
+    uint sign = a.y & 0x80000000u;
+    uvec2 am = uvec2(a.x, a.y & 0x7FFFFFFFu);
+    uvec2 bm = uvec2(b.x, b.y & 0x7FFFFFFFu);
+    uvec2 r = _ie_rem(am, bm);
+    uint q_odd = !_ie_ge(am, bm) ? 0u : _ie_mod_core(am, bm).w;
+    uvec2 two_r = _ie_add(r, r);
+    bool sub = _ie_lt(bm, two_r) || (_ie_eq(two_r, bm) && q_odd == 1u);
+    uvec2 res = sub ? _ie_add(r, uvec2(bm.x, bm.y ^ 0x80000000u)) : r;
+    res = uvec2(res.x, res.y ^ sign);
+    res = ((res.x | (res.y & 0x7FFFFFFFu)) == 0u) ? uvec2(0u, sign) : res;
+    bool a_inf = _ie_is_inf(a);
+    bool b_inf = _ie_is_inf(b);
+    res = (b_inf && !a_inf) ? a : res;
+    res = (a_inf || _ie_is_zero(bm)) ? uvec2(0u, 0xFFF80000u) : res;
+    res = _ie_is_nan(b) ? _ie_qnan(b) : res;
+    return _ie_is_nan(a) ? _ie_qnan(a) : res;
+}
+
+float _ie_to_f32(uvec2 a) {
+    uint sign = a.y & 0x80000000u;
+    uint ef = (a.y >> 20u) & 0x7FFu;
+    uvec2 m = _ie_mant(a);
+    uvec2 m27 = _ie_shr_jam(m, 26u);
+    int fe = int(max(ef, 1u)) - 896;
+    bool tiny = fe < 1;
+    uint mm = tiny ? _ie_shr_jam(uvec2(m27.x, 0u), uint(clamp(1 - fe, 0, 64))).x : m27.x;
+    int fe1 = tiny ? 1 : fe;
+    uint low = mm & 7u;
+    uint m3 = mm >> 3u;
+    uint mr = m3 + ((low > 4u || (low == 4u && (m3 & 1u) == 1u)) ? 1u : 0u);
+    uint bits = (uint(fe1 - 1) << 23u) + mr;
+    bool ovf = fe1 >= 255 || bits >= 0x7F800000u;
+    uint r = ovf ? (sign | 0x7F800000u) : (sign | bits);
+    r = (ef == 0u && m.x == 0u && m.y == 0u) ? sign : r;
+    bool special = ef == 0x7FFu;
+    r = special ? (sign | 0x7F800000u) : r;
+    r = (special && ((a.y & 0xFFFFFu) | a.x) != 0u) ? (sign | 0x7FC00000u | (((a.y & 0xFFFFFu) << 3u) | (a.x >> 29u))) : r;
+    return uintBitsToFloat(r);
+}
+
+uvec2 _ie_from_f32(float v) {
+    uint b = floatBitsToUint(v);
+    uint sign = b & 0x80000000u;
+    uint fe = (b >> 23u) & 0xFFu;
+    uint m = b & 0x7FFFFFu;
+    uint s = 23u - _f64_msb32(m == 0u ? 1u : m);
+    uint mn = fe == 0u ? ((m << s) & 0x7FFFFFu) : m;
+    uint ef = fe == 0u ? (897u - s) : (fe + 896u);
+    uvec2 r = uvec2(mn << 29u, sign | (ef << 20u) | (mn >> 3u));
+    r = (fe == 0u && m == 0u) ? uvec2(0u, sign) : r;
+    return fe == 0xFFu ? uvec2(m << 29u, sign | 0x7FF00000u | (m >> 3u)) : r;
+}
+
+// ---- the emu_f64i API the code generator calls ----
+emu_f64i f64_from_ieee754_bits(uint lo, uint hi) { return emu_f64i(lo, hi); }
+// WebGL has no ?: on structures: select word by word.
+emu_f64i f64_select(bool c, emu_f64i t, emu_f64i f) { return emu_f64i(c ? t.x : f.x, c ? t.y : f.y); }
+uvec2 f64_to_ieee754_bits(emu_f64i v) { return uvec2(v.x, v.y); }
+emu_f64i f64_from_f32(float v) { return _ie_w(_ie_from_f32(v)); }
+float f64_to_f32(emu_f64i v) { return _ie_to_f32(_ie_u(v)); }
+emu_f64i f64_new(float hi, float lo) { return _ie_w(_ie_add(_ie_from_f32(hi), _ie_from_f32(lo))); }
+emu_f64i f64_neg(emu_f64i a) { return emu_f64i(a.x, a.y ^ 0x80000000u); }
+emu_f64i f64_abs(emu_f64i a) { return emu_f64i(a.x, a.y & 0x7FFFFFFFu); }
+bool f64_is_nan(emu_f64i v) { return _ie_is_nan(_ie_u(v)); }
+bool f64_is_inf(emu_f64i v) { return _ie_is_inf(_ie_u(v)); }
+emu_f64i f64_add(emu_f64i a, emu_f64i b) { return _ie_w(_ie_add(_ie_u(a), _ie_u(b))); }
+emu_f64i f64_sub(emu_f64i a, emu_f64i b) { return _ie_w(_ie_add(_ie_u(a), uvec2(b.x, b.y ^ 0x80000000u))); }
+emu_f64i f64_mul(emu_f64i a, emu_f64i b) { return _ie_w(_ie_mul(_ie_u(a), _ie_u(b))); }
+emu_f64i f64_div(emu_f64i a, emu_f64i b) { return _ie_w(_ie_div(_ie_u(a), _ie_u(b))); }
+emu_f64i f64_sqrt(emu_f64i a) { return _ie_w(_ie_sqrt(_ie_u(a))); }
+emu_f64i f64_fma(emu_f64i a, emu_f64i b, emu_f64i c) { return _ie_w(_ie_fma(_ie_u(a), _ie_u(b), _ie_u(c))); }
+emu_f64i f64_rem(emu_f64i a, emu_f64i b) { return _ie_w(_ie_rem(_ie_u(a), _ie_u(b))); }
+emu_f64i f64_ieee_rem(emu_f64i a, emu_f64i b) { return _ie_w(_ie_ieee_rem(_ie_u(a), _ie_u(b))); }
+emu_f64i f64_copysign(emu_f64i a, emu_f64i b) { return emu_f64i(a.x, (a.y & 0x7FFFFFFFu) | (b.y & 0x80000000u)); }
+bool f64_lt(emu_f64i a, emu_f64i b) { return _ie_lt(_ie_u(a), _ie_u(b)); }
+bool f64_le(emu_f64i a, emu_f64i b) { return _ie_le(_ie_u(a), _ie_u(b)); }
+bool f64_gt(emu_f64i a, emu_f64i b) { return _ie_lt(_ie_u(b), _ie_u(a)); }
+bool f64_ge(emu_f64i a, emu_f64i b) { return _ie_le(_ie_u(b), _ie_u(a)); }
+bool f64_eq(emu_f64i a, emu_f64i b) { return _ie_eq(_ie_u(a), _ie_u(b)); }
+bool f64_ne(emu_f64i a, emu_f64i b) { return !_ie_eq(_ie_u(a), _ie_u(b)); }
+emu_f64i f64_min(emu_f64i a, emu_f64i b) {
+    uvec2 ua = _ie_u(a); uvec2 ub = _ie_u(b);
+    uvec2 r = (_ie_lt(ua, ub) || (_ie_both_zero(ua, ub) && (ua.y & 0x80000000u) != 0u)) ? ua : ub;
+    r = _ie_is_nan(ub) ? ub : r;
+    return _ie_w(_ie_is_nan(ua) ? ua : r);
+}
+emu_f64i f64_max(emu_f64i a, emu_f64i b) {
+    uvec2 ua = _ie_u(a); uvec2 ub = _ie_u(b);
+    uvec2 r = (_ie_lt(ub, ua) || (_ie_both_zero(ua, ub) && (ua.y & 0x80000000u) == 0u)) ? ua : ub;
+    r = _ie_is_nan(ub) ? ub : r;
+    return _ie_w(_ie_is_nan(ua) ? ua : r);
+}
+emu_f64i f64_floor(emu_f64i v) { return _ie_w(_f64_bits_round_int(_ie_u(v), false)); }
+emu_f64i f64_ceil(emu_f64i v) { return _ie_w(_f64_bits_round_int(_ie_u(v), true)); }
+emu_f64i f64_trunc(emu_f64i v) { return _ie_w(_f64_bits_round_int(_ie_u(v), (v.y & 0x80000000u) != 0u)); }
+emu_f64i f64_round_even(emu_f64i v) { return _ie_w(_f64_bits_round_nearest(_ie_u(v), false)); }
+emu_f64i f64_round_away(emu_f64i v) { return _ie_w(_f64_bits_round_nearest(_ie_u(v), true)); }
+
+// ---- exact integer <-> f64 conversions (saturating like .NET 9+) ----
+emu_f64i f64_from_u64(uvec2 v) { return _ie_w(_f64_u64_to_bits(v)); }
+emu_f64i f64_from_i64(uvec2 v) {
+    bool neg = (v.y & 0x80000000u) != 0u;
+    uvec2 b = _f64_u64_to_bits(neg ? _f64u_sub(uvec2(0u, 0u), v) : v);
+    return emu_f64i(b.x, b.y | (neg ? 0x80000000u : 0u));
+}
+emu_f64i f64_from_u32(uint v) { return f64_from_u64(uvec2(v, 0u)); }
+emu_f64i f64_from_i32(int v) { return f64_from_i64(uvec2(uint(v), v < 0 ? 0xFFFFFFFFu : 0u)); }
+uvec2 f64_to_i64(emu_f64i v) {
+    uvec2 b = _ie_u(v);
+    uvec3 t = _f64_bits_trunc_mag(b);
+    bool neg_ovf = t.z != 0u || t.y > 0x80000000u || (t.y == 0x80000000u && t.x != 0u);
+    uvec2 neg = neg_ovf ? uvec2(0u, 0x80000000u) : _f64u_sub(uvec2(0u, 0u), t.xy);
+    uvec2 pos = (t.z != 0u || t.y >= 0x80000000u) ? uvec2(0xFFFFFFFFu, 0x7FFFFFFFu) : t.xy;
+    uvec2 r = (b.y & 0x80000000u) != 0u ? neg : pos;
+    return _f64_bits_is_nan(b) ? uvec2(0u, 0u) : r;
+}
+uvec2 f64_to_u64(emu_f64i v) {
+    uvec2 b = _ie_u(v);
+    return (_f64_bits_is_nan(b) || (b.y & 0x80000000u) != 0u) ? uvec2(0u, 0u) : _f64_bits_trunc_mag(b).xy;
+}
+int f64_to_i32(emu_f64i v) {
+    uvec2 r = f64_to_i64(v);
+    int hi = int(r.y);
+    int r32 = (hi > 0 || (hi == 0 && r.x > 0x7FFFFFFFu)) ? 2147483647 : int(r.x);
+    return (hi < -1 || (hi == -1 && r.x < 0x80000000u)) ? int(0x80000000u) : r32;
+}
+uint f64_to_u32(emu_f64i v) {
+    uvec2 r = f64_to_u64(v);
+    return r.y != 0u ? 0xFFFFFFFFu : r.x;
+}
+
+// Pow / Atan2 through f32, as in the other families.
+emu_f64i f64_pow(emu_f64i a, emu_f64i b) {
+    float x = f64_to_f32(a);
+    float y = f64_to_f32(b);
+    return f64_from_f32(pow(abs(x), y) * ((x < 0.0 && mod(abs(y), 2.0) >= 1.0) ? -1.0 : 1.0));
+}
+emu_f64i f64_atan2(emu_f64i a, emu_f64i b) { return f64_from_f32(atan(f64_to_f32(a), f64_to_f32(b))); }
+";
+
+        #endregion
+
         #region emu_f64 Emulation (Ozaki Scheme using vec4)
 
         /// <summary>
@@ -1060,177 +1554,7 @@ vec4 f32_quick_renorm(vec4 c_in, float e) {
     return vec4(c0, c1, c2, c3);
 }
 
-// ---- exact f64 <-> bits core (same text in the Dekker and Ozaki families) ----
-uvec2 _f64u_add(uvec2 a, uvec2 b) {
-    uint lo = a.x + b.x;
-    return uvec2(lo, a.y + b.y + (lo < a.x ? 1u : 0u));
-}
-
-uvec2 _f64u_sub(uvec2 a, uvec2 b) {
-    return uvec2(a.x - b.x, a.y - b.y - (a.x < b.x ? 1u : 0u));
-}
-
-uvec2 _f64u_shl(uvec2 a, uint n) {
-    uint s = n & 31u;
-    uint carry = a.x >> ((32u - s) & 31u);
-    uvec2 small = uvec2(a.x << s, (a.y << s) | (s == 0u ? 0u : carry));
-    uvec2 big = uvec2(0u, a.x << s);
-    uvec2 r = n >= 32u ? big : small;
-    return n >= 64u ? uvec2(0u, 0u) : r;
-}
-
-uvec2 _f64u_shr(uvec2 a, uint n) {
-    uint s = n & 31u;
-    uint carry = a.y << ((32u - s) & 31u);
-    uvec2 small = uvec2((a.x >> s) | (s == 0u ? 0u : carry), a.y >> s);
-    uvec2 big = uvec2(a.y >> s, 0u);
-    uvec2 r = n >= 32u ? big : small;
-    return n >= 64u ? uvec2(0u, 0u) : r;
-}
-
-// Highest set bit of a NON-ZERO uint. GLSL ES 3.00 has no findMSB: a value below 2^24 converts
-// to float exactly, so its exponent IS the bit index (larger values are shifted down first).
-uint _f64_msb32(uint x) {
-    uint high = 8u + ((floatBitsToUint(float(x >> 8u)) >> 23u) - 127u);
-    uint low = (floatBitsToUint(float(x)) >> 23u) - 127u;
-    return x >= 0x1000000u ? high : low;
-}
-
-uint _f64u_msb(uvec2 a) {
-    uint high = 32u + _f64_msb32(a.y);
-    uint low = _f64_msb32(a.x);
-    return a.y != 0u ? high : low;
-}
-
-// a >> n (n >= 1) rounded to nearest-even; sticky = true value strictly above a.
-uvec2 _f64u_shr_rne(uvec2 a, uint n, bool sticky) {
-    uvec2 q = _f64u_shr(a, n);
-    uvec2 h = _f64u_shr(a, n - 1u);
-    uvec2 below = _f64u_shl(h, n - 1u);
-    bool rest = sticky || below.x != a.x || below.y != a.y;
-    bool up = (h.x & 1u) == 1u && (rest || (q.x & 1u) == 1u);
-    uvec2 q1 = _f64u_add(q, uvec2(1u, 0u));
-    return up ? q1 : q;
-}
-
-// One lower f32 component into the magnitude accumulator (x, y) = |hi| with the hi LSB at bit
-// 39; z = sticky. Same-sign components add, opposite-sign subtract; bits below the LSB are
-// floored + sticky.
-uvec3 _f64_acc_component(uvec3 st, float c, uint hi_sign, uint ehn) {
-    uint b = floatBitsToUint(c);
-    uint e = (b >> 23u) & 0xFFu;
-    uint en = max(e, 1u);
-    uint m = (e != 0u) ? ((b & 0x7FFFFFu) | 0x800000u) : (b & 0x7FFFFFu);
-    int pos = 39 - (int(ehn) - int(en));
-    bool left = pos >= 0;
-    bool mid = !left && -pos < 24;
-    uint rs = uint(clamp(-pos, 0, 31));
-    uvec2 shifted = _f64u_shl(uvec2(m, 0u), uint(max(pos, 0)));
-    uvec2 right = mid ? uvec2(m >> rs, 0u) : uvec2(0u, 0u);
-    uvec2 part = left ? shifted : right;
-    bool lost = (m & ((1u << rs) - 1u)) != 0u;
-    bool dropped = !left && (!mid || lost);
-    uvec2 acc = st.xy;
-    uvec2 added = _f64u_add(acc, part);
-    uvec2 subbed = _f64u_sub(_f64u_sub(acc, part), uvec2(dropped ? 1u : 0u, 0u));
-    uvec2 next = ((b & 0x80000000u) == hi_sign) ? added : subbed;
-    bool skip = (b & 0x7FFFFFFFu) == 0u || (st.z != 0u && dropped && part.x == 0u && part.y == 0u);
-    uvec3 r = uvec3(next, dropped ? 1u : st.z);
-    return skip ? st : r;
-}
-
-// Exact sum of up to four f32 components (hi first) as IEEE-754 double bits (lo, hi), RNE.
-// BRANCH-FREE: inlined into every emulated-double store, and ANGLE's D3D backend compiles with
-// FXC, whose compile time grows superlinearly with branches (see the WGSL twin).
-uvec2 _f64_components_to_bits(vec4 c) {
-    uint hb = floatBitsToUint(c.x);
-    uint sign = hb & 0x80000000u;
-    uint eh = (hb >> 23u) & 0xFFu;
-    uint ehn = max(eh, 1u);
-    uint mh = (eh != 0u) ? ((hb & 0x7FFFFFu) | 0x800000u) : (hb & 0x7FFFFFu);
-    uvec3 st = uvec3(0u, mh << 7u, 0u);
-    st = _f64_acc_component(st, c.y, sign, ehn);
-    st = _f64_acc_component(st, c.z, sign, ehn);
-    st = _f64_acc_component(st, c.w, sign, ehn);
-    uvec2 acc = st.xy;
-    uint p = _f64u_msb(acc);
-    bool big = p > 52u;
-    uvec2 mr = _f64u_shr_rne(acc, p - 52u, st.z != 0u);
-    bool carry = (mr.y >> 21u) != 0u;
-    uvec2 mr1 = _f64u_shr(mr, 1u);
-    uvec2 mbig = carry ? mr1 : mr;
-    uvec2 msmall = _f64u_shl(acc, 52u - p);
-    uvec2 m = big ? mbig : msmall;
-    uint pf = p + ((big && carry) ? 1u : 0u);
-    uint biased = pf + ehn + 834u;
-    uvec2 normal = uvec2(m.x, sign | (biased << 20u) | (m.y & 0xFFFFFu));
-    bool zero = (acc.x | acc.y) == 0u || (hb & 0x7FFFFFFFu) == 0u;
-    uvec2 finite = zero ? uvec2(0u, sign) : normal;
-    uvec2 special = uvec2(0u, sign | (((hb & 0x7FFFFFu) != 0u) ? 0x7FF80000u : 0x7FF00000u));
-    return eh == 0xFFu ? special : finite;
-}
-
-// x * 2^k for -178 <= k <= 127 (GLSL ES 3.00 has no ldexp).
-float _f64_scale(float x, int k) {
-    float lowk = x * uintBitsToFloat(uint(clamp(k + 253, 1, 254)) << 23u) * uintBitsToFloat(1u << 23u);
-    float normk = x * uintBitsToFloat(uint(clamp(k + 127, 1, 254)) << 23u);
-    return k < -126 ? lowk : normk;
-}
-
-// Exact split of IEEE double bits into non-overlapping f32 components (24 + 24 + 5 bits).
-vec4 _f64_bits_to_components(uint lo, uint hi) {
-    uint sign = hi & 0x80000000u;
-    uint exponent = (hi >> 20u) & 0x7FFu;
-    uint m_hi20 = hi & 0xFFFFFu;
-    int e = int(exponent) - 1023;
-    int f32_exp = e + 127;
-    uint fe = uint(clamp(f32_exp, 1, 254));
-    uint c0 = 0x800000u | (m_hi20 << 3u) | (lo >> 29u);
-    uint c1 = (lo >> 5u) & 0xFFFFFFu;
-    uint c2 = lo & 0x1Fu;
-    float s = (sign != 0u) ? -1.0 : 1.0;
-    float f0 = uintBitsToFloat(sign | (fe << 23u) | (c0 & 0x7FFFFFu));
-    float f1 = s * _f64_scale(float(c1), e - 47);
-    float f2 = s * _f64_scale(float(c2), e - 52);
-    vec4 normal = vec4(f0, f1, f2, 0.0);
-    vec4 approx = vec4(uintBitsToFloat(sign | (fe << 23u) | (m_hi20 << 3u)), 0.0, 0.0, 0.0);
-    vec4 special = vec4(uintBitsToFloat(sign | (((m_hi20 | lo) != 0u) ? 0x7FC00000u : 0x7F800000u)), 0.0, 0.0, 0.0);
-    vec4 zero = vec4(uintBitsToFloat(sign), 0.0, 0.0, 0.0);
-    vec4 r = (f32_exp <= 0 || f32_exp >= 255) ? approx : normal;
-    r = exponent == 0x7FFu ? special : r;
-    return (exponent == 0u && m_hi20 == 0u && lo == 0u) ? zero : r;
-}
-
-// Unsigned 64-bit integer -> double bits, rounded to nearest-even at 53 bits.
-uvec2 _f64_u64_to_bits(uvec2 v) {
-    uint p = _f64u_msb(v);
-    bool big = p > 52u;
-    uvec2 mr = _f64u_shr_rne(v, p - 52u, false);
-    bool carry = (mr.y >> 21u) != 0u;
-    uvec2 mr1 = _f64u_shr(mr, 1u);
-    uvec2 mbig = carry ? mr1 : mr;
-    uvec2 msmall = _f64u_shl(v, 52u - p);
-    uvec2 m = big ? mbig : msmall;
-    uint pf = p + ((big && carry) ? 1u : 0u);
-    uvec2 r = uvec2(m.x, ((pf + 1023u) << 20u) | (m.y & 0xFFFFFu));
-    return (v.x == 0u && v.y == 0u) ? uvec2(0u, 0u) : r;
-}
-
-bool _f64_bits_is_nan(uvec2 b) {
-    return ((b.y >> 20u) & 0x7FFu) == 0x7FFu && ((b.y & 0xFFFFFu) | b.x) != 0u;
-}
-
-// |value| truncated toward zero; z = 1 when |value| >= 2^64.
-uvec3 _f64_bits_trunc_mag(uvec2 b) {
-    uint exponent = (b.y >> 20u) & 0x7FFu;
-    uint e = exponent - 1023u;
-    uvec2 m = uvec2(b.x, (b.y & 0xFFFFFu) | 0x100000u);
-    uvec2 up = _f64u_shl(m, e - 52u);
-    uvec2 down = _f64u_shr(m, 52u - e);
-    uvec3 r = uvec3(e >= 52u ? up : down, 0u);
-    uvec3 sat = e >= 64u ? uvec3(0xFFFFFFFFu, 0xFFFFFFFFu, 1u) : r;
-    return exponent < 1023u ? uvec3(0u, 0u, 0u) : sat;
-}
+" + F64IntegerCoreFunctions + @"
 
 vec4 f64_from_ieee754_bits(uint lo, uint hi) {
     vec4 c = _f64_bits_to_components(lo, hi);
@@ -1358,28 +1682,30 @@ vec4 f64_div(vec4 a, vec4 b) {
     return non_finite ? vec4(_nf, 0.0, 0.0, 0.0) : q;
 }
 
+// By the SIGN of the quad-float difference (see the WGSL twin): the old compares looked at the first two of the
+// (24 + 24 + 5)-bit components. NaN: the difference is NaN and the components differ, so every ordered compare is false.
+bool f64_eq(vec4 a, vec4 b) {
+    return a == b || f64_sub(a, b).x == 0.0;
+}
+
 bool f64_lt(vec4 a, vec4 b) {
-    return (a.x < b.x) || (a.x == b.x && a.y < b.y);
+    return a != b && f64_sub(a, b).x < 0.0;
 }
 
 bool f64_le(vec4 a, vec4 b) {
-    return (a.x < b.x) || (a.x == b.x && a.y <= b.y);
+    return f64_lt(a, b) || f64_eq(a, b);
 }
 
 bool f64_gt(vec4 a, vec4 b) {
-    return (a.x > b.x) || (a.x == b.x && a.y > b.y);
+    return f64_lt(b, a);
 }
 
 bool f64_ge(vec4 a, vec4 b) {
-    return (a.x > b.x) || (a.x == b.x && a.y >= b.y);
-}
-
-bool f64_eq(vec4 a, vec4 b) {
-    return a.x == b.x && a.y == b.y;
+    return f64_le(b, a);
 }
 
 bool f64_ne(vec4 a, vec4 b) {
-    return a.x != b.x || a.y != b.y;
+    return !f64_eq(a, b);
 }
 
 vec4 f64_abs(vec4 a) {
@@ -1446,22 +1772,6 @@ uint f64_to_u32(vec4 v) {
 }
 
 
-// ---- exact Floor / Ceiling / Round on the IEEE bit pattern ----
-uvec2 _f64_bits_round_int(uvec2 b, bool ceil_mode) {
-    uint exponent = (b.y >> 20u) & 0x7FFu;
-    bool neg = (b.y & 0x80000000u) != 0u;
-    uvec2 small_neg = ceil_mode ? uvec2(0u, 0x80000000u) : uvec2(0u, 0xBFF00000u);
-    uvec2 small_pos = ceil_mode ? uvec2(0u, 0x3FF00000u) : uvec2(0u, 0u);
-    uvec2 small = neg ? small_neg : small_pos;
-    uvec2 small_r = ((b.x | (b.y & 0x7FFFFFFFu)) == 0u) ? b : small;
-    uint fracbits = 1075u - exponent;
-    uvec2 kept = _f64u_shl(_f64u_shr(b, fracbits), fracbits);
-    uvec2 plus = _f64u_add(kept, _f64u_shl(uvec2(1u, 0u), fracbits));
-    uvec2 bumped = (neg != ceil_mode) ? plus : kept;
-    uvec2 mid = (kept.x == b.x && kept.y == b.y) ? b : bumped;
-    uvec2 r = exponent < 1023u ? small_r : mid;
-    return (exponent == 0x7FFu || exponent >= 1075u) ? b : r;
-}
 
 vec4 f64_floor(vec4 v) {
     uvec2 r = _f64_bits_round_int(f64_to_ieee754_bits(v), false);
@@ -1473,26 +1783,6 @@ vec4 f64_ceil(vec4 v) {
     return f64_from_ieee754_bits(r.x, r.y);
 }
 
-// Nearest integer on the IEEE bit pattern; a tie goes to EVEN or AWAY from zero (rounding the
-// components separately is wrong: 2.5000000001 = 2.5 + 1e-10 -> 2).
-uvec2 _f64_bits_round_nearest(uvec2 b, bool away) {
-    uint exponent = (b.y >> 20u) & 0x7FFu;
-    uvec2 sign_only = uvec2(0u, b.y & 0x80000000u);
-    uvec2 half_range = (!away && b.x == 0u && (b.y & 0xFFFFFu) == 0u) ? sign_only : uvec2(0u, sign_only.y | 0x3FF00000u);
-    uint fracbits = 1075u - exponent;
-    uvec2 one = _f64u_shl(uvec2(1u, 0u), fracbits);
-    uvec2 kept = _f64u_shl(_f64u_shr(b, fracbits), fracbits);
-    uvec2 frac = _f64u_sub(b, kept);
-    uvec2 half_v = _f64u_shl(uvec2(1u, 0u), fracbits - 1u);
-    bool above = frac.y > half_v.y || (frac.y == half_v.y && frac.x > half_v.x);
-    bool tie = frac.x == half_v.x && frac.y == half_v.y;
-    bool odd = ((kept.x & one.x) | (kept.y & one.y)) != 0u;
-    uvec2 plus = _f64u_add(kept, one);
-    uvec2 mid = (above || (tie && (away || odd))) ? plus : kept;
-    uvec2 r = exponent == 1022u ? half_range : mid;
-    r = exponent < 1022u ? sign_only : r;
-    return (exponent == 0x7FFu || exponent >= 1075u) ? b : r;
-}
 
 vec4 f64_round_even(vec4 v) {
     uvec2 r = _f64_bits_round_nearest(f64_to_ieee754_bits(v), false);
@@ -1563,6 +1853,11 @@ vec4 f64_pow(vec4 a, vec4 b) {
 
 vec4 f64_atan2(vec4 a, vec4 b) {
     return f64_from_f32(atan(f64_to_f32(a), f64_to_f32(b)));
+}
+
+// Math.FusedMultiplyAdd: multiply, then add, in the emulated precision (two roundings; exact only in the Ieee family).
+vec4 f64_fma(vec4 a, vec4 b, vec4 c) {
+    return f64_add(f64_mul(a, b), c);
 }
 
 ";
@@ -1861,19 +2156,25 @@ uint _f32_to_e2m1(float f) {
         /// <param name="includeFP4">When true, emits the FP4 (E2M1) conversion helpers.</param>
         /// <returns>The concatenated GLSL helper source.</returns>
         public static string GetEmulationLibrary(bool includeF64, bool useOzakiF64, bool includeI64, bool includeF16, bool includeBF16 = false, bool includeFP8 = false, bool includeFP4 = false)
+            => GetEmulationLibrary(includeF64, useOzakiF64 ? F64EmulationMode.Ozaki : F64EmulationMode.Dekker,
+                includeI64, includeF16, includeBF16, includeFP8, includeFP4);
+
+        /// <summary>
+        /// The emulation library with the f64 family chosen by <paramref name="f64Mode"/> (Dekker, Ozaki or Ieee).
+        /// The Ieee family's struct type is declared in the shader header (see <see cref="IeeeF64StructDeclaration"/>).
+        /// </summary>
+        public static string GetEmulationLibrary(bool includeF64, F64EmulationMode f64Mode, bool includeI64, bool includeF16, bool includeBF16 = false, bool includeFP8 = false, bool includeFP4 = false)
         {
             var sb = new System.Text.StringBuilder();
 
             if (includeF64)
             {
-                if (useOzakiF64)
+                sb.AppendLine(f64Mode switch
                 {
-                    sb.AppendLine(OzakiF64Functions);
-                }
-                else
-                {
-                    sb.AppendLine(F64Functions);
-                }
+                    F64EmulationMode.Ieee => IeeeF64Functions,
+                    F64EmulationMode.Ozaki => OzakiF64Functions,
+                    _ => F64Functions,
+                });
             }
 
             if (includeI64)

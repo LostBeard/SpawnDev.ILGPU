@@ -15,6 +15,7 @@ using ILGPU.Resources;
 using System;
 using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Threading.Tasks;
 
 namespace ILGPU.Runtime
 {
@@ -406,6 +407,22 @@ namespace ILGPU.Runtime
                 KernelSpecialization.Empty,
                 new AutoKernelLoader(),
                 out kernelInfo);
+
+        /// <summary>
+        /// Called by the async kernel loaders (<c>LoadAutoGroupedStreamKernelAsync</c>, <c>LoadStreamKernelAsync</c>)
+        /// BEFORE the synchronous IL compile. The browser accelerators return to the browser's event loop here, so a page
+        /// that loads many kernels keeps painting and answering input between them (Lore 2026-11-08: SpawnGen's page
+        /// froze 30-104 s while SpawnDev.Codecs loaded ~112 kernels back to back on WebGPU). Default: completed.
+        /// </summary>
+        protected internal virtual Task BeforeKernelCompileAsync() => Task.CompletedTask;
+
+        /// <summary>
+        /// Called by <c>LoadAutoGroupedStreamKernelAsync</c> after the kernel was compiled (and cached) for
+        /// <paramref name="method"/>, which has no captured state and no specialized parameters. WebGPU builds the
+        /// pipeline here with createComputePipelineAsync (off the main thread) instead of at the first launch, which
+        /// otherwise creates it synchronously. Default: completed.
+        /// </summary>
+        protected internal virtual Task AfterAutoGroupedKernelLoadAsync(MethodInfo method) => Task.CompletedTask;
 
         private Kernel? LoadBoxedLaunchKernel<TKernelLoader>(
             in EntryPointDescription entry,

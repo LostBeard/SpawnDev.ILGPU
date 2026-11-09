@@ -303,25 +303,6 @@ fn _f64_bits_round_nearest(b: vec2<u32>, away: bool) -> vec2<u32> {
     return select(r, b, exponent == 0x7FFu || exponent >= 1075u); // NaN, Inf, already integral
 }
 
-// Math.IEEERemainder: x - y * RoundToEven(x / y), in the emulated precision.
-fn f64_ieee_rem(a: emu_f64, b: emu_f64) -> emu_f64 {
-    return f64_sub(a, f64_mul(b, f64_round_even(f64_div(a, b))));
-}
-
-
-
-// Math.CopySign: |a| with the SIGN BIT of b (the leading component carries it), so a
-// negative zero or NaN sign in b is honoured - a `b >= 0` test gets -0.0 wrong.
-fn f64_copysign(a: emu_f64, b: emu_f64) -> emu_f64 {
-    let m = f64_abs(a);
-    return select(m, f64_neg(m), (bitcast<u32>(b.x) >> 31u) != 0u);
-}
-
-// C# double % : x - y * trunc(x / y), in the emulated precision.
-fn f64_rem(a: emu_f64, b: emu_f64) -> emu_f64 {
-    return f64_sub(a, f64_mul(b, f64_trunc(f64_div(a, b))));
-}
-
 // Pow / Atan2 through f32 (f32 accuracy; no double-precision transcendentals). Same negative-base
 // rule as the f32 pow path: |x|^y, negated for an odd integral exponent.
 fn f64_pow(a: emu_f64, b: emu_f64) -> emu_f64 {
@@ -334,6 +315,34 @@ fn f64_atan2(a: emu_f64, b: emu_f64) -> emu_f64 {
     return f64_from_f32(atan2(f64_to_f32(a), f64_to_f32(b)));
 }
 
+";
+
+        /// <summary>
+        /// Remainder, CopySign and FusedMultiplyAdd for the f32-component representations (Dekker, Ozaki): computed in the
+        /// emulated precision, not exactly. The Ieee mode has exact versions (<see cref="IeeeF64Functions"/>).
+        /// </summary>
+        public const string F64ComponentCompositeFunctions = @"
+// Math.FusedMultiplyAdd: multiply, then add, in the emulated precision (two roundings).
+fn f64_fma(a: emu_f64, b: emu_f64, c: emu_f64) -> emu_f64 {
+    return f64_add(f64_mul(a, b), c);
+}
+
+// Math.IEEERemainder: x - y * RoundToEven(x / y), in the emulated precision.
+fn f64_ieee_rem(a: emu_f64, b: emu_f64) -> emu_f64 {
+    return f64_sub(a, f64_mul(b, f64_round_even(f64_div(a, b))));
+}
+
+// Math.CopySign: |a| with the SIGN BIT of b (the leading component carries it), so a
+// negative zero or NaN sign in b is honoured - a `b >= 0` test gets -0.0 wrong.
+fn f64_copysign(a: emu_f64, b: emu_f64) -> emu_f64 {
+    let m = f64_abs(a);
+    return select(m, f64_neg(m), (bitcast<u32>(b.x) >> 31u) != 0u);
+}
+
+// C# double % : x - y * trunc(x / y), in the emulated precision.
+fn f64_rem(a: emu_f64, b: emu_f64) -> emu_f64 {
+    return f64_sub(a, f64_mul(b, f64_trunc(f64_div(a, b))));
+}
 ";
 
         #region emu_f64 Emulation (Double-Float using vec2<f32>)
@@ -689,7 +698,7 @@ fn f64_min(a: emu_f64, b: emu_f64) -> emu_f64 {
 fn f64_max(a: emu_f64, b: emu_f64) -> emu_f64 {
     return select(b, a, f64_gt(a, b));
 }
-" + F64ExactConversionFunctions + DekkerRoundingFunctions;
+" + F64ExactConversionFunctions + F64ComponentCompositeFunctions + DekkerRoundingFunctions;
 
         #endregion
 
@@ -1070,6 +1079,451 @@ fn f32_to_u64(f: f32) -> emu_u64 {
 
         #endregion
 
+        #region emu_f64 Emulation (Ieee: software binary64 on vec2<u32>)
+
+        /// <summary>WGSL type alias for the Ieee emu_f64: the IEEE-754 bit pattern, (low word, high word).</summary>
+        public const string IeeeF64TypeAlias = "alias emu_f64 = vec2<u32>;";
+
+        /// <summary>
+        /// <see cref="F64EmulationMode.Ieee"/>: IEEE-754 binary64 in integer arithmetic. Every operation rounds to nearest
+        /// even at 53 bits with subnormals, like .NET's double: + - * / Sqrt, % and IEEERemainder (exact), FusedMultiplyAdd
+        /// (one rounding), conversions and comparisons are bit-identical to .NET. Transliterated from a C# reference checked
+        /// against .NET on millions of operands per operation including ties, subnormals and specials (with mutation checks).
+        /// Branch-free (select) apart from the fixed 56-step division / square-root loops and the remainder loop over the
+        /// exponent difference.
+        /// </summary>
+        public const string IeeeF64Functions = @"
+// ============================================================================
+// emu_f64 Emulation Functions (Ieee: binary64 bit pattern in vec2<u32>)
+// ============================================================================
+fn f64_from_ieee754_bits(lo: u32, hi: u32) -> emu_f64 { return vec2<u32>(lo, hi); }
+fn f64_to_ieee754_bits(v: emu_f64) -> vec2<u32> { return v; }
+
+fn _ie_ge(a: vec2<u32>, b: vec2<u32>) -> bool { return a.y > b.y || (a.y == b.y && a.x >= b.x); }
+fn _ie_is_zero(a: vec2<u32>) -> bool { return (a.x | a.y) == 0u; }
+fn _ie_shl1(a: vec2<u32>) -> vec2<u32> { return vec2<u32>(a.x << 1u, (a.y << 1u) | (a.x >> 31u)); }
+fn _ie_is_nan(a: vec2<u32>) -> bool {
+    let h = a.y & 0x7FFFFFFFu;
+    return h > 0x7FF00000u || (h == 0x7FF00000u && a.x != 0u);
+}
+fn _ie_is_inf(a: vec2<u32>) -> bool { return (a.y & 0x7FFFFFFFu) == 0x7FF00000u && a.x == 0u; }
+fn _ie_is_zero_mag(a: vec2<u32>) -> bool { return a.x == 0u && (a.y & 0x7FFFFFFFu) == 0u; }
+fn _ie_qnan(a: vec2<u32>) -> vec2<u32> { return vec2<u32>(a.x, a.y | 0x00080000u); }
+
+// a >> n, every shifted-out 1 bit OR'ed into bit 0 (n >= 64 leaves only that sticky bit).
+fn _ie_shr_jam(a: vec2<u32>, n: u32) -> vec2<u32> {
+    let q = _f64u_shr(a, n);
+    let back = _f64u_shl(q, n);
+    return vec2<u32>(q.x | select(0u, 1u, back.x != a.x || back.y != a.y), q.y);
+}
+
+// 32 x 32 -> 64 from 16-bit halves (WGSL has no high multiply).
+fn _ie_mul_wide(a: u32, b: u32) -> vec2<u32> {
+    let al = a & 0xFFFFu; let ah = a >> 16u; let bl = b & 0xFFFFu; let bh = b >> 16u;
+    let p0 = al * bl; let p1 = al * bh; let p2 = ah * bl; let p3 = ah * bh;
+    let mid = p1 + p2;
+    let mid_c = select(0u, 1u, mid < p1);
+    let lo = p0 + (mid << 16u);
+    let lo_c = select(0u, 1u, lo < p0);
+    return vec2<u32>(lo, p3 + (mid >> 16u) + (mid_c << 16u) + lo_c);
+}
+
+// Rounds m (value m * 2^(e - 1078): 53 significand bits + 3 guard bits, sticky in bit 0) to nearest even and packs it.
+// m's bit 55 is set, or e <= 1 (subnormal range). Overflow gives Inf.
+fn _ie_round_pack(sign: u32, e_in: i32, m_in: vec2<u32>) -> vec2<u32> {
+    let tiny = e_in < 1;
+    let m = select(m_in, _ie_shr_jam(m_in, u32(clamp(1 - e_in, 0, 64))), tiny);
+    let e = select(e_in, 1, tiny);
+    let low = m.x & 7u;
+    let m3 = _f64u_shr(m, 3u);
+    let up = low > 4u || (low == 4u && (m3.x & 1u) == 1u);
+    let mr = select(m3, _f64u_add(m3, vec2<u32>(1u, 0u)), up);
+    // (e - 1) << 52 PLUS the significand: the implicit bit (and a rounding carry to 2^53) adds into the exponent field.
+    let hi = (u32(e - 1) << 20u) + mr.y;
+    let ovf = e >= 2047 || hi >= 0x7FF00000u;
+    return select(vec2<u32>(mr.x, sign | hi), vec2<u32>(0u, sign | 0x7FF00000u), ovf);
+}
+
+// significand with the implicit bit, and exponent max(field, 1)
+fn _ie_mant(a: vec2<u32>) -> vec2<u32> {
+    return vec2<u32>(a.x, (a.y & 0xFFFFFu) | select(0u, 0x100000u, (a.y & 0x7FF00000u) != 0u));
+}
+fn _ie_exp(a: vec2<u32>) -> i32 { return i32(max((a.y >> 20u) & 0x7FFu, 1u)); }
+// significand normalized to bit 52 (subnormals) and its exponent: (m.x, m.y, bitcast<u32>(e))
+fn _ie_norm(a: vec2<u32>) -> vec3<u32> {
+    let m = _ie_mant(a);
+    let s = 52u - _f64u_msb(select(m, vec2<u32>(1u, 0u), _ie_is_zero(m)));
+    return vec3<u32>(_f64u_shl(m, s), bitcast<u32>(_ie_exp(a) - i32(s)));
+}
+
+fn f64_neg(a: emu_f64) -> emu_f64 { return vec2<u32>(a.x, a.y ^ 0x80000000u); }
+fn f64_abs(a: emu_f64) -> emu_f64 { return vec2<u32>(a.x, a.y & 0x7FFFFFFFu); }
+fn f64_is_nan(v: emu_f64) -> bool { return _ie_is_nan(v); }
+fn f64_is_inf(v: emu_f64) -> bool { return _ie_is_inf(v); }
+fn f64_copysign(a: emu_f64, b: emu_f64) -> emu_f64 { return vec2<u32>(a.x, (a.y & 0x7FFFFFFFu) | (b.y & 0x80000000u)); }
+
+fn f64_add(a: emu_f64, b: emu_f64) -> emu_f64 {
+    let am = vec2<u32>(a.x, a.y & 0x7FFFFFFFu);
+    let bm = vec2<u32>(b.x, b.y & 0x7FFFFFFFu);
+    let swap = !_ie_ge(am, bm);
+    let big = select(a, b, swap);
+    let small = select(b, a, swap);
+    let eb = _ie_exp(big);
+    let es = _ie_exp(small);
+    let mb = _f64u_shl(_ie_mant(big), 3u);
+    let ms = _ie_shr_jam(_f64u_shl(_ie_mant(small), 3u), u32(min(eb - es, 64)));
+    let subtract = ((a.y ^ b.y) & 0x80000000u) != 0u;
+    // same signs: the sum may carry into bit 56
+    let sum = _f64u_add(mb, ms);
+    let carry = (sum.y >> 24u) != 0u;
+    let sum_n = select(sum, _ie_shr_jam(sum, 1u), carry);
+    let e_sum = eb + select(0, 1, carry);
+    // opposite signs: normalize left, never below exponent 1
+    let diff = _f64u_sub(mb, ms);
+    let lz = 55u - _f64u_msb(select(diff, vec2<u32>(1u, 0u), _ie_is_zero(diff)));
+    let sh = min(lz, u32(eb - 1));
+    let diff_n = _f64u_shl(diff, sh);
+    let e_diff = eb - i32(sh);
+    var r = _ie_round_pack(big.y & 0x80000000u, select(e_sum, e_diff, subtract), select(sum_n, diff_n, subtract));
+    r = select(r, vec2<u32>(0u, 0u), subtract && _ie_is_zero(diff)); // x - x = +0
+    let a_inf = _ie_is_inf(a);
+    let b_inf = _ie_is_inf(b);
+    r = select(r, b, b_inf);
+    r = select(r, a, a_inf);
+    r = select(r, vec2<u32>(0u, 0xFFF80000u), a_inf && b_inf && subtract);
+    r = select(r, _ie_qnan(b), _ie_is_nan(b));
+    return select(r, _ie_qnan(a), _ie_is_nan(a));
+}
+
+fn f64_sub(a: emu_f64, b: emu_f64) -> emu_f64 { return f64_add(a, f64_neg(b)); }
+
+// Exact 106-bit product of two normalized significands as (w0, w1, w2, w3).
+fn _ie_mul_sig(ma: vec2<u32>, mb: vec2<u32>) -> vec4<u32> {
+    let p00 = _ie_mul_wide(ma.x, mb.x);
+    let p01 = _ie_mul_wide(ma.x, mb.y);
+    let p10 = _ie_mul_wide(ma.y, mb.x);
+    let p11 = _ie_mul_wide(ma.y, mb.y);
+    let mid = _f64u_add(p01, p10);
+    let w1 = p00.y + mid.x;
+    let c1 = select(0u, 1u, w1 < mid.x);
+    let upper = _f64u_add(_f64u_add(p11, vec2<u32>(mid.y, 0u)), vec2<u32>(c1, 0u));
+    return vec4<u32>(p00.x, w1, upper.x, upper.y);
+}
+
+fn f64_mul(a: emu_f64, b: emu_f64) -> emu_f64 {
+    let sign = (a.y ^ b.y) & 0x80000000u;
+    let na = _ie_norm(a);
+    let nb = _ie_norm(b);
+    let p = _ie_mul_sig(na.xy, nb.xy);
+    let upper = p.zw;
+    let top = (upper.y >> 9u) != 0u;                  // bit 105
+    let s = select(49u, 50u, top);
+    let hi_part = _f64u_shl(upper, 64u - s);
+    let lo_part = _ie_shr_jam(p.xy, s);
+    let m = vec2<u32>(hi_part.x | lo_part.x, hi_part.y | lo_part.y);
+    let e = bitcast<i32>(na.z) + bitcast<i32>(nb.z) - 1023 + select(0, 1, top);
+    var r = _ie_round_pack(sign, e, m);
+    let a_inf = _ie_is_inf(a);
+    let b_inf = _ie_is_inf(b);
+    let a_zero = _ie_is_zero_mag(a);
+    let b_zero = _ie_is_zero_mag(b);
+    r = select(r, vec2<u32>(0u, sign), a_zero || b_zero);
+    r = select(r, vec2<u32>(0u, sign | 0x7FF00000u), a_inf || b_inf);
+    r = select(r, vec2<u32>(0u, 0xFFF80000u), (a_inf && b_zero) || (b_inf && a_zero));
+    r = select(r, _ie_qnan(b), _ie_is_nan(b));
+    return select(r, _ie_qnan(a), _ie_is_nan(a));
+}
+
+fn f64_div(a: emu_f64, b: emu_f64) -> emu_f64 {
+    let sign = (a.y ^ b.y) & 0x80000000u;
+    let na = _ie_norm(a);
+    let nb = _ie_norm(b);
+    let mb = nb.xy;
+    let lt = !_ie_ge(na.xy, mb);
+    var rem = select(na.xy, _ie_shl1(na.xy), lt);
+    let e = bitcast<i32>(na.z) - bitcast<i32>(nb.z) + 1023 - select(0, 1, lt);
+    // restoring division: 56 quotient bits, remainder < 2 mb < 2^54
+    var q = vec2<u32>(0u, 0u);
+    for (var i = 0u; i < 56u; i = i + 1u) {
+        let ge = _ie_ge(rem, mb);
+        rem = select(rem, _f64u_sub(rem, mb), ge);
+        q = _ie_shl1(q);
+        q.x = q.x | select(0u, 1u, ge);
+        rem = _ie_shl1(rem);
+    }
+    q.x = q.x | select(0u, 1u, !_ie_is_zero(rem));
+    var r = _ie_round_pack(sign, e, q);
+    let a_inf = _ie_is_inf(a);
+    let b_inf = _ie_is_inf(b);
+    let a_zero = _ie_is_zero_mag(a);
+    let b_zero = _ie_is_zero_mag(b);
+    r = select(r, vec2<u32>(0u, sign), a_zero || b_inf);
+    r = select(r, vec2<u32>(0u, sign | 0x7FF00000u), a_inf || b_zero);
+    r = select(r, vec2<u32>(0u, 0xFFF80000u), (a_inf && b_inf) || (a_zero && b_zero));
+    r = select(r, _ie_qnan(b), _ie_is_nan(b));
+    return select(r, _ie_qnan(a), _ie_is_nan(a));
+}
+
+fn f64_sqrt(a: emu_f64) -> emu_f64 {
+    let na = _ie_norm(a);
+    let k0 = bitcast<i32>(na.z) - 1075;              // a = m * 2^k
+    let odd = (k0 & 1) != 0;
+    let m = select(na.xy, _ie_shl1(na.xy), odd);
+    let k = k0 - select(0, 1, odd);
+    // digit-by-digit square root of m * 2^58: 56 result bits, two radicand bits per step
+    var cur = _f64u_shl(m, 10u);
+    var q = vec2<u32>(0u, 0u);
+    var rem = vec2<u32>(0u, 0u);
+    for (var i = 0u; i < 56u; i = i + 1u) {
+        rem = _ie_shl1(_ie_shl1(rem));
+        rem.x = rem.x | (cur.y >> 30u);
+        cur = _ie_shl1(_ie_shl1(cur));
+        var t = _ie_shl1(_ie_shl1(q));
+        t.x = t.x | 1u;
+        let ge = _ie_ge(rem, t);
+        rem = select(rem, _f64u_sub(rem, t), ge);
+        q = _ie_shl1(q);
+        q.x = q.x | select(0u, 1u, ge);
+    }
+    q.x = q.x | select(0u, 1u, !_ie_is_zero(rem));
+    var r = _ie_round_pack(0u, (k >> 1u) + 1049, q);
+    r = select(r, vec2<u32>(0u, 0xFFF80000u), (a.y & 0x80000000u) != 0u);
+    r = select(r, a, _ie_is_zero_mag(a) || (a.y == 0x7FF00000u && a.x == 0u));
+    return select(r, _ie_qnan(a), _ie_is_nan(a));
+}
+
+// Math.FusedMultiplyAdd: (a * b) + c rounded once. The exact product and the addend as 128-bit values with the top bit
+// at 125 (value = W * 2^E), aligned with a sticky bit, added, rounded.
+fn _ie_w4(a: vec4<u32>, k: u32) -> u32 {
+    return select(select(select(select(0u, a.w, k == 3u), a.z, k == 2u), a.y, k == 1u), a.x, k == 0u);
+}
+fn _ie_add4(a: vec4<u32>, b: vec4<u32>) -> vec4<u32> {
+    let x = a.x + b.x; let c0 = select(0u, 1u, x < a.x);
+    let y1 = a.y + b.y; let y = y1 + c0; let c1 = select(0u, 1u, y1 < a.y || y < y1);
+    let z1 = a.z + b.z; let z = z1 + c1; let c2 = select(0u, 1u, z1 < a.z || z < z1);
+    return vec4<u32>(x, y, z, a.w + b.w + c2);
+}
+fn _ie_sub4(a: vec4<u32>, b: vec4<u32>) -> vec4<u32> {
+    let x = a.x - b.x; let b0 = select(0u, 1u, a.x < b.x);
+    let y1 = a.y - b.y; let y = y1 - b0; let b1 = select(0u, 1u, a.y < b.y || y1 < b0);
+    let z1 = a.z - b.z; let z = z1 - b1; let b2 = select(0u, 1u, a.z < b.z || z1 < b1);
+    return vec4<u32>(x, y, z, a.w - b.w - b2);
+}
+fn _ie_ge4(a: vec4<u32>, b: vec4<u32>) -> bool {
+    return a.w > b.w || (a.w == b.w && (a.z > b.z || (a.z == b.z && (a.y > b.y || (a.y == b.y && a.x >= b.x)))));
+}
+fn _ie_shr_word4(a: vec4<u32>, k: u32, n: u32) -> u32 {
+    let ws = n >> 5u; let bs = n & 31u;
+    let v = (_ie_w4(a, k + ws) >> bs) | select(_ie_w4(a, k + ws + 1u) << ((32u - bs) & 31u), 0u, bs == 0u);
+    return select(v, 0u, n >= 128u);
+}
+fn _ie_shr4(a: vec4<u32>, n: u32) -> vec4<u32> {
+    return vec4<u32>(_ie_shr_word4(a, 0u, n), _ie_shr_word4(a, 1u, n), _ie_shr_word4(a, 2u, n), _ie_shr_word4(a, 3u, n));
+}
+fn _ie_shl_word4(a: vec4<u32>, k: u32, n: u32) -> u32 {
+    let ws = n >> 5u; let bs = n & 31u;
+    let hi = select(0u, _ie_w4(a, k - ws), ws <= k);
+    let lo = select(0u, _ie_w4(a, k - ws - 1u), ws + 1u <= k);
+    let v = (hi << bs) | select(lo >> ((32u - bs) & 31u), 0u, bs == 0u);
+    return select(v, 0u, n >= 128u);
+}
+fn _ie_shl4(a: vec4<u32>, n: u32) -> vec4<u32> {
+    return vec4<u32>(_ie_shl_word4(a, 0u, n), _ie_shl_word4(a, 1u, n), _ie_shl_word4(a, 2u, n), _ie_shl_word4(a, 3u, n));
+}
+fn _ie_shr_jam4(a: vec4<u32>, n: u32) -> vec4<u32> {
+    let q = _ie_shr4(a, n);
+    let back = _ie_shl4(q, min(n, 128u));
+    return vec4<u32>(q.x | select(0u, 1u, any(back != a)), q.y, q.z, q.w);
+}
+fn _ie_msb4(a: vec4<u32>) -> u32 {
+    return select(select(select(firstLeadingBit(a.x), 32u + firstLeadingBit(a.y), a.y != 0u),
+        64u + firstLeadingBit(a.z), a.z != 0u), 96u + firstLeadingBit(a.w), a.w != 0u);
+}
+
+fn f64_fma(a: emu_f64, b: emu_f64, c: emu_f64) -> emu_f64 {
+    let psign = (a.y ^ b.y) & 0x80000000u;
+    let csign = c.y & 0x80000000u;
+    let na = _ie_norm(a);
+    let nb = _ie_norm(b);
+    let nc = _ie_norm(c);
+    let p = _ie_mul_sig(na.xy, nb.xy);
+    let msb_p = _ie_msb4(p);                         // 104 or 105
+    let wp = _ie_shl4(p, 125u - msb_p);
+    let ep = bitcast<i32>(na.z) + bitcast<i32>(nb.z) - 2150 - i32(125u - msb_p);
+    let wc = _ie_shl4(vec4<u32>(nc.x, nc.y, 0u, 0u), 73u);
+    let ec = bitcast<i32>(nc.z) - 1075 - 73;
+    let c_big = ec > ep || (ec == ep && _ie_ge4(wc, wp) && any(wc != wp));
+    let wb = select(wp, wc, c_big);
+    let ws = select(wc, wp, c_big);
+    let eb = select(ep, ec, c_big);
+    let es = select(ec, ep, c_big);
+    let sb = select(psign, csign, c_big);
+    let ws_a = _ie_shr_jam4(ws, u32(min(eb - es, 128)));
+    let subtract = psign != csign;
+    let sum = _ie_add4(wb, ws_a);
+    let carry = (sum.w >> 30u) != 0u;                // bit 126
+    let sum_n = select(sum, _ie_shr_jam4(sum, 1u), carry);
+    let e_sum = eb + select(0, 1, carry);
+    let diff = _ie_sub4(wb, ws_a);
+    let lz = 125u - _ie_msb4(select(diff, vec4<u32>(1u, 0u, 0u, 0u), all(diff == vec4<u32>(0u))));
+    let diff_n = _ie_shl4(diff, lz);
+    let e_diff = eb - i32(lz);
+    let w = select(sum_n, diff_n, subtract);
+    let m4 = _ie_shr_jam4(w, 70u);                   // top bit at 55
+    var r = _ie_round_pack(sb, select(e_sum, e_diff, subtract) + 1148, m4.xy);
+    r = select(r, vec2<u32>(0u, 0u), subtract && all(diff == vec4<u32>(0u)));
+    let a_inf = _ie_is_inf(a);
+    let b_inf = _ie_is_inf(b);
+    let c_inf = _ie_is_inf(c);
+    let a_zero = _ie_is_zero_mag(a);
+    let b_zero = _ie_is_zero_mag(b);
+    r = select(r, f64_mul(a, b), _ie_is_zero_mag(c));
+    r = select(r, f64_add(vec2<u32>(0u, psign), c), a_zero || b_zero);
+    r = select(r, c, c_inf);
+    let p_inf = a_inf || b_inf;
+    r = select(r, vec2<u32>(0u, psign | 0x7FF00000u), p_inf);
+    r = select(r, vec2<u32>(0u, 0xFFF80000u), (p_inf && c_inf && psign != csign) || (a_inf && b_zero) || (b_inf && a_zero));
+    r = select(r, _ie_qnan(c), _ie_is_nan(c));
+    r = select(r, _ie_qnan(b), _ie_is_nan(b));
+    return select(r, _ie_qnan(a), _ie_is_nan(a));
+}
+
+// |a| mod |b| by shift-subtract over the exponent difference: (remainder significand, exponent, last quotient bit).
+fn _ie_mod_core(a: vec2<u32>, b: vec2<u32>) -> vec4<u32> {
+    let na = _ie_norm(a);
+    let nb = _ie_norm(b);
+    var mx = na.xy;
+    let my = nb.xy;
+    var ex = bitcast<i32>(na.z);
+    let ey = bitcast<i32>(nb.z);
+    loop {
+        if (ex <= ey) { break; }
+        let ge = _ie_ge(mx, my);
+        mx = _ie_shl1(select(mx, _f64u_sub(mx, my), ge));
+        ex = ex - 1;
+    }
+    let ge2 = _ie_ge(mx, my);
+    mx = select(mx, _f64u_sub(mx, my), ge2);
+    return vec4<u32>(mx, bitcast<u32>(ex), select(0u, 1u, ge2));
+}
+
+// C# double %: exact, sign of x.
+fn f64_rem(a: emu_f64, b: emu_f64) -> emu_f64 {
+    let sign = a.y & 0x80000000u;
+    let am = vec2<u32>(a.x, a.y & 0x7FFFFFFFu);
+    let bm = vec2<u32>(b.x, b.y & 0x7FFFFFFFu);
+    let mc = _ie_mod_core(am, bm);
+    let m = mc.xy;
+    let e = bitcast<i32>(mc.z);
+    let lz = 52u - _f64u_msb(select(m, vec2<u32>(1u, 0u), _ie_is_zero(m)));
+    let sh = u32(min(i32(lz), max(e - 1, 0)));
+    var mn = _f64u_shl(m, sh);
+    var en = e - i32(sh);
+    let tiny = en < 1;
+    mn = select(mn, _f64u_shr(mn, u32(clamp(1 - en, 0, 64))), tiny);
+    en = select(en, 1, tiny);
+    var r = vec2<u32>(mn.x, sign | ((u32(en - 1) << 20u) + mn.y));
+    r = select(r, vec2<u32>(0u, sign), _ie_is_zero(m));
+    let a_inf = _ie_is_inf(a);
+    let b_inf = _ie_is_inf(b);
+    r = select(r, a, !_ie_ge(am, bm) || b_inf);
+    r = select(r, vec2<u32>(0u, 0xFFF80000u), a_inf || _ie_is_zero(bm));
+    r = select(r, _ie_qnan(b), _ie_is_nan(b));
+    return select(r, _ie_qnan(a), _ie_is_nan(a));
+}
+
+// Math.IEEERemainder: x - y * RoundToEven(x / y), exact.
+fn f64_ieee_rem(a: emu_f64, b: emu_f64) -> emu_f64 {
+    let sign = a.y & 0x80000000u;
+    let am = vec2<u32>(a.x, a.y & 0x7FFFFFFFu);
+    let bm = vec2<u32>(b.x, b.y & 0x7FFFFFFFu);
+    let r = f64_rem(am, bm);
+    let q_odd = select(_ie_mod_core(am, bm).w, 0u, !_ie_ge(am, bm));
+    let two_r = f64_add(r, r);
+    let sub = f64_lt(bm, two_r) || (f64_eq(two_r, bm) && q_odd == 1u);
+    var res = select(r, f64_sub(r, bm), sub);
+    res = vec2<u32>(res.x, res.y ^ sign);
+    res = select(res, vec2<u32>(0u, sign), (res.x | (res.y & 0x7FFFFFFFu)) == 0u);
+    let a_inf = _ie_is_inf(a);
+    let b_inf = _ie_is_inf(b);
+    res = select(res, a, b_inf && !a_inf);
+    res = select(res, vec2<u32>(0u, 0xFFF80000u), a_inf || _ie_is_zero(bm));
+    res = select(res, _ie_qnan(b), _ie_is_nan(b));
+    return select(res, _ie_qnan(a), _ie_is_nan(a));
+}
+
+fn f64_to_f32(a: emu_f64) -> f32 {
+    let sign = a.y & 0x80000000u;
+    let ef = (a.y >> 20u) & 0x7FFu;
+    let m = _ie_mant(a);
+    let m27 = _ie_shr_jam(m, 26u);                   // 24 + 3 guard bits
+    let fe = i32(max(ef, 1u)) - 896;
+    let tiny = fe < 1;
+    let mm = select(m27.x, _ie_shr_jam(vec2<u32>(m27.x, 0u), u32(clamp(1 - fe, 0, 64))).x, tiny);
+    let fe1 = select(fe, 1, tiny);
+    let low = mm & 7u;
+    let m3 = mm >> 3u;
+    let mr = m3 + select(0u, 1u, low > 4u || (low == 4u && (m3 & 1u) == 1u));
+    let bits = (u32(fe1 - 1) << 23u) + mr;
+    let ovf = fe1 >= 255 || bits >= 0x7F800000u;
+    var r = select(sign | bits, sign | 0x7F800000u, ovf);
+    r = select(r, sign, ef == 0u && m.x == 0u && m.y == 0u);
+    let special = ef == 0x7FFu;
+    r = select(r, sign | 0x7F800000u, special);
+    r = select(r, sign | 0x7FC00000u | (((a.y & 0xFFFFFu) << 3u) | (a.x >> 29u)), special && ((a.y & 0xFFFFFu) | a.x) != 0u);
+    return bitcast<f32>(r);
+}
+
+fn f64_from_f32(v: f32) -> emu_f64 {
+    let b = bitcast<u32>(v);
+    let sign = b & 0x80000000u;
+    let fe = (b >> 23u) & 0xFFu;
+    let m = b & 0x7FFFFFu;
+    let s = 23u - firstLeadingBit(select(m, 1u, m == 0u)); // subnormal: the leading 1 to bit 23
+    let mn = select(m, (m << s) & 0x7FFFFFu, fe == 0u);
+    let ef = select(fe + 896u, 897u - s, fe == 0u);
+    var r = vec2<u32>(mn << 29u, sign | (ef << 20u) | (mn >> 3u));
+    r = select(r, vec2<u32>(0u, sign), fe == 0u && m == 0u);
+    return select(r, vec2<u32>(m << 29u, sign | 0x7FF00000u | (m >> 3u)), fe == 0xFFu);
+}
+
+// ordered compares: false with a NaN; -0 == +0
+fn _ie_both_zero(a: vec2<u32>, b: vec2<u32>) -> bool { return (a.x | b.x | ((a.y | b.y) & 0x7FFFFFFFu)) == 0u; }
+fn _ie_key(a: vec2<u32>) -> vec2<u32> {
+    return select(vec2<u32>(a.x, a.y | 0x80000000u), vec2<u32>(~a.x, ~a.y), (a.y & 0x80000000u) != 0u);
+}
+fn f64_lt(a: emu_f64, b: emu_f64) -> bool {
+    return !(_ie_is_nan(a) || _ie_is_nan(b)) && !_ie_both_zero(a, b) && !_ie_ge(_ie_key(a), _ie_key(b));
+}
+fn f64_le(a: emu_f64, b: emu_f64) -> bool {
+    return !(_ie_is_nan(a) || _ie_is_nan(b)) && (_ie_both_zero(a, b) || _ie_ge(_ie_key(b), _ie_key(a)));
+}
+fn f64_gt(a: emu_f64, b: emu_f64) -> bool { return f64_lt(b, a); }
+fn f64_ge(a: emu_f64, b: emu_f64) -> bool { return f64_le(b, a); }
+fn f64_eq(a: emu_f64, b: emu_f64) -> bool {
+    return !(_ie_is_nan(a) || _ie_is_nan(b)) && (_ie_both_zero(a, b) || (a.x == b.x && a.y == b.y));
+}
+fn f64_ne(a: emu_f64, b: emu_f64) -> bool { return !f64_eq(a, b); }
+
+// Math.Min / Math.Max (.NET Core 3.0+): NaN in -> NaN out, -0 < +0
+fn f64_min(a: emu_f64, b: emu_f64) -> emu_f64 {
+    let r = select(b, a, f64_lt(a, b) || (_ie_both_zero(a, b) && (a.y & 0x80000000u) != 0u));
+    return select(select(r, b, _ie_is_nan(b)), a, _ie_is_nan(a));
+}
+fn f64_max(a: emu_f64, b: emu_f64) -> emu_f64 {
+    let r = select(b, a, f64_lt(b, a) || (_ie_both_zero(a, b) && (a.y & 0x80000000u) == 0u));
+    return select(select(r, b, _ie_is_nan(b)), a, _ie_is_nan(a));
+}
+
+fn f64_floor(v: emu_f64) -> emu_f64 { return _f64_bits_round_int(v, false); }
+fn f64_ceil(v: emu_f64) -> emu_f64 { return _f64_bits_round_int(v, true); }
+fn f64_trunc(v: emu_f64) -> emu_f64 { return _f64_bits_round_int(v, (v.y & 0x80000000u) != 0u); }
+fn f64_round_even(v: emu_f64) -> emu_f64 { return _f64_bits_round_nearest(v, false); }
+fn f64_round_away(v: emu_f64) -> emu_f64 { return _f64_bits_round_nearest(v, true); }
+" + F64ExactConversionFunctions;
+
+        #endregion
+
         #region emu_f64 Emulation (Ozaki Scheme using vec4<f32>)
 
         /// <summary>
@@ -1343,28 +1797,36 @@ fn f64_div(a: emu_f64, b: emu_f64) -> emu_f64 {
 
 // Ozaki emu_f64 comparisons - IEEE-strict NaN handling via bit pattern.
 // See `_f32_is_nan_bits` in the Dekker section for rationale.
-fn f64_lt(a: emu_f64, b: emu_f64) -> bool {
-    return !(_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) && ((a.x < b.x) || (a.x == b.x && a.y < b.y));
-}
-
-fn f64_le(a: emu_f64, b: emu_f64) -> bool {
-    return !(_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) && ((a.x < b.x) || (a.x == b.x && a.y <= b.y));
-}
-
-fn f64_gt(a: emu_f64, b: emu_f64) -> bool {
-    return !(_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) && ((a.x > b.x) || (a.x == b.x && a.y > b.y));
-}
-
-fn f64_ge(a: emu_f64, b: emu_f64) -> bool {
-    return !(_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) && ((a.x > b.x) || (a.x == b.x && a.y >= b.y));
+// By the SIGN of the quad-float difference: a double needs three components (24 + 24 + 5 significand bits), and the
+// old compares looked at the first two, so doubles differing in their low bits compared equal; two splits of one
+// value may also differ component by component. Equality: identical components (covers Inf == Inf, where the
+// difference is NaN) or a zero difference (covers -0 == +0 and differently split equal values).
+fn _oz_diff_sign(a: emu_f64, b: emu_f64) -> f32 {
+    return f64_sub(a, b).x;
 }
 
 fn f64_eq(a: emu_f64, b: emu_f64) -> bool {
-    return !(_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) && (a.x == b.x && a.y == b.y);
+    return !(_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) && (all(a == b) || _oz_diff_sign(a, b) == 0.0);
+}
+
+fn f64_lt(a: emu_f64, b: emu_f64) -> bool {
+    return !(_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) && !all(a == b) && _oz_diff_sign(a, b) < 0.0;
+}
+
+fn f64_le(a: emu_f64, b: emu_f64) -> bool {
+    return f64_lt(a, b) || f64_eq(a, b);
+}
+
+fn f64_gt(a: emu_f64, b: emu_f64) -> bool {
+    return f64_lt(b, a);
+}
+
+fn f64_ge(a: emu_f64, b: emu_f64) -> bool {
+    return f64_le(b, a);
 }
 
 fn f64_ne(a: emu_f64, b: emu_f64) -> bool {
-    return (_f32_is_nan_bits(a.x) || _f32_is_nan_bits(b.x)) || (a.x != b.x || a.y != b.y);
+    return !f64_eq(a, b);
 }
 
 // Ozaki IEEE IsNaN / IsInfinity: bit-pattern checks, same as Dekker.
@@ -1388,7 +1850,7 @@ fn f64_min(a: emu_f64, b: emu_f64) -> emu_f64 {
 fn f64_max(a: emu_f64, b: emu_f64) -> emu_f64 {
     return select(b, a, f64_gt(a, b));
 }
-" + F64ExactConversionFunctions + OzakiRoundingAndSqrtFunctions;
+" + F64ExactConversionFunctions + F64ComponentCompositeFunctions + OzakiRoundingAndSqrtFunctions;
 
         #endregion
 
@@ -1732,6 +2194,7 @@ fn _f32_to_e2m1(f: f32) -> u32 {
 
         private static readonly List<EmulationFunc> _dekkerF64Funcs;
         private static readonly List<EmulationFunc> _ozakiF64Funcs;
+        private static readonly List<EmulationFunc> _ieeeF64Funcs;
         private static readonly List<EmulationFunc> _i64Funcs;
         private static readonly List<EmulationFunc> _f16Funcs;
         private static readonly List<EmulationFunc> _bf16Funcs;
@@ -1749,6 +2212,7 @@ fn _f32_to_e2m1(f: f32) -> u32 {
         {
             _dekkerF64Funcs = SplitIntoFunctions(F64Functions);
             _ozakiF64Funcs = SplitIntoFunctions(OzakiF64Functions);
+            _ieeeF64Funcs = SplitIntoFunctions(IeeeF64Functions);
             _i64Funcs = SplitIntoFunctions(I64Functions);
             _f16Funcs = SplitIntoFunctions(F16Functions);
             _bf16Funcs = SplitIntoFunctions(BF16Functions);
@@ -1795,6 +2259,17 @@ fn _f32_to_e2m1(f: f32) -> u32 {
             bool includeF64, bool useOzakiF64, bool includeI64, bool includeF16,
             string kernelBody, bool includeBF16 = false, bool includeFP8 = false,
             bool includeFP4 = false)
+            => GetMinimalEmulationLibrary(includeF64, useOzakiF64 ? F64EmulationMode.Ozaki : F64EmulationMode.Dekker,
+                includeI64, includeF16, kernelBody, includeBF16, includeFP8, includeFP4);
+
+        /// <summary>
+        /// <see cref="GetMinimalEmulationLibrary(bool, bool, bool, bool, string, bool, bool, bool)"/> with the f64
+        /// representation chosen by <paramref name="f64Mode"/> (Dekker, Ozaki or Ieee).
+        /// </summary>
+        public static string GetMinimalEmulationLibrary(
+            bool includeF64, F64EmulationMode f64Mode, bool includeI64, bool includeF16,
+            string kernelBody, bool includeBF16 = false, bool includeFP8 = false,
+            bool includeFP4 = false)
         {
             var sb = new System.Text.StringBuilder();
 
@@ -1813,8 +2288,8 @@ fn _f32_to_e2m1(f: f32) -> u32 {
             // trimming.
             if (includeF64)
             {
-                var funcs = useOzakiF64 ? _ozakiF64Funcs : _dekkerF64Funcs;
-                sb.AppendLine(useOzakiF64 ? OzakiF64TypeAlias : F64TypeAlias);
+                var funcs = f64Mode == F64EmulationMode.Ieee ? _ieeeF64Funcs : f64Mode == F64EmulationMode.Ozaki ? _ozakiF64Funcs : _dekkerF64Funcs;
+                sb.AppendLine(f64Mode == F64EmulationMode.Ieee ? IeeeF64TypeAlias : f64Mode == F64EmulationMode.Ozaki ? OzakiF64TypeAlias : F64TypeAlias);
                 foreach (var func in funcs)
                 {
                     sb.AppendLine(func.Code);

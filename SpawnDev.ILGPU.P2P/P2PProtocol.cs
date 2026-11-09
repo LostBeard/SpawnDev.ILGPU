@@ -286,13 +286,13 @@ public class PeerCapabilities
 
     /// <summary>
     /// F64 emulation modes this peer can configure on its WebGPU/WebGL backend.
-    /// All rc.21+ peers advertise <c>["Dekker", "Ozaki"]</c>; older peers (or
+    /// rc.21+ peers advertise <c>["Dekker", "Ozaki"]</c>, and 5.4.19+ peers also <c>"Ieee"</c>; older peers (or
     /// non-browser peers that don't have a relevant backend) may advertise a
     /// shorter list or null (treated as "no browser-side strict-f64 capability"
     /// at coordinator filter time).
     ///
     /// Used by the coordinator to gate <c>AcceleratorRequirements.RequiresFloat64Strict</c>
-    /// dispatches: a peer that doesn't list "Ozaki" cannot satisfy the strict-f64
+    /// dispatches: a peer that doesn't list "Ieee" cannot satisfy the strict-f64
     /// contract on its browser backends. Native-f64 peers (CPU/CUDA/OpenCL/Wasm)
     /// don't need this field — their backend is always strict.
     /// </summary>
@@ -301,7 +301,8 @@ public class PeerCapabilities
     /// <summary>
     /// True when this peer can satisfy strict IEEE 754 f64 for its preferred backend.
     /// Native-f64 backends (CPU/CUDA/OpenCL/Wasm) always pass; browser backends pass
-    /// only when their <see cref="F64ModesSupported"/> list contains "Ozaki".
+    /// only when their <see cref="F64ModesSupported"/> list contains "Ieee" (binary64, every operation bit-identical
+    /// to .NET; Ozaki keeps ~96 bits between operations, so it is not strict).
     ///
     /// Coordinators dispatching with <c>AcceleratorRequirements.RequiresFloat64Strict</c>
     /// should filter their peer list with this method before sending dispatch requests
@@ -320,7 +321,7 @@ public class PeerCapabilities
             case "WebGPU":
             case "WebGL":
                 return F64ModesSupported != null
-                    && Array.IndexOf(F64ModesSupported, "Ozaki") >= 0;
+                    && Array.IndexOf(F64ModesSupported, "Ieee") >= 0;
             default:
                 return false;
         }
@@ -369,7 +370,7 @@ public class KernelDispatchRequest
 
     /// <summary>
     /// Requested F64 emulation mode for this dispatch on the peer's WebGPU/WebGL
-    /// backend. Set to "Ozaki" by the coordinator when
+    /// backend. The coordinator sets "Ieee" when
     /// <c>AcceleratorRequirements.RequiresFloat64Strict</c> is in effect; null
     /// means "leave the peer's current mode alone" (preserves backwards compat
     /// with rc.10-rc.22 dispatches that didn't carry this field).

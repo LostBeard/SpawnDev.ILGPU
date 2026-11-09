@@ -1,6 +1,56 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.19 (forks 2.4.18) - 2026-11-08 - CUDA nested-loop miscompile fixed; awaitable kernel loads; F64EmulationMode.Ieee (bit-exact double on WebGPU and WebGL); WebGL loop-continue fix; CUDA 13 LibDevice
+
+- **FIXED (forks, CUDA): a loop nest compiled wrong.** The PTX generator moved a conditional branch's phi values into
+  place BEFORE the branch when it judged that safe (`PhiBindings.NeedSeparateBindingsFor` exempted a phi whose sources
+  include the other target), but the other edge could still read the old value. In a `while` around a `do { } while ((x -=
+  n) > 0 && --c >= 0)` the outer counter's `ireg + 1` was written on the edge back into the inner loop too, so it advanced
+  once per inner iteration (SpawnDev.Codecs' MP3 decoder decoded wrong on CUDA only; Geordi). Phis are now bound per
+  edge whenever any belongs to another block, as OpenCL and Velocity already did. Only Roslyn **Release** IL produced the
+  failing block shape: a probe built in Debug was correct. `NestedLoop_InnerDoWhileShortCircuit_MatchesHost` (PMT
+  publishes Release); before the fix, from the same Release build, 8 of 10 cases were wrong.
+- **FIXED (WebGL): a branch that continues an ENCLOSING loop from inside a nested loop was dropped.** The structured
+  walker checked "already emitted" before "outside the open loop", so an `if` after a nested loop whose arm jumps to the
+  enclosing loop's header emitted an empty arm and the inner loop never ended (the same kernel: 9 of 10 cases 0). Both arms
+  now leave the loop (flagged break) or `continue`; and an if's true-edge phi copies are emitted inside its arm, not before
+  the `if` (they ran on the false edge too).
+- **NEW (every backend): `LoadAutoGroupedStreamKernelAsync` / `LoadStreamKernelAsync`** (1 to 14 parameters, same launcher
+  delegates as the synchronous loaders). On the browser backends the load returns to the event loop before the
+  synchronous IL compile, so a page that loads many kernels keeps painting and answering input between them, and on
+  WebGPU an auto-grouped kernel's pipeline is built with `createComputePipelineAsync` during the load instead of
+  synchronously at its first launch. Measured (WebGPU, non-AOT): a DeformConv-size kernel took 489 ms to compile plus 313 ms
+  of pipeline creation at the first launch, all on the page's thread; SpawnGen froze 30-104 s while SpawnDev.Codecs loaded
+  ~112 kernels (Lore). New `Accelerator.BeforeKernelCompileAsync` / `AfterAutoGroupedKernelLoadAsync` hooks.
+  `KernelLoadAsync_LauncherMatchesCpu` (all lanes; on WebGPU the load adds the shader to the cache and the first launch
+  adds none), `KernelLoadAsync_YieldsToBrowserBeforeCompile` (a JS `setTimeout(0)` registered before the load compiles the
+  kernel itself: 160-470 ms there vs a 0.1 ms cache hit; red-check: without the yield it is a cache hit).
+- **NEW (WebGPU, WebGL): `F64EmulationMode.Ieee`** - `double` as its IEEE-754 bit pattern in integer arithmetic. Every
+  operation rounds to nearest even at 53 bits with subnormals, like .NET: + - * /, Sqrt, `%` and Math.IEEERemainder
+  (exact), Math.FusedMultiplyAdd (one rounding), Floor / Ceiling / Truncate / Round, conversions, comparisons, Min / Max are
+  bit-identical to desktop .NET. Transliterated from a C# reference checked against .NET on 4M operand sets per operation
+  (ties, subnormals, overflow, specials; seven deliberate mutations all caught); on the GPU
+  `F64Ieee_Ops_BitExactWithDotNet` matches on 8,192 operand sets x 20 operations on WebGPU and WebGL. Transcendentals stay
+  f32 as in the other modes. `AcceleratorRequirements.RequiresFloat64Strict` now selects Ieee on WebGPU and WebGL;
+  P2P WebGPU peers advertise "Ieee" and are strict only with it. Ozaki's documentation claimed "strict IEEE 754": it keeps
+  ~96 bits between operations and rounds only on stores, so register-resident chains differ from .NET (SpawnDev.Codecs FLAC
+  LPC chose different coefficients on WebGPU; Geordi). The browser's own .NET (Mono WASM) is NOT the oracle: it returns +0
+  for fma(4.87e-304, -1.24e-309, 0) where IEEE and desktop .NET give -0, and does not saturate double -> long.
+- **FIXED (WebGPU, WebGL, Ozaki): comparisons looked at two of a double's three components** (24 + 24 + 5 significand
+  bits), so doubles differing in their low bits compared equal (`F64Ozaki_Compare_FullSignificand`: 4,548 of 24,576 wrong
+  on both backends before the fix). They now compare by the sign of the difference.
+- **FIXED (WebGPU, every f64 mode): a double reduction identity** (e.g. Max's `-double.MaxValue`) was emitted as the raw
+  IEEE halves read as Dekker's (hi, lo) floats, and as a two-argument vec4 for Ozaki; it now goes through
+  `f64_from_ieee754_bits`. **WebGL: a double multiply-add inside a `[NoInlining]` helper** was computed per vector
+  component; it now uses the f64 helpers.
+- **FIXED (forks, CUDA 13): LibDevice was not found.** CUDA 13 moved `nvvm64_*.dll` to `nvvm\bin\x64`; the silent
+  auto-detection searched `nvvm\bin` only, so double `Math.Cos` (any LibDevice math) failed to compile without
+  Algorithms (Geordi). Both folders are searched, and a missing folder is "not found" instead of an exception.
+  `CudaTests.LibDevice_AutoDetected_DoubleCosCompilesWithoutAlgorithms` (red-check: fails with the old search).
+- Diagnostics in DemoConsole: `ptx-dump [O0|O1|O2] [file]` (offline PTX, no device), `ptx-variant-run` (a kernel's PTX as
+  generated vs edited, on CUDA), `ieee-wgsl <dir>` (WGSL + GLSL of the f64 test kernels in each mode, for naga / ANGLE).
+
 ## 5.4.18 (forks 2.4.17) - 2026-11-08 - float math rounds like .NET on every backend; exact FusedMultiplyAdd; MultiplyAddEstimate; WebGL floor/int in loop nests
 
 - **CHANGED (forks; CUDA, OpenCL, WebGL): a float multiply followed by an add is no longer contracted into one fused

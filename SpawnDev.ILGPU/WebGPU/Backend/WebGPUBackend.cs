@@ -623,6 +623,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// <summary>True if using Ozaki quad-float f64 emulation.</summary>
         internal bool UseOzakiF64Emulation => F64Mode == F64EmulationMode.Ozaki;
 
+        /// <summary>True if using the Ieee binary64 emulation (emu_f64 = the bit pattern as vec2&lt;u32&gt;).</summary>
+        internal bool UseIeeeF64Emulation => F64Mode == F64EmulationMode.Ieee;
+
+        /// <summary>The WGSL scalar type of one emu_f64 component: u32 for Ieee, f32 for Dekker / Ozaki.</summary>
+        internal string F64ComponentType => UseIeeeF64Emulation ? "u32" : "f32";
+
         /// <summary>Always true — i64 emulation is required by ILGPU IR.</summary>
         internal bool EnableI64Emulation => true;
 

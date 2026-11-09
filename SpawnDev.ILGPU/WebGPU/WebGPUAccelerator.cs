@@ -89,11 +89,23 @@ namespace SpawnDev.ILGPU.WebGPU
         public Task PrecompileAutoGroupedAsync(Delegate kernel)
         {
             ArgumentNullException.ThrowIfNull(kernel);
-            if (LoadBoxedLaunchAutoGroupedKernel(kernel.Method, out _) is not WebGPUKernel k) return Task.CompletedTask;
+            return PrecompileAutoGroupedAsync(kernel.Method);
+        }
+
+        private Task PrecompileAutoGroupedAsync(MethodInfo method)
+        {
+            if (LoadBoxedLaunchAutoGroupedKernel(method, out _) is not WebGPUKernel k) return Task.CompletedTask;
             var compiled = k.CompiledKernel;
             if (compiled.HasDynamicSharedMemory) return Task.CompletedTask;
             return NativeAccelerator.PrecompileComputeShaderAsync(compiled.WGSLSource, "main", compiled.EntryPoint?.Name);
         }
+
+        /// <inheritdoc/>
+        protected override Task BeforeKernelCompileAsync() => BrowserYield.ToEventLoopAsync();
+
+        /// <inheritdoc/>
+        /// <remarks>The kernel is already compiled and cached by the loader, so this is a cache hit plus the async pipeline.</remarks>
+        protected override Task AfterAutoGroupedKernelLoadAsync(MethodInfo method) => PrecompileAutoGroupedAsync(method);
 
         /// <summary>
         /// Gets the native WebGPU accelerator for low-level GPU access.

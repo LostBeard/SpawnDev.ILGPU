@@ -972,7 +972,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 Builder.AppendLine("// ============ Emulation Library ============");
                 Builder.AppendLine(GLSLEmulationLibrary.GetEmulationLibrary(
                     Backend.EnableF64Emulation && kernelNeedsF64,
-                    Backend.UseOzakiF64Emulation,
+                    Backend.F64Mode,
                     Backend.EnableI64Emulation && kernelNeedsI64,
                     kernelNeedsF16,
                     includeBF16: kernelNeedsBF16,
@@ -2589,6 +2589,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             "vec2" => "vec2(0.0)",
             "vec3" => "vec3(0.0)",
             "vec4" => "vec4(0.0)",
+            "emu_f64i" => "emu_f64i(0u, 0u)",
             "ivec2" => "ivec2(0)",
             "ivec3" => "ivec3(0)",
             "uvec2" => "uvec2(0u)",
@@ -4137,7 +4138,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
             var leftType = TypeGenerator[value.Left.Type];
             var rightType = TypeGenerator[value.Right.Type];
-            bool isEmulatedF64 = Backend.EnableF64Emulation && (leftType == "vec2" || rightType == "vec2" || (Backend.UseOzakiF64Emulation && (leftType == "vec4" || rightType == "vec4")));
+            bool isEmulatedF64 = Backend.IsF64Type(leftType) || Backend.IsF64Type(rightType);
             bool isEmulatedI64 = Backend.EnableI64Emulation && (leftType == "uvec2" || rightType == "uvec2");
 
             if (isEmulatedF64)
@@ -4357,12 +4358,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             string prefix = DeclarationPrefix(value, target, $"{TypeGenerator[value.Type]} ");
 
             var firstType = TypeGenerator[value.First.Type];
-            bool isEmulatedF64 = Backend.EnableF64Emulation && (firstType == "vec2" || (Backend.UseOzakiF64Emulation && firstType == "vec4"));
+            bool isEmulatedF64 = Backend.IsF64Type(firstType);
 
             if (isEmulatedF64)
             {
-                // FMA: a*b+c using double-float emulation
-                AppendLine($"{prefix}{target} = f64_add(f64_mul({first}, {second}), {third});");
+                // MultiplyAdd rounds once (exact in the Ieee mode); MultiplyAddEstimate may round twice.
+                AppendLine(value.Kind == TernaryArithmeticKind.MultiplyAdd
+                    ? $"{prefix}{target} = f64_fma({first}, {second}, {third});"
+                    : $"{prefix}{target} = f64_add(f64_mul({first}, {second}), {third});");
                 return;
             }
 
@@ -4378,7 +4381,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             string prefix = DeclarationPrefix(value, target, "bool ");
 
             var leftType = TypeGenerator[value.Left.Type];
-            bool isEmulatedF64 = Backend.EnableF64Emulation && (leftType == "vec2" || (Backend.UseOzakiF64Emulation && leftType == "vec4"));
+            bool isEmulatedF64 = Backend.IsF64Type(leftType);
             bool isEmulatedI64 = Backend.EnableI64Emulation && leftType == "uvec2";
 
             if (isEmulatedF64)

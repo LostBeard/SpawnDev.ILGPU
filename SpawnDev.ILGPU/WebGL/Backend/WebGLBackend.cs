@@ -88,6 +88,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// <summary>True if using Ozaki quad-float f64 emulation.</summary>
         internal bool UseOzakiF64Emulation => F64Mode == F64EmulationMode.Ozaki;
 
+        /// <summary>True if using the Ieee binary64 emulation (the emu_f64i struct: the IEEE bit pattern).</summary>
+        internal bool UseIeeeF64Emulation => F64Mode == F64EmulationMode.Ieee;
+
+        /// <summary>The GLSL type of an emulated double: vec2 (Dekker), vec4 (Ozaki) or emu_f64i (Ieee).</summary>
+        internal string F64TypeName => UseIeeeF64Emulation ? "emu_f64i" : UseOzakiF64Emulation ? "vec4" : "vec2";
+
+        /// <summary>True when <paramref name="glslType"/> is this backend's emulated-double type.</summary>
+        internal bool IsF64Type(string? glslType) => EnableF64Emulation && glslType == F64TypeName;
+
         /// <summary>Always true — i64 emulation is required by ILGPU IR.</summary>
         internal bool EnableI64Emulation => true;
 
@@ -429,6 +438,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // Declared here, before helper functions, which contain loops too.
             builder.AppendLine("uniform highp int u_loopLimit;");
             builder.AppendLine();
+            // The Ieee emulated double is a struct; helper prototypes (emitted before the emulation library) use it.
+            if (UseIeeeF64Emulation)
+            {
+                builder.AppendLine(GLSLEmulationLibrary.IeeeF64StructDeclaration);
+                builder.AppendLine();
+            }
 
             // Struct definitions land here so helper functions (emitted next, with
             // struct-typed params) can see the type. The original placeholder in

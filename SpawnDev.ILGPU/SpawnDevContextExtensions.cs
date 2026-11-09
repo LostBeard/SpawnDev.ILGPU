@@ -143,7 +143,7 @@ namespace SpawnDev.ILGPU
                 if (webGpuDevice != null)
                 {
                     var options = requirements.RequiresFloat64Strict
-                        ? new WebGPUBackendOptions { F64Emulation = F64EmulationMode.Ozaki }
+                        ? new WebGPUBackendOptions { F64Emulation = F64EmulationMode.Ieee }
                         : null;
                     return await webGpuDevice.CreateAcceleratorAsync(context, options);
                 }
@@ -153,7 +153,7 @@ namespace SpawnDev.ILGPU
                 if (webGlDevice != null)
                 {
                     var options = requirements.RequiresFloat64Strict
-                        ? new WebGLBackendOptions { F64Emulation = F64EmulationMode.Ozaki }
+                        ? new WebGLBackendOptions { F64Emulation = F64EmulationMode.Ieee }
                         : null;
                     return webGlDevice.CreateAccelerator(context, options);
                 }

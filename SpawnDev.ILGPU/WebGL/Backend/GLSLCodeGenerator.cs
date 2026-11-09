@@ -404,6 +404,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 "vec2" => "vec2(0.0)",
                 "vec3" => "vec3(0.0)",
                 "vec4" => "vec4(0.0)",
+                "emu_f64i" => "emu_f64i(0u, 0u)",
                 "ivec2" => "ivec2(0)",
                 "ivec3" => "ivec3(0)",
                 "ivec4" => "ivec4(0)",
@@ -878,6 +879,27 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         private BasicBlock? GenerateStructuredStep(BasicBlock current, BasicBlock? stop)
         {
             if (current == null || current == stop) return null;
+            // Inside an open loop, reaching the loop's own header is its back edge and reaching a block outside it is an
+            // exit - BEFORE the visited check: both are visited already (a header, or an enclosing loop's header), and the
+            // visited check emitted NOTHING for them. An if after a nested loop (EmitIfBranch drops a merge outside the
+            // open loop, so each arm comes here) whose arms continue the ENCLOSING loop then fell through and kept
+            // iterating the inner one: a do-while exit test that continues the outer while (Roslyn Release IL, the
+            // SpawnDev.Codecs MP3 big_values walk) never left its loop on WebGL (NestedLoop_InnerDoWhileShortCircuit_MatchesHost:
+            // 9 of 10 cases returned 0, 2026-11-08).
+            var enclosingOpen = InnermostOpenLoop();
+            if (enclosingOpen != null)
+            {
+                if (_activeLoopHeaders.Peek() == current)
+                {
+                    AppendLine("continue;");
+                    return null;
+                }
+                if (!enclosingOpen.Contains(current))
+                {
+                    EmitExitOfEnclosingLoop(current, enclosingOpen);
+                    return null;
+                }
+            }
             if (_visitedBlocks.Contains(current))
             {
                 // Every early `return` of the function reaches the SAME exit, usually through code-free phi blocks.
@@ -1421,8 +1443,6 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 }
             }
 
-            PushPhiValues(trueTarget, source);
-
             // SHORT-CIRCUIT FIX: Save visited state before true branch so that
             // blocks visited during the true path can be re-visited by the false
             // path. This is essential for || short-circuit patterns where both
@@ -1432,6 +1452,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var cond = Load(ib.Condition);
             AppendLine($"if ({cond}) {{");
             PushIndent();
+            // The true edge's phi copies belong INSIDE its arm: emitted before the `if` they also ran on the false edge,
+            // which may still read the old values (the PTX twin of this miscompiled a nested do-while, PhiBindings).
+            PushPhiValues(trueTarget, source);
             GenerateStructuredCode(trueTarget, merge);
             PopIndent();
             AppendLine("} else {");
@@ -1874,8 +1897,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // FIRST: the Min/Max branch below would otherwise catch emulated operands.
             {
                 string lt = TypeGenerator[value.Left.Type], rt = TypeGenerator[value.Right.Type];
-                bool emuF64 = Backend.EnableF64Emulation && (lt == "vec2" || rt == "vec2"
-                    || (Backend.UseOzakiF64Emulation && (lt == "vec4" || rt == "vec4")));
+                bool emuF64 = Backend.IsF64Type(lt) || Backend.IsF64Type(rt);
                 string? emulF64Func = !emuF64 ? null : value.Kind switch
                 {
                     BinaryArithmeticKind.Add => "f64_add",
@@ -2168,7 +2190,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 return;
             }
 
-            bool isEmuF64 = operandType == "vec2" || (Backend.UseOzakiF64Emulation && operandType == "vec4");
+            bool isEmuF64 = Backend.IsF64Type(operandType);
             // Emulated f64: the builtins below work per COMPONENT of the (hi, lo[, ...]) vector,
             // which is only right for Neg. Abs of hi = 12345679, lo = -0.25 gave 12345679.25.
             if (Backend.EnableF64Emulation && isEmuF64)
@@ -2352,6 +2374,15 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var second = Load(value.Second);
             var third = Load(value.Third);
             Declare(target);
+            // Emulated double: the f64 helpers (the vector expression below would work per component). MultiplyAdd
+            // rounds once (exact in the Ieee mode); MultiplyAddEstimate may round twice.
+            if (Backend.IsF64Type(TypeGenerator[value.First.Type]))
+            {
+                AppendLine(value.Kind == TernaryArithmeticKind.MultiplyAdd
+                    ? $"{target} = f64_fma({first}, {second}, {third});"
+                    : $"{target} = f64_add(f64_mul({first}, {second}), {third});");
+                return;
+            }
             // GLSL ES 3.0 has no fma() — emulate with a*b+c
             AppendLine($"{target} = ({first} * {second} + {third});");
         }
@@ -2411,7 +2442,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // emu_f64 in GLSL: vec2 (Dekker) or vec4 (Ozaki). Raw == returns
             // vec2/vec4 of bool which can't be assigned to bool. Route through
             // f64_xx helpers same as the kernel function generator.
-            bool isEmulatedF64 = (leftType == "vec2" || leftType == "vec4" || rightType == "vec2" || rightType == "vec4")
+            bool isEmulatedF64 = (Backend.IsF64Type(leftType) || Backend.IsF64Type(rightType))
                 && value.Left.BasicValueType == BasicValueType.Float64;
             if (isEmulatedF64)
             {
@@ -2597,7 +2628,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 return name switch
                 {
                     _ when name.Contains("Clamp") => $"f64_min(f64_max({a[0]}, {a[1]}), {a[2]})",
-                    _ when name.Contains("FusedMultiplyAdd") => $"f64_add(f64_mul({a[0]}, {a[1]}), {a[2]})",
+                    _ when name.Contains("FusedMultiplyAdd") => $"f64_fma({a[0]}, {a[1]}, {a[2]})",
                     _ => null
                 };
             }
@@ -2644,9 +2675,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var targetType = TypeGenerator[value.Type];
             var sourceType = TypeGenerator[value.Value.Type];
 
-            bool isEmulatedF64Target = Backend.EnableF64Emulation && (targetType == "vec2" || (Backend.UseOzakiF64Emulation && targetType == "vec4"));
+            bool isEmulatedF64Target = Backend.IsF64Type(targetType);
             bool isEmulatedI64Target = Backend.EnableI64Emulation && targetType == "uvec2";
-            bool isEmulatedF64Source = Backend.EnableF64Emulation && (sourceType == "vec2" || (Backend.UseOzakiF64Emulation && sourceType == "vec4"));
+            bool isEmulatedF64Source = Backend.IsF64Type(sourceType);
             bool isEmulatedI64Source = Backend.EnableI64Emulation && sourceType == "uvec2";
 
             // Detect unsigned source conversion (e.g. uint → float). Unsigned 32-bit values are
@@ -3014,6 +3045,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // reassociates its error term `l - (s * u_one - c.x)` into `(l + c.x) - s * u_one`, which rounds the
                 // low half to exactly 0 - a branch-assigned 1e-14 became float(1e-14), so 1.0 / x = 100000001754833
                 // (WebGL only; test BackendTestBase.F64_BranchAssignedConstant_KeepsLowHalf).
+                if (Backend.UseIeeeF64Emulation)
+                {
+                    // Ieee: the bit pattern itself (integers: nothing for a compiler to fold or reassociate)
+                    ulong cbits = BitConverter.DoubleToUInt64Bits(value.Float64Value);
+                    AppendLine($"{target} = emu_f64i({(uint)cbits}u, {(uint)(cbits >> 32)}u);");
+                    return;
+                }
                 var parts = F64ConstantComponents(value.Float64Value, Backend.UseOzakiF64Emulation);
                 AppendLine($"{target} = vec{parts.Length}({string.Join(", ", parts.Select(f => $"uintBitsToFloat({BitConverter.SingleToUInt32Bits(f)}u)"))});");
                 return;
@@ -3743,6 +3781,13 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             var trueVal = Load(value.TrueValue);
             var falseVal = Load(value.FalseValue);
             Declare(target);
+            // WebGL rejects ?: on a structure ("ternary operator is not allowed for structures in ESSL 1.0 and webgl"):
+            // the Ieee double is the struct emu_f64i, selected word by word.
+            if (Backend.UseIeeeF64Emulation && Backend.IsF64Type(TypeGenerator[value.Type]))
+            {
+                AppendLine($"{target} = f64_select({cond}, {trueVal}, {falseVal});");
+                return;
+            }
             AppendLine($"{target} = {cond} ? {trueVal} : {falseVal};");
         }
 
@@ -3811,7 +3856,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         private static string? Emulated64Prefix(WebGLBackend backend, GLSLCodeGenerator cg, MethodCall mc)
         {
             string type = cg.TypeGenerator[mc.Type];
-            if (backend.EnableF64Emulation && (type == "vec2" || (backend.UseOzakiF64Emulation && type == "vec4")))
+            if (backend.IsF64Type(type))
                 return "f64";
             if (backend.EnableI64Emulation && type == "uvec2")
                 return (mc.Target.Source as System.Reflection.MethodInfo)?.ReturnType == typeof(ulong) ? "u64" : "i64";

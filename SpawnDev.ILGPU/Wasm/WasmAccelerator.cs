@@ -714,6 +714,9 @@ namespace SpawnDev.ILGPU.Wasm
         public override bool SupportsBoxedLaunch => true;
 
         /// <inheritdoc/>
+        protected override Task BeforeKernelCompileAsync() => BrowserYield.ToEventLoopAsync();
+
+        /// <inheritdoc/>
         protected override WasmKernel CreateKernel(WasmCompiledKernel compiledKernel, MethodInfo launcher)
         {
             return new WasmKernel(this, compiledKernel, launcher);

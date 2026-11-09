@@ -15,6 +15,15 @@ try
     if (args.Length > 0 && args[0] == "fma-ab")
         return await FmaContractionBench.Run(args);
 
+    // Offline PTX of BackendTestBase.NestedLoopDoWhileKernel (no CUDA device used): `ptx-dump [O0|O1|O2] [out.ptx]`.
+    if (args.Length > 0 && args[0] == "ptx-dump")
+        return await PtxDump.Run(args);
+    if (args.Length > 0 && args[0] == "ptx-variant-run")
+        return await PtxVariantProbe.Run(args);
+    // Offline WGSL of the F64 Ieee ops kernel in each emulation mode, for naga: `ieee-wgsl <outDir>`. No browser.
+    if (args.Length > 0 && args[0] == "ieee-wgsl")
+        return await IeeeWgslDump.Run(args);
+
     // CPU per-launch latency probe (GGUFDecodeKVCache slowness). No browser, no ML.
     if (args.Length > 0 && args[0] == "cpu-launch-lat")
         return await CpuLaunchLatencyProbe.Run(args);

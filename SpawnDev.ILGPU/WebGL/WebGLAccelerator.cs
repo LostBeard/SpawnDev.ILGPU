@@ -353,6 +353,9 @@ namespace SpawnDev.ILGPU.WebGL
         public override bool SupportsBoxedLaunch => true;
 
         /// <inheritdoc/>
+        protected override Task BeforeKernelCompileAsync() => BrowserYield.ToEventLoopAsync();
+
+        /// <inheritdoc/>
         protected override WebGLKernel CreateKernel(WebGLCompiledKernel compiledKernel, MethodInfo launcher)
         {
             ValidateTransformFeedback(compiledKernel);

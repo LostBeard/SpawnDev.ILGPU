@@ -1707,7 +1707,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 && Backend.EnableF64Emulation
                 && TypeGenerator[value.First.Resolve().Type] == "emu_f64")
             {
-                AppendLine($"{target} = f64_add(f64_mul({first}, {second}), {third});");
+                // MultiplyAdd rounds once (exact in the Ieee mode); MultiplyAddEstimate may round twice.
+                AppendLine(value.Kind == TernaryArithmeticKind.MultiplyAdd
+                    ? $"{target} = f64_fma({first}, {second}, {third});"
+                    : $"{target} = f64_add(f64_mul({first}, {second}), {third});");
                 return;
             }
 
@@ -1792,7 +1795,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (value.IsUnsignedOrUnordered && value.Kind != CompareKind.NotEqual)
                     {
                         AppendLine(
-                            $"{target} = (_f32_is_nan_bits({left}.x) || _f32_is_nan_bits({right}.x)) || {emulFunc}({left}, {right});");
+                            $"{target} = (f64_is_nan({left}) || f64_is_nan({right})) || {emulFunc}({left}, {right});");
                     }
                     else
                     {
@@ -1956,7 +1959,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return name switch
                 {
                     _ when name.Contains("Clamp") => $"f64_min(f64_max({a[0]}, {a[1]}), {a[2]})",
-                    _ when name.Contains("FusedMultiplyAdd") => $"f64_add(f64_mul({a[0]}, {a[1]}), {a[2]})",
+                    _ when name.Contains("FusedMultiplyAdd") => $"f64_fma({a[0]}, {a[1]}, {a[2]})",
                     _ => null
                 };
             }
@@ -3633,7 +3636,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         AppendLine("workgroupBarrier();");
 
                         // Step 2: all threads cooperatively reduce across the workgroup
-                        string componentType = wgslType == "emu_f64" ? "f32" : "u32";
+                        string componentType = wgslType == "emu_f64" ? Backend.F64ComponentType : "u32";
                         string load0, loadN;
                         if (is64Bit)
                         {
@@ -5080,7 +5083,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             codeGenerator.AppendLine($"let _num_sg_{sfx} = (workgroup_size.x + subgroup_size - 1u) / subgroup_size;");
             if (is64Bit)
             {
-                string loadExpr = $"{wgslType}(bitcast<{(wgslType == "emu_f64" ? "f32" : "u32")}>(_grp_sg_results[subgroup_invocation_id * 2u]), bitcast<{(wgslType == "emu_f64" ? "f32" : "u32")}>(_grp_sg_results[subgroup_invocation_id * 2u + 1u]))";
+                string loadExpr = $"{wgslType}(bitcast<{(wgslType == "emu_f64" ? backend.F64ComponentType : "u32")}>(_grp_sg_results[subgroup_invocation_id * 2u]), bitcast<{(wgslType == "emu_f64" ? backend.F64ComponentType : "u32")}>(_grp_sg_results[subgroup_invocation_id * 2u + 1u]))";
                 codeGenerator.AppendLine($"let _sg0_val_{sfx} = select({identityExpr}, {loadExpr},");
             }
             else
@@ -5108,7 +5111,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             codeGenerator.AppendLine($"workgroupBarrier();");
             if (is64Bit)
             {
-                string comp = wgslType == "emu_f64" ? "f32" : "u32";
+                string comp = wgslType == "emu_f64" ? backend.F64ComponentType : "u32";
                 string readExpr = $"{wgslType}(bitcast<{comp}>(_grp_sg_results[0]), bitcast<{comp}>(_grp_sg_results[1]))";
                 codeGenerator.AppendLine($"{target} = {(needsBitcast ? $"bitcast<{irType}>({readExpr})" : readExpr)};");
             }
@@ -5194,16 +5197,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
         /// <summary>
-        /// Converts a double value to its WGSL emu_f64 (vec2&lt;f32&gt;) literal representation.
-        /// Uses bitcast to split the 64-bit IEEE 754 double into two u32 words,
-        /// then bitcasts each to f32 for vec2&lt;f32&gt; storage.
+        /// Converts a double value to a WGSL emu_f64 expression in the active f64 representation (Dekker, Ozaki or
+        /// Ieee): its IEEE-754 bit pattern through f64_from_ieee754_bits.
         /// </summary>
         private static string DoubleToEmuF64(double value)
         {
             ulong bits = BitConverter.DoubleToUInt64Bits(value);
             uint lo = (uint)(bits & 0xFFFFFFFF);
             uint hi = (uint)(bits >> 32);
-            return $"emu_f64(bitcast<f32>({lo}u), bitcast<f32>({hi}u))";
+            // The IEEE bit pattern converted into the active representation. It was emu_f64(bitcast<f32>(lo),
+            // bitcast<f32>(hi)): the two raw halves taken as Dekker's (hi, lo) floats (a wrong value for anything but
+            // 0, e.g. a Max reduction's -double.MaxValue identity) and two arguments for Ozaki's vec4.
+            return $"f64_from_ieee754_bits({lo}u, {hi}u)";
         }
 
         /// <summary>

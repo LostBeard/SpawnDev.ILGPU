@@ -171,15 +171,22 @@ namespace ILGPU.Backends
             /// Returns true if the current binding configuration needs separate bindings
             /// for individual target blocks.
             /// </summary>
+            /// <remarks>
+            /// Any binding for a phi of ANOTHER block must not run on the edge to <paramref name="target"/>. It used to
+            /// be allowed when <paramref name="target"/> was itself a source of that phi, on the theory that the target's
+            /// path rebinds the phi before reaching the phi's block. Nothing guarantees the path does not READ the phi's
+            /// register first: an inner do-while exit test (Roslyn Release IL) bound the outer loop header's `ireg + 1`
+            /// before branching, and the edge back into the inner loop read the already-incremented ireg - the outer
+            /// counter advanced once per inner iteration (SpawnDev.Codecs MP3 decoder, CUDA only, Geordi 2026-11-08;
+            /// BackendTestBase.NestedLoop_InnerDoWhileShortCircuit_MatchesHost). OpenCL had the same class of bug and
+            /// binds per edge since 2026-04-28 (CLCodeGenerator.BindPhis).
+            /// </remarks>
             public bool NeedSeparateBindingsFor(BasicBlock target)
             {
                 foreach (var (phiValue, _) in this)
                 {
-                    if (phiValue.BasicBlock != target &&
-                        !phiValue.Sources.Contains(target, new BasicBlock.Comparer()))
-                    {
+                    if (phiValue.BasicBlock != target)
                         return true;
-                    }
                 }
 
                 return false;
