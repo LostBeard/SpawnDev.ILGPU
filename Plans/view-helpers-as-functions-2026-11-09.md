@@ -136,3 +136,14 @@ the arg's length expression (SubView chain + chosen-view vars of the caller). Th
 Per-function state to isolate: valueVariables / declared names, hoisting, PHASE 5 var->let, current_block, uniformity info.
 Emission: when the kernel walker meets a surviving call, key (callee, tuple of kernel-param roots); generate the fn once into
 a module-scope buffer emitted before the kernel entry.
+
+## First implementation task (08:55)
+
+`WGSLKernelFunctionGenerator` has ~70 private state fields (+5 in `WGSLCodeGenerator`: `valueVariables`,
+`declaredVariables`, `_localAllocaVarNames`, ...). Before emitting a monomorphized helper body with the kernel generator,
+classify every field as KERNEL-WIDE (binding / scan results: `_directParamCoalesceMembership`, `_subWordParams`,
+`_viewOffsetScalarSlots`, `_chosenViewRoots` roots of the kernel, atomics sets, ... - shared, read-only during the nested
+emission) or PER-FUNCTION (`valueVariables`, `declaredVariables`, `_hoistedPrimitives`, `_localAllocaVarNames`, structured
+walker / block state, builder + indent - saved, reset, restored around it). Write the classification as a table here first;
+a field missed in the per-function set leaks names between the helper and the kernel (naga catches most: redeclaration /
+undeclared), a kernel-wide field wrongly reset loses binding info (silent wrong indexing: the ViewHelper test catches it).
