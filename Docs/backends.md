@@ -140,8 +140,8 @@ using SpawnDev.ILGPU.WebGPU.Backend;
 // Default: Dekker f64 emulation (good precision, fast)
 var options = new WebGPUBackendOptions();
 
-// Ozaki f64 emulation (strict IEEE 754)
-var options = new WebGPUBackendOptions { F64Emulation = F64EmulationMode.Ozaki };
+// Ieee f64 emulation (every operation bit-identical to .NET)
+var options = new WebGPUBackendOptions { F64Emulation = F64EmulationMode.Ieee };
 
 // Disable f64 emulation (double → float, max performance)
 var options = new WebGPUBackendOptions { F64Emulation = F64EmulationMode.Disabled };
@@ -219,8 +219,8 @@ using SpawnDev.ILGPU.WebGL.Backend;
 // Default: Dekker f64 emulation
 var options = new WebGLBackendOptions();
 
-// Ozaki f64 emulation (strict IEEE 754)
-var options = new WebGLBackendOptions { F64Emulation = F64EmulationMode.Ozaki };
+// Ieee f64 emulation (every operation bit-identical to .NET)
+var options = new WebGLBackendOptions { F64Emulation = F64EmulationMode.Ieee };
 
 using var accelerator = devices[0].CreateAccelerator(context, options);
 ```
@@ -368,13 +368,17 @@ GPU hardware typically supports only 32-bit operations. Both GPU backends provid
 
 **f64 emulation** (`double`) is configurable via `F64EmulationMode`:
 
-| | **Dekker** (Default) | **Ozaki** | **Disabled** |
-|---|---|---|---|
-| **Representation** | `vec2<f32>` (high + low) | `vec4<f32>` (quad-float) | Native `f32` |
-| **Precision** | ~48–53 bits mantissa | Strict IEEE 754 | 32-bit only |
-| **Memory** | 8 bytes | 16 bytes | 4 bytes |
-| **Performance** | ⚡ Fast | 🐢 ~2× slower | ⚡⚡ Fastest |
-| **Best for** | General compute, fractals | Scientific, financial | Rendering, max perf |
+| | **Dekker** (Default) | **Ieee** | **Ozaki** | **Disabled** |
+|---|---|---|---|---|
+| **Representation** | `vec2<f32>` (high + low) | IEEE-754 bit pattern (WGSL `vec2<u32>`, GLSL struct) | `vec4<f32>` (quad-float) | Native `f32` |
+| **Precision** | ~48–53 bits mantissa | binary64, every operation rounded like .NET (bit-identical) | ~96 bits between operations, rounded to double on stores | 32-bit only |
+| **Memory** | 8 bytes | 8 bytes | 16 bytes | 4 bytes |
+| **Performance** | ⚡ Fast | 🐢 Slowest (integer arithmetic) | 🐢 ~2× slower than Dekker | ⚡⚡ Fastest |
+| **Best for** | General compute, fractals | Results that must match CPU / CUDA / .NET exactly (codecs, reproducible encoders) | Extra precision | Rendering, max perf |
+
+Ieee covers + - * /, Sqrt, `%`, Math.IEEERemainder, Math.FusedMultiplyAdd (one rounding), Floor / Ceiling / Truncate /
+Round, conversions, comparisons and Min / Max. Transcendentals (Sin, Exp, Log, Pow, ...) are evaluated in f32 in every
+emulated mode.
 
 ### Configuration Examples
 
@@ -384,8 +388,8 @@ using SpawnDev.ILGPU;
 // Default: Dekker double-float emulation
 var options = new WebGPUBackendOptions();
 
-// Strict IEEE 754 precision
-var options = new WebGPUBackendOptions { F64Emulation = F64EmulationMode.Ozaki };
+// Every operation bit-identical to .NET
+var options = new WebGPUBackendOptions { F64Emulation = F64EmulationMode.Ieee };
 
 // Disable f64 emulation (double promoted to float, max performance)
 var options = new WebGPUBackendOptions { F64Emulation = F64EmulationMode.Disabled };

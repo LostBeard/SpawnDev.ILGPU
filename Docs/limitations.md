@@ -104,7 +104,8 @@ WGSL and GLSL natively support 32-bit floats (`f32` / `float`). Using `float` an
 `double` is **not natively supported** on most GPU hardware. Both GPU backends provide software emulation, controlled by `F64EmulationMode`:
 
 - **Dekker** (default): `vec2<f32>` — ~48–53 bits mantissa, fast
-- **Ozaki**: `vec4<f32>` — full IEEE 754, ~2x slower
+- **Ieee**: the IEEE-754 bit pattern in integer arithmetic — every operation bit-identical to .NET (+ - * / Sqrt % IEEERemainder FusedMultiplyAdd, rounding, conversions, compares), slowest
+- **Ozaki**: `vec4<f32>` — ~96 bits between operations, rounded to double only on stores (so register-resident chains differ from .NET), ~2x slower than Dekker
 - **Disabled**: `double` promoted to `float` — max performance, loses precision
 
 Emulated doubles work well for many use cases (fractals, scientific compute) but have performance overhead. For rendering and visual applications, use `F64EmulationMode.Disabled`.

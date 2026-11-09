@@ -63,6 +63,9 @@ All three browser backends (WebGPU + WebGL + Wasm) implement the same async surf
 - **`UniqueAsync(...)` &rarr; Task&lt;...&gt;** - async form of `Unique` (ends in a readback of the result length).
 - **Kernel dispatch has no async form.** Launching a kernel is fire-and-forget on every backend (the launch returns once the dispatch is recorded or queued); wait with `SynchronizeAsync()` or read the result with `CopyToHostAsync()`.
 
+### Awaitable kernel loads
+- **`LoadAutoGroupedStreamKernelAsync<TIndex, T1..T14>(action)` / `LoadStreamKernelAsync<T1..T14>(action)` &rarr; Task&lt;launcher&gt;** (5.4.19+) - the same launcher delegates as `LoadAutoGroupedStreamKernel` / `LoadStreamKernel`. Compiling a kernel (IL &rarr; shader) is synchronous and, in a non-AOT Blazor app, takes tens to hundreds of ms per kernel on the page's only thread; a library that loads dozens of kernels at start-up froze its page for 30-104 s (measured: a DeformConv-size kernel, 489 ms of IL &rarr; WGSL plus 313 ms of pipeline creation at its first launch). The async loaders return to the browser's event loop before each compile (WebGPU, WebGL, Wasm), so the page paints and handles input between kernels, and on WebGPU they build an auto-grouped kernel's pipeline with `createComputePipelineAsync` during the load instead of synchronously at the first launch. On the desktop backends they complete once the kernel is compiled. Load lazily and `await` each one; do not add your own `Task.Delay` yields. An explicitly grouped kernel's pipeline still compiles at its first launch (its group size is known only then) - use `WebGPUAccelerator.PrecompileAsync(kernel, groupDim)` for those.
+
 ### Codegen / debug / canvas / present
 - **`BeginCodeGenerationAsync()` &rarr; Task&lt;...&gt;** - async kernel code generation.
 - **`DisassembleAsync()` &rarr; Task&lt;string&gt;** - async kernel disassembly (debug).

@@ -214,7 +214,7 @@ The Wasm backend uses all cores through a `SharedArrayBuffer`, which needs a cro
 | **QR codes** | A dependency-free QR encoder, decoder and GPU renderer with logo overlay. [Docs/qr-codes.md](Docs/qr-codes.md) |
 | **Utilities** | `GpuMatrix4x4` (a .NET `Matrix4x4` that transposes itself for the GPU, with `TransformPoint` and `TransformDirection` inside kernels), `WebGPUBufferAccounting`, and `WebGPUBackend.VerboseLogging` (also on `WebGLBackend` and `WasmBackend`, off by default). |
 
-On WebGPU and WebGL, `long` is always emulated as two 32-bit words. `double` is configurable through `WebGPUBackendOptions.F64Emulation`: **Dekker** (the default, `vec2<f32>`, about 48 to 53 bits of mantissa), **Ozaki** (`vec4<f32>`, strict IEEE-754, about 2x slower) or **Disabled** (plain `float`, fastest).
+On WebGPU and WebGL, `long` is always emulated as two 32-bit words. `double` is configurable through `WebGPUBackendOptions.F64Emulation` (and `WebGLBackendOptions`): **Dekker** (the default, `vec2<f32>`, about 48 to 53 bits of mantissa), **Ieee** (the IEEE-754 bit pattern in integer arithmetic: every operation bit-identical to .NET, the slowest), **Ozaki** (`vec4<f32>` quad-float, about 96 bits between operations, rounded to double only when stored) or **Disabled** (plain `float`, fastest). Kernels can also be loaded with `await accelerator.LoadAutoGroupedStreamKernelAsync(...)`, which keeps a browser page responsive while many kernels compile (see [async](Docs/async.md#awaitable-kernel-loads)).
 
 ## How it works
 

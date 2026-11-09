@@ -23,7 +23,7 @@ using SpawnDev.ILGPU;
 | `builder.WebGL()` | `Task` | Enables WebGL backend only (async probe — `await` it) |
 | `builder.Wasm()` | `Builder` | Enables Wasm backend only (synchronous — chainable) |
 | `context.CreatePreferredAcceleratorAsync()` | `Task<Accelerator>` | Creates the best available accelerator (browser: WebGPU > WebGL > Wasm; desktop: CUDA > discrete OpenCL GPU > integrated OpenCL GPU > other OpenCL > Velocity > CPU) |
-| `context.CreatePreferredAcceleratorAsync(requirements)` | `Task<Accelerator>` | Same, restricted to devices that satisfy an `AcceleratorRequirements`; configures Ozaki f64 on WebGPU/WebGL for `RequiresFloat64Strict`. Throws `NotSupportedException` when nothing fits |
+| `context.CreatePreferredAcceleratorAsync(requirements)` | `Task<Accelerator>` | Same, restricted to devices that satisfy an `AcceleratorRequirements`; configures Ieee f64 on WebGPU/WebGL for `RequiresFloat64Strict`. Throws `NotSupportedException` when nothing fits |
 | `context.CreatePreferredAccelerator(requirements)` | `Accelerator` | Synchronous form (desktop; throws in the browser when WebGPU or Wasm is the pick, as those are async-only to create) |
 | `context.EnumerateCompatibleDevices(requirements)` | `IReadOnlyList<Device>` | Every device that satisfies the requirements, context order |
 | `device.Satisfies(requirements)` | `bool` | Per-device requirement check |
@@ -312,7 +312,7 @@ Configuration for the WebGPU transpiler.
 
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
-| `F64Emulation` | `F64EmulationMode` | `Dekker` | How to emulate `double`: `Dekker` (`vec2<f32>`, fast), `Ozaki` (`vec4<f32>`, precise), or `Disabled` |
+| `F64Emulation` | `F64EmulationMode` | `Dekker` | How to emulate `double`: `Dekker` (`vec2<f32>`, fast), `Ieee` (bit-identical to .NET, slowest), `Ozaki` (`vec4<f32>`, ~96 bits between operations), or `Disabled` |
 | `ForceDisableSubgroups` | `bool` | `false` | Force-disable subgroup features even when the adapter exposes them |
 
 (There is no i64 emulation toggle — `long`/`ulong` are always emulated as `vec2<u32>` on WebGPU.)
@@ -370,7 +370,7 @@ GLSL ES 3.0 transpiler backend.
 
 | Property | Type | Default | Description |
 |----------|------|---------|-------------|
-| `F64Emulation` | `F64EmulationMode` | `Dekker` | How to emulate `double`: `Dekker`, `Ozaki` or `Disabled` (as on WebGPU) |
+| `F64Emulation` | `F64EmulationMode` | `Dekker` | How to emulate `double`: `Dekker`, `Ieee`, `Ozaki` or `Disabled` (as on WebGPU) |
 
 (`long`/`ulong` are always emulated on WebGL; there is no toggle.)
 

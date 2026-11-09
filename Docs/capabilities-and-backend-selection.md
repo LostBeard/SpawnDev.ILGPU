@@ -65,7 +65,7 @@ Every flag below is `bool`, defaults to `false` (no requirement), and can be set
 | `RequiresPacked4Store` | WebGL, CPU | Your kernel STORES into a packed 4-bit view (`Float4E2M1` / `QInt4` / `QUInt4`) or radix-sorts one. A nibble store is an atomic RMW of its 32-bit word: WebGL has no atomics, and the CPU backend's managed indexer cannot address a sub-byte element. Both fail loud at compile time; this flag filters them at selection instead. |
 | `RequiresFloat64` | (none — every backend supports it) | Documentation that you use `double`. Filter is a no-op. |
 | `RequiresFloat64Native` | WebGPU, WebGL (emulate via Dekker) | Numerics where exact IEEE 754 matters or Dekker overhead is unacceptable |
-| `RequiresFloat64Strict` | (none — every backend can satisfy it) | Strict IEEE 754 f64 semantics. Native-f64 backends always satisfy; WebGPU/WebGL are auto-configured to Ozaki by `CreatePreferredAcceleratorAsync`. See "Strict IEEE 754 f64" section below. |
+| `RequiresFloat64Strict` | (none — every backend can satisfy it) | Strict IEEE 754 f64 semantics. Native-f64 backends always satisfy; WebGPU/WebGL are auto-configured to `F64EmulationMode.Ieee` (bit-identical to .NET) by `CreatePreferredAcceleratorAsync`. See "Strict IEEE 754 f64" section below. |
 | `RequiresInt64` | (none — every backend supports it) | Documentation. WebGPU/WebGL emulate via vec2&lt;u32&gt;. |
 | `RequiresInt64Native` | WebGPU, WebGL | Performance-critical i64/u64 kernels |
 | `RequiresInt64Atomics` | WebGL; OpenCL without `cl_khr_int64_base_atomics` | `Atomic.Add(ref long, ...)` and friends |
@@ -220,7 +220,7 @@ catch (UnsupportedKernelFeatureException ex)
 | Flag | What it filters | What it configures |
 |---|---|---|
 | `RequiresFloat64Native` | Rules out WebGPU + WebGL because they don't have hardware f64. Routes to CPU / CUDA / OpenCL / Wasm only. | Nothing — picks a backend that already has the feature. |
-| `RequiresFloat64Strict` | Rules out nothing. Every backend can produce IEEE 754 f64 — natively on CPU/CUDA/OpenCL/Wasm, via Ozaki emulation on WebGPU/WebGL. | Sets `F64Emulation = Ozaki` on browser-backend accelerators when `CreatePreferredAcceleratorAsync` picks one. |
+| `RequiresFloat64Strict` | Rules out nothing. Every backend can produce IEEE 754 f64 — natively on CPU/CUDA/OpenCL/Wasm, via the Ieee emulation on WebGPU/WebGL. | Sets `F64Emulation = Ieee` on browser-backend accelerators when `CreatePreferredAcceleratorAsync` picks one. |
 
 Use `Float64Strict` when you care about the **mathematical semantics** (full 53-bit IEEE 754) and the runtime should pick the right path; use `Float64Native` when you specifically want **hardware f64** for performance and are willing to skip WebGPU and WebGL (Wasm has native f64 and stays eligible).
 
@@ -234,7 +234,7 @@ using ILGPU.Runtime;
 
 using var context = await Context.CreateAsync(builder => builder.AllAcceleratorsAsync());
 
-// On browser: WebGPU is auto-configured for Ozaki (vec4<f32> emulation).
+// On browser: WebGPU / WebGL are auto-configured for Ieee (binary64 in integer arithmetic).
 // On desktop: routes to CPU/CUDA/OpenCL/Wasm (always strict).
 using var accelerator = await context.CreatePreferredAcceleratorAsync(
     new AcceleratorRequirements { RequiresFloat64Strict = true });
@@ -252,8 +252,8 @@ using SpawnDev.ILGPU.WebGPU;
 
 WebGPUAccelerator accelerator = ...;
 
-// Promote to strict for the next compile:
-accelerator.F64Mode = F64EmulationMode.Ozaki;
+// Promote to strict (bit-identical to .NET) for the next compile:
+accelerator.F64Mode = F64EmulationMode.Ieee;
 
 // Drop back to fast Dekker mode for everyday work:
 accelerator.F64Mode = F64EmulationMode.Dekker;
