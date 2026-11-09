@@ -358,6 +358,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         private static readonly ConditionalWeakTable<WebGPUAccelerator, ByteKernels> s_byteKernels = new();
 
+        /// <summary>
+        /// Compiles the byte kernels into the accelerator's kernel cache and builds their pipelines asynchronously, so the
+        /// first unaligned MemSet / copy (both synchronous APIs) finds them compiled. Without it that first call compiled a
+        /// kernel synchronously on the page thread (SpawnDev.Codecs' sync-compile guard: one compile at the first unaligned
+        /// MemSetToZero after every codec had warmed up; Geordi 2026-11-09). Called by <see cref="WebGPUAccelerator.CreateAsync"/>.
+        /// </summary>
+        internal static Task PreloadByteKernelsAsync(WebGPUAccelerator accelerator) => Task.WhenAll(
+            accelerator.PrecompileAutoGroupedAsync((Action<Index1D, ArrayView<byte>, ArrayView<byte>>)CopyBytesKernel),
+            accelerator.PrecompileAutoGroupedAsync((Action<Index1D, ArrayView<byte>, int>)FillBytesKernel));
+
         private static void CopyBytes(WebGPUAccelerator accelerator, AcceleratorStream stream, ArrayView<byte> source, ArrayView<byte> target)
         {
             if (target.Length == 0) return;

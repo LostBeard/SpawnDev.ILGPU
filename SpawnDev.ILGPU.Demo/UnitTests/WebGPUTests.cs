@@ -51,6 +51,36 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         /// <summary>
         /// Test WebGPU accelerator basic initialization (uses WebGPU-specific APIs)
         /// </summary>
+        // The byte kernels behind an unaligned MemSet / device copy are compiled by CreateAsync (5.4.21). Before, the first
+        // unaligned call (both are synchronous APIs) compiled one on the page thread: SpawnDev.Codecs' sync-compile guard
+        // saw it at the first unaligned MemSetToZero after every codec had warmed up (Geordi, 2026-11-09).
+        [TestMethod]
+        public async Task UnalignedMemSetAndCopy_CompileNothingAfterCreate() => await RunTest(async accelerator =>
+        {
+            var pattern = new byte[64];
+            for (int i = 0; i < pattern.Length; i++) pattern[i] = (byte)(i * 7 + 1);
+            using var a = accelerator.Allocate1D(pattern);
+            using var b = accelerator.Allocate1D(pattern);
+            long before = accelerator.CompiledKernelCount;
+            a.View.SubView(1, 6).MemSetToZero();
+            a.View.SubView(9, 5).MemSet(0x5A);
+            b.View.SubView(3, 9).CopyFrom(a.View.SubView(1, 9));
+            await accelerator.SynchronizeAsync();
+            long compiled = accelerator.CompiledKernelCount - before;
+            if (compiled != 0)
+                throw new Exception($"{compiled} kernel(s) compiled by an unaligned MemSet / copy after the accelerator was created");
+            var wantA = (byte[])pattern.Clone();
+            for (int i = 1; i < 7; i++) wantA[i] = 0;
+            for (int i = 9; i < 14; i++) wantA[i] = 0x5A;
+            var wantB = (byte[])pattern.Clone();
+            Array.Copy(wantA, 1, wantB, 3, 9);
+            var gotA = await a.View.CopyToHostAsync();
+            var gotB = await b.View.CopyToHostAsync();
+            for (int i = 0; i < pattern.Length; i++)
+                if (gotA[i] != wantA[i] || gotB[i] != wantB[i])
+                    throw new Exception($"[{i}] a {gotA[i]} (want {wantA[i]}), b {gotB[i]} (want {wantB[i]})");
+        });
+
         [TestMethod]
         public async Task WebGPUAcceleratorBasicTest()
         {

@@ -912,6 +912,11 @@ namespace SpawnDev.ILGPU.WebGPU
             else
                 if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log("[WebGPU] No optional features detected");
 
+            // The byte kernels behind an unaligned MemSet / copy: compiled here, while the caller awaits anyway, instead of
+            // synchronously on the page thread at the first unaligned call. (CreateFromExternalDevice is synchronous and
+            // keeps the load at first use.)
+            await WebGPUMemoryBuffer.PreloadByteKernelsAsync(accelerator);
+
             return accelerator;
         }
 
