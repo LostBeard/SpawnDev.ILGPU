@@ -255,7 +255,7 @@ namespace ILGPU.Runtime.OpenCL
         /// <summary>
         /// Extensions for Khronos subgroup shuffle (sub_group_shuffle, sub_group_shuffle_up/down/xor).
         /// </summary>
-                internal static readonly ImmutableArray<string> SubGroupShuffleExtensions =
+        internal static readonly ImmutableArray<string> SubGroupShuffleExtensions =
             ImmutableArray.Create(
                 "cl_khr_subgroup_shuffle",
                 "cl_khr_subgroup_shuffle_relative");
