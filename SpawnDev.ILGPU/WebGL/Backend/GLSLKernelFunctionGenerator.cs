@@ -835,7 +835,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             return ResolveToParamAndFieldStaticInner(value, -1);
         }
 
-        private static (global::ILGPU.IR.Values.Parameter? Param, int FieldIndex) ResolveToParamAndFieldStaticInner(Value value, int pendingFieldIdx)
+        private static (global::ILGPU.IR.Values.Parameter? Param, int FieldIndex) ResolveToParamAndFieldStaticInner(Value value, int pendingFieldIdx, HashSet<Value>? visitedPhis = null)
         {
             if (value is global::ILGPU.IR.Values.Parameter p) return (p, pendingFieldIdx);
             if (value is GetField gf)
@@ -843,24 +843,27 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 // First GetField encountered captures the field index. Walking through
                 // a body-struct view field is exactly one GetField step above the LEA.
                 int captured = pendingFieldIdx >= 0 ? pendingFieldIdx : gf.FieldSpan.Index;
-                return ResolveToParamAndFieldStaticInner(gf.ObjectValue, captured);
+                return ResolveToParamAndFieldStaticInner(gf.ObjectValue, captured, visitedPhis);
             }
-            if (value is global::ILGPU.IR.Values.Load load) return ResolveToParamAndFieldStaticInner(load.Source, pendingFieldIdx);
-            if (value is LoadElementAddress lea) return ResolveToParamAndFieldStaticInner(lea.Source, pendingFieldIdx);
-            if (value is LoadFieldAddress lfa) return ResolveToParamAndFieldStaticInner(lfa.Source, pendingFieldIdx);
-            if (value is NewView nv) return ResolveToParamAndFieldStaticInner(nv.Pointer, pendingFieldIdx);
-            if (value is AddressSpaceCast asc) return ResolveToParamAndFieldStaticInner(asc.Value, pendingFieldIdx);
-            if (value is SubViewValue sv) return ResolveToParamAndFieldStaticInner(sv.Source, pendingFieldIdx);
+            if (value is global::ILGPU.IR.Values.Load load) return ResolveToParamAndFieldStaticInner(load.Source, pendingFieldIdx, visitedPhis);
+            if (value is LoadElementAddress lea) return ResolveToParamAndFieldStaticInner(lea.Source, pendingFieldIdx, visitedPhis);
+            if (value is LoadFieldAddress lfa) return ResolveToParamAndFieldStaticInner(lfa.Source, pendingFieldIdx, visitedPhis);
+            if (value is NewView nv) return ResolveToParamAndFieldStaticInner(nv.Pointer, pendingFieldIdx, visitedPhis);
+            if (value is AddressSpaceCast asc) return ResolveToParamAndFieldStaticInner(asc.Value, pendingFieldIdx, visitedPhis);
+            if (value is SubViewValue sv) return ResolveToParamAndFieldStaticInner(sv.Source, pendingFieldIdx, visitedPhis);
             // AsAligned/AlignTo are compile-time alignment hints — the runtime view is the source,
             // so trace through to the underlying view/param (else a `view.AsAligned16()[i]` load never
             // resolves to its param → the param isn't classified as an input buffer / no sampler).
-            if (value is global::ILGPU.IR.Values.BaseAlignOperationValue align) return ResolveToParamAndFieldStaticInner(align.Source, pendingFieldIdx);
-            if (value is ConvertValue cv) return ResolveToParamAndFieldStaticInner(cv.Value, pendingFieldIdx);
+            if (value is global::ILGPU.IR.Values.BaseAlignOperationValue align) return ResolveToParamAndFieldStaticInner(align.Source, pendingFieldIdx, visitedPhis);
+            if (value is ConvertValue cv) return ResolveToParamAndFieldStaticInner(cv.Value, pendingFieldIdx, visitedPhis);
             if (value is PhiValue phi)
             {
+                // a loop-carried view phi reaches itself (directly or through other phis): visit each phi once
+                visitedPhis ??= new HashSet<Value>();
+                if (!visitedPhis.Add(phi)) return (null, -1);
                 for (int i = 0; i < phi.Count; i++)
                 {
-                    var (paramX, fldX) = ResolveToParamAndFieldStaticInner(phi[i], pendingFieldIdx);
+                    var (paramX, fldX) = ResolveToParamAndFieldStaticInner(phi[i], pendingFieldIdx, visitedPhis);
                     if (paramX != null) return (paramX, fldX);
                 }
             }
@@ -871,29 +874,32 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// Static version of ResolveToParameter that doesn't depend on code gen state.
         /// Used during pre-scan analysis before code generation starts.
         /// </summary>
-        private static global::ILGPU.IR.Values.Parameter? ResolveToParameterStatic(Value value)
+        private static global::ILGPU.IR.Values.Parameter? ResolveToParameterStatic(Value value, HashSet<Value>? visitedPhis = null)
         {
             if (value is global::ILGPU.IR.Values.Parameter p) return p;
-            if (value is GetField gf) return ResolveToParameterStatic(gf.ObjectValue);
-            if (value is global::ILGPU.IR.Values.Load load) return ResolveToParameterStatic(load.Source);
-            if (value is LoadElementAddress lea) return ResolveToParameterStatic(lea.Source);
-            if (value is LoadFieldAddress lfa) return ResolveToParameterStatic(lfa.Source);
+            if (value is GetField gf) return ResolveToParameterStatic(gf.ObjectValue, visitedPhis);
+            if (value is global::ILGPU.IR.Values.Load load) return ResolveToParameterStatic(load.Source, visitedPhis);
+            if (value is LoadElementAddress lea) return ResolveToParameterStatic(lea.Source, visitedPhis);
+            if (value is LoadFieldAddress lfa) return ResolveToParameterStatic(lfa.Source, visitedPhis);
             // NewView creates a view from a pointer — trace through to the source
-            if (value is NewView nv) return ResolveToParameterStatic(nv.Pointer);
+            if (value is NewView nv) return ResolveToParameterStatic(nv.Pointer, visitedPhis);
             // AddressSpaceCast changes address space — trace through
-            if (value is AddressSpaceCast asc) return ResolveToParameterStatic(asc.Value);
+            if (value is AddressSpaceCast asc) return ResolveToParameterStatic(asc.Value, visitedPhis);
             // SubViewValue creates a sub-range — trace the source view
-            if (value is SubViewValue sv) return ResolveToParameterStatic(sv.Source);
+            if (value is SubViewValue sv) return ResolveToParameterStatic(sv.Source, visitedPhis);
             // AsAligned/AlignTo are compile-time alignment hints — trace through to the source view
-            if (value is global::ILGPU.IR.Values.BaseAlignOperationValue align) return ResolveToParameterStatic(align.Source);
+            if (value is global::ILGPU.IR.Values.BaseAlignOperationValue align) return ResolveToParameterStatic(align.Source, visitedPhis);
             // ConvertValue (pointer/view casts) — trace through
-            if (value is ConvertValue cv) return ResolveToParameterStatic(cv.Value);
+            if (value is ConvertValue cv) return ResolveToParameterStatic(cv.Value, visitedPhis);
             if (value is PhiValue phi)
             {
+                // a loop-carried view phi reaches itself (directly or through other phis): visit each phi once
+                visitedPhis ??= new HashSet<Value>();
+                if (!visitedPhis.Add(phi)) return null;
                 // For phi nodes, check all source values — if any traces to a buffer param, include it
                 for (int i = 0; i < phi.Count; i++)
                 {
-                    var result = ResolveToParameterStatic(phi[i]);
+                    var result = ResolveToParameterStatic(phi[i], visitedPhis);
                     if (result != null) return result;
                 }
             }
@@ -4594,7 +4600,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
         }
 
-        private global::ILGPU.IR.Values.Parameter? ResolveToParameter(Value value)
+        private global::ILGPU.IR.Values.Parameter? ResolveToParameter(Value value, HashSet<Value>? visitedPhis = null)
         {
             if (value is global::ILGPU.IR.Values.Parameter p)
             {
@@ -4607,32 +4613,35 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 return p;
             }
 
-            if (value is GetField gf) return ResolveToParameter(gf.ObjectValue);
-            if (value is global::ILGPU.IR.Values.Load load) return ResolveToParameter(load.Source);
-            if (value is LoadElementAddress lea) return ResolveToParameter(lea.Source);
-            if (value is LoadFieldAddress lfa) return ResolveToParameter(lfa.Source);
+            if (value is GetField gf) return ResolveToParameter(gf.ObjectValue, visitedPhis);
+            if (value is global::ILGPU.IR.Values.Load load) return ResolveToParameter(load.Source, visitedPhis);
+            if (value is LoadElementAddress lea) return ResolveToParameter(lea.Source, visitedPhis);
+            if (value is LoadFieldAddress lfa) return ResolveToParameter(lfa.Source, visitedPhis);
             // NewView creates a view from a pointer — trace through to the source.
             // Without this, `view.Length` on an ArrayView1D parameter fails to resolve
             // to its kernel parameter (since BaseView access lowers through NewView)
             // and the GLSL codegen falls back to emitting 0 for the length, which
             // silently breaks every runtime bounds check (`idx < view.Length`) — the
             // gather/scatter/anything-with-bounds-check then returns the typed default.
-            if (value is NewView nv) return ResolveToParameter(nv.Pointer);
+            if (value is NewView nv) return ResolveToParameter(nv.Pointer, visitedPhis);
             // AddressSpaceCast changes address space — trace through.
-            if (value is AddressSpaceCast asc) return ResolveToParameter(asc.Value);
+            if (value is AddressSpaceCast asc) return ResolveToParameter(asc.Value, visitedPhis);
             // SubViewValue creates a sub-range — trace the source view.
-            if (value is SubViewValue sv) return ResolveToParameter(sv.Source);
+            if (value is SubViewValue sv) return ResolveToParameter(sv.Source, visitedPhis);
             // AsAligned/AlignTo are compile-time alignment hints — trace through to the source view
             // (else `view.AsAligned16()[i]`'s LEA never resolves to its param and falls to the
             // generic-LEA fallback that emits invalid GLSL for a struct-element load).
-            if (value is global::ILGPU.IR.Values.BaseAlignOperationValue align) return ResolveToParameter(align.Source);
+            if (value is global::ILGPU.IR.Values.BaseAlignOperationValue align) return ResolveToParameter(align.Source, visitedPhis);
             // ConvertValue (pointer/view casts) — trace through.
-            if (value is ConvertValue cv) return ResolveToParameter(cv.Value);
+            if (value is ConvertValue cv) return ResolveToParameter(cv.Value, visitedPhis);
             if (value is PhiValue phi)
             {
+                // a loop-carried view phi reaches itself (directly or through other phis): visit each phi once
+                visitedPhis ??= new HashSet<Value>();
+                if (!visitedPhis.Add(phi)) return null;
                 for (int i = 0; i < phi.Count; i++)
                 {
-                    var result = ResolveToParameter(phi[i]);
+                    var result = ResolveToParameter(phi[i], visitedPhis);
                     if (result != null) return result;
                 }
             }

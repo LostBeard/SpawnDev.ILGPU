@@ -761,6 +761,16 @@ namespace ILGPU.Backends
                 // If we already have an internal compiler exception, re-throw it.
                 throw;
             }
+            catch (AggregateException aggregate)
+                when (FirstNotSupported(aggregate) is not null)
+            {
+                // The same deliberate exception thrown inside a parallel step (helper functions are generated with
+                // Parallel.For in CodeGeneratorBackend): it arrived as an AggregateException and was wrapped in an
+                // InternalCompilerException, so catch (UnsupportedKernelFeatureException) missed it (VP9 ParseKernel,
+                // 2026-11-09). Rethrow the inner exception with its own stack trace.
+                System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(FirstNotSupported(aggregate)!).Throw();
+                throw;
+            }
             catch (NotSupportedException)
             {
                 // A deliberate "this kernel cannot run on this backend" (SpawnDev's
@@ -781,6 +791,15 @@ namespace ILGPU.Backends
             {
                 System.Globalization.CultureInfo.CurrentCulture = callerCulture;
             }
+        }
+
+        /// <summary>The first <see cref="NotSupportedException"/> inside a (nested) aggregate, or null.</summary>
+        private static NotSupportedException? FirstNotSupported(AggregateException aggregate)
+        {
+            foreach (var inner in aggregate.Flatten().InnerExceptions)
+                if (inner is NotSupportedException notSupported)
+                    return notSupported;
+            return null;
         }
 
         /// <summary>
