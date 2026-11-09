@@ -21,6 +21,10 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   compiled-kernel cache was keyed by entry point and specialization only; it now includes the backend's new
   `Backend.KernelCacheVariant` (the f64 mode on WebGPU / WebGL, 0 elsewhere). `F64EmulationScope_ModePerLoad_IndependentOfInterleavedLoads`.
 - DemoConsole `ptx-dump [O0|O1|O2] [file] [divpack]` dumps this kernel's PTX offline.
+- Release sweep (RTX 4070, all lanes, default exclusions, code = 5.4.20-local.1 d0e8ae6): **7,881 cases, 7,247 passed,
+  634 skipped, 0 failed, 45.8 min** (5.4.19: 53.1 min, 7,235 passed). Known, for 5.4.21: SpawnDev.ILGPU.ML CUDA short
+  prefill is ~15% slower than on 5.4.18 since 5.4.19 (Tuvok; LibDevice now found under CUDA 13, or the per-edge phi
+  binding - being split).
 
 ## 5.4.19 (forks 2.4.18) - 2026-11-08 - CUDA nested-loop miscompile fixed; awaitable kernel loads; F64EmulationMode.Ieee (bit-exact double on WebGPU and WebGL); WebGL loop-continue fix; CUDA 13 LibDevice
 
