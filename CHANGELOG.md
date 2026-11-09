@@ -59,6 +59,9 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   red-check fails on all four, which timing the browser task could not show on WebGL).
 - Diagnostics in DemoConsole: `ptx-dump [O0|O1|O2] [file]` (offline PTX, no device), `ptx-variant-run` (a kernel's PTX as
   generated vs edited, on CUDA), `ieee-wgsl <dir>` (WGSL + GLSL of the f64 test kernels in each mode, for naga / ANGLE).
+- Release sweeps (RTX 4070, all lanes, default exclusions): the first (826a9b8) 7,225 passed / 10 failed - the six CUDA
+  LibDevice failures and four async-load test flaws above, all fixed; the second (code = 9b636bd) **7,863 cases, 7,235
+  passed, 628 skipped, 0 failed, 53.1 min** (5.4.18: 52.6 min, 7,197 passed; the 55 new cases are this release's tests).
 
 ## 5.4.18 (forks 2.4.17) - 2026-11-08 - float math rounds like .NET on every backend; exact FusedMultiplyAdd; MultiplyAddEstimate; WebGL floor/int in loop nests
 
