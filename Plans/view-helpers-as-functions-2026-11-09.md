@@ -74,3 +74,22 @@ Cross-binding view choice (still unsupported on WebGPU / WebGL - documented, typ
   length param; one function per distinct binding element type (plain / `array<atomic<u32>>` sub-word / emu i64); then
   enable the flag for WebGPU. Gate = `ViewHelper_ManyCallSitesWithSubViews_MatchesHost` (all lanes) + a size test
   (16 call sites <= ~1.5x one call site in WGSL lines) + naga over the whole suite + Codecs VP9 size table.
+
+## Code map for Phase 3 (WGSL), read 2026-11-09 07:00
+
+- Existing fn-def view ABI = "direct-param coalesce": `WGSLKernelFunctionGenerator.ScanCallSiteAddressSpacesInternal`
+  (~line 490-560) stages `HelperParamCoalesceEntry` per (callee, argIdx) when the argument resolves
+  (`ResolveToParameter`) to a kernel parameter in a coalesce group; `WGSLFunctionGenerator.GenerateHeaderStub` (~250)
+  emits `p_<id>_leader : ptr<storage, array<T>, rw>` once per group + `p_<id>_offset : i32` per member;
+  `EmitNonInlinedMethodCall` (~3450) passes `&<binding>` + `i32(_scalar_params[slot])` (the kernel parameter's BASE
+  offset slot). Non-coalesced view args are passed as their Variable (the whole binding pointer).
+- Gaps vs the plan: (1) a SubView computed in the kernel (`a.SubView(c * 64, 64)`) has a runtime offset that is NOT
+  added - only the parameter's base slot; (2) no length parameter (`GetViewLength` in the body -> `arrayLength(&p)`
+  on a pointer: invalid, and wrong for a sub-view anyway); (3) helper bodies reference caller value names (`v_0`)
+  when the param mapping (`_paramIndexToLocalVar`, ~line 54/397-470) does not cover the case.
+- Step 1 next session: read `WGSLCodeGenerator.GenerateCode(SubViewValue)` / `GetViewLength` to see how the kernel
+  tracks a view's (binding, offset, length); then generalize the coalesce entry to EVERY parameter-origin view arg:
+  `p_<id>_leader` + `p_<id>_offset` (+ `p_<id>_len` when the body reads the length), call site passes
+  base slot + sub-view offset expression + length expression; body LEA = `(*leader)[offset + idx]`.
+- Test kernel + gate already in master: `ViewHelper_ManyCallSitesWithSubViews_MatchesHost` (cca264d, 11/0 with inlining);
+  flag `keepGlobalViewCalls` (8825b01, off). Offline probe: scratchpad vhprobe/vhprobe.cs (+ naga).
