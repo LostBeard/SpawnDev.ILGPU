@@ -3053,7 +3053,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     return;
                 }
                 var parts = F64ConstantComponents(value.Float64Value, Backend.UseOzakiF64Emulation);
-                AppendLine($"{target} = vec{parts.Length}({string.Join(", ", parts.Select(f => $"uintBitsToFloat({BitConverter.SingleToUInt32Bits(f)}u)"))});");
+                // a -0 component (the hi part of -0.0) as a value ANGLE cannot fold: uintBitsToFloat(0x80000000u) came out +0
+                AppendLine($"{target} = vec{parts.Length}({string.Join(", ", parts.Select(f => BitConverter.SingleToUInt32Bits(f) == 0x80000000u ? "uintBitsToFloat(2147483648u | uint(gl_VertexID >> 31))" : $"uintBitsToFloat({BitConverter.SingleToUInt32Bits(f)}u)"))});");
                 return;
             }
 
@@ -3114,7 +3115,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (float.IsPositiveInfinity(value)) return "uintBitsToFloat(0x7F800000u)";
             if (float.IsNegativeInfinity(value)) return "uintBitsToFloat(0xFF800000u)";
             if (float.IsNaN(value)) return "uintBitsToFloat(0x7FC00000u)";
-            var str = value.ToString("G9");
+            // -0: "-0.0" (the negation of 0.0) and even uintBitsToFloat(0x80000000u) came out +0 (folded by ANGLE / D3D;
+            // Tuvok 2026-11-09) - OR in a value the compiler cannot prove zero, as OpaqueFloat does
+            if (value == 0f && float.IsNegative(value)) return "uintBitsToFloat(0x80000000u | uint(gl_VertexID >> 31))";
+            var str = value.ToString("G9", System.Globalization.CultureInfo.InvariantCulture);
             if (!str.Contains('.') && !str.Contains('e') && !str.Contains('E'))
                 str += ".0";
             return str;

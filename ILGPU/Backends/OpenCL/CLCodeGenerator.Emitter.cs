@@ -670,8 +670,12 @@ namespace ILGPU.Backends.OpenCL
                 }
                 else
                 {
-                    stringBuilder.Append(
-                        value.ToString("G17", CultureInfo.InvariantCulture));
+                    // A whole double prints without a decimal point ("2", "-0"), which C reads as an INTEGER literal:
+                    // "-0" was the integer 0 and a -0.0 constant became +0.0. Append ".0" as the float overload does.
+                    var formattedValue = value.ToString("G17", CultureInfo.InvariantCulture);
+                    stringBuilder.Append(formattedValue);
+                    if (formattedValue.IndexOfAny(FormattedFloatLiteralTokens) == -1)
+                        stringBuilder.Append(".0");
                 }
             }
 

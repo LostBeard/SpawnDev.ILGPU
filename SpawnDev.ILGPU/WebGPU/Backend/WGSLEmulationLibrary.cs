@@ -48,6 +48,7 @@ var<private> _ilgpu_runtime_zero : u32 = 0u;
 fn _f32_pos_inf() -> f32 { return bitcast<f32>(0x7F800000u | _ilgpu_runtime_zero); }
 fn _f32_neg_inf() -> f32 { return bitcast<f32>(0xFF800000u | _ilgpu_runtime_zero); }
 fn _f32_qnan()    -> f32 { return bitcast<f32>(0x7FC00000u | _ilgpu_runtime_zero); }
+fn _f32_neg_zero() -> f32 { return bitcast<f32>(0x80000000u | _ilgpu_runtime_zero); }
 ";
 
         /// <summary>

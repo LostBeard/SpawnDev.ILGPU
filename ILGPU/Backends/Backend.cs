@@ -713,6 +713,11 @@ namespace ILGPU.Backends
             where TBackendHook : IBackendHook
         {
             System.Threading.Interlocked.Increment(ref compiledKernelCount);
+            // Code generators print numbers into shader / PTX / OpenCL source with the CURRENT culture ($"{x}",
+            // x.ToString("G9")): under de-DE 0.5f printed as "0,5", under sv-SE (ICU) -5 printed with U+2212, and the
+            // generated source did not compile. Generate under the invariant culture; the caller's is restored after.
+            var callerCulture = System.Globalization.CultureInfo.CurrentCulture;
+            System.Globalization.CultureInfo.CurrentCulture = System.Globalization.CultureInfo.InvariantCulture;
             try
             {
                 // Import the all kernel functions into our kernel context
@@ -771,6 +776,10 @@ namespace ILGPU.Backends
                 throw new InternalCompilerException(
                     ErrorMessages.InternalCompilerError,
                     e);
+            }
+            finally
+            {
+                System.Globalization.CultureInfo.CurrentCulture = callerCulture;
             }
         }
 

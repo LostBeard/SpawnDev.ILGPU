@@ -2883,7 +2883,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 return $"bitcast<f32>(0x{bits:X8}u)";
             }
 
-            var str = value.ToString("G9");
+            // -0: "-0.0" (the negation of 0.0) and even a const bitcast<f32>(0x80000000u) came out +0 (folded on the way
+            // to D3D; Tuvok 2026-11-09, measured on WebGPU) - through the runtime-zero helper like the Inf/NaN literals
+            if (value == 0f && float.IsNegative(value))
+                return "_f32_neg_zero()";
+
+            var str = value.ToString("G9", System.Globalization.CultureInfo.InvariantCulture);
             if (!str.Contains('.') && !str.Contains('e') && !str.Contains('E'))
                 str += ".0";
             return str;
@@ -5159,7 +5164,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             ? "_f32_pos_inf()"
                             : float.IsNaN(f)
                                 ? "_f32_qnan()"
-                                : f.ToString("G9") + "f",
+                                : f == 0f && float.IsNegative(f)
+                                    ? "_f32_neg_zero()"
+                                    : f.ToString("G9", System.Globalization.CultureInfo.InvariantCulture) + "f",
                     long l => LongToEmuI64(l),
                     ulong ul => ULongToEmuU64(ul),
                     double d => DoubleToEmuF64(d),
