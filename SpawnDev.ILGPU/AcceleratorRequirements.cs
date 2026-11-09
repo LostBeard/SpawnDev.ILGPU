@@ -196,6 +196,21 @@ public sealed class AcceleratorRequirements
     public bool RequiresSubGroups { get; init; }
 
     /// <summary>
+    /// Kernel calls <c>Warp.Shuffle</c> / <c>ShuffleDown</c> / <c>ShuffleUp</c> / <c>ShuffleXor</c>. Stricter than
+    /// <see cref="RequiresSubGroups"/> on OpenCL: subgroups without the shuffle extensions (<c>cl_khr_subgroup_shuffle</c>,
+    /// or Intel's <c>cl_intel_subgroups</c>) cannot compile a shuffle - NVIDIA's OpenCL is one. Rules out WebGL and WebGPU
+    /// adapters without <c>subgroups</c>. CUDA, CPU and Wasm (emulated warps) pass. Combine with
+    /// <see cref="RequiredWarpSize"/> when the kernel's lane arithmetic assumes a width (a 32-lane xor reduction).
+    /// </summary>
+    public bool RequiresWarpShuffle { get; init; }
+
+    /// <summary>
+    /// The device's warp / subgroup size must be exactly this (0 = any). CUDA reports 32; Wasm emulates 8; WebGPU and
+    /// OpenCL report what the adapter / device does (AMD is often 64, Intel 8-32, and 0 when the device does not say).
+    /// </summary>
+    public int RequiredWarpSize { get; init; }
+
+    /// <summary>
     /// Kernel writes more than one element of the same output buffer per thread, or writes to a
     /// computed/scattered output index (<c>out[someComputedIndex] = ...</c>, e.g. a per-thread
     /// loop filling several output elements, an in-place butterfly writing two slots, or any
@@ -292,8 +307,31 @@ public static class AcceleratorRequirementsExtensions
         if (requirements.RequiresInt64Native && !HasInt64Native(backend)) return false;
         if (requirements.RequiresInt64Atomics && !HasInt64Atomics(device)) return false;
         if (requirements.RequiresSubGroups && !HasSubGroups(device)) return false;
+        if (requirements.RequiresWarpShuffle && !HasWarpShuffle(device)) return false;
+        if (requirements.RequiredWarpSize > 0 && device.WarpSize != requirements.RequiredWarpSize) return false;
         if (requirements.RequiresScatterStores && !HasScatterStores(backend)) return false;
         return true;
+    }
+
+    /// <summary>
+    /// True when kernels on <paramref name="device"/> can call <c>Warp.Shuffle</c> with lanes really exchanging values
+    /// across a fixed warp of <see cref="Device.WarpSize"/> lanes (WebGL's shuffle is the identity of a 1-lane warp, and
+    /// a WebGPU accelerator without subgroups emulates a warp as the whole workgroup: both false) (and, with <paramref name="warpSize"/>
+    /// &gt; 0, the warp is exactly that wide): <see cref="AcceleratorRequirements.RequiresWarpShuffle"/> +
+    /// <see cref="AcceleratorRequirements.RequiredWarpSize"/>, without a backend type check in the consumer.
+    /// </summary>
+    public static bool SupportsWarpShuffle(this Device device, int warpSize = 0) =>
+        device.Satisfies(new AcceleratorRequirements { RequiresWarpShuffle = true, RequiredWarpSize = warpSize });
+
+    /// <inheritdoc cref="SupportsWarpShuffle(Device, int)"/>
+    public static bool SupportsWarpShuffle(this Accelerator accelerator, int warpSize = 0)
+    {
+        ArgumentNullException.ThrowIfNull(accelerator);
+        if (warpSize > 0 && accelerator.WarpSize != warpSize) return false;
+        // A WebGPU accelerator created without the subgroups feature emulates a "warp" as the whole workgroup
+        // (Warp.WarpSize = workgroup_size.x in the kernel), so there is no fixed width to promise.
+        if (accelerator is WebGPU.WebGPUAccelerator webGpu && !webGpu.Backend.HasSubgroups) return false;
+        return accelerator.Device.Satisfies(new AcceleratorRequirements { RequiresWarpShuffle = true });
     }
 
     // ──────────────────────────────────────────────────────────────────────────
@@ -426,6 +464,14 @@ public static class AcceleratorRequirementsExtensions
     // shared-memory exchange) and the CPU accelerator simulates them; both match the other backends, so they pass
     // (until 2026-10-13 both were rejected). WebGPU needs the adapter's 'subgroups' feature, read at enumeration
     // (the accelerator requests it whenever the adapter has it). WebGL has no shared memory or barriers at all.
+    private static bool HasWarpShuffle(Device device) => device.AcceleratorType switch
+    {
+        AcceleratorType.WebGL => false,
+        AcceleratorType.OpenCL => device.Capabilities is CLCapabilityContext cl && cl.SubGroups && cl.SubGroupShuffle,
+        AcceleratorType.WebGPU => device is not WebGPU.WebGPUILGPUDevice webGpu || webGpu.AdapterSupportsSubgroups,
+        _ => true,
+    };
+
     private static bool HasSubGroups(Device device) => device.AcceleratorType switch
     {
         AcceleratorType.WebGL => false,
@@ -457,6 +503,8 @@ public static class AcceleratorRequirementsExtensions
         if (r.RequiresInt64Native) flags.Add("Int64Native");
         if (r.RequiresInt64Atomics) flags.Add("Int64Atomics");
         if (r.RequiresSubGroups) flags.Add("SubGroups");
+        if (r.RequiresWarpShuffle) flags.Add("WarpShuffle");
+        if (r.RequiredWarpSize > 0) flags.Add($"WarpSize={r.RequiredWarpSize}");
         if (r.RequiresScatterStores) flags.Add("ScatterStores");
         return flags.Count == 0 ? "(none)" : string.Join(", ", flags);
     }

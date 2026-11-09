@@ -1,6 +1,23 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.22 (forks 2.4.21) - unreleased
+
+- **NEW: `AcceleratorRequirements.RequiresWarpShuffle` + `RequiredWarpSize`, and `device.SupportsWarpShuffle(width)` /
+  `accelerator.SupportsWarpShuffle(width)`** - a backend-neutral "can Warp.Shuffle exchange values across a fixed warp
+  (of this width)", so a consumer needs no backend type check (Tuvok: SpawnDev.ILGPU.ML's Q4_K GEMV shuffle had to test
+  `CLAccelerator.Capabilities.SubGroupShuffle`; NVIDIA's OpenCL has subgroups but no shuffle). False on WebGL (its shuffle
+  is the identity of a 1-lane warp), on OpenCL without `cl_khr_subgroup_shuffle` / Intel subgroups, and on a WebGPU
+  accelerator created without the `subgroups` feature (its emulated warp is the whole workgroup while it reports the
+  device's 32 - found by the new test). `WarpShuffle_CapabilityMatchesWhatTheBackendRuns` (all lanes: when true, a
+  rotate-by-one shuffle matches the host at `accelerator.WarpSize`).
+- **FIXED (forks, OpenCL): device-level subgroup capabilities were always false** before an accelerator existed, so
+  `AcceleratorRequirements.RequiresSubGroups` ruled out every OpenCL device. `CLCapabilityContext(CLDevice)` now reads
+  `cl_khr_subgroups` / `cl_intel_subgroups` and the shuffle extensions (the accelerator still probes and narrows them).
+- **FIXED (WebGL): a cycle of view phis overflowed the stack in code generation** (SpawnDev.Codecs' VP9 ParseKernel); and
+  an `UnsupportedKernelFeatureException` thrown while helper functions are generated in parallel arrived wrapped in an
+  `InternalCompilerException` (b33ed2e).
+
 ## 5.4.21 (forks 2.4.20) - 2026-11-09 - CUDA: accurate float exp without the toolkit, one-instruction math never a LibDevice call; Wasm: big kernels compile (local reuse); -0f on WebGPU / WebGL; culture-independent codegen
 
 - **CUDA prefill since 5.4.19 (the "known, for 5.4.21" in 5.4.20) - explained, not a regression of correctness.** 5.4.19
