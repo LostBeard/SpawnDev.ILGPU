@@ -153,6 +153,13 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public static bool ForceScalar { get; set; } = false;
 
         /// <summary>
+        /// Reuse Wasm locals inside each emitted function (<see cref="WasmLocalCompaction"/>). Default on: the
+        /// generators give every IR value its own local, and a large kernel exceeded V8's limit of 50,000 locals per
+        /// function (SpawnDev.Codecs' VP9 loop filter: 68,382, "local count too large"). Off only for an A/B check.
+        /// </summary>
+        public static bool CompactLocals { get; set; } = true;
+
+        /// <summary>
         /// Forces the SIMD codegen path ON regardless of runtime detection — for OFFLINE codegen
         /// verification (the <c>wasm-dump</c> / DemoConsole path where <see cref="RuntimeSupportsWasmSimd"/>
         /// is false because it's the desktop CLR, not browser-wasm). Do NOT enable in a browser whose
@@ -989,7 +996,17 @@ namespace SpawnDev.ILGPU.Wasm.Backend
             }
 
             // Record compilation info for diagnostics
-            var info = $"Kernel params={paramTypes.Length} (userParams={data.ParamInfos.Count}), locals={kernelGen._locals.Count}, code={kernelGen.Code.Count}b, helpers={data.HelperFunctionOrder.Count}, sharedMem={data.SharedMemorySize}, barriers={data.BarrierCount}, hasBarriers={data.HasBarriers}, dynSharedElemSize={data.DynamicSharedElementSize}, scratchPerThread={data.ScratchPerThread}";
+            // Locals per function before -> after WasmLocalCompaction (a loop, not LINQ: see the Wasm CLAUDE.md logging note)
+            var compactionInfo = "";
+            if (moduleBuilder.LocalCompactionStats.Count > 0)
+            {
+                var sb = new System.Text.StringBuilder(" (after reuse ");
+                sb.Append(moduleBuilder.LocalCompactionStats[0].After).Append("; functions");
+                foreach (var (before, after) in moduleBuilder.LocalCompactionStats)
+                    sb.Append(' ').Append(before).Append("->").Append(after);
+                compactionInfo = sb.Append(')').ToString();
+            }
+            var info = $"Kernel params={paramTypes.Length} (userParams={data.ParamInfos.Count}), locals={kernelGen._locals.Count}{compactionInfo}, code={kernelGen.Code.Count}b, helpers={data.HelperFunctionOrder.Count}, sharedMem={data.SharedMemorySize}, barriers={data.BarrierCount}, hasBarriers={data.HasBarriers}, dynSharedElemSize={data.DynamicSharedElementSize}, scratchPerThread={data.ScratchPerThread}";
             if (VerboseLogging) Log($"[Wasm-Final] spt={data.ScratchPerThread} barriers={data.BarrierCount} phases={data.PhaseCount} helpers={data.HelperFunctionOrder.Count}");
             if (VerboseLogging)
             {

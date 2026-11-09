@@ -58,6 +58,12 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         private readonly List<(string Name, byte Kind, uint Index)> _exports = new();
         private readonly List<WasmFuncBody> _bodies = new();
 
+        /// <summary>
+        /// Declared locals of each function body before and after <see cref="WasmLocalCompaction"/>, filled by
+        /// <see cref="Emit"/> (empty when <see cref="WasmBackend.CompactLocals"/> is off).
+        /// </summary>
+        public List<(int Before, int After)> LocalCompactionStats { get; } = new();
+
         // Track import counts by kind for export index calculation
         private int _importFuncCount = 0;
 
@@ -228,14 +234,25 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         private void WriteCodeSection(MemoryStream s)
         {
             WriteU32Leb128(s, (uint)_bodies.Count);
-            foreach (var body in _bodies)
+            LocalCompactionStats.Clear();
+            for (int bodyIndex = 0; bodyIndex < _bodies.Count; bodyIndex++)
             {
+                var body = _bodies[bodyIndex];
+                var bodyLocals = body.Locals;
+                var bodyCode = body.Code;
+                if (WasmBackend.CompactLocals && bodyIndex < _funcTypeIndices.Count)
+                {
+                    int paramCount = _types[_funcTypeIndices[bodyIndex]].ParamTypes.Length;
+                    (bodyCode, bodyLocals) = WasmLocalCompaction.Compact(bodyCode, bodyLocals, paramCount, out int before, out int after);
+                    LocalCompactionStats.Add((before, after));
+                }
+
                 // Build body bytes
                 using var bodyStream = new MemoryStream();
 
                 // Local declarations
                 // Group consecutive locals of same type
-                var groupedLocals = GroupLocals(body.Locals);
+                var groupedLocals = GroupLocals(bodyLocals);
                 WriteU32Leb128(bodyStream, (uint)groupedLocals.Count);
                 foreach (var local in groupedLocals)
                 {
@@ -244,7 +261,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 }
 
                 // Instructions
-                bodyStream.Write(body.Code);
+                bodyStream.Write(bodyCode);
 
                 // End opcode
                 bodyStream.WriteByte(WasmOpCodes.End);
