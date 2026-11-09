@@ -1,6 +1,27 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.20-local.1 (forks 2.4.19-local.1) - 2026-11-08 - CUDA: a branch on the thread index was marked warp-uniform; F64EmulationScope (per-load f64 mode)
+
+- **FIXED (forks, CUDA, O2 - the default since 5.4.9): a branch directly on an implicitly grouped kernel's index was
+  emitted as `bra.uni`.** The uniformity analysis started every kernel parameter as warp-uniform, the thread index too,
+  so `if (i < n)` / `if (i >= n) return;` - a condition on `i` itself, not on a value loaded through it - was declared
+  non-divergent, and ptxas may then take one path for the whole warp. In a warp that straddles the condition the other
+  side's threads ran the wrong code: SpawnDev.Codecs' VP9 plane pack wrote 28 wrong bytes, exactly the U-plane threads of
+  the one warp that also held Y threads (Geordi). Any CUDA kernel that branches on its index where a warp can straddle the
+  boundary was exposed. The index parameter now starts divergent (`Uniforms.Apply(method, threadIndexParameter)`).
+  `DivergentWarp_Int64DivRemIndex_MatchesHost` (all lanes; the reporter's kernel and two variants), and the PTX-level
+  `CudaTests.O2_PtxBranchesOnThreadDependentValues_AreNotUniform` now includes a branch on the index.
+- **NEW (WebGPU, WebGL): `F64EmulationScope.Use(mode)`** - compiles the kernels loaded inside it with that f64 mode,
+  without changing the accelerator's `F64Mode`: `using (F64EmulationScope.Use(F64EmulationMode.Ieee)) k = await
+  acc.LoadAutoGroupedStreamKernelAsync(...)`. An `AsyncLocal`: it follows the call through its awaits but not into other
+  loads interleaved on the browser thread (flipping `accelerator.F64Mode` around an awaited load would leak into them).
+  For SpawnDev.Codecs' FLAC LPC kernels: Ieee for two kernels, the fast default for the rest (Geordi).
+- **FIXED (forks, browser backends): a kernel compiled under one f64 mode was handed out after the mode changed.** The
+  compiled-kernel cache was keyed by entry point and specialization only; it now includes the backend's new
+  `Backend.KernelCacheVariant` (the f64 mode on WebGPU / WebGL, 0 elsewhere). `F64EmulationScope_ModePerLoad_IndependentOfInterleavedLoads`.
+- DemoConsole `ptx-dump [O0|O1|O2] [file] [divpack]` dumps this kernel's PTX offline.
+
 ## 5.4.19 (forks 2.4.18) - 2026-11-08 - CUDA nested-loop miscompile fixed; awaitable kernel loads; F64EmulationMode.Ieee (bit-exact double on WebGPU and WebGL); WebGL loop-continue fix; CUDA 13 LibDevice
 
 - **FIXED (forks, CUDA): a loop nest compiled wrong.** The PTX generator moved a conditional branch's phi values into

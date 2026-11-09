@@ -323,6 +323,68 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
         });
 
+        static void F64ScopeMulKernel(Index1D i, ArrayView<double> xs, ArrayView<double> ys, ArrayView<double> o) => o[i] = xs[i] * ys[i];
+
+        // F64EmulationScope: two async loads of the SAME kernel method started together, one inside an Ieee scope and one
+        // outside, interleave on the browser thread. The scoped one must be Ieee (bit-exact products of full 53-bit
+        // doubles), the other the accelerator's Dekker (some products differ from .NET - proof it really is the other
+        // compile and the cache did not hand back the Ieee kernel), and the accelerator's own mode must be unchanged.
+        [TestMethod]
+        public async Task F64EmulationScope_ModePerLoad_IndependentOfInterleavedLoads() => await RunTest(async accelerator =>
+        {
+            F64EmulationMode saved;
+            if (accelerator is WebGPUAccelerator webgpu) { saved = webgpu.F64Mode; webgpu.F64Mode = F64EmulationMode.Dekker; }
+            else if (accelerator is WebGLAccelerator webgl) { saved = webgl.F64Mode; webgl.F64Mode = F64EmulationMode.Dekker; }
+            else throw new UnsupportedTestException("F64EmulationScope applies to the emulated-double backends (WebGPU / WebGL).");
+            try
+            {
+                const int n = 4096;
+                var xs = new double[n]; var ys = new double[n];
+                ulong s = 0x51ED270B27C0FFEEUL;
+                ulong Next() { s ^= s << 13; s ^= s >> 7; s ^= s << 17; return s; }
+                for (int i = 0; i < n; i++)
+                {
+                    xs[i] = BitConverter.UInt64BitsToDouble((Next() & 0x800FFFFFFFFFFFFFUL) | ((ulong)(1023 - 20 + (int)(Next() % 40)) << 52));
+                    ys[i] = BitConverter.UInt64BitsToDouble((Next() & 0x800FFFFFFFFFFFFFUL) | ((ulong)(1023 - 20 + (int)(Next() % 40)) << 52));
+                }
+                async Task<Action<Index1D, ArrayView<double>, ArrayView<double>, ArrayView<double>>> LoadIeee()
+                {
+                    using (F64EmulationScope.Use(F64EmulationMode.Ieee))
+                        return await accelerator.LoadAutoGroupedStreamKernelAsync<Index1D, ArrayView<double>, ArrayView<double>, ArrayView<double>>(F64ScopeMulKernel);
+                }
+                var ieeeTask = LoadIeee();
+                var defaultTask = accelerator.LoadAutoGroupedStreamKernelAsync<Index1D, ArrayView<double>, ArrayView<double>, ArrayView<double>>(F64ScopeMulKernel);
+                await Task.WhenAll(ieeeTask, defaultTask);
+                var modeAfter = accelerator is WebGPUAccelerator g1 ? g1.F64Mode : ((WebGLAccelerator)accelerator).F64Mode;
+
+                using var xb = accelerator.Allocate1D(xs);
+                using var yb = accelerator.Allocate1D(ys);
+                using var ob1 = accelerator.Allocate1D<double>(n);
+                using var ob2 = accelerator.Allocate1D<double>(n);
+                ieeeTask.Result(n, xb.View, yb.View, ob1.View);
+                defaultTask.Result(n, xb.View, yb.View, ob2.View);
+                await accelerator.SynchronizeAsync();
+                var ieee = await ob1.CopyToHostAsync<double>();
+                var dflt = await ob2.CopyToHostAsync<double>();
+                int ieeeWrong = 0, defaultWrong = 0;
+                for (int i = 0; i < n; i++)
+                {
+                    long want = BitConverter.DoubleToInt64Bits(xs[i] * ys[i]);
+                    if (BitConverter.DoubleToInt64Bits(ieee[i]) != want) ieeeWrong++;
+                    if (BitConverter.DoubleToInt64Bits(dflt[i]) != want) defaultWrong++;
+                }
+                Console.WriteLine($"[F64Ieee] scope: Ieee load {ieeeWrong}/{n} differ from .NET, default (Dekker) load {defaultWrong}/{n}");
+                if (modeAfter != F64EmulationMode.Dekker) throw new Exception($"the scope changed the accelerator's F64Mode to {modeAfter}");
+                if (ieeeWrong != 0) throw new Exception($"the load inside the Ieee scope is not Ieee: {ieeeWrong}/{n} products differ from .NET");
+                if (defaultWrong == 0) throw new Exception("the load outside the scope gave .NET's products everywhere: it is not the Dekker compile (scope leaked or cache shared)");
+            }
+            finally
+            {
+                if (accelerator is WebGPUAccelerator w) w.F64Mode = saved;
+                else if (accelerator is WebGLAccelerator g) g.F64Mode = saved;
+            }
+        });
+
         /// <summary>The Ieee ops kernel, for offline WGSL / GLSL validation (DemoConsole ieee-wgsl).</summary>
         public static Delegate F64IeeeOpsKernelDelegate =>
             (Action<Index1D, ArrayView<double>, ArrayView<double>, ArrayView<double>, ArrayView<double>>)F64IeeeOpsKernel;

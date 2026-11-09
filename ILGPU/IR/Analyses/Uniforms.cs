@@ -214,11 +214,48 @@ namespace ILGPU.IR.Analyses
         /// Applies a new alignment analysis to the given root method.
         /// </summary>
         /// <param name="entryPoint">The root (entry) method.</param>
-        public static Info Apply(Method entryPoint)
+        public static Info Apply(Method entryPoint) => Apply(entryPoint, threadIndexParameter: false);
+
+        /// <summary>
+        /// Applies a new uniform analysis to the given root method.
+        /// </summary>
+        /// <param name="entryPoint">The root (entry) method.</param>
+        /// <param name="threadIndexParameter">
+        /// True for an implicitly grouped kernel: its first parameter is the thread's own global index (different in every
+        /// lane), every other kernel argument is the same for all threads.
+        /// </param>
+        /// <remarks>
+        /// Every kernel parameter used to start as uniform, the thread index too, so a branch on it (`if (i &lt; n) {...}`
+        /// directly, not on a value loaded through it) was emitted as `bra.uni`, and ptxas may then evaluate it once per
+        /// warp: in a warp that held both sides, the other side's threads ran the wrong path (SpawnDev.Codecs VP9 plane
+        /// pack, 28 wrong bytes at a plane boundary inside one warp; Geordi 2026-11-08,
+        /// DivergentWarp_Int64DivRemIndex_MatchesHost).
+        /// </remarks>
+        public static Info Apply(Method entryPoint, bool threadIndexParameter)
         {
             var analysis = Create(entryPoint);
-            var result = analysis.AnalyzeGlobalMethod(entryPoint, UniformKind.Uniform);
+            var result = analysis.AnalyzeGlobalMethod(
+                entryPoint,
+                new KernelParameterContext(threadIndexParameter));
             return new Info(result);
+        }
+
+        /// <summary>Kernel arguments are uniform, except an implicitly grouped kernel's thread index (parameter 0).</summary>
+        private readonly struct KernelParameterContext : IAnalysisValueSourceContext<ValueInfo>
+        {
+            private readonly bool threadIndexParameter;
+
+            public KernelParameterContext(bool threadIndexParameter)
+            {
+                this.threadIndexParameter = threadIndexParameter;
+            }
+
+            public AnalysisValue<ValueInfo> this[Value value] =>
+                AnalysisValue.Create<ValueInfo>(
+                    threadIndexParameter && value is Parameter parameter && parameter.Index == 0
+                        ? UniformKind.Divergent
+                        : UniformKind.Uniform,
+                    value.Type);
         }
 
         #endregion

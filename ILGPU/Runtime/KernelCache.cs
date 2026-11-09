@@ -57,10 +57,12 @@ namespace ILGPU.Runtime
             /// <param name="specialization">The kernel specialization.</param>
             public CachedCompiledKernelKey(
                 EntryPointDescription entry,
-                KernelSpecialization specialization)
+                KernelSpecialization specialization,
+                int variant)
             {
                 Entry = entry;
                 Specialization = specialization;
+                Variant = variant;
             }
 
             #endregion
@@ -77,6 +79,12 @@ namespace ILGPU.Runtime
             /// </summary>
             public KernelSpecialization Specialization { get; }
 
+            /// <summary>
+            /// The backend's <see cref="ILGPU.Backends.Backend.KernelCacheVariant"/> at compile time (e.g. a browser
+            /// backend's f64 emulation mode): the same method compiled under another variant is a different kernel.
+            /// </summary>
+            public int Variant { get; }
+
             #endregion
 
             #region IEquatable
@@ -90,7 +98,8 @@ namespace ILGPU.Runtime
             /// </returns>
             public bool Equals(CachedCompiledKernelKey other) =>
                 other.Entry == Entry &&
-                other.Specialization.Equals(Specialization);
+                other.Specialization.Equals(Specialization) &&
+                other.Variant == Variant;
 
             #endregion
 
@@ -111,14 +120,14 @@ namespace ILGPU.Runtime
             /// </summary>
             /// <returns>The hash code of this object.</returns>
             public override int GetHashCode() =>
-                Entry.GetHashCode() ^ Specialization.GetHashCode();
+                Entry.GetHashCode() ^ Specialization.GetHashCode() ^ (Variant * 397);
 
             /// <summary>
             /// Returns the string representation of this object.
             /// </summary>
             /// <returns>The string representation of this object.</returns>
             public override string ToString() =>
-                $"{Entry} [Specialization: {Specialization}]";
+                $"{Entry} [Specialization: {Specialization}, Variant: {Variant}]";
 
             #endregion
         }
@@ -394,7 +403,8 @@ namespace ILGPU.Runtime
             {
                 var cachedCompiledKernelKey = new CachedCompiledKernelKey(
                     entry,
-                    specialization);
+                    specialization,
+                    Backend.KernelCacheVariant);
                 var cachedKey = new CachedKernelKey(
                     cachedCompiledKernelKey,
                     kernelLoader.GroupSize);
@@ -568,7 +578,7 @@ namespace ILGPU.Runtime
             if (KernelCacheEnabled)
             {
                 // Check and update cache
-                var cachedKey = new CachedCompiledKernelKey(entry, specialization);
+                var cachedKey = new CachedCompiledKernelKey(entry, specialization, Backend.KernelCacheVariant);
                 lock (syncRoot)
                 {
                     if (!compiledKernelCache.AsNotNull().TryGetValue(

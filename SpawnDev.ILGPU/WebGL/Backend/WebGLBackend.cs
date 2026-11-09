@@ -80,7 +80,17 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// reflect the mode in effect when they were generated; callers that depend on
         /// re-compilation after a mode flip should clear the kernel cache.
         /// </summary>
-        public F64EmulationMode F64Mode { get; set; }
+        public F64EmulationMode F64Mode
+        {
+            // An F64EmulationScope of the current async flow wins: it compiles that flow's kernels in its mode without
+            // touching the backend's own setting, which other interleaved loads keep using.
+            get => F64EmulationScope.Current ?? f64Mode;
+            set => f64Mode = value;
+        }
+        private F64EmulationMode f64Mode;
+
+        /// <summary>The f64 mode is part of the compiled-kernel cache key: the same method compiled in two modes is two kernels.</summary>
+        public override int KernelCacheVariant => (int)F64Mode;
 
         /// <summary>True if f64 emulation is enabled (Dekker or Ozaki).</summary>
         internal bool EnableF64Emulation => F64Mode != F64EmulationMode.Disabled;

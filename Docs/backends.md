@@ -391,6 +391,11 @@ var options = new WebGPUBackendOptions();
 // Every operation bit-identical to .NET
 var options = new WebGPUBackendOptions { F64Emulation = F64EmulationMode.Ieee };
 
+// Or per kernel load, without changing the accelerator's mode (5.4.20+). The scope follows this call through its awaits
+// but not into other loads running at the same time; the kernel cache keeps one compile per mode.
+using (F64EmulationScope.Use(F64EmulationMode.Ieee))
+    lpc = await accelerator.LoadAutoGroupedStreamKernelAsync<Index1D, ArrayView<double>, ArrayView<double>>(LpcKernel);
+
 // Disable f64 emulation (double promoted to float, max performance)
 var options = new WebGPUBackendOptions { F64Emulation = F64EmulationMode.Disabled };
 ```

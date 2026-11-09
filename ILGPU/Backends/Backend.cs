@@ -642,6 +642,13 @@ namespace ILGPU.Backends
         public long CompiledKernelCount => System.Threading.Interlocked.Read(ref compiledKernelCount);
 
         /// <summary>
+        /// Part of the accelerator's compiled-kernel cache key: backend state that changes the generated code for the SAME
+        /// kernel method (the browser backends' f64 emulation mode). A kernel compiled under one variant is never handed
+        /// out for another. Default 0.
+        /// </summary>
+        public virtual int KernelCacheVariant => 0;
+
+        /// <summary>
         /// Compiles a given compile unit with the specified entry point using
         /// the given kernel specialization.
         /// </summary>

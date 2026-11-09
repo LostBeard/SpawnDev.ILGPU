@@ -16,7 +16,10 @@ static class PtxDump
         using var context = Context.Create(b => b.Optimize(level));
         using var backend = new PTXBackend(context, new CudaCapabilityContext(CudaArchitecture.SM_89),
             CudaArchitecture.SM_89, CudaInstructionSet.ISA_85, null);
-        var entry = EntryPointDescription.FromImplicitlyGroupedKernel(BackendTestBase.NestedLoopDoWhileKernelDelegate.Method);
+        var kernelDelegate = args.Length > 3 && args[3] == "divpack"
+            ? BackendTestBase.DivergentPackEarlyReturnLongDelegate
+            : BackendTestBase.NestedLoopDoWhileKernelDelegate;
+        var entry = EntryPointDescription.FromImplicitlyGroupedKernel(kernelDelegate.Method);
         var compiled = (PTXCompiledKernel)backend.Compile(entry, default(KernelSpecialization));
         if (args.Length > 2) File.WriteAllText(args[2], compiled.PTXAssembly);
         else Console.WriteLine(compiled.PTXAssembly);

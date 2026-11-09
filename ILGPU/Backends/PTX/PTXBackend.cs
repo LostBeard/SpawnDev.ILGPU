@@ -252,7 +252,7 @@ namespace ILGPU.Backends.PTX
 
             // Create detailed uniform information in O2 builds
             var uniforms = o2Enabled
-                ? Uniforms.Apply(backendContext.KernelMethod)
+                ? Uniforms.Apply(backendContext.KernelMethod, threadIndexParameter: entryPoint.IsImplicitlyGrouped)
                 : Uniforms.Info.Empty;
 
             data = new PTXCodeGenerator.GeneratorArgs(

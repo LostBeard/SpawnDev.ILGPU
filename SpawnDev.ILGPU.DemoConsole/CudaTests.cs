@@ -28,6 +28,14 @@ public class CudaTests : BackendTestBase
         else o[i] = 2;
     }
 
+    // The branch is on the thread index itself (not a value loaded through it): an implicitly grouped kernel's index
+    // parameter started as uniform in the analysis (SpawnDev.Codecs VP9 plane pack, Geordi 2026-11-08).
+    static void UniformsThreadIndexKernel(Index1D i, ArrayView<int> data, ArrayView<int> o)
+    {
+        if (i < data.IntLength / 2) o[i] = 1;
+        else o[i] = 2;
+    }
+
     static void UniformsSharedWordKernel(Index1D i, ArrayView<int> state, ArrayView<int> o)
     {
         int cur = state[0];
@@ -54,6 +62,7 @@ public class CudaTests : BackendTestBase
             ("loop counter", ((Action<Index1D, ArrayView<int>, ArrayView<int>>)UniformsLoopCounterKernel).Method),
             ("atomic slot", ((Action<Index1D, ArrayView<int>, ArrayView<int>>)UniformsAtomicSlotKernel).Method),
             ("load of one word", ((Action<Index1D, ArrayView<int>, ArrayView<int>>)UniformsSharedWordKernel).Method),
+            ("thread index", ((Action<Index1D, ArrayView<int>, ArrayView<int>>)UniformsThreadIndexKernel).Method),
         })
         {
             var ptx = ((ILGPU.Backends.PTX.PTXCompiledKernel)accelerator.CompileKernel(
