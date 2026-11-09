@@ -1,7 +1,7 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.22 (forks 2.4.21) - unreleased
+## 5.4.22 (forks 2.4.21) - unreleased; 5.4.22-local.1 (forks 2.4.21-local.1) 2026-11-09 for SpawnDev.ILGPU.ML's shuffle gates
 
 - **NEW: `AcceleratorRequirements.RequiresWarpShuffle` + `RequiredWarpSize`, and `device.SupportsWarpShuffle(width)` /
   `accelerator.SupportsWarpShuffle(width)`** - a backend-neutral "can Warp.Shuffle exchange values across a fixed warp
