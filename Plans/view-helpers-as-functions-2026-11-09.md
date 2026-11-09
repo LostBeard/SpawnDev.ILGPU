@@ -57,3 +57,20 @@ the same kernel parameters, so a helper becomes 1-3 functions instead of N inlin
 ## Not in scope
 
 Cross-binding view choice (still unsupported on WebGPU / WebGL - documented, typed exception).
+
+## Findings 2026-11-09 06:40 (first experiment)
+
+- `InlineAddressParameterCalls(inlineBudgetSurvivors, keepGlobalViewCalls)` added (flag OFF everywhere): leaves a call to a
+  non-Inline helper as a call when every address-carrying argument traces (sub-view / cast / align / NewView / GetField) to a
+  method PARAMETER. At this stage view arguments are `View<T, Generic>` - address spaces are not inferred yet - so the origin
+  is traced, not the type's address space. Turned on for WebGPU, the 16-call-site test kernel went 1482 -> 724 WGSL lines
+  (1 call site: 589), i.e. the helper became ONE `fn`.
+- The dormant WGSL fn-def path for view parameters (unreachable since 09-27) is wrong in three ways (naga: "the operand of
+  `&` must be a reference"): (1) the body uses the caller-side value names (`v_0`..) instead of its `p_N` parameters,
+  (2) `arrayLength(&p)` on a pointer parameter, (3) the call passes the whole binding: a sub-view's OFFSET and LENGTH are
+  dropped (silently wrong results, not only a compile error).
+- So Phase 3 = a view ABI for helper functions: `(ptr<storage, array<T>, rw>, offset, length)` per view parameter (offset /
+  length in the kernel's index width, emulated i64 when needed), body indexing `(*p)[offset + i]`, `GetViewLength` ->
+  length param; one function per distinct binding element type (plain / `array<atomic<u32>>` sub-word / emu i64); then
+  enable the flag for WebGPU. Gate = `ViewHelper_ManyCallSitesWithSubViews_MatchesHost` (all lanes) + a size test
+  (16 call sites <= ~1.5x one call site in WGSL lines) + naga over the whole suite + Codecs VP9 size table.

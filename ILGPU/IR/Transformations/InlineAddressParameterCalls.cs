@@ -35,6 +35,7 @@ namespace ILGPU.IR.Transformations
     public sealed class InlineAddressParameterCalls : OrderedTransformation
     {
         private readonly bool inlineBudgetSurvivors;
+        private readonly bool keepGlobalViewCalls;
 
         /// <summary>
         /// <paramref name="inlineBudgetSurvivors"/>: also inline calls whose target IS marked
@@ -49,8 +50,71 @@ namespace ILGPU.IR.Transformations
         /// calls are inlined.
         /// </summary>
         public InlineAddressParameterCalls(bool inlineBudgetSurvivors = false)
+            : this(inlineBudgetSurvivors, keepGlobalViewCalls: false)
+        { }
+
+        /// <summary>
+        /// <paramref name="keepGlobalViewCalls"/>: leave a call to a NON-Inline helper (<c>[NoInlining]</c> / over the
+        /// IL cap) as a call when every address-carrying argument is a plain view of GLOBAL memory (a storage buffer):
+        /// the generator emits such a helper once as a function with <c>ptr&lt;storage&gt;</c> parameters. Calls passing
+        /// local or shared memory, or a structure that carries an address, are still inlined (the case the transformation
+        /// exists for). Without it, every view-taking helper was copied into every call site: SpawnDev.Codecs' VP9 decoder
+        /// kernels reached 33-87 MB of WGSL (2026-11-09).
+        /// </summary>
+        public InlineAddressParameterCalls(bool inlineBudgetSurvivors, bool keepGlobalViewCalls)
         {
             this.inlineBudgetSurvivors = inlineBudgetSurvivors;
+            this.keepGlobalViewCalls = keepGlobalViewCalls;
+        }
+
+        /// <summary>
+        /// True when every argument of <paramref name="call"/> that carries an address is a view or pointer (not a
+        /// structure containing one) whose origin is a method PARAMETER: a kernel parameter is a storage buffer, and a
+        /// helper's parameter is one too whenever that helper survives as a function (it does only when all of its own
+        /// address-carrying call sites pass views of parameters). Views of an allocation (local / shared memory), and
+        /// views chosen at run time (phi, select) or loaded from memory, are not. Address spaces are not inferred yet
+        /// at this point (the arguments are Generic), so the origin is traced instead.
+        /// </summary>
+        public static bool PassesOnlyGlobalViews(MethodCall call)
+        {
+            for (int i = 0, e = call.Count; i < e; ++i)
+            {
+                var type = call[i].Type;
+                if (!CarriesAddress(type))
+                    continue;
+                if (type is not AddressSpaceType || !OriginatesFromParameter(call[i]))
+                    return false;
+            }
+            return true;
+        }
+
+        /// <summary>Follows sub-views, casts, alignment hints and field reads back to a method parameter.</summary>
+        private static bool OriginatesFromParameter(Value value)
+        {
+            for (int guard = 0; guard < 256; guard++)
+            {
+                value = value.Resolve();
+                switch (value)
+                {
+                    case Parameter:
+                        return true;
+                    case PointerValue pointerValue:   // SubViewValue, LoadElementAddress, AsAligned / AlignTo
+                        value = pointerValue.Source;
+                        continue;
+                    case CastValue cast:              // AddressSpaceCast, ViewCast, PointerCast
+                        value = cast.Value;
+                        continue;
+                    case NewView newView:
+                        value = newView.Pointer;
+                        continue;
+                    case GetField getField:
+                        value = getField.ObjectValue;
+                        continue;
+                    default:                          // Alloca (local / shared), phi, select, load, ...
+                        return false;
+                }
+            }
+            return false;
         }
 
         /// <summary>True when <paramref name="type"/> is, or (for a structure) contains, a pointer or view.</summary>
@@ -123,9 +187,9 @@ namespace ILGPU.IR.Transformations
                 }
                 else
                 {
-                    // WebGPU non-Inline helper ([NoInlining] / over the IL cap): a WGSL fn-def, which cannot
-                    // marshal an address.
-                    inline = TakesAddress(target);
+                    // WebGPU non-Inline helper ([NoInlining] / over the IL cap): a WGSL fn-def, which can take a
+                    // storage-buffer view (ptr<storage>) but not a local / shared / struct-carried address.
+                    inline = TakesAddress(target) && !(keepGlobalViewCalls && PassesOnlyGlobalViews(call));
                 }
                 if (!inline)
                     continue;
