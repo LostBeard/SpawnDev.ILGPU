@@ -234,6 +234,12 @@ namespace ILGPU.Runtime.OpenCL
     }
 #>
         /// <summary>
+        /// Subgroup extensions (Khronos, Intel).
+        /// </summary>
+        internal static readonly ImmutableArray<string> SubGroupDeviceExtensions =
+            ImmutableArray.Create("cl_khr_subgroups", "cl_intel_subgroups");
+
+        /// <summary>
         /// Extensions for Khronos subgroup shuffle (sub_group_shuffle, sub_group_shuffle_up/down/xor).
         /// </summary>
         internal static readonly ImmutableArray<string> SubGroupShuffleExtensions =
@@ -299,6 +305,22 @@ namespace ILGPU.Runtime.OpenCL
             Float16 = true;
             if (Float16Native)
                 extensions.AddRange(Float16Extensions);
+<#
+            continue;
+        }
+        if (c.Name == "SubGroups") {
+#>
+            // Subgroup support as the device's extensions state it, so a requirement checked against the DEVICE (before
+            // an accelerator exists - AcceleratorRequirements) sees it; CLAccelerator still probes a real kernel and
+            // narrows these. Until 2026-11-09 both were false here, so RequiresSubGroups ruled out every OpenCL device.
+            SubGroups = device.HasAnyExtension(SubGroupDeviceExtensions);
+<#
+            continue;
+        }
+        if (c.Name == "SubGroupShuffle") {
+#>
+            SubGroupShuffle = SubGroups
+                && (device.Vendor == CLDeviceVendor.Intel || device.HasAnyExtension(SubGroupShuffleExtensions));
 <#
             continue;
         }
