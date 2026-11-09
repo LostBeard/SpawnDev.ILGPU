@@ -50,8 +50,17 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   `Backend.Compile` now generates under the invariant culture and restores the caller's culture afterwards.
   `CodegenUnderCommaDecimalCulture_MatchesHost` (all lanes; red-checked both ways: the original code fails on WebGPU,
   WebGPU-no-subgroups and WebGL, and the culture scope alone - with the float printers still culture-dependent - passes).
-- In 5.4.21-local.1 (forks 2.4.20-local.1): cb4e79c (CUDA), ceaf3d5 (Wasm locals), 57a87f7 (-0, culture). Focused-tested
-  (the new tests on every lane, the full WasmTests lane 878/0/52, red-checks); no full sweep yet.
+- **FIXED (WebGPU): the first unaligned MemSet / device copy compiled a kernel synchronously on the page thread.**
+  Their unaligned head / tail bytes are moved by byte kernels, loaded lazily at the first such call (both are
+  synchronous APIs); SpawnDev.Codecs' sync-compile guard caught one compile at the first unaligned MemSetToZero after
+  every codec had warmed up (Geordi). `WebGPUAccelerator.CreateAsync` now precompiles both (kernel cache + async
+  pipeline); `CreateFromExternalDevice` is synchronous and keeps the load at first use.
+  `WebGPUTests.UnalignedMemSetAndCopy_CompileNothingAfterCreate` (red-check without the preload: 2 kernels compiled).
+- 5.4.21-local.1 (forks 2.4.20-local.1) = cb4e79c (CUDA), ceaf3d5 (Wasm locals), 57a87f7 (-0, culture); SpawnDev.ILGPU.ML
+  on it (Tuvok, qwen3:1.7b Q8_0 CUDA prefill): 293 / 7,691 tok/s short / long with LibDevice, 293 / 7,687-7,702 without
+  the toolkit - the same accurate math on every machine, +7% / -0.5% against 5.4.18's 64-ulp exp.
+- Release sweep (RTX 4070, all lanes, default exclusions, code = ff98ffc): **7,903 cases, 7,269 passed, 634 skipped,
+  0 failed, 45.5 min** (5.4.20: 7,247 passed, 45.8 min).
 
 ## 5.4.20 (forks 2.4.19) - 2026-11-09 - CUDA: a branch on the thread index was marked warp-uniform; F64EmulationScope (per-load f64 mode)
 
