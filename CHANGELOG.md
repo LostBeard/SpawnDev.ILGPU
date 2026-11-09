@@ -1,7 +1,7 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.23 (forks 2.4.22) - unreleased; 5.4.23-local.2 (forks 2.4.22-local.2) 2026-11-09: WebGPU view / ref helpers as functions (VP9 WGSL 6x smaller), bool XOR; 5.4.23-local.1 for SpawnDev.Codecs' VP9 on Velocity
+## 5.4.23 (forks 2.4.22) - unreleased; 5.4.23-local.3 (forks 2.4.22-local.3) 2026-11-09: WebGPU LocalMemory views through helper functions, LocalMemory view Length on WebGPU / WebGL / Wasm; 5.4.23-local.2: WebGPU view / ref helpers as functions (VP9 WGSL 6x smaller), bool XOR; 5.4.23-local.1 for SpawnDev.Codecs' VP9 on Velocity
 
 - **PERF (forks, Velocity): small launches run ~40x faster.** Velocity executes each IR operation as a call into a
   warp-type helper with lane masks: right for wide launches, ~60x slower than the IL backend for a few threads that each
@@ -33,6 +33,11 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   parameter is `ptr<function, T>`, the call passes `&v` (a kept helper hands its own pointer on). SpawnDev.Codecs' VP9
   parse helpers all take `ref Vp8BoolDecoderGpuState`. `RefStateHelpers_LocalStructByReference_MatchHost` (the kernel's
   state by reference, a helper passing its reference on with an early return from a loop, a `ref int` accumulator).
+  A view of a LOCAL array (`LocalMemory.Allocate`) is kept too (5.4.23-local.3): the parameter is
+  `ptr<function, array<T, N>>` plus an element offset (and length), one function per array type, forwarded from helper to
+  helper. `LocalViewHelpers_LocalMemoryThroughHelpers_MatchHost` (whole arrays and sub-views, a helper handing its local
+  view on to one reading its `Length`, stores through the helper, an early return, byte and int arrays).
+  SpawnDev.Codecs 31a1073 (its parse state in LocalMemory): Parse 684,927 -> 113,564 lines (72.9 -> 9.0 MB).
   Variable names in the WebGPU generator now come from one counter that only grows: inlining used to restart it at 10,000
   x (inlining count) and restore it after, so a body of more than 10,000 values could reuse a name of another type in the
   same function (found on VP9 InverseTransformAdd emitted as a function).
@@ -50,6 +55,13 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   bool** - an invalid shader (naga: "ExclusiveOr can't work with Bool"; ANGLE: "no operation '^' exists that takes ...
   'bool'"; found in SpawnDev.Codecs' VP9 ParseBlock). It is `!=` now, also where the result widens to an int.
   `BoolXor_TwoComparisons_MatchHost` (all lanes; red-check: the old WGSL fails naga, and the new test failed WebGL first).
+- **FIXED (WebGPU, Wasm, WebGL): the `Length` of a LocalMemory view was wrong where it was not folded away** - read in the
+  kernel, inside an inlined helper taking the view, or passed to a Wasm helper function. A local array's view traces to no
+  kernel parameter: WebGPU emitted `arrayLength(&v_arr)` (an invalid shader), WebGL emitted 0 (a loop to `view.Length`
+  silently ran zero times, or the draw failed with INVALID_OPERATION), Wasm passed 0 to helpers (`k % view.IntLength`
+  trapped "remainder by zero"). The length is now the view's own length operand on all three. Found by
+  `LocalViewHelpers_LocalMemoryThroughHelpers_MatchHost`; `LocalMemory_ViewLength_InKernelAndHelper_MatchHost`,
+  `_ByteArray_MatchHost`, `_NestedHelpers_MatchHost`.
 - **TEST: `WebGPU_InvalidShader_FailsTheReadbackWithoutASync`** accepts the shader's follow-on submit error on the
   SECOND readback too (the browser delivers the two errors in either order; each is reported once; the third readback
   must succeed). Seen once in the 5.4.23 WebGPU lane under load.

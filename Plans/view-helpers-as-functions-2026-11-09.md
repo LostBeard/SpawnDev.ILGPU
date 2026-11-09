@@ -195,6 +195,13 @@ Open:
   ptr<function> parameters. Needs: IR keep rule (pointer to an Alloca of the caller or a ptr param of a kept helper),
   call site `&var`, accesses through `(*p)` in the body (the local-alloca value-name handling must not apply).
 - [ ] Commit core + wrapper, drift check, -local package for Geordi.
-- [ ] LocalMemory views as `ptr<function, array<T, N>>` + element offset (Geordi's S3 branch: token cache / contexts /
-  partition stack in LocalMemory).
+- [x] 5.4.23-local.2 (741b3ec, forks 2.4.22-local.2) in the local feed, bits verified; PMT WebGPU 1717/0/91, WebGL
+  693/0/194; drift check clean (local + CI).
+- [x] v3 (implemented 15:45; LocalViewHelpersKernel naga-valid; Codecs 31a1073 with S3, all six VP9 kernels naga-valid: Parse 684,927 -> 113,564 lines, 72.9 -> 9.0 MB; PMT pending): LocalMemory views (Geordi's S3: token cache / contexts / partition stack in LocalMemory).
+  Design: a view argument whose root is a LOCAL array Alloca (NewView of it, sub-views) becomes
+  `hv{i} : ptr<function, array<T, N>>` + `hv{i}_vo` (+ `_vl`); N and T join the specialization key. Inside the helper the
+  LEA cannot redirect to the root (a kernel-scope var the fn cannot see): new branch - a helper view param marked
+  local -> `&(*hv{i})[FunctionArrayIndex(vo + idx)]`. Call site: `&v_arr`, offset, length; a nested helper forwards
+  `hv{i}` with its own offset sum. IR: OriginatesFromKernelParameter also accepts NewView(local array Alloca) and a
+  helper's local-view param (same caller rules).
 - [ ] Wasm / GLSL phases unchanged (not started).

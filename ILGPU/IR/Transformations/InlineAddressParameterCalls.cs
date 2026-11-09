@@ -184,8 +184,8 @@ namespace ILGPU.IR.Transformations
 
         /// <summary>
         /// Follows sub-views and address-space casts back to a parameter (of the kernel: a storage buffer; of a helper: a
-        /// view rooted at one when that helper is kept), or to a view field of one (an ArrayView1D kernel parameter is a
-        /// structure whose field 0 is the view). Exactly the shapes the WebGPU generator resolves to a binding and an element
+        /// view rooted at one when that helper is kept), to a view field of one (an ArrayView1D kernel parameter is a
+        /// structure whose field 0 is the view), or to a view of a LOCAL array of the caller (LocalMemory). Exactly the shapes the WebGPU generator resolves to a binding and an element
         /// offset (WGSLKernelFunctionGenerator.ViewArgumentRoot); a view rebuilt from an element address, a view cast to
         /// another element type, a view chosen at run time (phi, select), loaded from memory or of an allocation (local /
         /// shared memory) is not.
@@ -206,6 +206,10 @@ namespace ILGPU.IR.Transformations
                         value = cast.Value;
                         continue;
                     case GetField getField when getField.ObjectValue.Resolve() is Parameter:
+                        return true;
+                    // a view of a LOCAL array of the caller (LocalMemory.Allocate): WGSL ptr<function, array<T, N>>
+                    case NewView newView when newView.Pointer.Resolve() is Alloca alloca
+                        && alloca.AddressSpace == MemoryAddressSpace.Local:
                         return true;
                     default:
                         return false;

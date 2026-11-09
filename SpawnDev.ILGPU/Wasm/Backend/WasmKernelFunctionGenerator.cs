@@ -4620,6 +4620,17 @@ EmitSaveAllLocals();
                     Code.Add(WasmOpCodes.I64ExtendI32S);
                 return true;
             }
+            // A view of a LOCAL array (LocalMemory.Allocate) carries its length: it traces to no parameter, so its length
+            // was the 0 fallback - in the kernel, and passed to a helper taking the view (`k % ctx.IntLength` trapped
+            // "remainder by zero"; LocalViewHelpers_LocalMemoryThroughHelpers_MatchHost, 2026-11-09).
+            if (current is NewView localView && IsLocalArrayView(localView))
+            {
+                var localLength = localView.Length.Resolve();
+                EmitGetLocal(localLength);
+                if (GetWasmTypeFromIR(localLength.Type) != WasmOpCodes.I64)
+                    Code.Add(WasmOpCodes.I64ExtendI32S);
+                return true;
+            }
             if (current is Predicate pred && pred.Type is ViewType)
             {
                 // select(lengthOfTrue, lengthOfFalse, condition)
@@ -4638,6 +4649,15 @@ EmitSaveAllLocals();
                     backend: global::ILGPU.Runtime.AcceleratorType.Wasm,
                     remediation: "Read the length in each branch, or choose the view with a conditional expression.");
             return false;
+        }
+
+        /// <summary>True for a view of a LOCAL allocation (LocalMemory.Allocate), through address-space casts.</summary>
+        private static bool IsLocalArrayView(NewView view)
+        {
+            var pointer = view.Pointer.Resolve();
+            while (pointer is AddressSpaceCast cast)
+                pointer = cast.Value.Resolve();
+            return pointer is Alloca { AddressSpace: global::ILGPU.IR.MemoryAddressSpace.Local };
         }
 
         /// <summary>One arm of a select of views: its length, or a parameter's length local.</summary>
@@ -4687,6 +4707,7 @@ EmitSaveAllLocals();
             }
             if (current == null) return false;
             if (current is SubViewValue) return true;
+            if (current is NewView localView && IsLocalArrayView(localView)) return true;
             if (current is Predicate pred && pred.Type is ViewType)
                 return depth < 16 && CanEmitViewLength(pred.TrueValue, depth + 1) && CanEmitViewLength(pred.FalseValue, depth + 1);
             if (current is PhiValue) return false;

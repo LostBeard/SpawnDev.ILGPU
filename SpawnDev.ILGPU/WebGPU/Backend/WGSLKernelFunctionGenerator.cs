@@ -6327,6 +6327,23 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     offsetExpr = $"(({ChosenViewVar(effectiveSourceValue, "vo")}) + ({offsetExpr}))";
                     effectiveSourceValue = chosenRoot;
                 }
+                else if (effectiveSourceValue is AddressSpaceCast helperViewCast && IsHelperViewParam(StripViewCasts(helperViewCast)))
+                    effectiveSourceValue = StripViewCasts(helperViewCast);
+                else if (effectiveSourceValue is global::ILGPU.IR.Values.Parameter localViewParam
+                    && _localViewParams.ContainsKey(localViewParam))
+                {
+                    // A LOCAL array passed to a helper emitted as a function (ViewHelpers.cs): index through its
+                    // ptr<function, array<T, N>> parameter (the caller's array is not visible here).
+                    string localIndex = OpaqueZeroIndex(value, $"(({ChosenViewVar(localViewParam, "vo")}) + ({offsetExpr}))");
+                    string localPtr = Load(localViewParam).Name;
+                    if (_crossBlockPointers.Contains(value))
+                    {
+                        _crossBlockPointerExprs[target.Name] = $"(*{localPtr})[{localIndex}]";
+                        _crossBlockElementPointers.Add(target.Name);
+                    }
+                    AppendLine($"let {target.Name} = &(*{localPtr})[{localIndex}];");
+                    return;
+                }
                 else break;
             }
 
@@ -8768,6 +8785,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // for its root view of the kernel, as an arm of a chosen view does: its accesses are the root's accesses.
                 if (p.Method != Method && _chosenViewRoots.TryGetValue(p, out var helperRoot))
                     return ResolveToParameter(helperRoot.Resolve(), throughSubViews);
+                // a local-array view parameter of a helper being emitted is no buffer of the kernel
+                if (p.Method != Method && _localViewParams.ContainsKey(p))
+                    return null;
                 return p;
             }
             if (value is GetField gf) return ResolveToParameter(gf.ObjectValue, throughSubViews);
@@ -8797,10 +8817,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // A view chosen at run time (or a view parameter of a helper emitted per binding tuple) carries its length
             // in a variable of its own.
             var lengthView = StripViewCasts(value.View);
-            if (_chosenViewRoots.ContainsKey(lengthView))
+            if (_chosenViewRoots.ContainsKey(lengthView) || (lengthView is global::ILGPU.IR.Values.Parameter lengthParam && _localViewParams.ContainsKey(lengthParam)))
             {
                 string chosenPrefix = _hoistedPrimitives.Contains(value) ? "" : "let ";
                 AppendLine($"{chosenPrefix}{target} = {ChosenViewVar(lengthView, "vl")};");
+                return;
+            }
+
+            // A view of a LOCAL array (LocalMemory.Allocate) carries its length. It traces to no parameter, and the base
+            // path below emitted `arrayLength(&v_arr)`, which WGSL defines only for runtime-sized storage arrays: an
+            // invalid shader ("Invalid BindGroupLayout ... due to a previous error"; LvbTmp_IntOnly, 2026-11-09).
+            if (LocalArrayOf(value.View) is not null && StripViewCasts(value.View) is NewView localView)
+            {
+                string prefix = _hoistedPrimitives.Contains(value) ? "" : "let ";
+                string length = Load(localView.Length).ToString();
+                bool lengthIs64 = Backend.EnableI64Emulation && localView.Length.Resolve().BasicValueType == BasicValueType.Int64;
+                AppendLine($"{prefix}{target} = {ConvertLengthExpr(length, lengthIs64 ? "emu_i64" : "i32", TypeGenerator[value.Type])};");
                 return;
             }
 

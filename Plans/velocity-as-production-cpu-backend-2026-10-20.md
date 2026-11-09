@@ -75,3 +75,20 @@ ILGPU's own suite on Velocity (`VelocityTests`, 727 tests): 443 pass, 212 fail, 
 6. Register `VelocityTests` in `SpawnDev.ILGPU.DemoConsole/Program.cs` (DONE 10-20: all 731 pass or skip, per test and in PMT) and add a `VelocityTests` lane to ML's gate (Tuvok).
 
 Keep the plain CPU backend as the debugging backend; Velocity as the one that does the work. ML should create its CPU accelerator through one place so the choice is a flag, not an edit in many files.
+
+## VP9 on Velocity, 5.4.23-local.2 (Geordi, 2026-11-09 17:10; ComfyUI 252 frames, bit-exact, ms/frame)
+
+| Stage | before | local.2 | CPU accelerator |
+|---|---|---|---|
+| Tile parse (1-few threads) | 1,104.7 | 4.39 (small-launch host path) | ~2.6 |
+| Reconstruction (~15k threads since Codecs S2) | 115.6 | 127.1 | 4.4 |
+| Loop filter (grouped, barriers) | 114 | 621 (?) | 351 |
+
+Caveat: Tuvok's WebGPU bench overlapped part of the run (upper bounds). CORRECTION (Geordi 17:15): the 114 ms loop
+filter was the OLD one-thread-per-superblock kernel (before Codecs S1); 621 is the S1 grouped barrier kernel - different
+kernels, not an ILGPU regression. A clean A/B (S1 kernel on 5.4.21 vs local.2, quiet) is queued with Geordi. The S1 LF
+on Velocity (621) vs CPU (351) is Velocity's own barrier path.
+Clean A/B (Geordi 17:30, Codecs master with S1, same 252 frames, bit-exact): 5.4.21 LF 471.3 / recon 125.6 ms/frame vs
+5.4.23-local.2 LF 451.9 / recon 108.9 - NO regression (621 was load overlap). Open perf item: Velocity's barrier path
+(S1 grouped LF ~460 vs the old one-thread kernel 114; CPU accelerator 351).
+Recon on Velocity: per-op helper-call cost dominates wide serial kernels (35x CPU) - the next Velocity perf item.

@@ -36,6 +36,45 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// <summary>Per helper: its view parameters whose length it reads, with the length's IR type.</summary>
         private readonly Dictionary<Method, Dictionary<Parameter, TypeNode>> _helperViewLengthTypes = new();
 
+        /// <summary>
+        /// The view parameters of the helper being emitted whose root is a LOCAL array of a caller (LocalMemory): each is
+        /// a <c>ptr&lt;function, array&lt;T, N&gt;&gt;</c> parameter (value: that WGSL array type) plus an element offset.
+        /// Unlike a kernel binding, the caller's array is not visible inside the function, so an access does not
+        /// redirect to the root: it indexes through the pointer (GenerateCode(LoadElementAddress)).
+        /// </summary>
+        private readonly Dictionary<Parameter, string> _localViewParams = new();
+
+        /// <summary>True when <paramref name="value"/> is a view parameter of the helper being emitted (bound or local).</summary>
+        private bool IsHelperViewParam(Value value) =>
+            value is Parameter hp && hp.Method != Method
+            && (_chosenViewRoots.ContainsKey(hp) || _localViewParams.ContainsKey(hp));
+
+        /// <summary>The local array behind a view (NewView of a LOCAL Alloca, through casts), or null.</summary>
+        private static Alloca? LocalArrayOf(Value value)
+        {
+            value = StripViewCasts(value);
+            if (value is NewView newView)
+                value = StripViewCasts(newView.Pointer);
+            return value is Alloca { AddressSpace: MemoryAddressSpace.Local } alloca ? alloca : null;
+        }
+
+        /// <summary>True when the root of a view argument is a local array (or a local-array view parameter).</summary>
+        private bool IsLocalRoot(Value root) =>
+            LocalArrayOf(root) is not null || (root is Parameter p && _localViewParams.ContainsKey(p));
+
+        /// <summary>The WGSL array type of a local root: the alloca's declared array, or the forwarded parameter's.</summary>
+        private string LocalRootArrayType(Value root)
+        {
+            if (root is Parameter p && _localViewParams.TryGetValue(p, out var forwarded))
+                return forwarded;
+            var alloca = LocalArrayOf(root)!;
+            string type = Load(alloca).Type;
+            if (!type.StartsWith("array<", StringComparison.Ordinal))
+                throw new InvalidOperationException(
+                    $"WGSL view helper argument: local allocation {alloca} is declared {type}, not an array, in kernel '{Method.Name}'");
+            return type;
+        }
+
         /// <summary>A view through address-space casts (which keep the element type and the length).</summary>
         private static Value StripViewCasts(Value value)
         {
@@ -92,6 +131,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     value = hpRoot.Resolve();
                 else break;
             }
+            // a local array (LocalMemory) of the kernel or a forwarded local-array view parameter
+            if (IsLocalRoot(value))
+                return value;
             if (ResolveToParameter(value) is Parameter p && p.Method == Method && p.Index >= KernelParamOffset)
                 return value;
             throw new InvalidOperationException(
@@ -121,9 +163,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     parts.Add($"({SubViewOffsetExpr(sv)})");
                     value = sv.Source.Resolve();
                 }
-                else if (value is Parameter hp && hp.Method != Method && _chosenViewRoots.ContainsKey(hp))
+                else if (IsHelperViewParam(value))
                 {
-                    parts.Add(ChosenViewVar(hp, "vo")); // relative to the root already
+                    parts.Add(ChosenViewVar(value, "vo")); // relative to the root already
                     break;
                 }
                 else break;
@@ -144,8 +186,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         {
             var value = StripViewCasts(argument);
             bool wants64 = lengthType == "emu_i64" || lengthType == "emu_u64";
+            // a whole local array: its view's length operand
+            if (value is NewView localView && LocalArrayOf(localView) is not null)
+            {
+                string localLength = Load(localView.Length).ToString();
+                bool localIs64 = localView.Length.Resolve().BasicValueType == BasicValueType.Int64;
+                return ConvertLengthExpr(localLength, localIs64 && Backend.EnableI64Emulation ? "emu_i64" : "i32", lengthType);
+            }
             // a view parameter of the helper being emitted: its own length parameter
-            if (value is Parameter hp && hp.Method != Method && _chosenViewRoots.ContainsKey(hp))
+            if (value is Parameter hp && IsHelperViewParam(hp))
             {
                 if (!HelperViewLengthTypes(hp.Method).TryGetValue(hp, out var hpType))
                     throw new InvalidOperationException(
@@ -188,7 +237,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // a pointer parameter is ptr<function, T>: any local variable of type T, nothing to specialize
                 if (parameters[i].ParameterType is not ViewType) continue;
                 roots[i] = ViewArgumentRoot(methodCall[i], callee);
-                key.Append(',').Append(i).Append('=').Append(ViewRootKeyString(roots[i]!));
+                // a local array: any array of the same WGSL type (one function takes a pointer to it)
+                key.Append(',').Append(i).Append('=').Append(
+                    IsLocalRoot(roots[i]!) ? "L:" + LocalRootArrayType(roots[i]!) : ViewRootKeyString(roots[i]!));
             }
             var lengthTypes = HelperViewLengthTypes(callee);
             string keyString = key.ToString();
@@ -210,6 +261,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         argument = "&" + argument;
                     args.Add(argument);
                     continue;
+                }
+                if (IsLocalRoot(roots[i]!))
+                {
+                    // the array: `&v` of the kernel's (or this helper's caller's) local, or a forwarded pointer parameter
+                    args.Add(roots[i] is Parameter forwarded
+                        ? Load(forwarded).Name
+                        : "&" + Load(LocalArrayOf(roots[i]!)!).Name);
                 }
                 args.Add(ViewArgumentOffsetExpr(methodCall[i]));
                 if (lengthTypes.TryGetValue(parameters[i], out var lengthType))
@@ -285,10 +343,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var signature = new List<string>();
             var parameters = callee.Parameters;
             var helperViewParams = new List<Parameter>();
+            var localViewParams = new List<(Parameter Param, string ArrayType)>();
             for (int i = 0; i < parameters.Count; i++)
             {
                 var param = parameters[i];
-                if (roots[i] is Value root)
+                if (roots[i] is Value localRoot && IsLocalRoot(localRoot))
+                {
+                    string name = $"hv{i}";
+                    string arrayType = LocalRootArrayType(localRoot);
+                    valueVariables[param] = new Variable(name, $"ptr<function, {arrayType}>");
+                    localViewParams.Add((param, arrayType));
+                    signature.Add($"{name} : ptr<function, {arrayType}>");
+                    signature.Add($"{name}_vo : i32");
+                    if (lengthTypes.TryGetValue(param, out var localLengthType))
+                        signature.Add($"{name}_vl : {TypeGenerator[localLengthType]}");
+                }
+                else if (roots[i] is Value root)
                 {
                     string name = $"hv{i}";
                     valueVariables[param] = new Variable(name, "i32");
@@ -315,6 +385,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     signature.Add($"{variable.Name} : {variable.Type}");
                 }
             }
+
+            // the outer helper's local-view parameters are not this function's: only its own are visible here
+            var savedLocalViewParams = new Dictionary<Parameter, string>(_localViewParams);
+            _localViewParams.Clear();
+            foreach (var (param, arrayType) in localViewParams)
+                _localViewParams[param] = arrayType;
 
             // the kernel body's own pipeline (GenerateCode()): cross-block values declared at function scope, local
             // allocations, the structured walker with function-scope deferred declarations, the scoping post-process
@@ -365,6 +441,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 _chosenViewRoots.Remove(param);
                 _chosenViewNeedsLength.Remove(param);
             }
+            _localViewParams.Clear();
+            foreach (var entry in savedLocalViewParams)
+                _localViewParams[entry.Key] = entry.Value;
             Builder = savedBuilder;
             IndentLevel = savedIndent;
             IsStateMachineActive = savedStateMachine;
@@ -401,9 +480,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var source = StripViewCasts(value.Source);
             while (source is SubViewValue inner)
                 source = StripViewCasts(inner.Source);
-            if (source is Parameter hp && hp.Method != Method && _chosenViewRoots.ContainsKey(hp))
+            if (IsHelperViewParam(source))
             {
-                valueVariables[value] = Load(hp);
+                valueVariables[value] = Load(source);
                 return;
             }
             base.GenerateCode(value);

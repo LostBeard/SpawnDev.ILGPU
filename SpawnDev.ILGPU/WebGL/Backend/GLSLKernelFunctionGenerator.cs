@@ -3869,12 +3869,39 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 }
                 EmitHoistedOrTypedAssignment(value, target, lengthExpr);
             }
+            else if (LocalArrayViewOf(value.View) is NewView localView)
+            {
+                // A view of a LOCAL array (LocalMemory.Allocate) carries its length; it traces to no parameter, so its
+                // length was the 0 fallback below: a loop to `view.Length` ran zero times and `x % view.Length` broke
+                // the draw (INVALID_OPERATION) - LocalViewHelpers_LocalMemoryThroughHelpers_MatchHost, 2026-11-09.
+                string glslType = TypeGenerator[value.Type];
+                string length = Load(localView.Length).ToString();
+                string lengthType = TypeGenerator[localView.Length.Type];
+                string lengthExpr = glslType == lengthType ? length
+                    : glslType == "uvec2" ? $"uvec2(uint({length}), 0u)"
+                    : lengthType == "uvec2" ? $"int(({length}).x)"
+                    : $"{glslType}({length})";
+                EmitHoistedOrTypedAssignment(value, target, lengthExpr);
+            }
             else
             {
                 // Fallback: emit typed zero (should not happen for well-formed kernels)
                 Declare(target);
                 AppendLine($"{target} = {GetDefaultValue(TypeGenerator[value.Type])}; // GetViewLength: could not resolve view to parameter");
             }
+        }
+
+        /// <summary>The view of a LOCAL allocation (LocalMemory.Allocate) behind <paramref name="view"/>, through casts.</summary>
+        private static NewView? LocalArrayViewOf(Value view)
+        {
+            var current = view.Resolve();
+            while (current is AddressSpaceCast cast)
+                current = cast.Value.Resolve();
+            if (current is not NewView newView) return null;
+            var pointer = newView.Pointer.Resolve();
+            while (pointer is AddressSpaceCast pointerCast)
+                pointer = pointerCast.Value.Resolve();
+            return pointer is Alloca { AddressSpace: MemoryAddressSpace.Local } ? newView : null;
         }
 
         /// <summary>
