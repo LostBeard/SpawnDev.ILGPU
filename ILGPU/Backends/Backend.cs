@@ -633,6 +633,14 @@ namespace ILGPU.Backends
             return generatedKernelMethod;
         }
 
+        private long compiledKernelCount;
+
+        /// <summary>
+        /// The number of kernels this backend has compiled (IL to its target code). Diagnostic: tells a kernel-cache hit
+        /// from a compile without timing it.
+        /// </summary>
+        public long CompiledKernelCount => System.Threading.Interlocked.Read(ref compiledKernelCount);
+
         /// <summary>
         /// Compiles a given compile unit with the specified entry point using
         /// the given kernel specialization.
@@ -697,6 +705,7 @@ namespace ILGPU.Backends
             TBackendHook backendHook)
             where TBackendHook : IBackendHook
         {
+            System.Threading.Interlocked.Increment(ref compiledKernelCount);
             try
             {
                 // Import the all kernel functions into our kernel context

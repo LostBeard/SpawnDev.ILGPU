@@ -106,6 +106,13 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         {
             var (x, wt, off, prm, outLen) = KernelLoadInputs();
             var webgpu = accelerator as global::SpawnDev.ILGPU.WebGPU.WebGPUAccelerator;
+            // The suite caps the shader cache (TestShaderCacheCap): at the cap a new shader evicts one and the count
+            // cannot rise (5.4.19 sweep: 64 / 64 / 64). Unlimited while this test counts.
+            var savedCap = global::SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.MaxCachedShaders;
+            global::SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.MaxCachedShaders = 0;
+            float[] got;
+            try
+            {
             int shadersBefore = webgpu?.CachedShaderCount ?? 0;
             var kernel = await accelerator.LoadAutoGroupedStreamKernelAsync<Index1D,
                 ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
@@ -122,10 +129,12 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             kernel((Index1D)outLen, xb.View, wb.View, ob.View, mb.View, bb.View, yb.View, pb.View);
             await accelerator.SynchronizeAsync();
             int shadersAfterLaunch = webgpu?.CachedShaderCount ?? 0;
-            var got = await yb.CopyToHostAsync<float>();
+            got = await yb.CopyToHostAsync<float>();
             if (webgpu != null && (shadersAfterLoad != shadersBefore + 1 || shadersAfterLaunch != shadersAfterLoad))
                 throw new Exception($"WebGPU shader cache: {shadersBefore} before the load, {shadersAfterLoad} after it (want +1), " +
                     $"{shadersAfterLaunch} after the first launch (want unchanged)");
+            }
+            finally { global::SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.MaxCachedShaders = savedCap; }
 
             using var cpuContext = Context.Create(b => b.CPU());
             using var cpu = cpuContext.CreateCPUAccelerator(0);
@@ -148,51 +157,36 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                     throw new Exception($"[{i}] cpu {want[i]:R} got {got[i]:R}");
         });
 
-        // Browser backends: the async load returns to the browser's event loop BEFORE the synchronous IL compile. Observed
-        // by ORDER, not time: a JS setTimeout(0) registered just before the load runs at the first moment the page's event
-        // loop is free, and there loads the SAME kernel synchronously. If the async load yielded before compiling, that
-        // load is the one that compiles (tens to hundreds of ms); if the async load compiled first, it is a kernel-cache hit
-        // (well under a ms). Time ratios were not usable: in the Wasm lane the event loop has a backlog of worker messages
-        // from earlier dispatches, so even a yielding load saw the JS timer late (83.8 ms of a 118 ms load).
+        // Browser backends: the async load returns to the browser's event loop BEFORE the synchronous IL compile. Observed by
+        // ORDER: a JS setTimeout(0) registered just before the load runs at the first moment the page's event loop is free
+        // and records Accelerator.CompiledKernelCount there. If the load yielded before compiling, the count is still the
+        // one from before the load; if it compiled first, it is one more. (Timing the browser task was not usable: the
+        // Wasm lane's event loop has a backlog of worker messages, and WebGL's second load of a kernel costs ~11 ms by
+        // itself, which looked like a compile in a red-check.)
         [TestMethod]
         public async Task KernelLoadAsync_YieldsToBrowserBeforeCompile() => await RunTest(async accelerator =>
         {
             if (!OperatingSystem.IsBrowser())
                 throw new UnsupportedTestException("Browser event-loop yield (browser backends only).");
-            double callbackLoadMs = -1;
+            long atBrowserTask = -1;
+            long before = accelerator.CompiledKernelCount;
             using var window = global::SpawnDev.SpawnJS.SpawnJSRuntime.Instance.Get<global::SpawnDev.SpawnJS.JSObjects.Window>("window");
-            window.SetTimeout(() =>
-            {
-                var t = Stopwatch.StartNew();
-                accelerator.LoadAutoGroupedStreamKernel<Index1D,
-                    ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
-                    ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
-                    ArrayView1D<float, Stride1D.Dense>>(KernelLoadAsyncDeformConvB);
-                callbackLoadMs = t.Elapsed.TotalMilliseconds;
-            }, 0);
+            window.SetTimeout(() => atBrowserTask = accelerator.CompiledKernelCount, 0);
             var sw = Stopwatch.StartNew();
             var kernel = await accelerator.LoadAutoGroupedStreamKernelAsync<Index1D,
                 ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
                 ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
                 ArrayView1D<float, Stride1D.Dense>>(KernelLoadAsyncDeformConvB);
             double loaded = sw.Elapsed.TotalMilliseconds;
-            while (callbackLoadMs < 0) await Task.Delay(1);
-            // the same load again, now certainly cached: what a cache hit costs here
-            var t2 = Stopwatch.StartNew();
-            accelerator.LoadAutoGroupedStreamKernel<Index1D,
-                ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
-                ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>, ArrayView1D<float, Stride1D.Dense>,
-                ArrayView1D<float, Stride1D.Dense>>(KernelLoadAsyncDeformConvB);
-            double cachedMs = t2.Elapsed.TotalMilliseconds;
-            Console.WriteLine($"[KernelLoadTiming] async {accelerator.AcceleratorType}: load in the JS task {callbackLoadMs:F1} ms, " +
-                $"cache hit {cachedMs:F2} ms, async load {loaded:F1} ms");
-            // The JS task's load must be the COMPILE: far above a cache hit, and most of the async load's wall time (it ran
-            // inside it). Measured: 69-88% when the load yields; a non-yielding load left the JS task 0.07-0.8 ms on WebGPU /
-            // Wasm, and 29 ms of 166 (17%) on WebGL, where the interpreter's first call of this 8-type-argument loader costs
-            // tens of ms by itself (red-check 2026-11-08).
-            if (callbackLoadMs < 10 * cachedMs + 5 || callbackLoadMs < 0.4 * loaded)
-                throw new Exception($"the browser task ran AFTER the compile (its load of the same kernel took {callbackLoadMs:F2} ms, " +
-                    $"a cache hit {cachedMs:F2} ms): the async load did not yield before compiling");
+            long after = accelerator.CompiledKernelCount;
+            while (atBrowserTask < 0) await Task.Delay(1);
+            Console.WriteLine($"[KernelLoadTiming] async {accelerator.AcceleratorType}: compiles before {before}, at the browser task " +
+                $"{atBrowserTask}, after the load {after}; async load {loaded:F1} ms");
+            if (after != before + 1)
+                throw new Exception($"the async load compiled {after - before} kernels, expected 1 (a cold kernel)");
+            if (atBrowserTask != before)
+                throw new Exception($"the browser task ran AFTER the compile (count {atBrowserTask}, {before} before the load): " +
+                    "the async load did not yield before compiling");
         });
     }
 }

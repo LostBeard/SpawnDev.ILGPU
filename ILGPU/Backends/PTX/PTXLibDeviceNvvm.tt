@@ -74,11 +74,16 @@ namespace ILGPU.Backends.PTX
         {
             var builder = new StringBuilder();
             bool addPrefix = true;
+            // Each fragment ONCE: a LibDevice function used by a kernel and by a [NoInlining] helper appears as two
+            // methods, and a second `define` of the same wrapper made NVVM reject the whole module, which the PTX
+            // backend then dropped (5.4.19 sweep: "Unknown symbol '__ilgpu__nv_ceil'").
+            var emitted = new HashSet<string>(System.StringComparer.Ordinal);
 
             foreach (var method in methods)
             {
                 if (method.HasSource &&
-                    fragments.TryGetValue(method.Source.Name, out var methodNvvm))
+                    fragments.TryGetValue(method.Source.Name, out var methodNvvm) &&
+                    emitted.Add(method.Source.Name))
                 {
                     if (addPrefix)
                     {

@@ -18,6 +18,9 @@ try
     // Offline PTX of BackendTestBase.NestedLoopDoWhileKernel (no CUDA device used): `ptx-dump [O0|O1|O2] [out.ptx]`.
     if (args.Length > 0 && args[0] == "ptx-dump")
         return await PtxDump.Run(args);
+    // NVVM / libdevice probe (CPU only): `nvvm-probe`.
+    if (args.Length > 0 && args[0] == "nvvm-probe")
+        return await NvvmProbe.Run(args);
     if (args.Length > 0 && args[0] == "ptx-variant-run")
         return await PtxVariantProbe.Run(args);
     // Offline WGSL of the F64 Ieee ops kernel in each emulation mode, for naga: `ieee-wgsl <outDir>`. No browser.

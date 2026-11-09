@@ -272,6 +272,11 @@ namespace ILGPU.Runtime
         /// </summary>
         internal Backend Backend { get; private set; }
 
+        /// <summary>
+        /// The number of kernels this accelerator's backend has compiled (a kernel-cache hit does not count). Diagnostic.
+        /// </summary>
+        public long CompiledKernelCount => Backend?.CompiledKernelCount ?? 0;
+
         #endregion
 
         #region Methods

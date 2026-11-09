@@ -396,6 +396,16 @@ namespace ILGPU.Backends.PTX
                         builder.Append(compiledString);
                     }
                 }
+
+                // A failure here used to be silent: the kernel then called __ilgpu__nv_* functions that were never
+                // emitted and failed much later in the driver JIT with "Unknown symbol" (5.4.19 sweep, CUDA 13).
+                if (result != NvvmResult.NVVM_SUCCESS)
+                {
+                    NvvmAPI.GetProgramLog(program, out var nvvmLog);
+                    throw new InvalidOperationException(
+                        $"NVVM could not compile the LibDevice functions this kernel uses ({result}): " +
+                        $"{nvvmLog?.Trim()}{Environment.NewLine}NVVM module:{Environment.NewLine}{nvvmModule}");
+                }
             }
             finally
             {

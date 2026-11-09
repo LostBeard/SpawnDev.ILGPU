@@ -24,8 +24,7 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   of pipeline creation at the first launch, all on the page's thread; SpawnGen froze 30-104 s while SpawnDev.Codecs loaded
   ~112 kernels (Lore). New `Accelerator.BeforeKernelCompileAsync` / `AfterAutoGroupedKernelLoadAsync` hooks.
   `KernelLoadAsync_LauncherMatchesCpu` (all lanes; on WebGPU the load adds the shader to the cache and the first launch
-  adds none), `KernelLoadAsync_YieldsToBrowserBeforeCompile` (a JS `setTimeout(0)` registered before the load compiles the
-  kernel itself: 160-470 ms there vs a 0.1 ms cache hit; red-check: without the yield it is a cache hit).
+  adds none), `KernelLoadAsync_YieldsToBrowserBeforeCompile` (see `CompiledKernelCount` below).
 - **NEW (WebGPU, WebGL): `F64EmulationMode.Ieee`** - `double` as its IEEE-754 bit pattern in integer arithmetic. Every
   operation rounds to nearest even at 53 bits with subnormals, like .NET: + - * /, Sqrt, `%` and Math.IEEERemainder
   (exact), Math.FusedMultiplyAdd (one rounding), Floor / Ceiling / Truncate / Round, conversions, comparisons, Min / Max are
@@ -48,6 +47,16 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   auto-detection searched `nvvm\bin` only, so double `Math.Cos` (any LibDevice math) failed to compile without
   Algorithms (Geordi). Both folders are searched, and a missing folder is "not found" instead of an exception.
   `CudaTests.LibDevice_AutoDetected_DoubleCosCompilesWithoutAlgorithms` (red-check: fails with the old search).
+- **FIXED (forks, CUDA, any machine where LibDevice is found): a kernel that uses a LibDevice function both directly and
+  in a `[NoInlining]` helper failed to load** ("Call to '__ilgpu__nv_floor' requires call prototype / Unknown symbol").
+  The same wrapper was written into the NVVM module twice, NVVM rejected the redefinition, and the PTX backend silently
+  dropped every LibDevice function. Found by this release's first sweep (6 CUDA tests: f64 math, `%`, the fused-FFN GELU),
+  once the CUDA 13 fix let LibDevice load on this machine. Each wrapper is emitted once, and an NVVM failure now throws
+  with NVVM's log instead of surfacing later as a driver JIT error. `DemoConsole -- nvvm-probe` replays the NVVM step.
+- **NEW (forks): `Accelerator.CompiledKernelCount`** - kernels the accelerator's backend has compiled (a cache hit does
+  not count); `KernelLoadAsync_YieldsToBrowserBeforeCompile` reads it from a JS `setTimeout(0)` registered before the
+  load: still the count from before the load on all four browser lanes (it is one higher with the yield removed - the
+  red-check fails on all four, which timing the browser task could not show on WebGL).
 - Diagnostics in DemoConsole: `ptx-dump [O0|O1|O2] [file]` (offline PTX, no device), `ptx-variant-run` (a kernel's PTX as
   generated vs edited, on CUDA), `ieee-wgsl <dir>` (WGSL + GLSL of the f64 test kernels in each mode, for naga / ANGLE).
 
