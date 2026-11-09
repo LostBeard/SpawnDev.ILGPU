@@ -408,7 +408,11 @@ fn main() {
                 catch (InvalidOperationException ex) { caught = ex; }
                 if (caught == null)
                     throw new Exception("the readback after an invalid shader returned data instead of throwing (a silent no-op kernel)");
-                if (!caught.Message.Contains("failed validation") && !caught.Message.Contains("InvalidOnPurpose"))
+                // The shader's validation error, or the follow-on submit error it causes ("[Invalid CommandBuffer] is invalid due to
+                // a previous error"): the browser does not order them, and under load (the 5.4.22 release sweep) the follow-on came
+                // first. This accelerator dispatches nothing else, so either one is this shader's failure.
+                if (!caught.Message.Contains("failed validation") && !caught.Message.Contains("InvalidOnPurpose")
+                    && !caught.Message.Contains("due to a previous error"))
                     throw new Exception($"the readback threw, but not about the invalid shader: {caught.Message}");
                 // The error is consumed, and the staging buffer is usable again.
                 var again = await buffer.CopyToHostAsync();
