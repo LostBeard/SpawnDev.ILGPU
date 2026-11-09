@@ -69,11 +69,10 @@ namespace ILGPU.IR.Transformations
 
         /// <summary>
         /// True when every argument of <paramref name="call"/> that carries an address is a view or pointer (not a
-        /// structure containing one) whose origin is a method PARAMETER: a kernel parameter is a storage buffer, and a
-        /// helper's parameter is one too whenever that helper survives as a function (it does only when all of its own
-        /// address-carrying call sites pass views of parameters). Views of an allocation (local / shared memory), and
-        /// views chosen at run time (phi, select) or loaded from memory, are not. Address spaces are not inferred yet
-        /// at this point (the arguments are Generic), so the origin is traced instead.
+        /// structure containing one) of a supported element type (<see cref="IsHelperAbiElement"/>) whose origin is a
+        /// KERNEL parameter (a storage buffer). Views of an allocation (local / shared memory), of a helper's own
+        /// parameter, chosen at run time (phi, select) or loaded from memory are not. Address spaces are not inferred
+        /// yet at this point (the arguments are Generic), so the origin is traced instead.
         /// </summary>
         public static bool PassesOnlyGlobalViews(MethodCall call)
         {
@@ -82,22 +81,80 @@ namespace ILGPU.IR.Transformations
                 var type = call[i].Type;
                 if (!CarriesAddress(type))
                     continue;
-                if (type is not AddressSpaceType || !OriginatesFromParameter(call[i]))
+                if (type is not ViewType view || !IsHelperAbiElement(view.ElementType) || !OriginatesFromKernelParameter(call[i]))
                     return false;
             }
             return true;
         }
 
-        /// <summary>Follows sub-views, casts, alignment hints and field reads back to a method parameter.</summary>
-        private static bool OriginatesFromParameter(Value value)
+        /// <summary>
+        /// Version 1 of the helper-function view ABI (Plans/view-helpers-as-functions-2026-11-09.md): a call in the KERNEL
+        /// whose view arguments are all kernel-parameter views of a supported element type, to a helper that (with
+        /// everything it calls) has no atomics, barriers, warp / broadcast operations or shared memory, in a kernel that
+        /// uses no atomics anywhere (an atomically used binding is declared <c>array&lt;atomic&lt;T&gt;&gt;</c>, which a
+        /// plain <c>ptr&lt;storage, array&lt;T&gt;&gt;</c> parameter would not match).
+        /// </summary>
+        private static bool KeepsAsFunction(Method caller, Method target, MethodCall call) =>
+            caller.HasFlags(MethodFlags.EntryPoint)
+            && PassesOnlyGlobalViews(call)
+            && !UsesSynchronization(target, new HashSet<Method>(), sharedToo: true)
+            && !UsesSynchronization(caller, new HashSet<Method>(), sharedToo: false);
+
+        /// <summary>
+        /// True when <paramref name="method"/> or anything it calls contains an atomic, a barrier, a memory barrier, a warp
+        /// shuffle / broadcast, or a shared-memory allocation; with <paramref name="sharedToo"/> false (the kernel-wide
+        /// check) only atomics count.
+        /// </summary>
+        private static bool UsesSynchronization(Method method, HashSet<Method> visited, bool sharedToo)
+        {
+            if (!visited.Add(method) || !method.HasImplementation)
+                return false;
+            foreach (var block in method.Blocks)
+                foreach (var entry in block)
+                {
+                    switch (entry.Value)
+                    {
+                        case AtomicValue:
+                            return true;
+                        case BarrierOperation or MemoryBarrier or Broadcast or ShuffleOperation when sharedToo:
+                            return true;
+                        case Alloca alloca when sharedToo && alloca.AddressSpace == MemoryAddressSpace.Shared:
+                            return true;
+                        case MethodCall nested when UsesSynchronization(nested.Target, visited, sharedToo):
+                            return true;
+                    }
+                }
+            return false;
+        }
+
+        /// <summary>
+        /// Element types the WGSL helper-function view ABI (binding pointer + element offset) supports: plain 32-bit
+        /// (<c>array&lt;i32|u32|f32&gt;</c>) and the sub-word types packed into <c>array&lt;atomic&lt;u32&gt;&gt;</c>. 64-bit
+        /// (emulated vec2 storage), packed 4-bit and structure elements keep the inlining path.
+        /// </summary>
+        private static bool IsHelperAbiElement(TypeNode elementType) =>
+            elementType is PrimitiveType primitive && primitive.BasicValueType switch
+            {
+                BasicValueType.Int8 or BasicValueType.Int16 or BasicValueType.Int32 or
+                BasicValueType.Float16 or BasicValueType.BFloat16 or BasicValueType.Float32 or
+                BasicValueType.Float8E4M3 or BasicValueType.Float8E5M2 => true,
+                _ => false,
+            };
+
+        /// <summary>
+        /// Follows sub-views, casts, alignment hints and field reads back to a parameter of the KERNEL (entry point): a
+        /// storage buffer. A helper's own parameter does not qualify, so a view-taking call inside a surviving helper is
+        /// inlined into that helper's function.
+        /// </summary>
+        private static bool OriginatesFromKernelParameter(Value value)
         {
             for (int guard = 0; guard < 256; guard++)
             {
                 value = value.Resolve();
                 switch (value)
                 {
-                    case Parameter:
-                        return true;
+                    case Parameter parameter:
+                        return parameter.Method.HasFlags(MethodFlags.EntryPoint);
                     case PointerValue pointerValue:   // SubViewValue, LoadElementAddress, AsAligned / AlignTo
                         value = pointerValue.Source;
                         continue;
@@ -189,7 +246,7 @@ namespace ILGPU.IR.Transformations
                 {
                     // WebGPU non-Inline helper ([NoInlining] / over the IL cap): a WGSL fn-def, which can take a
                     // storage-buffer view (ptr<storage>) but not a local / shared / struct-carried address.
-                    inline = TakesAddress(target) && !(keepGlobalViewCalls && PassesOnlyGlobalViews(call));
+                    inline = TakesAddress(target) && !(keepGlobalViewCalls && KeepsAsFunction(builder.Method, target, call));
                 }
                 if (!inline)
                     continue;

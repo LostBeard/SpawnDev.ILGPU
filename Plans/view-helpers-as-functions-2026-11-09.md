@@ -102,3 +102,21 @@ Cross-binding view choice (still unsupported on WebGPU / WebGL - documented, typ
   `IsSubWord`/`SubWordElementByteSize`), stage entries for every parameter-origin view arg (not only coalesce members),
   and at the call site pass `base slot + SubView-chain offset` (reuse the LEA chain walk) and a length
   (`p_<id>_len`: the innermost SubView's Length, else the parameter's length) when the body reads the length.
+
+## Design correction 2026-11-09 07:30 - do NOT pass typed storage pointers
+
+The declared element type of a kernel binding (`param{N} : array<T>`) depends on signedness from the CLR type, packed
+structs, sub-word storage (`atomic<u32>`, or plain `u32` for a read-only f16 - `IsPlainLoadF16`), and atomics - several of
+which are decided DURING kernel body codegen (`_subWordParams` registration is path/order dependent), while helper fns are
+generated in parallel with their own signatures. A `ptr<storage, array<T>>` parameter must match the binding type exactly
+(Tint rejects a mismatch), so the coalesce-style typed-pointer ABI is fragile.
+
+**Use monomorphization instead:** emit a surviving helper once per BINDING TUPLE (which kernel parameter each view
+argument is) and have its body index the module-scope `param{N}` directly, with only the element offset (+ length) as
+scalar parameters - every load / store then goes through the KERNEL's own parameter-aware paths (sub-word, f16, packed
+struct, atomics), so the binding's type never has to be spelled in a signature. Implementation shape: generate the helper
+body with the kernel generator's machinery (a "helper as kernel-fragment" emission), keyed by (method, binding tuple).
+
+IR side committed and inert (flag off): `KeepsAsFunction` = call in the kernel, all view args kernel-parameter views of
+plain / sub-word element types, helper free of atomics / barriers / warp ops / shared memory, kernel free of atomics.
+VP9 decoder kernels use no atomics, so v1 covers them.
