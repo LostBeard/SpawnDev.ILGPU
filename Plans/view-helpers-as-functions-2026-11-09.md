@@ -161,3 +161,40 @@ undeclared), a kernel-wide field wrongly reset loses binding info (silent wrong 
 Consumer-side update (Geordi, S2 branch): splitting the inter path out of the recon kernels took IntraWaveKernel 33.7 ->
 6.6 MB WGSL; the two new inter kernels are 5.7 and 4.5 MB. Still multi-MB per kernel (the library fix remains the way to
 take them to sub-MB), but below the 10-26 OOM class.
+
+## Status 2026-11-09 14:20 (Data) - WGSL implemented, uncommitted, browser lane pending
+
+Done (builds; offline WGSL validates with naga):
+- [x] IR: `InlineAddressParameterCalls(keepGlobalViewCalls: true)` on WebGPU keeps a call to a NON-Inline helper whose view
+  arguments are sub-views (through address-space casts) of a parameter: of the kernel, or of the calling helper
+  (transitive), or a view field of a kernel struct parameter. Target: no atomics / barriers / warp / broadcast / grid
+  indices / shared memory; kernel: no atomics.
+- [x] Codegen (`WGSLKernelFunctionGenerator.ViewHelpers.cs`): one `fn <helper>_m<k>` per binding tuple; view params =
+  `hv{i}_vo` (+ `hv{i}_vl` when the helper, or a nested helper given it whole, reads the length); body through the kernel
+  pipeline (cross-block hoist, structured walker, scoping post-process, phases 4 / 5, scalar-slot hoist). Walker returns
+  carry the value (`ReturnExitStatement`). The function generator emits nothing for view-taking methods.
+- [x] Pre-scans: body-struct output scan maps helper params to kernel params per call site (was latent-wrong);
+  `ParamLengthIsRead` sees lengths read inside kept helpers (count slots for sub-word views).
+- [x] Tests: size gate in `ViewHelper_ManyCallSitesWithSubViews_MatchesHost` (651 vs 516 lines; flag off 1,481 vs 146: the gate fails, red-check done), new
+  `ViewHelper_BindingShapesThroughHelpers_MatchHost`.
+
+Open:
+- [x] Red-check: flag off -> 1,481 vs 146 lines, the size gate fails.
+- [x] PMT: ViewHelper tests 19/20 (WebGL refuses the 8-byte scatter loudly -> test skips WebGL); WebGPU lanes 1712/1/91 (the 1 = InvalidShader error-order flake, test fixed). [ ] naga over the suite. [ ] PMT the RefStateHelpers test.
+- [ ] VP9 size table with Codecs 64a88db (`scratchpad/vp9screen2`): its `[NoInlining]` helpers (PredictBlockPlane,
+  Predict, InverseTransformAdd, loop-filter lanes) are called from inside other helpers, which the nested support covers.
+  Codecs 7c4fbce (no NoInlining) moved only 314k -> 280k lines (one kept call per kernel).
+- [x] VP9 table (Codecs 64a88db, 5.4.21 -> this build, naga-valid): InterResidual 67,308 -> 44,093, IntraWave
+  72,122 -> 48,719, InterPredict / Wavefront / CompressedHeader ~same, Parse 821,782 unchanged.
+- [x] v2 (implemented 14:50): `ref` to a LOCAL structure as a `ptr<function, T>` parameter. VP9 64a88db with v2 (15:25,
+  all six kernels naga-valid): Parse 821,782 -> 136,945 lines (87 MB -> 10.7 MB, generate 196 s -> 6 s), InterResidual
+  44,093, IntraWave 48,719, others unchanged. Found on the way: bool XOR emitted `^` (FIXED, pre-existing, any kernel);
+  a caller rule that excluded Inline-flagged callers duplicated InverseTransformAdd (fixed: only Inline + shared-memory
+  callers are excluded). Parse's helpers (DecodeCoefs, ReadCoeff,
+  DecodeBlockTokens, ReadMv*, ReadInterMode, ...) all take `ref Vp8BoolDecoderGpuState r`; WGSL core allows
+  ptr<function> parameters. Needs: IR keep rule (pointer to an Alloca of the caller or a ptr param of a kept helper),
+  call site `&var`, accesses through `(*p)` in the body (the local-alloca value-name handling must not apply).
+- [ ] Commit core + wrapper, drift check, -local package for Geordi.
+- [ ] LocalMemory views as `ptr<function, array<T, N>>` + element offset (Geordi's S3 branch: token cache / contexts /
+  partition stack in LocalMemory).
+- [ ] Wasm / GLSL phases unchanged (not started).

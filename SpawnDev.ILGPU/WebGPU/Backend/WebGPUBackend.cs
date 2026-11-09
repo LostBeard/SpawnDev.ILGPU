@@ -767,7 +767,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // operands - emulated-i64 index/length compares from every ArrayView access - stayed alive as dead
                     // assignments (32-47 % of the TRELLIS.2 attention/gemm shaders). DeadCodeElimination below drops them.
                     new RemoveDebugOperations(),
-                    new InlineAddressParameterCalls(inlineBudgetSurvivors: true),
+                    new InlineAddressParameterCalls(inlineBudgetSurvivors: true, keepGlobalViewCalls: true),
                     // A call inlined here ran past SSA construction: a struct whose address it took (`this` of a struct
                     // method, a `ref` argument) is still an alloca, and a struct alloca holding a view cannot be a WGSL
                     // var (the view field came out as an i32 and was then indexed: naga "Invalid sub-access into type",
@@ -1355,6 +1355,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // flag) get emitted as standalone WGSL `fn` definitions; methods
             // with the Inline flag stay on the codegen-time inline path.
             // Tracks `Plans/rc16-fn-def-codegen-harden.md`.
+            data.FunctionAllocas[method] = allocas;
             if (method.HasFlags(MethodFlags.Inline))
                 data.HelperMethods[method] = allocas;
             else

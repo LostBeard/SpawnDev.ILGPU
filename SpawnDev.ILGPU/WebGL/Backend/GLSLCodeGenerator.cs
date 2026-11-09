@@ -2077,7 +2077,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 BinaryArithmeticKind.Div => "/",
                 BinaryArithmeticKind.And => isBoolOp ? "&&" : "&",
                 BinaryArithmeticKind.Or => isBoolOp ? "||" : "|",
-                BinaryArithmeticKind.Xor => "^",
+                // GLSL has no `^` on bool: XOR of two bools is `!=`
+                BinaryArithmeticKind.Xor => isBoolOp ? "!=" : "^",
                 BinaryArithmeticKind.Shl => "<<",
                 BinaryArithmeticKind.Shr => ">>",
                 BinaryArithmeticKind.Rem => "%",

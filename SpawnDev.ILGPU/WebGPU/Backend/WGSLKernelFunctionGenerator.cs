@@ -561,13 +561,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         private void ScanForBodyStructOutputs()
         {
-            ScanBlocksForBodyStructOutputs(Method.Blocks);
+            static (int Param, int Field) identity(int param, int field) => (param, field);
+            ScanBlocksForBodyStructOutputs(Method.Blocks, identity);
 
             var visited = new HashSet<global::ILGPU.IR.Method>();
-            ScanMethodCallsForBodyStructOutputs(Method, visited);
+            ScanMethodCallsForBodyStructOutputs(Method, identity, visited);
         }
 
-        private void ScanBlocksForBodyStructOutputs(IEnumerable<global::ILGPU.IR.BasicBlock> blocks)
+        /// <param name="blocks">The blocks to scan.</param>
+        /// <param name="paramMapper">Maps (parameter index, body-struct field) of the scanned method to the KERNEL's
+        /// (parameter index, field); a parameter index of -1 = not a kernel buffer. A helper's own parameter index means
+        /// nothing in the kernel: before this mapper, a store through a NoInlining helper's parameter 1 credited KERNEL
+        /// parameter 1.</param>
+        private void ScanBlocksForBodyStructOutputs(
+            IEnumerable<global::ILGPU.IR.BasicBlock> blocks,
+            Func<int, int, (int Param, int Field)> paramMapper)
         {
             foreach (var block in blocks)
             {
@@ -582,14 +590,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         target = cas.Target;
                     if (target == null) continue;
 
-                    foreach (var (param, fieldIdx) in ResolveWrittenParameters(target))
+                    foreach (var (rawParam, rawFieldIdx) in ResolveWrittenParameters(target))
                     {
+                        var (paramIndex, fieldIdx) = paramMapper(rawParam.Index, rawFieldIdx);
+                        if (paramIndex < 0) continue;
                         if (fieldIdx >= 0
-                            && _bodyStructParams.TryGetValue(param.Index, out var bsFields)
+                            && _bodyStructParams.TryGetValue(paramIndex, out var bsFields)
                             && fieldIdx < bsFields.Count
                             && bsFields[fieldIdx].IsView)
                         {
-                            _bodyStructOutputFields.Add((param.Index, fieldIdx));
+                            _bodyStructOutputFields.Add((paramIndex, fieldIdx));
                         }
                         else if (fieldIdx < 0)
                         {
@@ -599,7 +609,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             // each member's individual GPU buffer (mirrors body-struct
                             // output exclusion, rc.27). (rc.16 direct-param coalesce,
                             // 2026-05-05.)
-                            _directParamOutputs.Add(param.Index);
+                            _directParamOutputs.Add(paramIndex);
                         }
                     }
                 }
@@ -608,19 +618,33 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         private void ScanMethodCallsForBodyStructOutputs(
             global::ILGPU.IR.Method method,
+            Func<int, int, (int Param, int Field)> paramMapper,
             HashSet<global::ILGPU.IR.Method> visited)
         {
             if (!visited.Add(method)) return;
-
-            // Scan blocks of this method
-            ScanBlocksForBodyStructOutputs(method.Blocks);
 
             foreach (var block in method.Blocks)
             {
                 foreach (var entry in block)
                 {
-                    if (entry.Value is global::ILGPU.IR.Values.MethodCall methodCall)
-                        ScanMethodCallsForBodyStructOutputs(methodCall.Target, visited);
+                    if (entry.Value is not global::ILGPU.IR.Values.MethodCall methodCall) continue;
+                    var targetMethod = methodCall.Target;
+                    var targetParams = targetMethod.Parameters.ToArray();
+                    // target parameter index -> the kernel (parameter, field) its argument points into
+                    var paramMap = new Dictionary<int, (int Param, int Field)>();
+                    for (int argIdx = 0; argIdx < methodCall.Count && argIdx < targetParams.Length; argIdx++)
+                        foreach (var (parentParam, parentField) in ResolveWrittenParameters(methodCall[argIdx]))
+                        {
+                            var mapped = paramMapper(parentParam.Index, parentField);
+                            if (mapped.Param >= 0)
+                                paramMap[targetParams[argIdx].Index] = mapped;
+                        }
+                    if (paramMap.Count == 0) continue;
+                    (int Param, int Field) childMapper(int param, int field) =>
+                        paramMap.TryGetValue(param, out var k) ? (k.Param, k.Field >= 0 ? k.Field : field) : (-1, -1);
+                    // per call site (each passes its own buffers); the recursion guard is per caller
+                    ScanBlocksForBodyStructOutputs(targetMethod.Blocks, childMapper);
+                    ScanMethodCallsForBodyStructOutputs(targetMethod, childMapper, visited);
                 }
             }
         }
@@ -3275,6 +3299,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         {
             var targetMethod = methodCall.Target;
 
+            // A helper taking views of kernel parameters: one fn per binding tuple (WGSLKernelFunctionGenerator.ViewHelpers.cs)
+            if (TryEmitMonomorphizedHelperCall(methodCall))
+                return;
+
             // Check if this is a helper function we should inline
             if (_generatorArgs.HelperMethods.TryGetValue(targetMethod, out var helperAllocas))
             {
@@ -3349,14 +3377,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 var savedDeclaredVariables = new HashSet<string>(declaredVariables);
                 var savedEmittedLetBindings = new HashSet<string>(_emittedLetBindings);
 
-                // CRITICAL FIX: Offset varCounter to avoid namespace collisions.
-                // The kernel's hoisting pass pre-declares vars at function scope (e.g. var v_214 : bool).
-                // If the inlined helper's Allocate() generates the same name (v_214) for an i32,
-                // the function-scope bool declaration is visible inside the { } block → type mismatch.
-                // Fix: jump varCounter to a high offset so inlined vars get unique names.
-                var savedVarCounter = varCounter;
+                // Variable names: varCounter only ever grows, so an inlined helper's names never repeat one the kernel's
+                // hoisting pass pre-declared at function scope (e.g. `var v_214 : bool` then an i32 `v_214` inside the
+                // { } block: type mismatch). It used to jump to 10000 x (inlining count) and drop back afterwards, which
+                // collided as soon as a body passed 10,000 values (SpawnDev.Codecs' VP9 InverseTransformAdd emitted as a
+                // function: two `v_30002` of different types in one fn, 2026-11-09).
                 _inlineCounter++;
-                varCounter = 10000 * _inlineCounter;
 
                 // Also remove helper's IR values from valueVariables so Load() allocates
                 // fresh variable names for each inlining (avoids name collisions in { } scopes).
@@ -3413,10 +3439,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // Both are readonly, so we remove entries added during inlining.
                 declaredVariables.ExceptWith(declaredVariables.Except(savedDeclaredVariables).ToList());
                 _emittedLetBindings.ExceptWith(_emittedLetBindings.Except(savedEmittedLetBindings).ToList());
-
-                // Restore varCounter so the kernel's own code gen continues from
-                // where it left off, without gaps from the inlined variable names.
-                varCounter = savedVarCounter;
                 return;
             }
 
@@ -3965,7 +3987,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             ScanChosenViews();
 
             // 1. Scan and declare hoisted variables
-            HoistCrossBlockVariables();
+            HoistCrossBlockVariables(Method.Blocks);
 
             // 2. Setup standard bindings
             SetupIndexVariables();
@@ -4020,6 +4042,181 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 }
             }
 
+            FixStructuredBodyScoping(codeGenStartPosition, Method.Blocks.Count > 1);
+
+            // PHASE 4: Dead variable elimination.
+            // Remove hoisted "var v_N : type;" pre-declarations that are never
+            // referenced elsewhere in the function body. Hoisting pre-declares
+            // variables for all cross-block values, but structured code generation
+            // may eliminate the code paths that use some of them.
+            // IMPORTANT: Only target "var v_" (hoisted pre-declarations). Never
+            // remove "let v_" lines — those are active computations whose removal
+            // can break binding layout detection and eliminate needed values.
+            {
+                string fullBody = Builder.ToString(signatureInsertPosition,
+                    Builder.Length - signatureInsertPosition);
+                var lines = fullBody.Split('\n');
+                int removedCount = EliminateDeadVarDeclarations(lines);
+#if DEAD_VAR_ELIM_CHECK
+                {
+                    var reference = fullBody.Split('\n');
+                    int referenceRemoved = EliminateDeadVarDeclarationsReference(reference);
+                    if (referenceRemoved != removedCount || !System.Linq.Enumerable.SequenceEqual(reference, lines))
+                        throw new System.InvalidOperationException($"[DeadVarElim] token pass ({removedCount}) differs from the reference scan ({referenceRemoved}) in {_kernelMethodName}");
+                }
+#endif
+
+                if (removedCount > 0)
+                {
+                    Builder.Remove(signatureInsertPosition, Builder.Length - signatureInsertPosition);
+                    for (int li = 0; li < lines.Length; li++)
+                    {
+                        if (lines[li] != null)
+                        {
+                            if (li > 0 && Builder.Length > signatureInsertPosition)
+                                Builder.Append('\n');
+                            Builder.Append(lines[li]);
+                        }
+                    }
+                    if (WebGPUBackend.VerboseLogging)
+                        WebGPUBackend.Log($"[DeadVarElim] Removed {removedCount} unused declarations");
+                }
+            }
+
+            // PHASE 5: single-assignment hoisted vars become lets at their assignment (Tint's module step costs vars x
+            // branches; see ConvertSingleAssignmentVarsToLet).
+            {
+                var lines = Builder.ToString(signatureInsertPosition, Builder.Length - signatureInsertPosition).Split('\n');
+                int converted = ConvertSingleAssignmentVarsToLet(lines);
+                if (converted > 0)
+                {
+                    Builder.Remove(signatureInsertPosition, Builder.Length - signatureInsertPosition);
+                    bool first = true;
+                    foreach (var l in lines)
+                    {
+                        if (l == null) continue;
+                        if (!first) Builder.Append('\n');
+                        Builder.Append(l);
+                        first = false;
+                    }
+                    if (WebGPUBackend.VerboseLogging)
+                        WebGPUBackend.Log($"[VarToLet] {converted} single-assignment vars became lets");
+                }
+            }
+
+            PopIndent();
+            Builder.AppendLine("}"); // End Function
+
+            // --- NOW BUILD THE REAL SIGNATURE ---
+            // Check the generated body to see if it actually uses subgroup builtins.
+            // This is more reliable than the IR pre-scan which may miss inlined methods.
+            string bodyText = Builder.ToString(signatureInsertPosition + signatureSentinel.Length + Environment.NewLine.Length,
+                Builder.Length - signatureInsertPosition - signatureSentinel.Length - Environment.NewLine.Length);
+            bool bodyUsesSubgroups = Backend.HasSubgroups &&
+                (bodyText.Contains("subgroup_size") || bodyText.Contains("subgroup_invocation_id") ||
+                 bodyText.Contains("subgroupShuffle") || bodyText.Contains("subgroupAdd") ||
+                 bodyText.Contains("subgroupBroadcastFirst") || bodyText.Contains("subgroup_id"));
+
+            // Determine which subgroup builtins to include in the entry point signature.
+            // @builtin(subgroup_id) requires 'chromium_experimental_subgroup_matrix' which
+            // is NOT part of the standard 'subgroups' extension. We compute subgroup_id
+            // from available builtins instead: local_invocation_index / subgroup_size.
+            bool bodyNeedsSubgroups = bodyUsesSubgroups || _usesGroupReduce;
+
+            // Marker (parsed by WebGPUCompiledKernel.UsesGridIdxZ) so the dispatch path knows whether the
+            // Z dimension is FREE for an X-workgroup-overflow fold. A kernel that reads Grid.IdxZ owns Z, so
+            // its X-overflow must NOT be folded into Z. A 2D kernel (Grid.IdxX/IdxY only) leaves Z free.
+            string gridIdxZMarker = KernelUsesGridIdxZ() ? "// @uses_grid_idx_z\n" : "";
+            // Rename entry point builtins to _ep_xxx to avoid clashing with module-scope var<private>
+            string signature = gridIdxZMarker + $"@compute @workgroup_size({workgroupSize})\n" +
+                "fn main(@builtin(global_invocation_id) _ep_global_id : vec3<u32>, " +
+                "@builtin(local_invocation_id) _ep_local_id : vec3<u32>, " +
+                "@builtin(workgroup_id) _ep_group_id : vec3<u32>, " +
+                "@builtin(num_workgroups) _ep_num_workgroups : vec3<u32>, " +
+                "@builtin(local_invocation_index) _ep_local_index : u32" +
+                (bodyNeedsSubgroups ? ", @builtin(subgroup_invocation_id) subgroup_invocation_id : u32, @builtin(subgroup_size) subgroup_size : u32" : "") +
+                ") {";
+
+            string builtinCopies = "\n" +
+                "    // All builtins use 'let' (not var<private>) for WGSL uniformity analysis.\n" +
+                "    // 'let' preserves uniformity tracking from @builtin parameters.\n" +
+                "    let global_id = _ep_global_id;\n" +
+                "    let local_id = _ep_local_id;\n" +
+                "    let group_id = _ep_group_id;\n" +
+                "    let num_workgroups = _ep_num_workgroups;\n" +
+                "    let local_index = _ep_local_index;\n" +
+                "    // Seed the runtime-zero used by F32 special-value helpers from a\n" +
+                "    // @builtin value so Tint's const-evaluator cannot fold it. Required\n" +
+                "    // because `bitcast<f32>(const_u32_with_inf_bit_pattern)` is rejected\n" +
+                "    // at shader creation. See WGSLEmulationLibrary.F32SpecialValueFunctions.\n" +
+                "    _ilgpu_runtime_zero = local_id.x ^ local_id.x;\n" +
+                // The opaque zero for function-scope array indices (WGSLCodeGenerator.FunctionArrayIndex): resolved in
+                // WebGPUBackend.CreateKernel once GenerateHeader has assigned its _scalar_params slot, or removed.
+                "    /*__ILGPU_OPAQUE_ZERO_INIT__*/\n" +
+                (bodyNeedsSubgroups ? "    let subgroup_id = _ep_local_index / subgroup_size;\n" : "") +
+                // The uniformity transform's synthetic loop counters, at FUNCTION scope so every loop that assigns one
+                // (in any nested or sibling block) sees the declaration.
+                string.Concat(_declaredSyntheticCounters.OrderBy(n => n, StringComparer.Ordinal).Select(n => $"    var {n} : i32 = 0;\n"));
+
+            // Replace the sentinel with the real signature + builtin copies
+            string fullOutput = Builder.ToString(signatureInsertPosition, Builder.Length - signatureInsertPosition);
+            string scalarParamLets = HoistScalarParamLoads(ref fullOutput);
+            fullOutput = fullOutput.Replace(signatureSentinel, signature + builtinCopies + scalarParamLets);
+
+            Builder.Remove(signatureInsertPosition, Builder.Length - signatureInsertPosition);
+            Builder.Append(fullOutput);
+            // after the entry point and after its scalar-slot hoist (the helpers read the slots themselves)
+            AppendMonomorphizedHelpers();
+            // NOTE: The enable subgroups placeholder is resolved in WebGPUBackend.CreateKernel()
+            // because the header is written to the upstream builder, not this.Builder.
+
+            // Diagnostic WGSL dump (enable when debugging specific kernels)
+            // if (_kernelMethodName.Contains("SomeKernel"))
+            // {
+            //     var escaped = fullOutput.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", "\\n");
+            //     Console.WriteLine($"WGSL_DUMP[{_kernelMethodName}|loops={_loops.Count}]:{escaped}:END_WGSL_DUMP");
+            // }
+        }
+        // "_scalar_params[N]" with a literal slot (the dynamic-index forms are left alone)
+        [System.Text.RegularExpressions.GeneratedRegex(@"\b_scalar_params\[(\d+)\]")]
+        private static partial System.Text.RegularExpressions.Regex ScalarParamLoadPattern();
+
+        /// <summary>
+        /// Replaces every literal-slot read of <c>_scalar_params[N]</c> in the kernel body by <c>_sp_N</c> and returns the
+        /// <c>let _sp_N : u32 = _scalar_params[N];</c> lines that load each slot ONCE at kernel entry.
+        /// </summary>
+        /// <remarks>
+        /// Every view access re-read its element offset (and every scalar parameter its value) from the storage buffer, in
+        /// whatever block it sat. DXC merges those equal loads across blocks into a PHI OF RESOURCE HANDLES, which is invalid
+        /// DXIL ("Resource handle should returned by createHandle"): the shader of a loop with breaks, a select between a view
+        /// read and 0, and a later store failed pipeline creation with "DXC compile failed with error: E_FAIL"
+        /// (SpawnDev.ILGPU.ML CenterCropPadImpl, WebGPUTests.Op_CenterCropPad_CopiesData, 2026-10-21; reproduced as
+        /// DebugAssertRemoval_LoopWithBreak_CenterCropPad_CorrectOutput). Whether DXC does it depends on the surrounding
+        /// code - removing the dead debug-assert chains is what exposed it - so the cure is the shape, not that kernel: the
+        /// slots are loaded in the entry block only, where there is nothing to merge. The values are dispatch constants, so
+        /// hoisting changes no result; it also drops the repeated loads from hot loops.
+        /// </summary>
+        private static string HoistScalarParamLoads(ref string body)
+        {
+            var slots = new SortedSet<int>();
+            foreach (System.Text.RegularExpressions.Match m in ScalarParamLoadPattern().Matches(body))
+                slots.Add(int.Parse(m.Groups[1].Value));
+            if (slots.Count == 0)
+                return "";
+            body = ScalarParamLoadPattern().Replace(body, "_sp_$1");
+            var lets = new StringBuilder();
+            foreach (int slot in slots)
+                lets.Append("    let _sp_").Append(slot).Append(" : u32 = _scalar_params[").Append(slot).Append("];\n");
+            return lets.ToString();
+        }
+
+        /// <summary>
+        /// The variable-scoping post-process of a generated body (from <paramref name="codeGenStartPosition"/> to the
+        /// end of <see cref="WGSLCodeGenerator.Builder"/>): the kernel body, and a view helper emitted as a function
+        /// (<see cref="EmitMonomorphizedHelper"/>) through the same structured walker.
+        /// </summary>
+        private void FixStructuredBodyScoping(int codeGenStartPosition, bool multiBlock)
+        {
             // CRITICAL: Post-process to fix variable scoping issues.
             // HoistCrossBlockVariables() declares cross-block vars at function scope, but its
             // analysis may miss variables used by terminators in other blocks (e.g., CompareValue
@@ -4027,7 +4224,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // block-scoped bindings that shadow hoisted vars. Fix: unconditionally convert ALL
             // "let v_N = expr;" to assignments, and add missing var declarations at function scope.
             // Pointer references (&param, &temp_) must remain as 'let' since they're immutable bindings.
-            if (Method.Blocks.Count > 1)
+            if (multiBlock)
             {
                 string generatedCode = Builder.ToString(codeGenStartPosition, Builder.Length - codeGenStartPosition);
                 var missingDeclarations = new List<string>(); // var declarations to add
@@ -4272,7 +4469,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // Fix: unconditionally move every 'var v_N' declaration to function
             // scope. Only v_N-prefixed variables are touched — local arrays, structs,
             // and other naming conventions are left in place.
-            if (Method.Blocks.Count > 1)
+            if (multiBlock)
             {
                 string code = Builder.ToString(codeGenStartPosition, Builder.Length - codeGenStartPosition);
 
@@ -4353,169 +4550,6 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     Builder.Append(hoisted);
                 }
             }
-
-            // PHASE 4: Dead variable elimination.
-            // Remove hoisted "var v_N : type;" pre-declarations that are never
-            // referenced elsewhere in the function body. Hoisting pre-declares
-            // variables for all cross-block values, but structured code generation
-            // may eliminate the code paths that use some of them.
-            // IMPORTANT: Only target "var v_" (hoisted pre-declarations). Never
-            // remove "let v_" lines — those are active computations whose removal
-            // can break binding layout detection and eliminate needed values.
-            {
-                string fullBody = Builder.ToString(signatureInsertPosition,
-                    Builder.Length - signatureInsertPosition);
-                var lines = fullBody.Split('\n');
-                int removedCount = EliminateDeadVarDeclarations(lines);
-#if DEAD_VAR_ELIM_CHECK
-                {
-                    var reference = fullBody.Split('\n');
-                    int referenceRemoved = EliminateDeadVarDeclarationsReference(reference);
-                    if (referenceRemoved != removedCount || !System.Linq.Enumerable.SequenceEqual(reference, lines))
-                        throw new System.InvalidOperationException($"[DeadVarElim] token pass ({removedCount}) differs from the reference scan ({referenceRemoved}) in {_kernelMethodName}");
-                }
-#endif
-
-                if (removedCount > 0)
-                {
-                    Builder.Remove(signatureInsertPosition, Builder.Length - signatureInsertPosition);
-                    for (int li = 0; li < lines.Length; li++)
-                    {
-                        if (lines[li] != null)
-                        {
-                            if (li > 0 && Builder.Length > signatureInsertPosition)
-                                Builder.Append('\n');
-                            Builder.Append(lines[li]);
-                        }
-                    }
-                    if (WebGPUBackend.VerboseLogging)
-                        WebGPUBackend.Log($"[DeadVarElim] Removed {removedCount} unused declarations");
-                }
-            }
-
-            // PHASE 5: single-assignment hoisted vars become lets at their assignment (Tint's module step costs vars x
-            // branches; see ConvertSingleAssignmentVarsToLet).
-            {
-                var lines = Builder.ToString(signatureInsertPosition, Builder.Length - signatureInsertPosition).Split('\n');
-                int converted = ConvertSingleAssignmentVarsToLet(lines);
-                if (converted > 0)
-                {
-                    Builder.Remove(signatureInsertPosition, Builder.Length - signatureInsertPosition);
-                    bool first = true;
-                    foreach (var l in lines)
-                    {
-                        if (l == null) continue;
-                        if (!first) Builder.Append('\n');
-                        Builder.Append(l);
-                        first = false;
-                    }
-                    if (WebGPUBackend.VerboseLogging)
-                        WebGPUBackend.Log($"[VarToLet] {converted} single-assignment vars became lets");
-                }
-            }
-
-            PopIndent();
-            Builder.AppendLine("}"); // End Function
-
-            // --- NOW BUILD THE REAL SIGNATURE ---
-            // Check the generated body to see if it actually uses subgroup builtins.
-            // This is more reliable than the IR pre-scan which may miss inlined methods.
-            string bodyText = Builder.ToString(signatureInsertPosition + signatureSentinel.Length + Environment.NewLine.Length,
-                Builder.Length - signatureInsertPosition - signatureSentinel.Length - Environment.NewLine.Length);
-            bool bodyUsesSubgroups = Backend.HasSubgroups &&
-                (bodyText.Contains("subgroup_size") || bodyText.Contains("subgroup_invocation_id") ||
-                 bodyText.Contains("subgroupShuffle") || bodyText.Contains("subgroupAdd") ||
-                 bodyText.Contains("subgroupBroadcastFirst") || bodyText.Contains("subgroup_id"));
-
-            // Determine which subgroup builtins to include in the entry point signature.
-            // @builtin(subgroup_id) requires 'chromium_experimental_subgroup_matrix' which
-            // is NOT part of the standard 'subgroups' extension. We compute subgroup_id
-            // from available builtins instead: local_invocation_index / subgroup_size.
-            bool bodyNeedsSubgroups = bodyUsesSubgroups || _usesGroupReduce;
-
-            // Marker (parsed by WebGPUCompiledKernel.UsesGridIdxZ) so the dispatch path knows whether the
-            // Z dimension is FREE for an X-workgroup-overflow fold. A kernel that reads Grid.IdxZ owns Z, so
-            // its X-overflow must NOT be folded into Z. A 2D kernel (Grid.IdxX/IdxY only) leaves Z free.
-            string gridIdxZMarker = KernelUsesGridIdxZ() ? "// @uses_grid_idx_z\n" : "";
-            // Rename entry point builtins to _ep_xxx to avoid clashing with module-scope var<private>
-            string signature = gridIdxZMarker + $"@compute @workgroup_size({workgroupSize})\n" +
-                "fn main(@builtin(global_invocation_id) _ep_global_id : vec3<u32>, " +
-                "@builtin(local_invocation_id) _ep_local_id : vec3<u32>, " +
-                "@builtin(workgroup_id) _ep_group_id : vec3<u32>, " +
-                "@builtin(num_workgroups) _ep_num_workgroups : vec3<u32>, " +
-                "@builtin(local_invocation_index) _ep_local_index : u32" +
-                (bodyNeedsSubgroups ? ", @builtin(subgroup_invocation_id) subgroup_invocation_id : u32, @builtin(subgroup_size) subgroup_size : u32" : "") +
-                ") {";
-
-            string builtinCopies = "\n" +
-                "    // All builtins use 'let' (not var<private>) for WGSL uniformity analysis.\n" +
-                "    // 'let' preserves uniformity tracking from @builtin parameters.\n" +
-                "    let global_id = _ep_global_id;\n" +
-                "    let local_id = _ep_local_id;\n" +
-                "    let group_id = _ep_group_id;\n" +
-                "    let num_workgroups = _ep_num_workgroups;\n" +
-                "    let local_index = _ep_local_index;\n" +
-                "    // Seed the runtime-zero used by F32 special-value helpers from a\n" +
-                "    // @builtin value so Tint's const-evaluator cannot fold it. Required\n" +
-                "    // because `bitcast<f32>(const_u32_with_inf_bit_pattern)` is rejected\n" +
-                "    // at shader creation. See WGSLEmulationLibrary.F32SpecialValueFunctions.\n" +
-                "    _ilgpu_runtime_zero = local_id.x ^ local_id.x;\n" +
-                // The opaque zero for function-scope array indices (WGSLCodeGenerator.FunctionArrayIndex): resolved in
-                // WebGPUBackend.CreateKernel once GenerateHeader has assigned its _scalar_params slot, or removed.
-                "    /*__ILGPU_OPAQUE_ZERO_INIT__*/\n" +
-                (bodyNeedsSubgroups ? "    let subgroup_id = _ep_local_index / subgroup_size;\n" : "") +
-                // The uniformity transform's synthetic loop counters, at FUNCTION scope so every loop that assigns one
-                // (in any nested or sibling block) sees the declaration.
-                string.Concat(_declaredSyntheticCounters.OrderBy(n => n, StringComparer.Ordinal).Select(n => $"    var {n} : i32 = 0;\n"));
-
-            // Replace the sentinel with the real signature + builtin copies
-            string fullOutput = Builder.ToString(signatureInsertPosition, Builder.Length - signatureInsertPosition);
-            string scalarParamLets = HoistScalarParamLoads(ref fullOutput);
-            fullOutput = fullOutput.Replace(signatureSentinel, signature + builtinCopies + scalarParamLets);
-
-            Builder.Remove(signatureInsertPosition, Builder.Length - signatureInsertPosition);
-            Builder.Append(fullOutput);
-            // NOTE: The enable subgroups placeholder is resolved in WebGPUBackend.CreateKernel()
-            // because the header is written to the upstream builder, not this.Builder.
-
-            // Diagnostic WGSL dump (enable when debugging specific kernels)
-            // if (_kernelMethodName.Contains("SomeKernel"))
-            // {
-            //     var escaped = fullOutput.Replace("\\", "\\\\").Replace("\"", "\\\"").Replace("\r", "").Replace("\n", "\\n");
-            //     Console.WriteLine($"WGSL_DUMP[{_kernelMethodName}|loops={_loops.Count}]:{escaped}:END_WGSL_DUMP");
-            // }
-        }
-        // "_scalar_params[N]" with a literal slot (the dynamic-index forms are left alone)
-        [System.Text.RegularExpressions.GeneratedRegex(@"\b_scalar_params\[(\d+)\]")]
-        private static partial System.Text.RegularExpressions.Regex ScalarParamLoadPattern();
-
-        /// <summary>
-        /// Replaces every literal-slot read of <c>_scalar_params[N]</c> in the kernel body by <c>_sp_N</c> and returns the
-        /// <c>let _sp_N : u32 = _scalar_params[N];</c> lines that load each slot ONCE at kernel entry.
-        /// </summary>
-        /// <remarks>
-        /// Every view access re-read its element offset (and every scalar parameter its value) from the storage buffer, in
-        /// whatever block it sat. DXC merges those equal loads across blocks into a PHI OF RESOURCE HANDLES, which is invalid
-        /// DXIL ("Resource handle should returned by createHandle"): the shader of a loop with breaks, a select between a view
-        /// read and 0, and a later store failed pipeline creation with "DXC compile failed with error: E_FAIL"
-        /// (SpawnDev.ILGPU.ML CenterCropPadImpl, WebGPUTests.Op_CenterCropPad_CopiesData, 2026-10-21; reproduced as
-        /// DebugAssertRemoval_LoopWithBreak_CenterCropPad_CorrectOutput). Whether DXC does it depends on the surrounding
-        /// code - removing the dead debug-assert chains is what exposed it - so the cure is the shape, not that kernel: the
-        /// slots are loaded in the entry block only, where there is nothing to merge. The values are dispatch constants, so
-        /// hoisting changes no result; it also drops the repeated loads from hot loops.
-        /// </summary>
-        private static string HoistScalarParamLoads(ref string body)
-        {
-            var slots = new SortedSet<int>();
-            foreach (System.Text.RegularExpressions.Match m in ScalarParamLoadPattern().Matches(body))
-                slots.Add(int.Parse(m.Groups[1].Value));
-            if (slots.Count == 0)
-                return "";
-            body = ScalarParamLoadPattern().Replace(body, "_sp_$1");
-            var lets = new StringBuilder();
-            foreach (int slot in slots)
-                lets.Append("    let _sp_").Append(slot).Append(" : u32 = _scalar_params[").Append(slot).Append("];\n");
-            return lets.ToString();
         }
 
         private string GetPrefix(Value value)
@@ -5612,7 +5646,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
         }
 
-        private void HoistCrossBlockVariables()
+        private void HoistCrossBlockVariables(IEnumerable<BasicBlock> blocks)
         {
             var defBlocks = new Dictionary<Value, BasicBlock>();
             _hoistedPrimitives.Clear(); // Initialize the restored set
@@ -5620,11 +5654,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             _crossBlockPointerExprs.Clear();
             _crossBlockElementPointers.Clear();
 
-            foreach (var block in Method.Blocks)
+            foreach (var block in blocks)
                 foreach (var value in block)
                     defBlocks[value.Value] = block;
 
-            foreach (var block in Method.Blocks)
+            foreach (var block in blocks)
             {
                 foreach (var value in block)
                 {
@@ -7666,12 +7700,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 value.Right.BasicValueType == BasicValueType.Int1 &&
                 value.BasicValueType != BasicValueType.Int1)
             {
-                var boolOp = GetArithmeticOp(value.Kind);
+                // WGSL has no `^` on bool: XOR of two bools is `!=`
+                var boolOp = value.Kind == BinaryArithmeticKind.Xor ? "!=" : GetArithmeticOp(value.Kind);
                 AppendLine($"{prefix}{target} = select(0, 1, {left} {boolOp} {right});");
                 return;
             }
 
-            var op = GetArithmeticOp(value.Kind);
+            // WGSL has no `^` on bool: XOR of two bools is `!=` (naga: "ExclusiveOr can't work with Bool"; SpawnDev.Codecs'
+            // VP9 ParseBlock emitted as a function, 2026-11-09)
+            var op = value.Kind == BinaryArithmeticKind.Xor
+                && value.Left.BasicValueType == BasicValueType.Int1 && value.Right.BasicValueType == BasicValueType.Int1
+                ? "!="
+                : GetArithmeticOp(value.Kind);
 
             if (value.Kind == BinaryArithmeticKind.Shl || value.Kind == BinaryArithmeticKind.Shr)
             {
@@ -8221,9 +8261,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 _lengthReadParams = new HashSet<int>();
                 foreach (var block in Method.Blocks)
                     foreach (var entry in block)
+                    {
                         if (entry.Value is global::ILGPU.IR.Values.GetViewLength gvl
                             && ResolveToParameter(gvl.View) is global::ILGPU.IR.Values.Parameter p)
                             _lengthReadParams.Add(p.Index);
+                        // A helper emitted per binding tuple reads the length of the view it was passed: the WHOLE
+                        // parameter when the argument is the parameter itself (a sub-view argument passes its own length).
+                        if (entry.Value is MethodCall call && WGSLFunctionGenerator.IsMonomorphizedViewHelper(call.Target))
+                        {
+                            var lengthTypes = HelperViewLengthTypes(call.Target);
+                            for (int i = 0; i < call.Count && i < call.Target.Parameters.Count; i++)
+                                if (lengthTypes.ContainsKey(call.Target.Parameters[i])
+                                    && ResolveToParameter(call[i].Resolve()) is global::ILGPU.IR.Values.Parameter ap)
+                                    _lengthReadParams.Add(ap.Index);
+                        }
+                    }
             }
             return _lengthReadParams.Contains(paramIndex);
         }
@@ -8710,7 +8762,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// to). Off by default: callers such as GetViewLength must not treat a sub-view as the whole parameter.</param>
         private global::ILGPU.IR.Values.Parameter? ResolveToParameter(global::ILGPU.IR.Value value, bool throughSubViews = false)
         {
-            if (value is global::ILGPU.IR.Values.Parameter p) return p;
+            if (value is global::ILGPU.IR.Values.Parameter p)
+            {
+                // A view parameter of a helper being emitted per binding tuple (TryEmitMonomorphizedHelperCall) stands
+                // for its root view of the kernel, as an arm of a chosen view does: its accesses are the root's accesses.
+                if (p.Method != Method && _chosenViewRoots.TryGetValue(p, out var helperRoot))
+                    return ResolveToParameter(helperRoot.Resolve(), throughSubViews);
+                return p;
+            }
             if (value is GetField gf) return ResolveToParameter(gf.ObjectValue, throughSubViews);
 
             if (value is global::ILGPU.IR.Values.Load load) return ResolveToParameter(load.Source, throughSubViews);
@@ -8735,11 +8794,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         {
             var target = Load(value);
 
-            // A view chosen at run time carries its length in a variable of its own.
-            if (_chosenViewRoots.ContainsKey(value.View.Resolve()))
+            // A view chosen at run time (or a view parameter of a helper emitted per binding tuple) carries its length
+            // in a variable of its own.
+            var lengthView = StripViewCasts(value.View);
+            if (_chosenViewRoots.ContainsKey(lengthView))
             {
                 string chosenPrefix = _hoistedPrimitives.Contains(value) ? "" : "let ";
-                AppendLine($"{chosenPrefix}{target} = {ChosenViewVar(value.View.Resolve(), "vl")};");
+                AppendLine($"{chosenPrefix}{target} = {ChosenViewVar(lengthView, "vl")};");
                 return;
             }
 
@@ -9176,9 +9237,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                         block = uBranch.Target;
                     }
                 }
-                else if (terminator is global::ILGPU.IR.Values.ReturnTerminator)
+                else if (terminator is global::ILGPU.IR.Values.ReturnTerminator returnTerminator)
                 {
-                    AppendLine("return;");
+                    // the kernel returns nothing; a view helper emitted as a function returns its value
+                    AppendLine(_emittingHelperFunction && !returnTerminator.IsVoidReturn
+                        ? $"return {Load(returnTerminator.ReturnValue.Resolve())};"
+                        : "return;");
                     block = null;
                 }
                 else if (terminator is global::ILGPU.IR.Values.SwitchBranch sw)
@@ -9569,6 +9633,35 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// A block with non-PHI instructions is post-loop code, not a direct return path -
         /// even if it ends with ReturnTerminator.
         /// </summary>
+        /// <summary>
+        /// The statement for leaving through return exit <paramref name="exit"/> (<see cref="IsReturnExit"/>, its phis
+        /// already assigned): <c>return;</c> in the kernel, <c>return value;</c> in a view helper emitted as a function
+        /// (<see cref="EmitMonomorphizedHelper"/>), the value taken back along the phi-only chain to the return.
+        /// </summary>
+        private string ReturnExitStatement(BasicBlock exit)
+        {
+            if (!_emittingHelperFunction) return "return;";
+            var chain = new List<BasicBlock>();
+            var current = exit;
+            while (current != null && chain.Count < 10)
+            {
+                chain.Add(current);
+                if (current.Terminator is global::ILGPU.IR.Values.ReturnTerminator ret)
+                {
+                    if (ret.IsVoidReturn) return "return;";
+                    var value = ret.ReturnValue.Resolve();
+                    // a phi of a later chain block takes the operand of the block before it (the exit's own phis hold
+                    // their values already)
+                    for (int i = chain.Count - 1; i > 0; i--)
+                        if (value is PhiValue phi && phi.BasicBlock == chain[i] && phi.GetValue(chain[i - 1]) is Value incoming)
+                            value = incoming.Resolve();
+                    return $"return {Load(value)};";
+                }
+                current = current.Terminator is global::ILGPU.IR.Values.UnconditionalBranch ub ? ub.Target : null;
+            }
+            throw new InvalidOperationException($"WGSL view helper: return exit {exit} does not reach a return");
+        }
+
         private static bool IsReturnExit(BasicBlock block)
         {
             int limit = 10;
@@ -9634,7 +9727,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (IsReturnExit(x) || ExitReachesNormal(x, loop))
             {
                 EmitIntermediateBlocksToExit(start, x, source, loop, visited);
-                AppendLine(IsReturnExit(x) ? "return;" : "break;");
+                AppendLine(IsReturnExit(x) ? ReturnExitStatement(x) : "break;");
                 return;
             }
             // Divergent: run the in-loop part of the chain here, hand the destination its phis, and let the
@@ -9681,7 +9774,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         private void EmitExitOfEnclosingLoop(BasicBlock block, Loops<ReversePostOrder, Forwards>.Node loop,
             HashSet<BasicBlock> visited)
         {
-            if (IsReturnExit(block)) { AppendLine("return;"); return; }
+            if (IsReturnExit(block)) { AppendLine(ReturnExitStatement(block)); return; }
             if (ExitReachesNormal(block, loop))
             {
                 var normal = NormalExitOf(loop);

@@ -11,8 +11,9 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
     // A [NoInlining] helper taking STORAGE views (sub-views of kernel parameters), called from many sites. On WebGPU and
     // WebGL every view-taking helper used to be inlined at every call site (InlineAddressParameterCalls), so shader size
     // grew with call sites x helper size: SpawnDev.Codecs' VP9 decoder kernels came out at 33-87 MB of WGSL (300k-820k
-    // lines) and lost the device in Tint (Geordi, 2026-11-09). Correctness on every backend; the size gate (16 call sites vs 1
-    // in WGSL lines) lands with Plans/view-helpers-as-functions-2026-11-09.md.
+    // lines) and lost the device in Tint (Geordi, 2026-11-09). Since 5.4.23 WebGPU keeps such a call and emits the helper
+    // once per binding tuple (WGSLKernelFunctionGenerator.ViewHelpers.cs). Correctness on every backend; on the WebGPU lane
+    // also the size gate: 16 call sites must not cost 16 helper bodies.
     public abstract partial class BackendTestBase
     {
         const int ViewHelperSegment = 64;
@@ -52,6 +53,13 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             sums[i] = s;
         }
 
+        static int WgslLineCount(string kernelName)
+        {
+            var method = typeof(BackendTestBase).GetMethod(kernelName, System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            var wgsl = ShaderCompiler.Generate(method!, CapabilityProfiles.WebGPUBaseline).Source ?? "";
+            return wgsl.Split('\n').Length;
+        }
+
         // the same helper from ONE call site: the size reference
         static void ViewHelperOneCallSiteKernel(Index1D i, ArrayView<int> a, ArrayView<int> b, ArrayView<int> sums) =>
             sums[i] = ViewHelperMix(a.SubView(0, ViewHelperSegment), b.SubView(0, ViewHelperSegment), i, 0);
@@ -59,6 +67,14 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         [TestMethod]
         public async Task ViewHelper_ManyCallSitesWithSubViews_MatchesHost() => await RunTest(async accelerator =>
         {
+            if (accelerator.AcceleratorType == AcceleratorType.WebGPU)
+            {
+                int many = WgslLineCount(nameof(ViewHelperManyCallSitesKernel));
+                int one = WgslLineCount(nameof(ViewHelperOneCallSiteKernel));
+                // emitted once: 651 vs 516 lines (the emulation library is most of both); inlined at every site: ~3x
+                if (many * 2 > one * 3)
+                    throw new Exception($"ViewHelper: 16 call sites generate {many} WGSL lines, 1 call site {one}; the helper body is repeated per call site");
+            }
             const int n = ViewHelperSegment;
             var a = new int[16 * ViewHelperSegment];
             for (int k = 0; k < a.Length; k++) a[k] = k * 2654435 + 17;

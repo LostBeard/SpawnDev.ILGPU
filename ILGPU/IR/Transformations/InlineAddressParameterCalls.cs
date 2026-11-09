@@ -55,8 +55,9 @@ namespace ILGPU.IR.Transformations
 
         /// <summary>
         /// <paramref name="keepGlobalViewCalls"/>: leave a call to a NON-Inline helper (<c>[NoInlining]</c> / over the
-        /// IL cap) as a call when every address-carrying argument is a plain view of GLOBAL memory (a storage buffer):
-        /// the generator emits such a helper once as a function with <c>ptr&lt;storage&gt;</c> parameters. Calls passing
+        /// IL cap) as a call when every address-carrying argument is a plain view of GLOBAL memory (a sub-view of a kernel
+        /// parameter, or of a kept helper's view parameter; <see cref="KeepsAsFunction"/>): the WebGPU generator emits such
+        /// a helper once per tuple of kernel bindings, its views passed as element offsets. Calls passing
         /// local or shared memory, or a structure that carries an address, are still inlined (the case the transformation
         /// exists for). Without it, every view-taking helper was copied into every call site: SpawnDev.Codecs' VP9 decoder
         /// kernels reached 33-87 MB of WGSL (2026-11-09).
@@ -70,9 +71,13 @@ namespace ILGPU.IR.Transformations
         /// <summary>
         /// True when every argument of <paramref name="call"/> that carries an address is a view or pointer (not a
         /// structure containing one) of a supported element type (<see cref="IsHelperAbiElement"/>) whose origin is a
-        /// KERNEL parameter (a storage buffer). Views of an allocation (local / shared memory), of a helper's own
-        /// parameter, chosen at run time (phi, select) or loaded from memory are not. Address spaces are not inferred
-        /// yet at this point (the arguments are Generic), so the origin is traced instead.
+        /// parameter: of the KERNEL (a storage buffer), or of the calling helper (kept itself only when its own view
+        /// arguments are such views; inlined anywhere else, the call is examined again in its new caller). Views of an
+        /// allocation (local / shared memory), chosen at run time (phi, select) or loaded from memory are not. Address
+        /// spaces are not inferred yet at this point (the arguments are Generic), so the origin is traced instead.
+        /// A POINTER argument qualifies when it is the address of a whole local variable of the caller (a <c>ref</c> to a
+        /// local structure or scalar: WGSL <c>ptr&lt;function, T&gt;</c>) or the caller's own such pointer parameter, and
+        /// its element carries no address and is not a bool (bool locals have their own lowering).
         /// </summary>
         public static bool PassesOnlyGlobalViews(MethodCall call)
         {
@@ -81,6 +86,14 @@ namespace ILGPU.IR.Transformations
                 var type = call[i].Type;
                 if (!CarriesAddress(type))
                     continue;
+                if (type is PointerType pointer)
+                {
+                    if (!IsLocalVariableAddress(call[i])
+                        || CarriesAddress(pointer.ElementType)
+                        || pointer.ElementType is PrimitiveType { BasicValueType: BasicValueType.Int1 })
+                        return false;
+                    continue;
+                }
                 if (type is not ViewType view || !IsHelperAbiElement(view.ElementType) || !OriginatesFromKernelParameter(call[i]))
                     return false;
             }
@@ -88,22 +101,46 @@ namespace ILGPU.IR.Transformations
         }
 
         /// <summary>
-        /// Version 1 of the helper-function view ABI (Plans/view-helpers-as-functions-2026-11-09.md): a call in the KERNEL
-        /// whose view arguments are all kernel-parameter views of a supported element type, to a helper that (with
-        /// everything it calls) has no atomics, barriers, warp / broadcast operations or shared memory, in a kernel that
-        /// uses no atomics anywhere (an atomically used binding is declared <c>array&lt;atomic&lt;T&gt;&gt;</c>, which a
-        /// plain <c>ptr&lt;storage, array&lt;T&gt;&gt;</c> parameter would not match).
+        /// True when <paramref name="value"/> is, through address-space casts, a LOCAL allocation (a whole function-scope
+        /// variable; not an array allocation, whose view is a different case) or a pointer parameter of the caller.
+        /// </summary>
+        private static bool IsLocalVariableAddress(Value value)
+        {
+            value = value.Resolve();
+            while (value is AddressSpaceCast cast)
+                value = cast.Value.Resolve();
+            return value switch
+            {
+                Alloca alloca => alloca.AddressSpace == MemoryAddressSpace.Local && alloca.IsSimpleAllocation,
+                Parameter parameter => parameter.ParameterType is PointerType,
+                _ => false,
+            };
+        }
+
+        /// <summary>
+        /// The helper-function view ABI (Plans/view-helpers-as-functions-2026-11-09.md): a call whose view arguments are
+        /// all parameter views of a supported element type (<see cref="PassesOnlyGlobalViews"/>), to a helper that (with
+        /// everything it calls) has no atomics, barriers, warp / broadcast operations, grid / group indices or shared
+        /// memory. In the kernel, the kernel must use no atomics anywhere (checked once there: a helper called from a kept
+        /// helper is only emitted through that kernel call, and inlined into a kernel it is examined again).
         /// </summary>
         private static bool KeepsAsFunction(Method caller, Method target, MethodCall call) =>
-            caller.HasFlags(MethodFlags.EntryPoint)
+            // the caller's body must end up generated by the WebGPU KERNEL generator: the kernel itself, a helper it emits
+            // per binding tuple (non-Inline, taking an address), or an Inline-flagged helper (inlined into its caller here,
+            // where the kept call is examined again). Not a plain fn-def helper (the function generator cannot call those
+            // functions), nor an Inline-flagged helper that allocates shared memory (it stays a call and is inlined at
+            // emission without its parameters rooted). Leaving Inline-flagged callers out copied the whole of SpawnDev.Codecs'
+            // InverseTransformAdd into the VP9 kernel once more (59k lines instead of 44k).
+            (caller.HasFlags(MethodFlags.EntryPoint)
+                || (caller.HasFlags(MethodFlags.Inline) ? !AllocatesShared(caller) : TakesAddress(caller)))
             && PassesOnlyGlobalViews(call)
             && !UsesSynchronization(target, new HashSet<Method>(), sharedToo: true)
-            && !UsesSynchronization(caller, new HashSet<Method>(), sharedToo: false);
+            && (!caller.HasFlags(MethodFlags.EntryPoint) || !UsesSynchronization(caller, new HashSet<Method>(), sharedToo: false));
 
         /// <summary>
         /// True when <paramref name="method"/> or anything it calls contains an atomic, a barrier, a memory barrier, a warp
-        /// shuffle / broadcast, or a shared-memory allocation; with <paramref name="sharedToo"/> false (the kernel-wide
-        /// check) only atomics count.
+        /// shuffle / broadcast, a grid / group / warp index or dimension, or a shared-memory allocation; with
+        /// <paramref name="sharedToo"/> false (the kernel-wide check) only atomics count.
         /// </summary>
         private static bool UsesSynchronization(Method method, HashSet<Method> visited, bool sharedToo)
         {
@@ -117,6 +154,10 @@ namespace ILGPU.IR.Transformations
                         case AtomicValue:
                             return true;
                         case BarrierOperation or MemoryBarrier or Broadcast or ShuffleOperation when sharedToo:
+                            return true;
+                        // Grid / group / warp / lane indices and dimensions are builtins of the kernel's entry point: a
+                        // module-scope helper function cannot see them, so such a helper stays inlined
+                        case DeviceConstantValue when sharedToo:
                             return true;
                         case Alloca alloca when sharedToo && alloca.AddressSpace == MemoryAddressSpace.Shared:
                             return true;
@@ -142,9 +183,12 @@ namespace ILGPU.IR.Transformations
             };
 
         /// <summary>
-        /// Follows sub-views, casts, alignment hints and field reads back to a parameter of the KERNEL (entry point): a
-        /// storage buffer. A helper's own parameter does not qualify, so a view-taking call inside a surviving helper is
-        /// inlined into that helper's function.
+        /// Follows sub-views and address-space casts back to a parameter (of the kernel: a storage buffer; of a helper: a
+        /// view rooted at one when that helper is kept), or to a view field of one (an ArrayView1D kernel parameter is a
+        /// structure whose field 0 is the view). Exactly the shapes the WebGPU generator resolves to a binding and an element
+        /// offset (WGSLKernelFunctionGenerator.ViewArgumentRoot); a view rebuilt from an element address, a view cast to
+        /// another element type, a view chosen at run time (phi, select), loaded from memory or of an allocation (local /
+        /// shared memory) is not.
         /// </summary>
         private static bool OriginatesFromKernelParameter(Value value)
         {
@@ -153,21 +197,17 @@ namespace ILGPU.IR.Transformations
                 value = value.Resolve();
                 switch (value)
                 {
-                    case Parameter parameter:
-                        return parameter.Method.HasFlags(MethodFlags.EntryPoint);
-                    case PointerValue pointerValue:   // SubViewValue, LoadElementAddress, AsAligned / AlignTo
-                        value = pointerValue.Source;
+                    case Parameter:
+                        return true;
+                    case SubViewValue subView:
+                        value = subView.Source;
                         continue;
-                    case CastValue cast:              // AddressSpaceCast, ViewCast, PointerCast
+                    case AddressSpaceCast cast:
                         value = cast.Value;
                         continue;
-                    case NewView newView:
-                        value = newView.Pointer;
-                        continue;
-                    case GetField getField:
-                        value = getField.ObjectValue;
-                        continue;
-                    default:                          // Alloca (local / shared), phi, select, load, ...
+                    case GetField getField when getField.ObjectValue.Resolve() is Parameter:
+                        return true;
+                    default:
                         return false;
                 }
             }

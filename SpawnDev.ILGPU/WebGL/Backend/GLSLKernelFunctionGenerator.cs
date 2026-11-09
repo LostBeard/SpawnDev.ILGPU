@@ -4285,6 +4285,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 op = "&&";
             else if (isBoolOp && value.Kind == BinaryArithmeticKind.Or)
                 op = "||";
+            // GLSL has no `^` on bool: XOR of two bools is `!=` (ANGLE: "no operation '^' exists that takes ... 'bool'";
+            // BoolXor_TwoComparisons_MatchHost, 2026-11-09)
+            else if (isBoolOp && value.Kind == BinaryArithmeticKind.Xor)
+                op = "!=";
             else
                 op = GetArithmeticOp(value.Kind);
 

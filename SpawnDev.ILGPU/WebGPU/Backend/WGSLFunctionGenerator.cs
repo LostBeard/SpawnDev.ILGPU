@@ -312,6 +312,24 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// Used by both the function generator (to emit the fn definition) and the
         /// kernel generator (to emit the call site) so the names match.
         /// </summary>
+        /// <summary>
+        /// True for a helper the KERNEL generator emits (once per binding tuple): one taking a view, or a reference to a
+        /// local variable (a pointer). InlineAddressParameterCalls inlines every other call to such a helper, so the
+        /// calls that reach code generation are the kept ones.
+        /// </summary>
+        internal static bool IsMonomorphizedViewHelper(Method method)
+        {
+            foreach (var param in method.Parameters)
+                if (param.ParameterType is ViewType or PointerType)
+                    return true;
+            return false;
+        }
+
+        /// <summary>
+        /// Gets the WGSL function name for the given method.
+        /// </summary>
+        /// <param name="method">The method.</param>
+        /// <returns>The name.</returns>
         internal static string GetMethodName(Method method)
         {
             var handleName = method.Handle.Name;
@@ -373,6 +391,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (_args.HelperMethods.ContainsKey(Method))
             {
                 if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WGSL-FuncGen] Skipping code gen for inlined helper: {Method.Handle.Name}_{Method.Id}");
+                return;
+            }
+
+            // A helper taking a view survives as a call only when every view argument is a view of a kernel parameter
+            // (InlineAddressParameterCalls, keepGlobalViewCalls); the KERNEL generator emits it, once per binding tuple, as a
+            // module-scope fn indexing those bindings directly (WGSLKernelFunctionGenerator.EmitMonomorphizedHelperCall).
+            // The typed ptr<storage> definition this generator would write cannot match every binding's declared type.
+            if (IsMonomorphizedViewHelper(Method))
+            {
+                if (WebGPUBackend.VerboseLogging) WebGPUBackend.Log($"[WGSL-FuncGen] View helper emitted per binding tuple by the kernel: {Method.Handle.Name}_{Method.Id}");
                 return;
             }
 

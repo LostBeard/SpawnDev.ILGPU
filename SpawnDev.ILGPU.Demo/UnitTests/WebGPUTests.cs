@@ -414,8 +414,16 @@ fn main() {
                 if (!caught.Message.Contains("failed validation") && !caught.Message.Contains("InvalidOnPurpose")
                     && !caught.Message.Contains("due to a previous error"))
                     throw new Exception($"the readback threw, but not about the invalid shader: {caught.Message}");
-                // The error is consumed, and the staging buffer is usable again.
-                var again = await buffer.CopyToHostAsync();
+                // The error is consumed, and the staging buffer is usable again. The shader causes TWO browser errors (its
+                // validation error and the follow-on submit error) whose order and timing the browser does not fix: when the
+                // second arrives after the first readback threw, the next readback reports it (each error is reported once;
+                // seen in the 5.4.23 WebGPU lane under load). A third readback must then succeed.
+                int[] again;
+                try { again = await buffer.CopyToHostAsync(); }
+                catch (InvalidOperationException followOn) when (followOn.Message.Contains("due to a previous error"))
+                {
+                    again = await buffer.CopyToHostAsync();
+                }
                 if (again.Length != 4 || again[0] != 11 || again[3] != 44)
                     throw new Exception($"second readback = [{string.Join(", ", again)}], expected [11, 22, 33, 44]");
             }

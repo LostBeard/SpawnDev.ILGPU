@@ -1,7 +1,7 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.23 (forks 2.4.22) - unreleased; 5.4.23-local.1 (forks 2.4.22-local.1) 2026-11-09 for SpawnDev.Codecs' VP9 on Velocity
+## 5.4.23 (forks 2.4.22) - unreleased; 5.4.23-local.2 (forks 2.4.22-local.2) 2026-11-09: WebGPU view / ref helpers as functions (VP9 WGSL 6x smaller), bool XOR; 5.4.23-local.1 for SpawnDev.Codecs' VP9 on Velocity
 
 - **PERF (forks, Velocity): small launches run ~40x faster.** Velocity executes each IR operation as a call into a
   warp-type helper with lane masks: right for wide launches, ~60x slower than the IL backend for a few threads that each
@@ -13,6 +13,46 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   `ArrayView` host access now accepts Velocity buffers (native host memory too). `VelocityTests.HostLaunch_SmallLaunchesRunOnTheHost_SameResults`
   (1 and 8 threads go to the host, 4,096 do not, 0 disables, a barrier kernel never does; red-check: disabled by default
   -> 0 host launches).
+- **PERF (WebGPU, forks): a helper taking views is emitted ONCE per binding tuple, not inlined at every call site.**
+  WGSL cannot pass a pointer to a binding through one function for every buffer (each binding has its own declared type:
+  `array<T>`, packed `array<atomic<u32>>` for sub-word elements, a coalesced or body-struct field binding, and its own
+  offset slot), so every view-taking helper was copied into every call site: SpawnDev.Codecs' VP9 decoder kernels reached
+  33-87 MB of WGSL and lost the device in Tint (Geordi). `InlineAddressParameterCalls(keepGlobalViewCalls: true)` (WebGPU)
+  now keeps a call to a `[NoInlining]` / over-budget helper when each view argument is a sub-view of a parameter (of the
+  kernel, or of an enclosing kept helper), the helper has no atomics, barriers, warp / broadcast operations, grid / group
+  indices or shared memory, and the kernel has no atomics. The WebGPU kernel generator emits such a helper as
+  `fn <name>_m<k>(hv0_vo : i32, [hv0_vl,] ..., scalars...)` for each distinct tuple of kernel bindings its views index:
+  each view parameter is an element offset (and, when read, a length) relative to its kernel binding, so every access
+  keeps that binding's own handling; nested helpers chain the offsets. The body goes through the kernel body pipeline
+  (structured walker, scoping post-process, dead-var and let passes); a return from inside a loop returns its value.
+  16 call sites of a 30-line helper: 1,481 -> 651 WGSL lines (one call site: 146 -> 516, of which ~370 are the i64
+  emulation library the helper's 64-bit `Length` parameter pulls in; it is a fixed cost per kernel).
+  SpawnDev.Codecs 64a88db VP9 decoder (offline, naga-valid): InterResidual 67,308 -> 44,093 lines, IntraWave 72,122 ->
+  48,719.
+  A `ref` to a LOCAL variable (a structure or scalar of the kernel or of a kept helper) is kept the same way: the
+  parameter is `ptr<function, T>`, the call passes `&v` (a kept helper hands its own pointer on). SpawnDev.Codecs' VP9
+  parse helpers all take `ref Vp8BoolDecoderGpuState`. `RefStateHelpers_LocalStructByReference_MatchHost` (the kernel's
+  state by reference, a helper passing its reference on with an early return from a loop, a `ref int` accumulator).
+  Variable names in the WebGPU generator now come from one counter that only grows: inlining used to restart it at 10,000
+  x (inlining count) and restore it after, so a body of more than 10,000 values could reuse a name of another type in the
+  same function (found on VP9 InverseTransformAdd emitted as a function).
+  `ViewHelper_ManyCallSitesWithSubViews_MatchesHost` (+ the size gate on the WebGPU lane),
+  `ViewHelper_BindingShapesThroughHelpers_MatchHost` (byte views with their true length, an early return from a loop,
+  stores only through a helper, an `ArrayView1D` parameter, a call inside a loop, two tuples of one helper, a helper
+  calling a helper).
+- **FIXED (WebGPU, latent until the item above): the body-struct / direct-output scan credited a store inside a helper
+  to the KERNEL parameter with the helper parameter's index** (a store through helper parameter 1 marked kernel parameter
+  1 as written), so a buffer written only inside a kept helper could have stayed in a direct-parameter coalesce group,
+  whose concatenated binding is not written back. Unreachable before (a helper taking an address was always inlined). It
+  now maps each helper parameter to the kernel (parameter, field) behind its argument, per call site, as the atomic and
+  stored-parameter scans already did.
+- **FIXED (WebGPU, WebGL): XOR of two bools (`a ^ b` on `bool`) generated `^`, which neither WGSL nor GLSL defines for
+  bool** - an invalid shader (naga: "ExclusiveOr can't work with Bool"; ANGLE: "no operation '^' exists that takes ...
+  'bool'"; found in SpawnDev.Codecs' VP9 ParseBlock). It is `!=` now, also where the result widens to an int.
+  `BoolXor_TwoComparisons_MatchHost` (all lanes; red-check: the old WGSL fails naga, and the new test failed WebGL first).
+- **TEST: `WebGPU_InvalidShader_FailsTheReadbackWithoutASync`** accepts the shader's follow-on submit error on the
+  SECOND readback too (the browser delivers the two errors in either order; each is reported once; the third readback
+  must succeed). Seen once in the 5.4.23 WebGPU lane under load.
 
 ## 5.4.22 (forks 2.4.21) - 2026-11-09 - Warp.Shuffle capability (SupportsWarpShuffle), OpenCL device subgroup caps, WebGL phi-cycle and typed-exception fixes
 

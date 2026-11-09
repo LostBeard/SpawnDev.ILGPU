@@ -198,6 +198,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             public List<Method> NonInlineMethods { get; }
 
             /// <summary>
+            /// The allocas of every non-kernel method (inline helpers and standalone fns). The kernel generator emits a
+            /// view-taking helper itself, once per binding tuple (WGSLKernelFunctionGenerator.TryEmitMonomorphizedHelperCall),
+            /// and declares its local allocations from here. Populated by WebGPUBackend.CreateFunctionCodeGenerator().
+            /// </summary>
+            public Dictionary<Method, Allocas> FunctionAllocas { get; } = new();
+
+            /// <summary>
             /// Tracks emulated i64/u64 constant values used during body generation.
             /// Maps (lo, hi) u32 pairs to module-scope const names (e.g., _c_i64_0).
             /// Populated by GenerateCode(PrimitiveValue), consumed by GenerateHeader()
