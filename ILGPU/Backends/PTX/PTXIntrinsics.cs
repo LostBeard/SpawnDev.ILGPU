@@ -152,8 +152,29 @@ namespace ILGPU.Backends.PTX
             RegisterFP16(manager);
             RegisterBitFunctions(manager);
             RegisterMathFunctions(manager);
+            RegisterAccurateMath(manager);
             RegisterPackedDot(manager);
         }
+
+        /// <summary>
+        /// Registers <see cref="PTXAccurateMath"/> for when LibDevice is NOT loaded (with
+        /// it, LibDevice's own functions apply). Without this, a float exp on a machine
+        /// without the CUDA toolkit needed ILGPU.Algorithms, which computed it to 63.8 ulp.
+        /// </summary>
+        /// <param name="manager">The target implementation manager.</param>
+        private static void RegisterAccurateMath(IntrinsicImplementationManager manager) =>
+            manager.RegisterUnaryArithmetic(
+                UnaryArithmeticKind.ExpF,
+                BasicValueType.Float32,
+                new PTXIntrinsic(
+                    typeof(PTXAccurateMath).GetMethod(
+                        nameof(PTXAccurateMath.Exp),
+                        BindingFlags.Public | BindingFlags.Static,
+                        null,
+                        new[] { typeof(float) },
+                        null).ThrowIfNull(),
+                    IntrinsicImplementationMode.Redirect,
+                    libDeviceRequired: false));
 
         #endregion
 

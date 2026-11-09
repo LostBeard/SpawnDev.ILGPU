@@ -43,22 +43,6 @@ namespace ILGPU.Algorithms.PTX
         {
             // Register math intrinsics
             manager.RegisterUnaryArithmetic(
-                UnaryArithmeticKind.FloorF,
-                BasicValueType.Float32,
-                GetMathIntrinsic("Floor", typeof(System.Single)));
-            manager.RegisterUnaryArithmetic(
-                UnaryArithmeticKind.FloorF,
-                BasicValueType.Float64,
-                GetMathIntrinsic("Floor", typeof(System.Double)));
-            manager.RegisterUnaryArithmetic(
-                UnaryArithmeticKind.CeilingF,
-                BasicValueType.Float32,
-                GetMathIntrinsic("Ceiling", typeof(System.Single)));
-            manager.RegisterUnaryArithmetic(
-                UnaryArithmeticKind.CeilingF,
-                BasicValueType.Float64,
-                GetMathIntrinsic("Ceiling", typeof(System.Double)));
-            manager.RegisterUnaryArithmetic(
                 UnaryArithmeticKind.LogF,
                 BasicValueType.Float32,
                 GetMathIntrinsic("Log", typeof(System.Single)));

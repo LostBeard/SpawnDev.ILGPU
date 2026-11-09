@@ -661,8 +661,13 @@ namespace ILGPU.Algorithms.PTX
 
         /// <summary cref="XMath.Exp(float)" />
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        /// <remarks>
+        /// The core PTX backend's <see cref="ILGPU.Backends.PTX.PTXAccurateMath.Exp"/>
+        /// (2.07 ulp; used only when LibDevice is not loaded). The former
+        /// <c>Exp2(value / ln 2)</c> rounded the product first: up to 63.8 ulp.
+        /// </remarks>
         public static float Exp(float value) =>
-            XMath.Exp2(value * XMath.OneOverLn2);
+            ILGPU.Backends.PTX.PTXAccurateMath.Exp(value);
 
         /// <summary cref="XMath.Exp2(double)" />
         [MethodImpl(MethodImplOptions.AggressiveInlining)]

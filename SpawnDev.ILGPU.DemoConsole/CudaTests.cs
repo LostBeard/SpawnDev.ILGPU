@@ -75,6 +75,111 @@ public class CudaTests : BackendTestBase
         if (bad.Count > 0) throw new Exception("thread-dependent branches emitted as uniform: " + string.Join("; ", bad));
     }
 
+    static void ExpF32Kernel(Index1D i, ArrayView<float> x, ArrayView<float> y) => y[i] = MathF.Exp(x[i]);
+
+    static void InlineMathKernel(Index1D i, ArrayView<float> x, ArrayView<double> d, ArrayView<float> y, ArrayView<double> yd)
+    {
+        y[i] = MathF.Floor(x[i]) + MathF.Ceiling(x[i]) + MathF.Sqrt(x[i]) + IntrinsicMath.CPUOnly.Exp2(x[i])
+            + IntrinsicMath.CPUOnly.Rsqrt(x[i]);
+        yd[i] = Math.Floor(d[i]) + Math.Ceiling(d[i]) + Math.Sqrt(d[i]) + IntrinsicMath.CPUOnly.Rsqrt(d[i]);
+    }
+
+    // The inputs of the exp tests: every 61st float bit pattern in [-104, 89] (both signs), the overflow / underflow
+    // edges, the subnormal-result range and the specials.
+    static float[] ExpTestInputs()
+    {
+        var list = new List<float>();
+        for (uint bits = 0; bits < 0x42B20000u; bits += 61) list.Add(BitConverter.UInt32BitsToSingle(bits));
+        for (uint bits = 0x80000000u; bits < 0xC2D00000u; bits += 61) list.Add(BitConverter.UInt32BitsToSingle(bits));
+        list.AddRange(new[] { 88.72283f, 88.722839f, 88.72284f, 89f, 100f, -87.33654f, -87.4f, -100f, -103.97207f, -103.9721f,
+            -104f, -150f, float.MaxValue, float.MinValue, float.Epsilon, -float.Epsilon, float.PositiveInfinity,
+            float.NegativeInfinity, float.NaN, 0f, -0f, 1f, -1f });
+        return list.ToArray();
+    }
+
+    // 5.4.21: MathF.Exp on CUDA is accurate in every configuration. Without the CUDA toolkit's LibDevice (most machines
+    // have the driver only) ILGPU.Algorithms computed ex2.approx(x / ln 2): up to 63.8 ulp, and without Algorithms either
+    // a float exp did not compile. Now: LibDevice's __nv_expf when it is loaded (1.93 ulp measured), else
+    // PTXAccurateMath.Exp (2.07 ulp measured, exhaustively over every float on an RTX 4070). Asserts <= 2.1 ulp and exact
+    // overflow / underflow / NaN / infinities in each configuration this machine can build.
+    [TestMethod]
+    public async Task MathFExp_AccurateWithOrWithoutLibDeviceOrAlgorithms()
+    {
+        var x = ExpTestInputs();
+        var configs = new List<(string name, Action<Context.Builder> setup)>
+        {
+            ("no LibDevice, no Algorithms", b => b.Cuda().LibDevice("", "")),
+            ("no LibDevice, Algorithms", b => b.Cuda().LibDevice("", "").EnableAlgorithms()),
+        };
+        var cudaPath = Environment.GetEnvironmentVariable("CUDA_PATH");
+        if (!string.IsNullOrEmpty(cudaPath) && Directory.Exists(Path.Combine(cudaPath, "nvvm", "libdevice")))
+        {
+            configs.Add(("LibDevice", b => b.Cuda()));
+            configs.Add(("LibDevice, Algorithms", b => b.Cuda().EnableAlgorithms()));
+        }
+        var report = new List<string>();
+        foreach (var (name, setup) in configs)
+        {
+            using var context = Context.Create(setup);
+            if (context.GetCudaDevices().Count == 0)
+                throw new UnsupportedTestException("No CUDA devices found");
+            using var accelerator = context.CreateCudaAccelerator(0);
+            using var xb = accelerator.Allocate1D(x);
+            using var yb = accelerator.Allocate1D<float>(x.Length);
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<float>, ArrayView<float>>(ExpF32Kernel);
+            kernel(x.Length, xb.View, yb.View);
+            await accelerator.SynchronizeAsync();
+            var y = await yb.CopyToHostAsync<float>();
+            double maxUlp = 0; float worst = 0;
+            for (int i = 0; i < x.Length; i++)
+            {
+                if (float.IsNaN(x[i]))
+                {
+                    if (!float.IsNaN(y[i])) throw new Exception($"{name}: exp(NaN) = {y[i]:R}");
+                    continue;
+                }
+                double exact = Math.Exp(x[i]);
+                float rounded = (float)exact;
+                if (float.IsInfinity(rounded) || rounded == 0f || float.IsInfinity(y[i]) || y[i] == 0f)
+                {
+                    if (y[i] != rounded) throw new Exception($"{name}: exp({x[i]:R}) = {y[i]:R}, correctly rounded {rounded:R}");
+                    continue;
+                }
+                double ulp = Math.Abs(y[i] - exact) / Math.ScaleB(1.0, Math.Max(Math.ILogB(Math.Abs((double)rounded)), -126) - 23);
+                if (ulp > maxUlp) { maxUlp = ulp; worst = x[i]; }
+            }
+            report.Add($"{name}: {maxUlp:F3} ulp at {worst:R}");
+            if (maxUlp > 2.1)
+                throw new Exception($"{name}: exp off by {maxUlp:F3} ulp at x = {worst:R} (limit 2.1). " + string.Join("; ", report));
+        }
+        Console.WriteLine("[MathFExp] " + string.Join("; ", report));
+    }
+
+    // 5.4.21: with LibDevice loaded, f32/f64 floor, ceiling, sqrt and rsqrt and f32 exp2 compile to their one PTX instruction
+    // each (cvt.rmi / cvt.rpi / sqrt.rn exact; LibDevice's exp2f / rsqrtf / rsqrt are themselves ex2.approx / rsqrt.approx),
+    // not to a call to a separate __nv_* function, which ptxas does not inline (222 of SpawnDev.ILGPU.ML's 895 kernels had
+    // such calls). Offline PTX, no CUDA device needed; skips without the toolkit.
+    [TestMethod]
+    public Task LibDevice_SingleInstructionMath_CompilesWithoutCalls()
+    {
+        using var context = Context.Create(b => b.Cuda().EnableAlgorithms());
+        if (string.IsNullOrEmpty(context.Properties.LibNvvmPath) || string.IsNullOrEmpty(context.Properties.LibDevicePath))
+            throw new UnsupportedTestException("No CUDA toolkit LibDevice on this machine");
+        using var nvvm = ILGPU.Runtime.Cuda.NvvmAPI.Create(context.Properties.LibNvvmPath, context.Properties.LibDevicePath);
+        using var backend = new ILGPU.Backends.PTX.PTXBackend(context, new CudaCapabilityContext(CudaArchitecture.SM_89),
+            CudaArchitecture.SM_89, CudaInstructionSet.ISA_85, nvvm);
+        var entry = ILGPU.Backends.EntryPoints.EntryPointDescription.FromImplicitlyGroupedKernel(
+            ((Action<Index1D, ArrayView<float>, ArrayView<double>, ArrayView<float>, ArrayView<double>>)InlineMathKernel).Method);
+        var ptx = ((ILGPU.Backends.PTX.PTXCompiledKernel)backend.Compile(entry, default(KernelSpecialization))).PTXAssembly;
+        var calls = ptx.Split('\n').Where(l => l.TrimStart().StartsWith("call")).Select(l => l.Trim()).ToList();
+        if (calls.Count > 0)
+            throw new Exception($"{calls.Count} call(s) in the PTX, first: {calls[0]}");
+        foreach (var instr in new[] { "cvt.rmi.f32.f32", "cvt.rpi.f32.f32", "sqrt.rn.f32", "cvt.rmi.f64.f64", "cvt.rpi.f64.f64", "sqrt.rn.f64",
+            "ex2.approx.f32", "rsqrt.approx.f32", "rsqrt.approx.f64" })
+            if (!ptx.Contains(instr)) throw new Exception($"'{instr}' not in the PTX");
+        return Task.CompletedTask;
+    }
+
     static void LibDeviceCosF64Kernel(Index1D i, ArrayView<double> x, ArrayView<double> y) => y[i] = Math.Cos(x[i]);
 
     // Double Math.Cos on PTX comes from LibDevice (CUDA toolkit) or from Algorithms' software math. CUDA 13 on Windows

@@ -40,7 +40,10 @@ var hardwareMathFunctions =
 
         ( UnaryMathFunctions[40],   "SM_75" ),  // TanH
     };
+// Floor and Ceiling are left to the core PTX backend: cvt.rmi / cvt.rpi are the exact IEEE result in one instruction
+// (the XMath.RoundingModes versions were several, and differed from the LibDevice path in code but not in value).
 var unaryMathFunctions = UnaryMathFunctions.Where(t =>
+    t.Item1 != "Floor" && t.Item1 != "Ceiling" &&
     !hardwareMathFunctions.Any(t2 => {
         var functionName = t.Item1;
         var dataType = t.Item2;

@@ -37,43 +37,39 @@ var fp16Ops = new (string, string, string, string)[]
     ("Ternary", "MultiplyAddEstimate", "FmaFP32", "SM_53"),
 };
 
+// NOT routed to LibDevice (2026-11-09): Floor, Ceiling, Sqrt (f32 + f64), Exp2 (f32) and Rsqrt (f32 + f64). PTX computes
+// each in one instruction (PTXInstructions.Data): cvt.rmi / cvt.rpi / sqrt.rn are the exact IEEE result, and LibDevice's
+// __nv_exp2f / __nv_rsqrtf / __nv_rsqrt are themselves just ex2.approx.f32 / rsqrt.approx.f32 / .f64 (checked in the
+// NVVM output). Through LibDevice each was a call to a separate function, which ptxas does not inline (222 of 895
+// SpawnDev.ILGPU.ML kernels had such calls).
 var unaryMathFunctions = new (string, string, TypeInformation)[]
 {
     ("AcosF",       "Acos",     FloatTypes[2]),
     ("AsinF",       "Asin",     FloatTypes[2]),
     ("AtanF",       "Atan",     FloatTypes[2]),
-    ("CeilingF",    "Ceil",     FloatTypes[2]),
     ("CosF",        "Cos",      FloatTypes[2]),
     ("CoshF",       "Cosh",     FloatTypes[2]),
     ("ExpF",        "Exp",      FloatTypes[2]),
     ("Exp2F",       "Exp2",     FloatTypes[2]),
-    ("FloorF",      "Floor",    FloatTypes[2]),
     ("LogF",        "Log",      FloatTypes[2]),
     ("Log2F",       "Log2",     FloatTypes[2]),
     ("Log10F",      "Log10",    FloatTypes[2]),
-    ("RsqrtF",      "Rsqrt",    FloatTypes[2]),
     ("SinF",        "Sin",      FloatTypes[2]),
     ("SinhF",       "Sinh",     FloatTypes[2]),
-    ("SqrtF",       "Sqrt",     FloatTypes[2]),
     ("TanF",        "Tan",      FloatTypes[2]),
     ("TanhF",       "Tanh",     FloatTypes[2]),
     
     ("AcosF",       "Acos",     FloatTypes[1]),
     ("AsinF",       "Asin",     FloatTypes[1]),
     ("AtanF",       "Atan",     FloatTypes[1]),
-    ("CeilingF",    "Ceil",     FloatTypes[1]),
     ("CosF",        "Cos",      FloatTypes[1]),
     ("CoshF",       "Cosh",     FloatTypes[1]),
     ("ExpF",        "Exp",      FloatTypes[1]),
-    ("Exp2F",       "Exp2",     FloatTypes[1]),
-    ("FloorF",      "Floor",    FloatTypes[1]),
     ("LogF",        "Log",      FloatTypes[1]),
     ("Log2F",       "Log2",     FloatTypes[1]),
     ("Log10F",      "Log10",    FloatTypes[1]),
-    ("RsqrtF",      "Rsqrt",    FloatTypes[1]),
     ("SinF",        "Sin",      FloatTypes[1]),
     ("SinhF",       "Sinh",     FloatTypes[1]),
-    ("SqrtF",       "Sqrt",     FloatTypes[1]),
     ("TanF",        "Tan",      FloatTypes[1]),
     ("TanhF",       "Tanh",     FloatTypes[1]),
 };

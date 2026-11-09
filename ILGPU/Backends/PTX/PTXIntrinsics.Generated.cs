@@ -633,12 +633,6 @@ namespace ILGPU.Backends.PTX
                     nameof(LibDevice.Atan),
                     typeof(double)));
             manager.RegisterUnaryArithmetic(
-                UnaryArithmeticKind.CeilingF,
-                BasicValueType.Float64,
-                CreateLibDeviceMathIntrinsic(
-                    nameof(LibDevice.Ceil),
-                    typeof(double)));
-            manager.RegisterUnaryArithmetic(
                 UnaryArithmeticKind.CosF,
                 BasicValueType.Float64,
                 CreateLibDeviceMathIntrinsic(
@@ -663,12 +657,6 @@ namespace ILGPU.Backends.PTX
                     nameof(LibDevice.Exp2),
                     typeof(double)));
             manager.RegisterUnaryArithmetic(
-                UnaryArithmeticKind.FloorF,
-                BasicValueType.Float64,
-                CreateLibDeviceMathIntrinsic(
-                    nameof(LibDevice.Floor),
-                    typeof(double)));
-            manager.RegisterUnaryArithmetic(
                 UnaryArithmeticKind.LogF,
                 BasicValueType.Float64,
                 CreateLibDeviceMathIntrinsic(
@@ -687,12 +675,6 @@ namespace ILGPU.Backends.PTX
                     nameof(LibDevice.Log10),
                     typeof(double)));
             manager.RegisterUnaryArithmetic(
-                UnaryArithmeticKind.RsqrtF,
-                BasicValueType.Float64,
-                CreateLibDeviceMathIntrinsic(
-                    nameof(LibDevice.Rsqrt),
-                    typeof(double)));
-            manager.RegisterUnaryArithmetic(
                 UnaryArithmeticKind.SinF,
                 BasicValueType.Float64,
                 CreateLibDeviceMathIntrinsic(
@@ -703,12 +685,6 @@ namespace ILGPU.Backends.PTX
                 BasicValueType.Float64,
                 CreateLibDeviceMathIntrinsic(
                     nameof(LibDevice.Sinh),
-                    typeof(double)));
-            manager.RegisterUnaryArithmetic(
-                UnaryArithmeticKind.SqrtF,
-                BasicValueType.Float64,
-                CreateLibDeviceMathIntrinsic(
-                    nameof(LibDevice.Sqrt),
                     typeof(double)));
             manager.RegisterUnaryArithmetic(
                 UnaryArithmeticKind.TanF,
@@ -741,12 +717,6 @@ namespace ILGPU.Backends.PTX
                     nameof(LibDevice.Atan),
                     typeof(float)));
             manager.RegisterUnaryArithmetic(
-                UnaryArithmeticKind.CeilingF,
-                BasicValueType.Float32,
-                CreateLibDeviceMathIntrinsic(
-                    nameof(LibDevice.Ceil),
-                    typeof(float)));
-            manager.RegisterUnaryArithmetic(
                 UnaryArithmeticKind.CosF,
                 BasicValueType.Float32,
                 CreateLibDeviceMathIntrinsic(
@@ -763,18 +733,6 @@ namespace ILGPU.Backends.PTX
                 BasicValueType.Float32,
                 CreateLibDeviceMathIntrinsic(
                     nameof(LibDevice.Exp),
-                    typeof(float)));
-            manager.RegisterUnaryArithmetic(
-                UnaryArithmeticKind.Exp2F,
-                BasicValueType.Float32,
-                CreateLibDeviceMathIntrinsic(
-                    nameof(LibDevice.Exp2),
-                    typeof(float)));
-            manager.RegisterUnaryArithmetic(
-                UnaryArithmeticKind.FloorF,
-                BasicValueType.Float32,
-                CreateLibDeviceMathIntrinsic(
-                    nameof(LibDevice.Floor),
                     typeof(float)));
             manager.RegisterUnaryArithmetic(
                 UnaryArithmeticKind.LogF,
@@ -795,12 +753,6 @@ namespace ILGPU.Backends.PTX
                     nameof(LibDevice.Log10),
                     typeof(float)));
             manager.RegisterUnaryArithmetic(
-                UnaryArithmeticKind.RsqrtF,
-                BasicValueType.Float32,
-                CreateLibDeviceMathIntrinsic(
-                    nameof(LibDevice.Rsqrt),
-                    typeof(float)));
-            manager.RegisterUnaryArithmetic(
                 UnaryArithmeticKind.SinF,
                 BasicValueType.Float32,
                 CreateLibDeviceMathIntrinsic(
@@ -811,12 +763,6 @@ namespace ILGPU.Backends.PTX
                 BasicValueType.Float32,
                 CreateLibDeviceMathIntrinsic(
                     nameof(LibDevice.Sinh),
-                    typeof(float)));
-            manager.RegisterUnaryArithmetic(
-                UnaryArithmeticKind.SqrtF,
-                BasicValueType.Float32,
-                CreateLibDeviceMathIntrinsic(
-                    nameof(LibDevice.Sqrt),
                     typeof(float)));
             manager.RegisterUnaryArithmetic(
                 UnaryArithmeticKind.TanF,
