@@ -1,7 +1,7 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.20-local.1 (forks 2.4.19-local.1) - 2026-11-08 - CUDA: a branch on the thread index was marked warp-uniform; F64EmulationScope (per-load f64 mode)
+## 5.4.20 (forks 2.4.19) - 2026-11-09 - CUDA: a branch on the thread index was marked warp-uniform; F64EmulationScope (per-load f64 mode)
 
 - **FIXED (forks, CUDA, O2 - the default since 5.4.9): a branch directly on an implicitly grouped kernel's index was
   emitted as `bra.uni`.** The uniformity analysis started every kernel parameter as warp-uniform, the thread index too,
