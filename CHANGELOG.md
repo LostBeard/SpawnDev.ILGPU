@@ -1,6 +1,58 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.21 (forks 2.4.20) - 2026-11-09 - CUDA: accurate float exp without the toolkit, one-instruction math never a LibDevice call; Wasm: big kernels compile (local reuse); -0f on WebGPU / WebGL; culture-independent codegen
+
+- **CUDA prefill since 5.4.19 (the "known, for 5.4.21" in 5.4.20) - explained, not a regression of correctness.** 5.4.19
+  started finding CUDA 13's LibDevice, so `MathF.Exp` became LibDevice's `__nv_expf`: a call to a separate function
+  (ptxas does not inline it: 34 calls in SpawnDev.ILGPU.ML's flash-prefill kernel) and 1.93 ulp at most. Before, on this
+  machine, it was ILGPU.Algorithms' `ex2.approx(x / ln 2)`: inline but up to **63.8 ulp** (measured over every float
+  input on an RTX 4070; the product rounds before the exponential, so the error grows with |x|). Tuvok's split on 5.4.20:
+  with LibDevice 232 / 7,388 tok/s short / long prefill, without 270 / 7,698, so LibDevice was the whole 15%. The faster
+  number came from the less accurate exp, so LibDevice stays; ML gets its speed back by calling `XMath.Exp2` in its
+  log2-domain softmax (294 / 7,534 tok/s with LibDevice; Tuvok). Measured, 4M threads x 256 exp: LibDevice 1.38-1.47 ms,
+  Algorithms 0.57 ms, and every inline accurate exp tried (a degree-7 polynomial at 0.94 ulp, Cody-Waite + `ex2.approx`
+  at 2.07 ulp) 1.7-2.2 ms - none beat LibDevice's call on speed and accuracy together.
+- **FIXED (forks, CUDA without the toolkit): float exp up to 63.8 ulp off, or not compiling at all.** Without LibDevice
+  (most machines have the driver, not the toolkit) float `Exp` was Algorithms' `ex2.approx(x / ln 2)`, and without
+  Algorithms either it failed to compile. New `PTXAccurateMath.Exp`: n = round(x / ln 2), f = x - n ln 2 in two fused
+  steps, `ex2.approx` on |f / ln 2| <= 0.5, exponent add, an exact two-step scaling for overflow and subnormal results:
+  **2.07 ulp, overflow / underflow / NaN / infinities exact**, inline. Used when LibDevice is not loaded; Algorithms'
+  `PTXMath.Exp(float)` (and with it its Sinh, Cosh, Tanh, Pow) uses it. `CudaTests.MathFExp_AccurateWithOrWithoutLibDeviceOrAlgorithms`
+  (4 configurations, <= 2.1 ulp; red-check: the old Algorithms exp fails at 62.7 ulp).
+- **FIXED (forks, CUDA with the toolkit): one-instruction math was a call to a separate function.** Floor, Ceiling, Sqrt
+  (f32, f64), Exp2 (f32) and Rsqrt (f32, f64) no longer go through LibDevice: each is one PTX instruction (`cvt.rmi` /
+  `cvt.rpi` / `sqrt.rn` exact; LibDevice's own `__nv_exp2f` / `__nv_rsqrtf` / `__nv_rsqrt` bodies are exactly
+  `ex2.approx.f32` / `rsqrt.approx.f32` / `.f64`), so results are unchanged and the call is gone (222 of SpawnDev.ILGPU.ML's
+  895 kernels had such calls). Algorithms no longer replaces Floor / Ceiling with multi-instruction C#.
+  `CudaTests.LibDevice_SingleInstructionMath_CompilesWithoutCalls` (offline PTX; red-check: Floor via LibDevice = a call).
+- **FIXED (Wasm): a large kernel failed with "local count too large".** The generators give every IR value its own Wasm
+  local and never reuse one; SpawnDev.Codecs' VP9 loop filter (`Vp9LoopFilterKernels.WavefrontKernel`, heavy inlining)
+  declared 68,382 and V8 rejects more than 50,000 per function (Geordi). New `WasmLocalCompaction`, a pass over each
+  finished function body: a local whose every touch is inside one basic block and starts with a write shares a per-type
+  slot with others (linear scan); every other local keeps its own; untouched ones are dropped. It reads only the
+  bytecode, so it is independent of the state machine, spills and helpers; an instruction it cannot decode fails the
+  compile. Geordi's kernel: 68,382 -> 8,300 locals (helper 12,183 -> 1,767), V8 compiles it; with it off, V8 fails with
+  his exact error. SpawnDev.ILGPU.ML's 895 kernels: 455,814 -> 153,429 locals. `WasmBackend.CompactLocals` (default on);
+  the compile info line shows locals before -> after. `WasmTests.Wasm_KernelOverV8LocalLimit_CompilesAndMatchesHost`
+  (61,443 -> 4 locals, host-exact).
+- **FIXED (WebGPU, WebGL, OpenCL): a negative-zero constant came out as +0.** WebGPU / WebGL printed `-0f` as `-0.0`,
+  the negation of `0.0`, which the shader compiler folds to +0 (SpawnDev.ILGPU.ML's HalfToFloat(0x8000); Tuvok); a
+  constant bit pattern (`bitcast<f32>(0x80000000u)`, `uintBitsToFloat(0x80000000u)`) was folded to +0 as well (measured).
+  Now a value the compiler cannot prove zero is OR-ed in, like the Inf / NaN literals: WGSL `_f32_neg_zero()` (the
+  runtime-zero helper), GLSL `uintBitsToFloat(0x80000000u | uint(gl_VertexID >> 31))`, also for the -0 hi component of an
+  emulated `-0.0` on WebGL. OpenCL printed a whole double without a decimal point (`-0`, `2`), which C reads as an
+  INTEGER literal, so `-0.0` became +0.0; it now appends `.0` like the float overload. `NegativeZeroConstant_KeepsSignBit`
+  (float and double, all lanes; failed on WebGPU, WebGL and OpenCL before).
+- **FIXED (every backend that generates source): code generation used the caller's culture.** Numbers were printed with
+  `ToString("G9")` / `$"{x}"` under `CultureInfo.CurrentCulture`: in a comma-decimal culture 0.5f printed as `0,5` (WebGL:
+  "'constructor' : too many arguments"; WebGPU: shader errors), and ICU cultures such as sv-SE print a minus as U+2212.
+  `Backend.Compile` now generates under the invariant culture and restores the caller's culture afterwards.
+  `CodegenUnderCommaDecimalCulture_MatchesHost` (all lanes; red-checked both ways: the original code fails on WebGPU,
+  WebGPU-no-subgroups and WebGL, and the culture scope alone - with the float printers still culture-dependent - passes).
+- In 5.4.21-local.1 (forks 2.4.20-local.1): cb4e79c (CUDA), ceaf3d5 (Wasm locals), 57a87f7 (-0, culture). Focused-tested
+  (the new tests on every lane, the full WasmTests lane 878/0/52, red-checks); no full sweep yet.
+
 ## 5.4.20 (forks 2.4.19) - 2026-11-09 - CUDA: a branch on the thread index was marked warp-uniform; F64EmulationScope (per-load f64 mode)
 
 - **FIXED (forks, CUDA, O2 - the default since 5.4.9): a branch directly on an implicitly grouped kernel's index was
