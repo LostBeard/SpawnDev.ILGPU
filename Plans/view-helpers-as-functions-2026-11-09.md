@@ -147,3 +147,13 @@ emission) or PER-FUNCTION (`valueVariables`, `declaredVariables`, `_hoistedPrimi
 walker / block state, builder + indent - saved, reset, restored around it). Write the classification as a table here first;
 a field missed in the per-function set leaks names between the helper and the kernel (naga catches most: redeclaration /
 undeclared), a kernel-wide field wrongly reset loses binding info (silent wrong indexing: the ViewHelper test catches it).
+
+### State classification - first pass (09:05, by name/role; verify each when touched)
+
+| class | fields |
+|---|---|
+| KERNEL-WIDE, read-only in the helper | `_generatorArgs`, `_atomicParameters` / `_floatAtomicParameters` / `_unsignedAtomicParameters`, `_emulatedF64Params` / `_emulatedI64Params`, `_subWord*Params` (all), `_plainLoadFloat16Params`, `_storedSubWordParams`, `_subWordBodyStructBindingNames`, `_scalarManifest`, `_viewOffsetScalarSlots` / `_viewCountScalarSlots` / `_scalarSlotsAfterScan` / `_coalesceCountSlots`, `_coalesceGroups`, `_directParamCoalesce*`, `_directParamOutputs`, `_packedStructLayouts`, `_bodyStructParams`, `_dynamicSharedOverrides`, `_atomicSharedAllocas`, `_isScanKernel`, `_shouldLinearizeGridX`, `_kernelUsesGridIdxZ`, `_indexParameterAddress` |
+| KERNEL-WIDE, ACCUMULATED by the helper (OR / union back) | `_uses*` flags (Broadcast / PredicateBarrier / Subgroups / Barriers / GroupReduce), `_broadcastType`, `_bodyReferencesScalarParams`, `_lengthReadParams`, `_paramPassedToHelper`, `_chosenViewNeedsLength` |
+| GLOBAL MONOTONIC counters (never reset: unique names across kernel + helpers) | `_inlineCounter`, `_ufBreakSentinelCounter`, `_loopExitFlagCounter`, `_declaredSyntheticCounters` |
+| PER-FUNCTION (save, reset, restore) | base: `valueVariables`, `declaredVariables`, `_localAllocaVarNames`, Builder + indent; `_hoistedPrimitives`, `_viewPointerVarNames`, `_subWordLEAVars`, `_crossBlockPointerExprs` / `_crossBlockElementPointers` / `_crossBlockPointers`, `_emittedLetBindings`, `_cfg` / `_postDominators` / `_loops`, `_deferredVarDeclarations` / `_useDeferredDeclarations`, `_loopExitStack` / `_returnMerge` / `_currentLoopHeaderExitTarget` / `_loopExitInfo`, `_hoistedIndexFields`, `_visitedBlocks`, `_boolLocalCastPtrs`, `_boolSharedPtrs` |
+| SPECIAL: `_chosenViewRoots` | kernel entries kept; the helper ADDS its view params (param -> kernel root) for its body, removed after |
