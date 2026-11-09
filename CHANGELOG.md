@@ -1,6 +1,19 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.23 (forks 2.4.22) - unreleased
+
+- **PERF (forks, Velocity): small launches run ~40x faster.** Velocity executes each IR operation as a call into a
+  warp-type helper with lane masks: right for wide launches, ~60x slower than the IL backend for a few threads that each
+  run a long serial loop (SpawnDev.Codecs' VP9 parse: 1,105 ms/frame on Velocity vs 3.4 on the CPU accelerator; Geordi).
+  A launch of at most `VelocityAccelerator.HostLaunchMaxThreads` threads (default 64; 0 disables) of a kernel without
+  group synchronization or shared memory now runs on an internal CPU accelerator (the kernel's own IL) shaped like the
+  Velocity device (its warp size, its maximum group); arguments are boxed only on that path. One-thread bool-decoder loop:
+  402.6 -> 10.0 ns per iteration (CPU accelerator 7.0), identical results. `HostLaunchCount` counts them.
+  `ArrayView` host access now accepts Velocity buffers (native host memory too). `VelocityTests.HostLaunch_SmallLaunchesRunOnTheHost_SameResults`
+  (1 and 8 threads go to the host, 4,096 do not, 0 disables, a barrier kernel never does; red-check: disabled by default
+  -> 0 host launches).
+
 ## 5.4.22 (forks 2.4.21) - 2026-11-09 - Warp.Shuffle capability (SupportsWarpShuffle), OpenCL device subgroup caps, WebGL phi-cycle and typed-exception fixes
 
 - **NEW: `AcceleratorRequirements.RequiresWarpShuffle` + `RequiredWarpSize`, and `device.SupportsWarpShuffle(width)` /

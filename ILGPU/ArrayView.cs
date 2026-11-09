@@ -281,12 +281,13 @@ namespace ILGPU
         }
 
         /// <summary>
-        /// Ensures that the current view is valid CPU buffer.
+        /// Ensures that the current view is a buffer in host memory (CPU, or Velocity - whose buffers are native host
+        /// memory too, so a CPU-executed kernel can address them).
         /// </summary>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private readonly void EnsureCPUBuffer() =>
             Trace.Assert(
-                Buffer.AcceleratorType == AcceleratorType.CPU,
+                Buffer.AcceleratorType is AcceleratorType.CPU or AcceleratorType.Velocity,
                 "Cannot access a non-CPU buffer directly");
 
         /// <summary>

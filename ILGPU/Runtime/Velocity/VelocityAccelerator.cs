@@ -251,6 +251,71 @@ namespace ILGPU.Runtime.Velocity
 
         #endregion
 
+        #region Host launches
+
+        private readonly object hostAcceleratorLock = new();
+        private CPUAccelerator? hostAccelerator;
+
+        /// <summary>
+        /// Launches of at most this many threads, of kernels without group synchronization or shared memory, run on an
+        /// internal CPU accelerator (the IL backend, executing the kernel's own IL) instead of Velocity's vectorized
+        /// code; 0 disables it. Velocity runs each IR operation as a call into a warp-type helper with lane masks: right
+        /// for wide launches, ~60x slower for a few threads that each run a long serial loop (measured 2026-11-09:
+        /// 402.6 vs 6.7 ns per iteration of a one-thread bool-decoder loop; SpawnDev.Codecs' VP9 parse 1,105 vs 3.4 ms
+        /// per frame). Results are the same: both execute the kernel's semantics on the same host memory.
+        /// </summary>
+        public int HostLaunchMaxThreads { get; set; } = 64;
+
+        private long hostLaunchCount;
+
+        /// <summary>
+        /// Launches that ran on the host accelerator (see <see cref="HostLaunchMaxThreads"/>); a diagnostic.
+        /// </summary>
+        public long HostLaunchCount => Interlocked.Read(ref hostLaunchCount);
+
+        /// <summary>Counts a launch that ran on the host accelerator.</summary>
+        internal void CountHostLaunch() => Interlocked.Increment(ref hostLaunchCount);
+
+        /// <summary>
+        /// Loads <paramref name="kernel"/>'s entry point on the internal host accelerator (created on first use).
+        /// Returns null when it cannot be compiled or loaded there; the launch then stays on Velocity.
+        /// </summary>
+        internal Kernel? TryLoadHostKernel(VelocityCompiledKernel kernel, int customGroupSize)
+        {
+            try
+            {
+                CPUAccelerator host;
+                lock (hostAcceleratorLock)
+                {
+                    // Velocity's warp size (a kernel sees the same Warp.WarpSize the accelerator reports) and enough
+                    // warps for Velocity's largest group (an explicitly grouped launch keeps its group size)
+                    hostAccelerator ??= new CPUAccelerator(
+                        Context,
+                        new CPUDevice(
+                            WarpSize,
+                            Math.Max(1, VelocityDevice.MaxGroupThreads / WarpSize),
+                            1),
+                        CPUAcceleratorMode.Sequential,
+                        ThreadPriority.Normal);
+                    host = hostAccelerator;
+                }
+                var entryPoint = kernel.EntryPoint;
+                var compiled = host.Backend.Compile(entryPoint.Description, entryPoint.Specialization);
+                if (!entryPoint.IsImplicitlyGrouped)
+                    return host.LoadKernel(compiled);
+                return customGroupSize > 0
+                    ? host.LoadImplicitlyGroupedKernel(compiled, customGroupSize)
+                    : host.LoadAutoGroupedKernel(compiled);
+            }
+            catch (Exception e) when (e is NotSupportedException or InternalCompilerException or InvalidOperationException)
+            {
+                Trace.WriteLine($"Velocity: kernel '{kernel.Name}' stays on Velocity for small launches: {e.Message}");
+                return null;
+            }
+        }
+
+        #endregion
+
         #region Launch Methods
 
         /// <summary>
@@ -389,6 +454,43 @@ namespace ILGPU.Runtime.Velocity
                 out var launcher);
             var emitter = new ILEmitter(launcher.ILGenerator);
 
+            // Small launches: if (kernel.ShouldLaunchOnHost(config) && kernel.LaunchOnHost(dimension, args)) return;
+            // (the arguments are boxed only on that path; see HostLaunchMaxThreads)
+            {
+                var velocityPath = emitter.DeclareLabel();
+                KernelLauncherBuilder.EmitLoadKernelArgument<VelocityKernel, ILEmitter>(
+                    Kernel.KernelInstanceParamIdx, emitter);
+                KernelLauncherBuilder.EmitLoadKernelConfig(
+                    entryPoint,
+                    emitter,
+                    Kernel.KernelParamDimensionIdx,
+                    MaxGridSize,
+                    MaxGroupSize);
+                emitter.EmitCall(VelocityKernel.ShouldLaunchOnHostMethod);
+                emitter.Emit(OpCodes.Brfalse, velocityPath);
+
+                KernelLauncherBuilder.EmitLoadKernelArgument<VelocityKernel, ILEmitter>(
+                    Kernel.KernelInstanceParamIdx, emitter);
+                emitter.Emit(ArgumentOperation.Load, Kernel.KernelParamDimensionIdx);
+                emitter.Emit(OpCodes.Box, entryPoint.KernelIndexType);
+                var hostParameters = entryPoint.Parameters;
+                emitter.EmitConstant(hostParameters.Count);
+                emitter.Emit(OpCodes.Newarr, typeof(object));
+                for (int i = 0, e = hostParameters.Count; i < e; ++i)
+                {
+                    emitter.Emit(OpCodes.Dup);
+                    emitter.EmitConstant(i);
+                    emitter.Emit(ArgumentOperation.Load, Kernel.KernelParameterOffset + i);
+                    if (hostParameters[i].IsValueType)
+                        emitter.Emit(OpCodes.Box, hostParameters[i]);
+                    emitter.Emit(OpCodes.Stelem_Ref);
+                }
+                emitter.EmitCall(VelocityKernel.LaunchOnHostMethod);
+                emitter.Emit(OpCodes.Brfalse, velocityPath);
+                emitter.Emit(OpCodes.Ret);
+                emitter.MarkLabel(velocityPath);
+            }
+
             // Map all arguments to an argument structure containing mapped views
             var argumentMapper = Backend.ArgumentMapper;
             var (structLocal, _) = argumentMapper.Map(emitter, entryPoint);
@@ -498,7 +600,10 @@ namespace ILGPU.Runtime.Velocity
             return new VelocityKernel(
                 this,
                 compiledKernel,
-                launcherMethod);
+                launcherMethod)
+            {
+                CustomGroupSize = customGroupSize,
+            };
         }
 
         /// <summary>
@@ -652,6 +757,10 @@ namespace ILGPU.Runtime.Velocity
 
             // Dispose barriers
             taskConcurrencyLimit.Dispose();
+
+            // The host accelerator of small launches (if one was created)
+            hostAccelerator?.Dispose();
+            hostAccelerator = null;
         }
 
         #endregion
