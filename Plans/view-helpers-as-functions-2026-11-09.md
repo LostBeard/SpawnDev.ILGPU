@@ -93,3 +93,12 @@ Cross-binding view choice (still unsupported on WebGPU / WebGL - documented, typ
   base slot + sub-view offset expression + length expression; body LEA = `(*leader)[offset + idx]`.
 - Test kernel + gate already in master: `ViewHelper_ManyCallSitesWithSubViews_MatchesHost` (cca264d, 11/0 with inlining);
   flag `keepGlobalViewCalls` (8825b01, off). Offline probe: scratchpad vhprobe/vhprobe.cs (+ naga).
+- Step 1 findings (07:10): the kernel never materializes a sub-view; LEA use sites walk the SubView chain and add each
+  `SubViewOffsetExpr` (+ chosen-view `_vo`) to the index (WGSLKernelFunctionGenerator ~6260-6290). Coalescing
+  (`_directParamCoalesceMembership`, groups built ~1380-1495 by element-type bucket, only past
+  `CoalesceTriggerThreshold` bindings) is a binding-count reduction that happens to give helpers a leader+offset ABI.
+- Step 2 (implement): for helper-ABI purposes give EVERY kernel view parameter reaching a surviving helper a
+  single-member pseudo-group (its own binding name + `BindingWgslType` from the same bucket classification,
+  `IsSubWord`/`SubWordElementByteSize`), stage entries for every parameter-origin view arg (not only coalesce members),
+  and at the call site pass `base slot + SubView-chain offset` (reuse the LEA chain walk) and a length
+  (`p_<id>_len`: the innermost SubView's Length, else the parameter's length) when the body reads the length.
