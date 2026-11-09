@@ -157,3 +157,7 @@ undeclared), a kernel-wide field wrongly reset loses binding info (silent wrong 
 | GLOBAL MONOTONIC counters (never reset: unique names across kernel + helpers) | `_inlineCounter`, `_ufBreakSentinelCounter`, `_loopExitFlagCounter`, `_declaredSyntheticCounters` |
 | PER-FUNCTION (save, reset, restore) | base: `valueVariables`, `declaredVariables`, `_localAllocaVarNames`, Builder + indent; `_hoistedPrimitives`, `_viewPointerVarNames`, `_subWordLEAVars`, `_crossBlockPointerExprs` / `_crossBlockElementPointers` / `_crossBlockPointers`, `_emittedLetBindings`, `_cfg` / `_postDominators` / `_loops`, `_deferredVarDeclarations` / `_useDeferredDeclarations`, `_loopExitStack` / `_returnMerge` / `_currentLoopHeaderExitTarget` / `_loopExitInfo`, `_hoistedIndexFields`, `_visitedBlocks`, `_boolLocalCastPtrs`, `_boolSharedPtrs` |
 | SPECIAL: `_chosenViewRoots` | kernel entries kept; the helper ADDS its view params (param -> kernel root) for its body, removed after |
+
+Consumer-side update (Geordi, S2 branch): splitting the inter path out of the recon kernels took IntraWaveKernel 33.7 ->
+6.6 MB WGSL; the two new inter kernels are 5.7 and 4.5 MB. Still multi-MB per kernel (the library fix remains the way to
+take them to sub-MB), but below the 10-26 OOM class.
