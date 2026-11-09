@@ -1,7 +1,7 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.23 (forks 2.4.22) - unreleased
+## 5.4.23 (forks 2.4.22) - unreleased; 5.4.23-local.1 (forks 2.4.22-local.1) 2026-11-09 for SpawnDev.Codecs' VP9 on Velocity
 
 - **PERF (forks, Velocity): small launches run ~40x faster.** Velocity executes each IR operation as a call into a
   warp-type helper with lane masks: right for wide launches, ~60x slower than the IL backend for a few threads that each
