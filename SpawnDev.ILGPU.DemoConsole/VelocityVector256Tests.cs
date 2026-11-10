@@ -5,8 +5,8 @@ using SpawnDev.SpawnJS.Cryptography;
 using SpawnDev.ILGPU.Demo.Shared.UnitTests;
 
 /// <summary>
-/// The Velocity backend with 256-bit vectors: a wider device type of <see cref="VelocityTests"/>. It is
-/// not registered in the default lane list (see Program.cs): it runs the same tests through a second set of operations.
+/// The Velocity backend with 256-bit vectors: a wider device type of <see cref="VelocityTests"/>, and since 5.4.23 the device
+/// AllAccelerators registers where the hardware runs 256-bit vectors (VelocityContextExtensions.PreferredDeviceType).
 /// </summary>
 public class VelocityVector256Tests : BackendTestBase
 {

@@ -115,7 +115,7 @@ namespace ILGPU
                     return this;
 #if NET7_0_OR_GREATER
                 if (ILGPU.Backends.Backend.RuntimePlatform.Is64Bit())
-                    return this.Velocity(VelocityDeviceType.Vector128);
+                    return this.Velocity(VelocityContextExtensions.PreferredDeviceType);
 #endif
                 return this.DefaultCPU();
             }
@@ -136,7 +136,7 @@ namespace ILGPU
 #if NET7_0_OR_GREATER
                 if (ILGPU.Backends.Backend.RuntimePlatform.Is64Bit())
                 {
-                    var velocity = new VelocityDevice(VelocityDeviceType.Vector128);
+                    var velocity = new VelocityDevice(VelocityContextExtensions.PreferredDeviceType);
                     if (predicate(velocity))
                         DeviceRegistry.Register(velocity);
                     return this.OpenCL(predicate).Cuda(predicate);

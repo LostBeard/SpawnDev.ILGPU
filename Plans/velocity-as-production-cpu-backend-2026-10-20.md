@@ -92,3 +92,24 @@ Clean A/B (Geordi 17:30, Codecs master with S1, same 252 frames, bit-exact): 5.4
 5.4.23-local.2 LF 451.9 / recon 108.9 - NO regression (621 was load overlap). Open perf item: Velocity's barrier path
 (S1 grouped LF ~460 vs the old one-thread kernel 114; CPU accelerator 351).
 Recon on Velocity: per-op helper-call cost dominates wide serial kernels (35x CPU) - the next Velocity perf item.
+
+## Barrier cost measured (Data, 2026-11-09 18:35; scratchpad velbarrier.cs, 12 processors, ns per two-barrier wavefront step)
+
+Grouped kernel, shared-memory wavefront, 64 groups x G threads x 64 steps (results identical everywhere):
+
+| Device | warp | G=16 | G=32 | G=64 | 256 groups, G=64 |
+|---|---|---|---|---|---|
+| CPU accelerator | 8 | - | 84,764 | 163,489 | 139,709 |
+| Velocity Scalar2 | 2 | - | 11,608 | 33,414 | 18,192 |
+| Velocity Vector128 (production default) | 4 | 398 | 1,438 | 9,875 | 16,046 |
+| Velocity Vector256 | 8 | - | 554 | 1,566 | 1,040 |
+
+The cliff is warps per group > processors (one OS thread per warp; G=64 on Vector128 = 16 warps on 12 cores). Vector256
+halves the warps: 6-15x faster barriers at G=64, and twice the lanes per operation everywhere. Velocity is already 5x
+faster than the CPU accelerator at barriers.
+
+PROPOSAL (5.4.23): production picks the widest HARDWARE-ACCELERATED device up to Vector256 (Vector256.IsHardwareAccelerated
+-> Vector256, else Vector128) in Context.Builder.HostCompute / AllAccelerators(predicate), and `builder.Velocity()` registers
+it too (its doc already says "the maximum vector length supported"). Gate first: the VelocityVector256Tests lane (commented
+out of DemoConsole/Program.cs, not run lately) must be green; then velbench / velbarrier / Geordi's VP9-on-Velocity table.
+Vector512 stays opt-in (AVX-512 is rare and its lane is untested).

@@ -160,6 +160,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     // undeclared view value with its field loads left out (StructViewMethod_LeftACall_MatchesHost).
                     new SSAConstruction(),
                     new LowerStructures(),
+                    // A call inlined above can turn a branch condition into a constant (SSA of a getter on
+                    // `default(T)`); fold it before codegen, which refuses warp operations even in a dead branch
+                    // (Tuvok's `if (default(TStruct).Flag)`, 2026-11-09).
+                    new UnreachableCodeElimination(),
                     new SimplifyControlFlow(),
                     new DeadCodeElimination()));
             });

@@ -38,6 +38,20 @@ namespace ILGPU.Runtime.Velocity
             return builder;
         }
 
+#if NET7_0_OR_GREATER
+        /// <summary>
+        /// The device type the host-compute path registers (<c>AllAccelerators</c>): the widest vectors the hardware
+        /// executes, up to 256 bits. A wider warp means fewer warps per group, and a group with barriers runs one
+        /// thread per warp: a 64-thread group is 16 warps on Vector128 but 8 on Vector256, and a barrier costs
+        /// 9.9 us vs 1.6 us per two-barrier step on 12 processors (Plans/velocity-as-production-cpu-backend-2026-10-20.md).
+        /// Vector512 stays opt-in.
+        /// </summary>
+        public static VelocityDeviceType PreferredDeviceType =>
+            IsHardwareAccelerated(VelocityDeviceType.Vector256)
+                ? VelocityDeviceType.Vector256
+                : VelocityDeviceType.Vector128;
+#endif
+
         /// <summary>
         /// Returns true if the vectors of the given device type are executed by the
         /// hardware (the others run through the slower software fallback of .NET).

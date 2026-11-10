@@ -176,7 +176,15 @@ namespace ILGPU.IR.Transformations
                 // marked-Inline calls as ordinary function calls. This
                 // prevents recursive helper trees from exploding the
                 // emitted Wasm/WGSL function.
-                if (!call.Target.HasFlags(MethodFlags.ForceInline))
+                // Trivial methods (property getters, constants, small wrappers: at most
+                // MaxNumILInstructionsToInline IL instructions) always inline and do not count: they cost
+                // nothing, and leaving one as a call hides a constant. In a large kernel the budget ran out
+                // before `default(TStruct).Flag`'s getter, so `if (default(TStruct).Flag)` stayed a branch on a
+                // call result, its untaken arm was never folded, and the Warp.ShuffleXor in it reached the
+                // OpenCL generator ("requires SubGroupShuffle"; SpawnDev.ILGPU.ML GQA attention, Tuvok
+                // 2026-11-09; ConstantBranch_AfterInliningBudget_FoldsAwayItsWarpOperation).
+                if (!call.Target.HasFlags(MethodFlags.ForceInline) &&
+                    call.Target.ILInstructionCount > MaxNumILInstructionsToInline)
                 {
                     int targetIL = call.Target.ILInstructionCount;
                     if (targetIL > 0 &&

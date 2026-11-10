@@ -224,9 +224,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         {
             var callee = methodCall.Target;
             // Inline-flagged helpers that allocate shared memory stay calls on purpose and are inlined at emission
-            // (InlineAddressParameterCalls); a kept call is always to a non-Inline helper
+            // (InlineAddressParameterCalls); any other surviving call to a view / reference helper was kept by that
+            // pass as a function (a non-Inline helper, or an Inliner budget survivor)
             if (!callee.HasImplementation || !WGSLFunctionGenerator.IsMonomorphizedViewHelper(callee)
-                || _generatorArgs.HelperMethods.ContainsKey(callee))
+                || (_generatorArgs.HelperMethods.ContainsKey(callee)
+                    && global::ILGPU.IR.Transformations.InlineAddressParameterCalls.AllocatesShared(callee)))
                 return false;
 
             var parameters = callee.Parameters;

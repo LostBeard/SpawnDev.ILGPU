@@ -774,6 +774,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // 2026-10-29, Codecs CELT band decode with CeltModeGpu.EBandsOf calls past the inlining budget).
                     new SSAConstruction(),
                     new LowerStructures(),
+                    // A call inlined above can turn a branch condition into a constant (SSA of a getter on
+                    // `default(T)`); fold it before codegen (Tuvok's `if (default(TStruct).Flag)`, 2026-11-09).
+                    new UnreachableCodeElimination(),
                     new SimplifyControlFlow(),
                     new DeadCodeElimination()));
             });

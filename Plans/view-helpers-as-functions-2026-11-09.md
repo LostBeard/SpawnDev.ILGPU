@@ -205,3 +205,64 @@ Open:
   `hv{i}` with its own offset sum. IR: OriginatesFromKernelParameter also accepts NewView(local array Alloca) and a
   helper's local-view param (same caller rules).
 - [ ] Wasm / GLSL phases unchanged (not started).
+
+## Queue (2026-11-09 evening)
+- [ ] (Tuvok) `if (default(TStruct).Flag)` - a struct type param whose property returns a constant is NOT folded before
+  OpenCL codegen: the untaken branch's Warp.ShuffleXor reached CLCodeGenerator ("Subgroup shuffle requires SubGroupShuffle
+  capability"). Repro shape: ML commit 50270de5's parent, GgufBatchDecoder IGqaReduce. Offline repro via the OpenCL
+  generator (no GPU), then find why the property never becomes a constant (getter on a default-initialized struct value).
+- [ ] Budget-survivor keep (WebGPU, uncommitted): gate = WebGPU lanes + per-kernel Chrome/Tint table + ML WGSL naga screen.
+- [ ] Velocity Vector256 default (uncommitted): gate = VelocityVector256Tests lane + benches.
+
+## Tint OOM on VP9 at local.3 - measured and fixed (2026-11-09 20:00)
+
+Geordi's first real VP9 WebGPU trial on local.3 (Codecs 25f0cdc): GPU process 0.39 -> 4.16 GB in 28 s, device lost.
+Per-kernel isolated installed Chrome (scratchpad tintcompile: own profile per kernel, tintwatch.ps1 watchdog scoped to it,
+3 GB kill; peak / Tint module ms / DXC pipeline ms):
+
+| Kernel | local.3 | survivor-keep build |
+|---|---|---|
+| CompressedHeader | KILLED >3 GB in 4.6 s | 1.16 GB / 863 / 39,439 |
+| Parse | KILLED >3 GB in 6.4 s | 1.04 GB / 816 / (harness hit 8-buffer default limit; fixed) |
+| InterPredict | 1.24 GB / 1,027 / 85,583 | 1.24 GB / 984 / 65,986 |
+| InterResidual | 1.24 GB / 313 / 14,478 | 1.21 GB / 208 / 12,197 |
+| IntraWave | 1.32 GB / 357 / 19,086 | 1.27 GB / 238 / 15,907 |
+| Adapt | 1.11 GB / 72 / 10,463 | 1.12 GB / 56 / 8,050 |
+| Wavefront | 2.03 GB / timeout 120 s | 2.03 GB / 1,115 / 101,959 |
+
+Cause: the Inliner's cumulative IL budget leaves late calls as survivors, and the WebGPU pipeline re-inlined every
+Inline-flagged survivor (InlineAddressParameterCalls), so CompressedHeader got ~30 inlined DiffUpdate copies in unrolled
+loops: one function of 8,118 vars x 7,483 branches (Tint's module cost is vars-in-scope x branches). Fix (uncommitted):
+a survivor that KeepsAsFunction stays a call and the kernel generator emits it as a function; [AggressiveInlining]
+(ForceInline) still inlines. Offline: CompressedHeader 119,048 -> 39,415 lines (score 60.7M -> 1.9M), Parse 113,564 ->
+53,152, InterResidual 44,093 -> 28,274, IntraWave 48,719 -> 32,796; naga-valid.
+Remaining cost: DXC pipeline time on first use (Wavefront ~100 s, InterPredict ~66 s, CompressedHeader ~39 s).
+
+### Same harness on Codecs dae4f90 (Geordi's [NoInlining] on DiffUpdate/MvUpdate) + survivor-keep build (20:30)
+
+| Kernel | peak | Tint module ms | DXC pipeline ms |
+|---|---|---|---|
+| CompressedHeader (6,970 lines) | 2.98 GB | - | TIMEOUT >240 s |
+| Parse (53,152 lines) | >3 GB KILLED | 1,620 | killed at 26,587 |
+| InterPredict | 1.24 GB | 958 | 66,624 |
+| Wavefront | 2.03 GB | 1,062 | 98,653 |
+| InterResidual / IntraWave / Adapt | 1.2-1.3 / 0.46 GB | 202 / 238 / 65 | 11,482 / 14,798 / 989 |
+
+FINDING: on D3D12 Chrome, DXC inlines every HLSL function into the entry point, so WGSL functions move the expansion from
+Tint to DXC. Tint OOM is fixed (module steps <= 1.6 s), but what D3D pays is total code AFTER inlining (helper body x call
+sites). CompressedHeader with all DiffUpdate calls as functions is WORSE for DXC (>240 s) than with only budget survivors
+as functions (39 s, 25f0cdc). Parse now exceeds 3 GB in DXC. Remaining lever: fewer call sites at the source (Codecs), or
+automatic call-site merging in ILGPU (one call site in a dispatch loop) - a research item, not started.
+
+### Codecs 3a20c7c (Geordi: compressed header table-driven, ONE DiffUpdate call site) on the local.4 candidate (21:15)
+
+| Kernel | peak | Tint ms | DXC ms |
+|---|---|---|---|
+| CompressedHeader (7,739 lines, all inlined) | 0.44 GB | 82 | 880 |
+| Parse (59,418) | >3 GB KILLED | 1,298 | killed at 31,607 |
+| InterPredict | 1.24 GB | 908 | 67,418 |
+| Wavefront | 2.03 GB | 1,051 | 98,281 |
+| InterResidual / IntraWave / Adapt | 1.15 / 1.22 / 1.02 GB | 171 / 210 / 82 | 10,693 / 14,127 / 7,293 |
+
+CONFIRMED: D3D cost = total code after full inlining; one call site in a table/state-driven loop takes CompressedHeader
+from 39 s / >240 s to 0.9 s. Parse is the blocker (Geordi rewrites it the same way next).

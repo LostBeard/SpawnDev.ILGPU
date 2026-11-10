@@ -229,7 +229,7 @@ try
         typeof(CPUTests),
         typeof(VelocityTests),   // the SIMD CPU backend (Vector128) as a lane: all 731 pass or skip (Plans/velocity-as-production-cpu-backend-2026-10-20.md)
         typeof(VelocityScalar2Tests),   // the two-lane scalar Velocity device (the first one Context.Builder.Velocity() registers): first full run 2026-10-26 737/1/57, the 1 a 4-lane-warp test that now skips
-        // typeof(VelocityVector256Tests),   // Velocity with 256-bit vectors (eight lanes per warp)
+        typeof(VelocityVector256Tests),   // Velocity with 256-bit vectors (eight lanes per warp): the device AllAccelerators picks where AVX2 runs it (5.4.23, VelocityContextExtensions.PreferredDeviceType)
         // typeof(VelocityVector512Tests),   // Velocity with 512-bit vectors (sixteen lanes per warp)
         typeof(CudaTests),
         typeof(OpenCLTests),

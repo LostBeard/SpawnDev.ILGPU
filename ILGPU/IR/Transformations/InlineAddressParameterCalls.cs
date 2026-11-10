@@ -281,10 +281,21 @@ namespace ILGPU.IR.Transformations
                 }
                 else if (target.HasFlags(MethodFlags.Inline))
                 {
-                    // WebGPU budget survivor: the generator would inline it at emission time through a
-                    // structurizer that mis-emits early exits - inline it here instead, unless it allocates
-                    // shared memory (the emission inliner shares one workgroup array across call sites).
-                    inline = !AllocatesShared(target);
+                    // WebGPU budget survivor: the Inliner's cumulative budget left this call as a call. The
+                    // generator would inline it at emission time through a structurizer that mis-emits early
+                    // exits - inline it here instead, unless it allocates shared memory (the emission inliner
+                    // shares one workgroup array across call sites). With keepGlobalViewCalls, a survivor that
+                    // takes views / references the WebGPU generator can emit as a function STAYS a call: the
+                    // budget ran out because too much was inlined, and inlining every survivor anyway made one
+                    // function of thousands of vars x branches - SpawnDev.Codecs' VP9 CompressedHeaderKernel
+                    // (~30 DiffUpdate copies in unrolled loops, 8,118 vars x 7,483 branches) took Chrome's GPU
+                    // process past 4 GB in Tint (Geordi, 2026-11-09). [AggressiveInlining] (ForceInline) still
+                    // inlines: the attribute is the author's choice.
+                    inline = !AllocatesShared(target)
+                        && !(keepGlobalViewCalls
+                            && !target.HasFlags(MethodFlags.ForceInline)
+                            && TakesAddress(target)
+                            && KeepsAsFunction(builder.Method, target, call));
                 }
                 else
                 {

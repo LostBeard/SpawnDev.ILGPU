@@ -62,6 +62,27 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   trapped "remainder by zero"). The length is now the view's own length operand on all three. Found by
   `LocalViewHelpers_LocalMemoryThroughHelpers_MatchHost`; `LocalMemory_ViewLength_InKernelAndHelper_MatchHost`,
   `_ByteArray_MatchHost`, `_NestedHelpers_MatchHost`.
+- **FIXED (forks, all backends): `if (default(TStruct).Flag)` could stay an unfolded branch, and the warp operation in its
+  untaken arm reached the generator** ("Subgroup shuffle requires SubGroupShuffle capability" in the OpenCL generator;
+  SpawnDev.ILGPU.ML's GQA attention on NVIDIA OpenCL, Tuvok). The Inliner's cumulative budget (2,048 IL per kernel)
+  counted every inlined call; once a large kernel had used it up, even the 2-instruction getter stayed a call, so the
+  condition was a call result, not a constant. Trivial methods (at most 32 IL instructions: getters, constants, small
+  wrappers) now always inline and do not count against the budget. `ConstantBranch_AtExhaustedInliningBudget_
+  FoldsAwayItsWarpOperation` (1,024 two-instruction calls fill the budget exactly; red-check: OpenCL throws Tuvok's
+  error), plus two shapes that already folded (`_OnStructTypeParameter_`, `_AfterInliningBudget_`).
+  The WebGPU / WebGL kernel pipelines also run unreachable-code elimination after their late inlining pass (a getter
+  inlined there can turn a branch condition into a constant; the offline ShaderCompiler path showed it).
+- **PERF (WebGPU, forks): Inliner budget survivors that take views / references stay WGSL functions** instead of being
+  re-inlined by the WebGPU pipeline. SpawnDev.Codecs' VP9 CompressedHeaderKernel (25f0cdc) inlined ~30 DiffUpdate copies
+  into one function of 8,118 vars x 7,483 branches and took Chrome's GPU process past 3 GB in Tint within 5 s; with
+  survivors kept: 39,415 lines, 1.16 GB peak, Tint 0.9 s. Measured per kernel in an isolated Chrome (Plans/view-helpers-as-
+  functions-2026-11-09.md). Note: on D3D12, DXC inlines HLSL functions again, so first-use pipeline time still scales with
+  the inlined size (Parse, Wavefront remain heavy).
+- **PERF (forks, Velocity): `AllAccelerators()` registers Velocity with 256-bit vectors where the hardware runs them
+  (AVX2)**, else 128-bit (`VelocityContextExtensions.PreferredDeviceType`). A group with barriers runs one thread per
+  warp; Vector256 halves the warps: a 64-thread wavefront barrier step 9.9 -> 1.6 us, 256 groups 16.0 -> 1.0 us (12
+  processors), and twice the lanes per operation. `builder.Velocity()` keeps its devices (Scalar2, Vector128). The
+  VelocityVector256Tests lane is back in the default lane list: 803 passed, 0 failed.
 - **TEST: `WebGPU_InvalidShader_FailsTheReadbackWithoutASync`** accepts the shader's follow-on submit error on the
   SECOND readback too (the browser delivers the two errors in either order; each is reported once; the third readback
   must succeed). Seen once in the 5.4.23 WebGPU lane under load.
