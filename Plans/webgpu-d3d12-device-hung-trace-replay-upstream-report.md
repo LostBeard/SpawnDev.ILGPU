@@ -91,3 +91,19 @@ prevents the hang. Waiting 3 s at the test boundary does not.
 - **The application's runtime.** The replay runs no application code.
 
 Not yet narrowed: whether Dawn's D3D12 backend or the driver is at fault. A different GPU vendor was not available to compare.
+
+## Second trigger (added 2026-11-10, Data + Geordi) - attach as case 2
+
+Same error, same victim dispatch, a different lead-in: a full VP9 decode (SpawnDev.Codecs' `Vp9DecoderGpu`, which runs
+compute kernels with workgroup barriers: the loop filter and intra wavefronts) instead of the encoder's own barrier kernel.
+Page flow: encode 64x64 (q30), decode it with the full GPU decoder (a host wait after each step), encode 64x64 again (q120):
+the second encode's first small wavefront dispatch dies with DXGI_ERROR_DEVICE_HUNG, 3 of 3 in the application.
+
+Recorded with the same `tracer.js` (Codecs PMT `PMT_INIT_SCRIPT`), 855 records, the original page's device lost at record
+826. Replayed in a fresh installed Chrome (own profile, no application code): **device lost with the same
+DXGI_ERROR_DEVICE_HUNG at record 827, 2 of 2**. Chrome 157.0.8103.39, driver 32.0.15.9621 (NVIDIA 596.21), RTX 4070.
+
+Attachment: `D:\users\tj\Projects\_upstream_reports\vp9-webgpu-device-hung-case2\` (index.html, replay.js, trace.jsonl
+6.7 MB, tracer.js). Not reduced: every reduction step is a deliberate device reset on TJ's machine, so it waits for his OK
+(the full trace already reproduces). The application keeps its workaround (a queue drain after the barrier kernel) on
+the encoder path; extending it to the decoder path waits for TJ (Geordi, Codecs Docs/status.md).
