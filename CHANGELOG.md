@@ -3,6 +3,13 @@
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 ## Unreleased
 
+- **FEATURE (forks, CUDA): `CudaStream.WaitFor(CudaStream other)`: cross-stream dependencies, and fork / join inside a
+  graph capture.** Records an event on `other` and makes this stream wait on it (`cuStreamWaitEvent`, newly bound; the
+  host does not block). Inside a capture, `side.WaitFor(main)` forks (the side stream joins main's capture, and its
+  launches become a parallel graph branch) and `main.WaitFor(side)` joins before `EndCapture`, so independent kernels of
+  one captured step can overlap on the GPU (Tuvok: the q/k Q4_K and v F16 GEMVs of a decode layer). One event per
+  waiting stream, created on first use and destroyed with the stream. `cuStreamWaitEvent` resolves on its own, so an
+  old driver without it keeps graph capture. `CudaTests.CudaGraph_ForkJoinCapture_BothBranchesReplay`.
 - **PERF (WebGPU, WebGL): a short-circuit condition's body is emitted once, not once per operand.** Release IL compiles
   `if (a || b) body` (and `if (a && b) x else body`, and longer chains) to branch blocks that each jump to the same
   body block. The structured WGSL and GLSL walkers emitted that block, loops included, in every arm that reached it, and inlining

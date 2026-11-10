@@ -216,6 +216,70 @@ public class CudaTests : BackendTestBase
         }
     }
 
+    static void ForkAddKernel(Index1D i, ArrayView<int> data, int amount) => data[i] += amount;
+
+    static void ForkJoinSumKernel(Index1D i, ArrayView<int> a, ArrayView<int> b, ArrayView<int> sum) => sum[i] = a[i] + b[i];
+
+    // CudaStream.WaitFor as fork / join inside a graph capture (Tuvok 2026-11-10: two independent GEMVs of a decode
+    // layer as parallel graph branches). Fork: the side stream waits on the capturing stream and joins its capture.
+    // Join: the capturing stream waits on the side stream before EndCapture. Each replay must run BOTH branches and then
+    // the sum; a side launch that was not captured would run once during capture instead (b = 1 for every replay count).
+    [TestMethod]
+    public async Task CudaGraph_ForkJoinCapture_BothBranchesReplay() => await RunTest(async accelerator =>
+    {
+        if (!CudaStream.SupportsGraphCapture)
+            throw new UnsupportedTestException("The CUDA driver has no graph API");
+        const int n = 4096, replays = 5;
+        using var main = (CudaStream)accelerator.CreateStream();
+        using var side = (CudaStream)accelerator.CreateStream();
+        var add = accelerator.LoadAutoGroupedKernel<Index1D, ArrayView<int>, int>(ForkAddKernel);
+        var sum = accelerator.LoadAutoGroupedKernel<Index1D, ArrayView<int>, ArrayView<int>, ArrayView<int>>(ForkJoinSumKernel);
+        using var a = accelerator.Allocate1D<int>(n);
+        using var b = accelerator.Allocate1D<int>(n);
+        using var s = accelerator.Allocate1D<int>(n);
+        // warm-up (JIT + module load) so the capture allocates nothing, then zero everything
+        add(main, n, a.View, 0);
+        add(side, n, b.View, 0);
+        sum(main, n, a.View, b.View, s.View);
+        a.MemSetToZero(main);
+        b.MemSetToZero(main);
+        s.MemSetToZero(main);
+        main.Synchronize();
+
+        main.BeginCapture();
+        side.WaitFor(main);               // fork
+        add(main, n, a.View, 2);          // branch 1
+        add(side, n, b.View, 1);          // branch 2
+        main.WaitFor(side);               // join
+        sum(main, n, a.View, b.View, s.View);
+        using var graph = main.EndCapture();
+        main.Synchronize();
+        side.Synchronize();
+        var afterCapture = b.GetAsArray1D();
+        if (afterCapture[0] != 0 || afterCapture[n - 1] != 0)
+            throw new Exception($"the side branch ran during capture (b = {afterCapture[0]}): it was not captured");
+
+        using var exec = graph.Instantiate();
+        for (int r = 0; r < replays; r++)
+            exec.Launch(main);
+        main.Synchronize();
+        var got = s.GetAsArray1D();
+        for (int i = 0; i < n; i++)
+            if (got[i] != 3 * replays)
+                throw new Exception($"sum[{i}] = {got[i]} after {replays} replays, expected {3 * replays} (a = 2 and b = 1 per replay)");
+
+        // outside a capture: an ordinary cross-stream dependency (side writes, main reads after WaitFor)
+        b.MemSetToZero(side);
+        add(side, n, b.View, 7);
+        main.WaitFor(side);
+        sum(main, n, a.View, b.View, s.View);
+        main.Synchronize();
+        var plain = s.GetAsArray1D();
+        if (plain[0] != 2 * replays + 7 || plain[n - 1] != 2 * replays + 7)
+            throw new Exception($"WaitFor outside a capture: sum = {plain[0]}, expected {2 * replays + 7}");
+        await Task.CompletedTask;
+    });
+
     protected override Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()
     {
         var context = Context.Create(builder => builder.AllAccelerators().EnableAlgorithms());

@@ -171,6 +171,48 @@ namespace ILGPU.Runtime.Cuda
             }
         }
 
+        private IntPtr _waitEvent;
+
+        /// <summary>
+        /// Makes the work issued on this stream from now on wait for all work issued on <paramref name="other"/> so far
+        /// (an event recorded on <paramref name="other"/> plus <c>cuStreamWaitEvent</c> on this stream). The host does not
+        /// block.
+        /// </summary>
+        /// <param name="other">The stream whose work issued so far must finish first.</param>
+        /// <remarks>
+        /// Inside a capture this forks and joins: while <paramref name="other"/> captures, this stream joins the same
+        /// capture and its launches become a parallel branch of the graph; waiting back on that branch from the
+        /// capturing stream before <see cref="EndCapture"/> joins it again.
+        /// <code>
+        /// main.BeginCapture();
+        /// side.WaitFor(main);        // fork: side joins main's capture
+        /// launchA(main, ...);        // branch 1
+        /// launchB(side, ...);        // branch 2, may run concurrently with branch 1
+        /// main.WaitFor(side);        // join (required: every forked stream must rejoin before EndCapture)
+        /// using var graph = main.EndCapture();
+        /// </code>
+        /// Outside a capture it is an ordinary cross-stream dependency.
+        /// </remarks>
+        public void WaitFor(CudaStream other)
+        {
+            if (other is null)
+                throw new ArgumentNullException(nameof(other));
+            if (ReferenceEquals(other, this))
+                return;
+            if (other.Accelerator != Accelerator)
+                throw new ArgumentException("Both streams must belong to the same accelerator.", nameof(other));
+            using var binding = Accelerator.BindScoped();
+            if (_waitEvent == IntPtr.Zero)
+            {
+                CudaException.ThrowIfFailed(
+                    CurrentAPI.CreateEvent(out _waitEvent, CudaEventFlags.CU_EVENT_DISABLE_TIMING));
+            }
+            // a wait uses the event's most recent record at the time of the call, so one event per waiting stream
+            // serves every WaitFor on it
+            CudaException.ThrowIfFailed(CurrentAPI.RecordEvent(_waitEvent, other.StreamPtr));
+            CudaGraphNativeMethods.StreamWaitEvent(StreamPtr, _waitEvent);
+        }
+
         /// <summary>
         /// Returns the current capture status of this stream.
         /// </summary>
@@ -193,6 +235,11 @@ namespace ILGPU.Runtime.Cuda
         protected override void DisposeAcceleratorObject(bool disposing)
         {
             CaptureEnded(); // a stream destroyed mid-capture no longer captures
+            if (_waitEvent != IntPtr.Zero)
+            {
+                CurrentAPI.DestroyEvent(_waitEvent);
+                _waitEvent = IntPtr.Zero;
+            }
             if (!responsibleForHandle || streamPtr == IntPtr.Zero)
                 return;
 

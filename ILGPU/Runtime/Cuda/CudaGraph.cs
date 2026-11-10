@@ -60,6 +60,14 @@ namespace ILGPU.Runtime.Cuda
         private static readonly delegate* unmanaged[Cdecl]<
             IntPtr, CudaError> cuGraphDestroy;
 
+        // CUresult cuStreamWaitEvent(CUstream, CUevent, unsigned int) - resolved on its own: it predates the graph
+        // API, and a missing export must not switch graph capture off
+        private static readonly delegate* unmanaged[Cdecl]<
+            IntPtr, IntPtr, uint, CudaError> cuStreamWaitEvent;
+
+        /// <summary>True when <c>cuStreamWaitEvent</c> resolved against the loaded CUDA driver.</summary>
+        public static bool SupportsStreamWaitEvent { get; }
+
         /// <summary>
         /// True when every graph entry point resolved against the loaded CUDA driver.
         /// </summary>
@@ -69,6 +77,12 @@ namespace ILGPU.Runtime.Cuda
         {
             if (!TryLoadDriver(out var driver))
                 return;
+
+            if (TryGet(driver, "cuStreamWaitEvent", out var wait))
+            {
+                cuStreamWaitEvent = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, uint, CudaError>)wait;
+                SupportsStreamWaitEvent = true;
+            }
 
             // Resolve every entry point; if any is missing (very old driver) the whole
             // feature is reported unsupported rather than half-working.
@@ -175,6 +189,13 @@ namespace ILGPU.Runtime.Cuda
         {
             EnsureSupported();
             CudaException.ThrowIfFailed(cuGraphUpload(graphExec, stream));
+        }
+
+        public static void StreamWaitEvent(IntPtr stream, IntPtr @event)
+        {
+            if (!SupportsStreamWaitEvent)
+                throw new NotSupportedException("The CUDA driver on this machine does not export cuStreamWaitEvent.");
+            CudaException.ThrowIfFailed(cuStreamWaitEvent(stream, @event, 0u));
         }
 
         public static CudaError DestroyExec(IntPtr graphExec) =>
