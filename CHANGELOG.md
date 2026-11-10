@@ -1,6 +1,19 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## Unreleased
+
+- **FIXED (WebGPU): "missing return at end of function" for a value-returning helper with an early return inside a
+  loop inside an if.** The structured walker ran a loop's exits (normal and returning) up to their common
+  post-dominator. When one exit returns, that is the function's exit, past the merge of the if the loop sits in, so the
+  if's merge, the rest of the function and the final `return` were emitted inside the loop's arm only. The other arm
+  then stopped at the merge, already visited, and fell off the end of the WGSL function: the shader module failed to
+  compile. In a void kernel the same walk was correct. Found by SpawnDev.Codecs' WebGPU lazy-load guard:
+  `Bc7EncoderGpu.CellCompression` (`if (!one) { for (..) { ..; if (best == 0) return 0; } } if (p) {..} return best;`,
+  Geordi). The exits now stop at the caller's merge, and a return-only exit emits its return in place. All 567
+  SpawnDev.Codecs kernels and 804 SpawnDev.ILGPU.ML kernels: naga-valid; only the affected kernel's WGSL changed.
+  `EarlyReturnInLoop_*` tests (helper as a function and inlined, vs the kernel on the CPU accelerator, data that takes
+  both the early return and the tail; red-check: fix off -> WebGPU fails at dispatch with GPU errors).
 ## 5.4.24 (forks 2.4.23) - 2026-11-10 - WebGPU / WebGL short-circuit condition bodies emitted once (VP9 InterPredict WGSL 78k -> 34k lines), CUDA graph fork / join (`CudaStream.WaitFor`)
 
 Verified outside this repo on 5.4.24-local.1: SpawnDev.Codecs' whole VP9 decoder on WebGPU bit-exact vs libvpx

@@ -10000,7 +10000,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             foreach (var (b, _) in inner) starts.Add(b);
             BasicBlock? merge = pd.GetImmediateCommonDominator(starts.ToArray());
             if (enclosing != null && merge != null && !enclosing.Contains(merge)) merge = null;
+            // An exit that returns makes the common post-dominator the function's exit, PAST the caller's stop block (the
+            // merge of the if this loop sits in). Walking the regions to it ran that merge and the rest of the function
+            // inside this arm, and the other arm then stopped at the (now visited) merge: in a function returning a value
+            // the other path fell off the end ("missing return at end of function", SpawnDev.Codecs
+            // Bc7EncoderGpu.CellCompression: `if (!one) { for (..) { ..; if (best == 0) return 0; } } if (p) {..} return best;`,
+            // Geordi 2026-11-10). Stop at the caller's block instead: a region that cannot reach it only returns (it is a
+            // dead end, emitted in place), and is un-visited afterwards so the caller's own walk still emits what it shares.
+            bool toCallerStop = enclosing == null && stopBlock != null && merge != null && merge != stopBlock
+                && merge.Terminator is global::ILGPU.IR.Values.ReturnTerminator && pd.Dominates(merge, stopBlock);
+            if (toCallerStop) merge = stopBlock;
             var stopAt = merge ?? stopBlock;
+            if (toCallerStop) _returnMerge ??= new SpawnDev.ILGPU.CodeGen.StructuredReturnMerge();
 
             var baseVisited = new HashSet<BasicBlock>(visited);
             void Region(BasicBlock? start)
@@ -10009,6 +10020,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 var rv = new HashSet<BasicBlock>(baseVisited);
                 GenerateStructuredCodeRecursive(start, stopAt, pd, rv, enclosing);
                 visited.UnionWith(rv);
+                if (toCallerStop && !_returnMerge!.Reaches(start, stopAt!))
+                    visited.ExceptWith(_returnMerge.ReturningRegion(start));
             }
             AppendLine($"if ({info.Flag} == 0) {{");
             PushIndent();
