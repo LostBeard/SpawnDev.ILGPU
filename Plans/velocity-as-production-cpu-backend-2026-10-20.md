@@ -183,3 +183,20 @@ Options: (a) an explicit opt-in per kernel (a load-time option or attribute: "ru
 time both paths over several launches per kernel, switch only on a large, repeated margin (the shelved version used one
 sample per path and picked wrong on noise). Then: why the host path is 3x slower than the CPU accelerator, and the barrier
 spin (yield sooner when the waited-for warps are far behind).
+
+### Host-path variants (18:20, same files, temporary EXPERIMENT_* env overrides in VelocityAccelerator, all reverted)
+
+| recon ms/frame (bit-exact) | |
+|---|---|
+| plain CPU accelerator (CpuCodecsTests, default device, Parallel) | **4.97** (LF 367.8) |
+| Velocity Vector256 default (SIMD; host path only for <= 64 threads) | 51.2 |
+| Velocity, every non-barrier launch on its host path (Sequential host, 1 multiprocessor = ONE thread) | 16.1 |
+| Velocity, host path Parallel, 12 multiprocessors x 32 warps (3,072 OS threads) | 38.0 |
+| Velocity, host path Parallel, 12 multiprocessors x 8 warps (the default CPU device shape) | 37.1 |
+| Velocity, small launches only (<= 64) on a Parallel host | 67.2 (small launches pay the parallel wake-up) |
+
+Reading: the plain CPU accelerator runs these kernels 10x faster than Velocity's SIMD and 3x faster than Velocity's own
+(single-threaded) host path, yet a PARALLEL host accelerator behind Velocity is slower than the sequential one. Something on
+the host path itself costs: candidates are the boxed `LaunchOnHost(object dimension, object[] args)` launch, a synchronize
+per launch, the host kernel compiled under the Velocity context's settings (optimization level?), and the intra wavefront's
+~30 tiny launches per frame. To find before designing the per-kernel choice: profile the host path at full width.
