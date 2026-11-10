@@ -7,6 +7,9 @@ Verified outside this repo on 5.4.24-local.1: SpawnDev.Codecs' whole VP9 decoder
 (Geordi, Codecs 24f7c1e, Chrome GPU process 1.03 GB); SpawnDev.ILGPU.ML WebGPU + WebGL lanes 2,180 passed, 0 failed
 (Tuvok).
 
+- Release sweep (RTX 4070, all lanes, default exclusions, code = 9e5a86b): **8,953 cases, 8,249 passed, 704 skipped,
+  0 failed, 49.9 min**. Earlier local build: 5.4.24-local.1 (forks 2.4.23-local.1).
+
 - **FEATURE (forks, CUDA): `CudaStream.WaitFor(CudaStream other)`: cross-stream dependencies, and fork / join inside a
   graph capture.** Records an event on `other` and makes this stream wait on it (`cuStreamWaitEvent`, newly bound; the
   host does not block). Inside a capture, `side.WaitFor(main)` forks (the side stream joins main's capture, and its
