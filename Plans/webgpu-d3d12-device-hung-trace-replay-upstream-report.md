@@ -107,3 +107,10 @@ Attachment: `D:\users\tj\Projects\_upstream_reports\vp9-webgpu-device-hung-case2
 6.7 MB, tracer.js). Not reduced: every reduction step is a deliberate device reset on TJ's machine, so it waits for his OK
 (the full trace already reproduces). The application keeps its workaround (a queue drain after the barrier kernel) on
 the encoder path; extending it to the decoder path waits for TJ (Geordi, Codecs Docs/status.md).
+
+Case 2 differs from case 1 on the drain (Geordi, 2026-11-10 15:45, watched, TJ-approved test): a queue drain
+(`SynchronizeAsync`) after the decoder's loop-filter wavefront kernel does NOT prevent the hang, and the page already waits
+for the GPU to go idle after every whole step. So encode -> full decode -> fully idle GPU -> encode still loses the device.
+Without the old keyframe decoder it still hangs; with encodes only (no decoder) it passes. The trigger is state the full
+decoder's work leaves behind, not work still in flight. Worth saying in the report: it points at the driver/Dawn keeping
+something (a resource, residency or a pipeline state) across an idle point.
