@@ -289,3 +289,21 @@ Geordi's next Codecs change (long -> int offsets, removes emu_i64 taps) stacks w
   (`GLSLCodeGenerator.TryEmitShortCircuitAsFlag`); every test shape 2-4 -> 1-2 loops, red-checked. naga cannot parse
   GLSL ES 300; the PMT WebGL lane is the compile check.
 - [ ] Geordi's second finding (early return in an inlined helper duplicating its tail): no Release-IL repro yet.
+
+### Codecs 5e76f1e (Geordi: int offsets 21d8906, loop filter 35e2c9a, inter predict 5e76f1e call-site rewrites), 04:00
+
+Isolated Chrome D3D12 (tintcompile + tintwatch, 3 GB watchdog), Tint ms / DXC ms / GPU-process peak, 5.4.23 | 5ec0dba:
+
+| Kernel | 5.4.23 | 5ec0dba (dedup) |
+|---|---|---|
+| Parse | 106 / 2,659 / 0.43 GB | 94 / 2,400 / 0.43 |
+| InterPredict | 21 / 411 / 0.35 | 21 / 409 / 0.37 |
+| Wavefront | 78 / 1,221 / 0.41 | 59 / 1,074 / 0.40 |
+| InterResidual (same WGSL) | 243 / 8,225 / 0.85 | 225 / 7,626 / 0.85 |
+| IntraWave (same WGSL) | 234 / 10,919 / 0.91 | 219 / 9,792 / 0.90 |
+| CompressedHeader | 65 / 545 / 0.39 | 64 / 458 / 0.39 |
+| Adapt (same WGSL) | 60 / 7,054 / 0.97 | 65 / 905 / 0.41 |
+
+Every VP9 kernel compiles (3a20c7c: Parse killed >3 GB in DXC, InterPredict 67 s, Wavefront 98 s). Identical WGSL varies
+10% (and Adapt 7.8x once): DXC run-to-run noise is large, so a single-run A/B under ~15% is not a result. With the source
+at one call site, the ILGPU dedup is within noise here; it matters for code that still has `||` in front of inlined loops.
