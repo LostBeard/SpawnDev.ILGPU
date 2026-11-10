@@ -113,3 +113,24 @@ PROPOSAL (5.4.23): production picks the widest HARDWARE-ACCELERATED device up to
 it too (its doc already says "the maximum vector length supported"). Gate first: the VelocityVector256Tests lane (commented
 out of DemoConsole/Program.cs, not run lately) must be green; then velbench / velbarrier / Geordi's VP9-on-Velocity table.
 Vector512 stays opt-in (AVX-512 is rare and its lane is untested).
+
+## Wide-launch path choice and Vector256 per kernel shape (Data, 2026-11-09 23:30; scratchpad velwide.cs, 4096 threads, median ms/launch, noisy machine)
+
+| Kernel | CPU accelerator | Velocity V128 | Velocity V256 |
+|---|---|---|---|
+| Divergent serial loop (3000 it) | 5.3 | 3.3-3.5 | 2.3-2.4 |
+| 64-bit addressing (2000 it) | 4.0 | 2.5 | 1.7 |
+| LocalMemory scratch, data-dependent indices (1000 it) | 6.9-10.7 | 6.8-8.1 | 11.1-12.3 (WORSE) |
+| Barrier wavefront step at G=64 (us, velbarrier) | 163 | 9.9 | 1.6 |
+
+- An ADAPTIVE wide-launch path choice (time Velocity vs the host IL accelerator per kernel, keep the faster) was
+  implemented and SHELVED (reverted, never committed): no wide kernel above was faster on the host, and one early sample per
+  path picked the wrong path on noise (+36-50%). The VP9 inter-prediction 25x gap (Velocity 109 vs CPU 4.4 ms/frame) is NOT
+  reproduced by divergence, local memory or 64-bit addressing alone - needs a profile of that kernel itself.
+- OPEN: Vector256 (the 5.4.23 default where AVX2 runs it) is 1.5-1.8x SLOWER than Vector128 on the LocalWork kernel. Not a
+  local-memory bug: Vec128 and Vec256 Load32/Store32 are the same per-lane scalar access (4 vs 8 lanes). It is SIMT
+  divergence: its expensive arm (an 8-iteration inner loop, taken by 1 lane in 4) runs when ANY lane of the warp needs it,
+  1-(3/4)^4 = 68% of the time with 4 lanes vs 1-(3/4)^8 = 90% with 8. Wider warps win on uniform / barrier code and lose on
+  divergent code. Geordi's earlier VP9 Velocity numbers were all Vector128 (VelocityCodecsTests pins it); he will run
+  V128 vs V256 per stage on 5.4.23. If divergent workloads lose, the default goes back to Vector128 (or a per-kernel choice).
+  Possible general speedup either way: AVX2 gathers (Avx2.GatherMaskVector128 with 64-bit addresses) in Vec256 Load32.
