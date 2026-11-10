@@ -1,7 +1,11 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## Unreleased
+## 5.4.24 (forks 2.4.23) - 2026-11-10 - WebGPU / WebGL short-circuit condition bodies emitted once (VP9 InterPredict WGSL 78k -> 34k lines), CUDA graph fork / join (`CudaStream.WaitFor`)
+
+Verified outside this repo on 5.4.24-local.1: SpawnDev.Codecs' whole VP9 decoder on WebGPU bit-exact vs libvpx
+(Geordi, Codecs 24f7c1e, Chrome GPU process 1.03 GB); SpawnDev.ILGPU.ML WebGPU + WebGL lanes 2,180 passed, 0 failed
+(Tuvok).
 
 - **FEATURE (forks, CUDA): `CudaStream.WaitFor(CudaStream other)`: cross-stream dependencies, and fork / join inside a
   graph capture.** Records an event on `other` and makes this stream wait on it (`cuStreamWaitEvent`, newly bound; the
