@@ -1,7 +1,10 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## Unreleased
+## 5.4.25 (forks 2.4.24) - 2026-11-10 - WebGPU value helper with an early return in a loop no longer falls off the end; no stack overflow on self-reaching reference types
+
+Verified outside this repo on 5.4.25-local.1: SpawnDev.Codecs WebGPU lazy-load guard with the BCn + VP9 warm-ups and the
+BCn encode/decode work passed (fails on 5.4.24 with the BC7 missing-return error), VP9 WebGPU bit-exact (Geordi).
 
 - **FIXED (WebGPU): "missing return at end of function" for a value-returning helper with an early return inside a
   loop inside an if.** The structured walker ran a loop's exits (normal and returning) up to their common
