@@ -131,6 +131,20 @@ Vector512 stays opt-in (AVX-512 is rare and its lane is untested).
   it. Divergence, local memory and 64-bit addressing alone do not explain a gap anyway. Next: a per-stage table (CPU
   accelerator vs Velocity 128/256, VP9_STAGE_TIMES on ComfyUI files, Codecs 81d99dd after the one-call-site rewrites,
   Geordi), then a profile of the stage with the worst Velocity/CPU ratio through its DSP test.
+- MEASURED (Geordi, 2026-11-10 17:00): ComfyUI files (252 frames), mean ms/frame, Codecs 676a456, ILGPU 5.4.25, bit-exact:
+
+  | | parse | recon | loop filter |
+  |---|---|---|---|
+  | CPU accelerator | 2.6-2.8 | 5.8-6.1 | 350-355 |
+  | Velocity Vector128 | 3.2 | 215-219 | 114-115 |
+  | Velocity Vector256 | 3.2-3.4 | 129-131 | 82-83 |
+
+  Velocity recon jumped 74 -> 130 at Codecs 5e76f1e (one Convolve body choosing copy/horiz/vert/2-D per pixel = divergent
+  lanes); Geordi is splitting it back into four one-call-site loops. After that the recon gap is ~74 (Velocity 256) vs ~6
+  (CPU accelerator) = the one to profile. The loop filter is the reverse: the CPU accelerator's barrier path (350) is the
+  slow one, Velocity 82. PRIORITY (Data): the CPU-accelerator barrier rework is LOW - production desktop registers Velocity,
+  not the CPU accelerator (ILGPU's debugging backend), and Velocity's loop filter is already 4x faster. The Velocity recon
+  gap (one thread per pixel row of serial code, per-op helper calls) is the item with user-visible value.
 - OPEN: Vector256 (the 5.4.23 default where AVX2 runs it) is 1.5-1.8x SLOWER than Vector128 on the LocalWork kernel. Not a
   local-memory bug: Vec128 and Vec256 Load32/Store32 are the same per-lane scalar access (4 vs 8 lanes). It is SIMT
   divergence: its expensive arm (an 8-iteration inner loop, taken by 1 lane in 4) runs when ANY lane of the warp needs it,
