@@ -155,3 +155,31 @@ Vector512 stays opt-in (AVX-512 is rare and its lane is untested).
 - DECIDED (Geordi 23:50, VP9 ComfyUI 252 frames on 5.4.23, bit-exact, quiet, ms/frame V128 -> V256): compressed header
   0.23 -> 0.22, tile parse 3.34 -> 3.05 (host path), reconstruction 112.8 -> 76.0 (-33%), loop filter 466 -> 266 (-43%).
   Vector256 STAYS the default; the divergence penalty is real for some kernels (LocalWork) but not for this workload.
+
+## VP9 on Velocity profiled (Data, 2026-11-10 18:15; Codecs ab21440, ILGPU 5.4.25, Vector256, ComfyUI 252 frames)
+
+dotnet-trace (dotnet-sampled-thread-time, Speedscope, CPU_TIME credited to the enclosing managed frame), whole decode:
+- 57% of CPU in barrier kernels (`VelocityGroupTeamRunner.RunWarp`), and 31% of ALL CPU is spinning in
+  `VelocityGroupBarrier.SignalAndWait` (warps of the loop-filter / intra wavefront kernels waiting for each other).
+- 31% in non-barrier kernels (`VelocityChunkRunner`). The `Vec256Operations` helpers total under 1% (mostly inlined):
+  NOT the per-op helper-call cost this plan assumed.
+- Kernel compilation ~1 s total; 6% on the finalizer thread (unexplained, small).
+
+MEASURED, untraced, ms/frame (bit-exact both):
+
+| Velocity Vector256 | parse | recon | loop filter |
+|---|---|---|---|
+| default (`HostLaunchMaxThreads` = 64) | 3.25 | 51.2 | 82.8 |
+| every non-barrier launch on the host IL path (`HostLaunchMaxThreads` = int.MaxValue, temporary env override, reverted) | 3.29 | **16.1** | 82.1 |
+
+So the VP9 reconstruction kernels (one thread per 4x4 unit of branchy serial code: inter prediction, inter residual) run
+3.2x FASTER as the kernel's own IL on the worker threads than as Velocity SIMD. This contradicts the shelved wide-launch
+experiment above, whose synthetic kernels never showed a host win; real decoder kernels do. The CPU accelerator does recon
+in 5.3, so the host path itself still has ~3x of overhead to find (it is a CPU accelerator shaped like the Velocity device:
+warp size 8, max group).
+
+NEXT (design, not started): a per-kernel path choice for kernels without group synchronization or shared memory.
+Options: (a) an explicit opt-in per kernel (a load-time option or attribute: "run on the host IL path"); (b) adaptive:
+time both paths over several launches per kernel, switch only on a large, repeated margin (the shelved version used one
+sample per path and picked wrong on noise). Then: why the host path is 3x slower than the CPU accelerator, and the barrier
+spin (yield sooner when the waited-for warps are far behind).
