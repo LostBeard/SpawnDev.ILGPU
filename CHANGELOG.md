@@ -6,6 +6,9 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
 Verified outside this repo on 5.4.25-local.1: SpawnDev.Codecs WebGPU lazy-load guard with the BCn + VP9 warm-ups and the
 BCn encode/decode work passed (fails on 5.4.24 with the BC7 missing-return error), VP9 WebGPU bit-exact (Geordi).
 
+- Release sweep (RTX 4070, all lanes, default exclusions, code = 773ec6b): **8,983 cases, 8,279 passed, 704 skipped,
+  0 failed, 48.6 min**. Earlier local build: 5.4.25-local.1 (forks 2.4.23).
+
 - **FIXED (WebGPU): "missing return at end of function" for a value-returning helper with an early return inside a
   loop inside an if.** The structured walker ran a loop's exits (normal and returning) up to their common
   post-dominator. When one exit returns, that is the function's exit, past the merge of the if the loop sits in, so the
