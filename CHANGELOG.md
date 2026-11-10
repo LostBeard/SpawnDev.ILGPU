@@ -1,7 +1,7 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.23 (forks 2.4.22) - unreleased; 5.4.23-local.3 (forks 2.4.22-local.3) 2026-11-09: WebGPU LocalMemory views through helper functions, LocalMemory view Length on WebGPU / WebGL / Wasm; 5.4.23-local.2: WebGPU view / ref helpers as functions (VP9 WGSL 6x smaller), bool XOR; 5.4.23-local.1 for SpawnDev.Codecs' VP9 on Velocity
+## 5.4.23 (forks 2.4.22) - 2026-11-09 - WebGPU view / reference / LocalMemory helpers as functions (VP9 WGSL up to 8x smaller), Inliner trivial-method fix (constant branches folded in large kernels), Velocity Vector256 by default, LocalMemory view Length and bool XOR fixes, Velocity small-launch host path
 
 - **PERF (forks, Velocity): small launches run ~40x faster.** Velocity executes each IR operation as a call into a
   warp-type helper with lane masks: right for wide launches, ~60x slower than the IL backend for a few threads that each
@@ -86,6 +86,10 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
 - **TEST: `WebGPU_InvalidShader_FailsTheReadbackWithoutASync`** accepts the shader's follow-on submit error on the
   SECOND readback too (the browser delivers the two errors in either order; each is reported once; the third readback
   must succeed). Seen once in the 5.4.23 WebGPU lane under load.
+
+- Release sweep (RTX 4070, all lanes, default exclusions, code = 3364bac): **8,882 cases, 8,178 passed, 704 skipped,
+  0 failed, 46.7 min** (VelocityVector256Tests back in the lane list). Earlier local builds: 5.4.23-local.1 (Velocity host
+  path), -local.2 (view / ref helpers, bool XOR), -local.3 (LocalMemory views, LocalMemory view Length).
 
 ## 5.4.22 (forks 2.4.21) - 2026-11-09 - Warp.Shuffle capability (SupportsWarpShuffle), OpenCL device subgroup caps, WebGL phi-cycle and typed-exception fixes
 
