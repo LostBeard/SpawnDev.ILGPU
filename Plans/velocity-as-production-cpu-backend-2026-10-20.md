@@ -125,8 +125,12 @@ Vector512 stays opt-in (AVX-512 is rare and its lane is untested).
 
 - An ADAPTIVE wide-launch path choice (time Velocity vs the host IL accelerator per kernel, keep the faster) was
   implemented and SHELVED (reverted, never committed): no wide kernel above was faster on the host, and one early sample per
-  path picked the wrong path on noise (+36-50%). The VP9 inter-prediction 25x gap (Velocity 109 vs CPU 4.4 ms/frame) is NOT
-  reproduced by divergence, local memory or 64-bit addressing alone - needs a profile of that kernel itself.
+  path picked the wrong path on noise (+36-50%). CORRECTION (Geordi, 2026-11-10): there was no measured "25x recon gap".
+  The 4.4 ms/frame was tile PARSE after the small-launch host path (1,105 -> 4.4), not reconstruction on the CPU
+  accelerator; recon on Velocity was 113 (Vector128) / 76 (Vector256) ms/frame with no CPU-accelerator recon number beside
+  it. Divergence, local memory and 64-bit addressing alone do not explain a gap anyway. Next: a per-stage table (CPU
+  accelerator vs Velocity 128/256, VP9_STAGE_TIMES on ComfyUI files, Codecs 81d99dd after the one-call-site rewrites,
+  Geordi), then a profile of the stage with the worst Velocity/CPU ratio through its DSP test.
 - OPEN: Vector256 (the 5.4.23 default where AVX2 runs it) is 1.5-1.8x SLOWER than Vector128 on the LocalWork kernel. Not a
   local-memory bug: Vec128 and Vec256 Load32/Store32 are the same per-lane scalar access (4 vs 8 lanes). It is SIMT
   divergence: its expensive arm (an 8-iteration inner loop, taken by 1 lane in 4) runs when ANY lane of the warp needs it,
