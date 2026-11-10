@@ -307,3 +307,20 @@ Isolated Chrome D3D12 (tintcompile + tintwatch, 3 GB watchdog), Tint ms / DXC ms
 Every VP9 kernel compiles (3a20c7c: Parse killed >3 GB in DXC, InterPredict 67 s, Wavefront 98 s). Identical WGSL varies
 10% (and Adapt 7.8x once): DXC run-to-run noise is large, so a single-run A/B under ~15% is not a result. With the source
 at one call site, the ILGPU dedup is within noise here; it matters for code that still has `||` in front of inlined loops.
+
+### Codecs 24f7c1e (inverse transform at two call sites), 06:20, and the external WebGPU check
+
+| Kernel | 5.4.23 DXC ms / peak | 5.4.24-local.1 |
+|---|---|---|
+| Parse | 2,639 / 0.48 GB | 2,581 / 0.48 |
+| InterPredict | 427 / 0.42 | 448 / 0.42 |
+| Wavefront | 1,763 / 0.48 | 1,680 / 0.48 |
+| InterResidual | 1,837 / 0.52 | 1,793 / 0.50 |
+| IntraWave | 3,560 / 0.55 | 3,077 / 0.57 |
+| CompressedHeader | 590 / 0.43 | 495 / 0.43 |
+| Adapt | 964 / 0.46 | 981 / 0.46 |
+
+Geordi 06:15: WebGPUCodecsTests.Vp9DecoderGpu_TypedArrayOverloads_MatchLibvpx PASSED bit-exact on Codecs 24f7c1e +
+5.4.24-local.1 (fence lifted for the run only), Chrome GPU peak 1.03 GB (5.4.23-local.3 before the call-site work:
+4.16 GB, device lost). The VP9 decoder runs on WebGPU. DONE for this plan's VP9 goal; remaining items are general
+(GLSL ported; Geordi's early-return tail duplication still unreproduced).
