@@ -196,6 +196,13 @@ namespace ILGPU.IR.Types
             new Dictionary<Type, TypeInformation>();
 
         /// <summary>
+        /// Compound types whose fields are being resolved right now (guarded by the write scope of
+        /// <see cref="GetTypeInfo(Type)"/>). Value types cannot contain themselves, but reference types can reach
+        /// themselves through their fields (a delegate, a closure holding a delegate, ...).
+        /// </summary>
+        private readonly HashSet<Type> compoundTypesInProgress = new HashSet<Type>();
+
+        /// <summary>
         /// Constructs a new type context.
         /// </summary>
         public TypeInformationManager()
@@ -335,7 +342,32 @@ namespace ILGPU.IR.Types
             }
             else
             {
-                result = CreateCompoundTypeInfo(type);
+                // A type reached again while its own fields are being resolved is a cycle through reference-type
+                // fields: answer with an opaque, non-blittable, not-a-kernel-parameter entry (NOT cached; the outer
+                // resolution finishes and caches the real one). Recursing overflowed the stack and killed the process:
+                // ShaderCompiler.Generate on a kernel with a DelegateSpecialization<TDelegate> parameter
+                // (SpawnDev.ILGPU.ML ElementWiseKernels.BroadcastBinaryKernel, 2026-11-10).
+                if (!compoundTypesInProgress.Add(type))
+                {
+                    return new TypeInformation(
+                        this,
+                        type,
+                        0,
+                        ImmutableArray<FieldInfo>.Empty,
+                        ImmutableArray<int>.Empty,
+                        ImmutableArray<Type>.Empty,
+                        1,
+                        false,
+                        false);
+                }
+                try
+                {
+                    result = CreateCompoundTypeInfo(type);
+                }
+                finally
+                {
+                    compoundTypesInProgress.Remove(type);
+                }
                 typeInfoMapping.Add(type, result);
             }
 

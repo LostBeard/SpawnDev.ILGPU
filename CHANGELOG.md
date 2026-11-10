@@ -14,6 +14,13 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   SpawnDev.Codecs kernels and 804 SpawnDev.ILGPU.ML kernels: naga-valid; only the affected kernel's WGSL changed.
   `EarlyReturnInLoop_*` tests (helper as a function and inlined, vs the kernel on the CPU accelerator, data that takes
   both the early return and the tail; red-check: fix off -> WebGPU fails at dispatch with GPU errors).
+- **FIXED (forks): a reference type that reaches itself through its fields no longer overflows the stack.**
+  `TypeInformationManager` resolved a compound type's fields recursively; a delegate's fields lead back to its own types,
+  so `ShaderCompiler.Generate` on a kernel with a `DelegateSpecialization<TDelegate>` parameter (SpawnDev.ILGPU.ML
+  `ElementWiseKernels.BroadcastBinaryKernel`, hit by an offline screen of every ML kernel) killed the process. A type
+  reached again while it is being resolved now gets an opaque, non-blittable, not-a-kernel-parameter entry, and such a
+  kernel throws a managed exception (`NotSupportedException`: class type not supported).
+  `ShaderCompiler_DelegateSpecializationParameter_ThrowsInsteadOfStackOverflow` (red-check: guard off -> stack overflow).
 ## 5.4.24 (forks 2.4.23) - 2026-11-10 - WebGPU / WebGL short-circuit condition bodies emitted once (VP9 InterPredict WGSL 78k -> 34k lines), CUDA graph fork / join (`CudaStream.WaitFor`)
 
 Verified outside this repo on 5.4.24-local.1: SpawnDev.Codecs' whole VP9 decoder on WebGPU bit-exact vs libvpx
