@@ -134,3 +134,6 @@ Vector512 stays opt-in (AVX-512 is rare and its lane is untested).
   divergent code. Geordi's earlier VP9 Velocity numbers were all Vector128 (VelocityCodecsTests pins it); he will run
   V128 vs V256 per stage on 5.4.23. If divergent workloads lose, the default goes back to Vector128 (or a per-kernel choice).
   Possible general speedup either way: AVX2 gathers (Avx2.GatherMaskVector128 with 64-bit addresses) in Vec256 Load32.
+- DECIDED (Geordi 23:50, VP9 ComfyUI 252 frames on 5.4.23, bit-exact, quiet, ms/frame V128 -> V256): compressed header
+  0.23 -> 0.22, tile parse 3.34 -> 3.05 (host path), reconstruction 112.8 -> 76.0 (-33%), loop filter 466 -> 266 (-43%).
+  Vector256 STAYS the default; the divergence penalty is real for some kernels (LocalWork) but not for this workload.
