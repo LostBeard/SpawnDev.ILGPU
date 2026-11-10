@@ -200,3 +200,27 @@ Reading: the plain CPU accelerator runs these kernels 10x faster than Velocity's
 the host path itself costs: candidates are the boxed `LaunchOnHost(object dimension, object[] args)` launch, a synchronize
 per launch, the host kernel compiled under the Velocity context's settings (optimization level?), and the intra wavefront's
 ~30 tiny launches per frame. To find before designing the per-kernel choice: profile the host path at full width.
+
+### FOUND (18:40): the host accelerator's SHAPE
+
+| Velocity Vector256 (bit-exact) | parse | recon | LF |
+|---|---|---|---|
+| default | 3.25 | 51.2 | 82.8 |
+| every non-barrier launch on a host accelerator in Sequential mode with ONE MULTIPROCESSOR PER LOGICAL CORE (the default CPU device's shape: groups in parallel, cooperative scheduling inside a group) | 3.66 | **7.58** | 87.0 |
+| same host shape, small launches only (<= 64 threads) | 3.57 | 52.4 | 85.5 |
+
+The host accelerator was `CPUDevice(WarpSize, MaxGroupThreads / WarpSize, 1)`: ONE multiprocessor, so a wide launch ran on one
+core (16.1); Parallel mode makes every kernel thread an OS thread (37). Sequential x ProcessorCount gets within 1.5x of the
+plain CPU accelerator (4.97; the mean includes host-kernel compilation in the worst frames).
+
+DESIGN (to implement):
+1. Host accelerator: `CPUDevice(WarpSize, MaxGroupThreads / WarpSize, Environment.ProcessorCount)`, Sequential (small launches
+   unchanged within noise, measured above).
+2. Per-kernel path choice for barrier-free, shared-memory-free kernels on launches above `HostLaunchMaxThreads`: adaptive.
+   After the first launch of each path (compilation), time K launches on each path (normalized per thread), pick the host
+   only when its median is faster by a clear margin (>= 1.25x), and re-check after N further launches (data can change).
+   The shelved version used ONE sample per path and picked wrong on noise; medians of K per path are the fix.
+   An explicit override stays (`HostLaunchMaxThreads`), plus a diagnostic of the choice per kernel.
+3. Gates: VelocityTests / VelocityVector256Tests lanes; the HostLaunch test extended (a wide divergent kernel picks the host,
+   a wide uniform elementwise kernel stays on SIMD, same results either way); velbench/velwide (no regression on SIMD-friendly
+   kernels); Geordi's VP9 stage table (recon target ~8 ms/frame on Vector256, bit-exact).
