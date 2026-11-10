@@ -9391,6 +9391,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 PopIndent();
                 AppendLine("}");
             }
+            else if (TryEmitShortCircuitAsFlag(block, branch, mergeNode, pd, visited, currentLoop))
+            {
+            }
             else
             {
                 // SHORT-CIRCUIT FIX: For || short-circuit patterns where both
@@ -9507,6 +9510,145 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// q read its default 0 (WebGPU-only wrong pixels in ILGPU.ML's resample, 2026-09-23). Guarded by
         /// <c>ShortCircuit_SharedBlockPhi_AllEmitters</c>.
         /// </summary>
+        private int _shortCircuitFlagCounter;
+
+        /// <summary>
+        /// A short-circuit condition (<c>if (a || b) body</c>, <c>if (a &amp;&amp; b) x else body</c>, chains of them) in
+        /// Release IL is a chain of branch blocks that each jump to the same shared block. The plain if/else walk
+        /// emits that shared block in every arm that reaches it (<see cref="UnvisitSharedTargets"/>), so the body,
+        /// loops and all, is copied once per operand, and nested shapes multiply. Lowers the chain to a flag instead,
+        /// emitting the shared block once:
+        /// <code>
+        /// var sc = false;
+        /// if (a) { sc = true; } else { if (b) { sc = true; } else { other } }
+        /// if (sc) { shared }
+        /// </code>
+        /// Each edge's phi moves are emitted where the edge is taken (inside the chain), so the shared block and the
+        /// other target start with the right values. A chain block's values are in scope wherever SSA allows a use:
+        /// the later links, the other target (emitted inside the innermost <c>else</c>) and phi moves.
+        /// (2026-11-09, Geordi: Codecs' Vp8 bool decoder Fill, <c>if (x &lt; 0 || bitsLeft != 0) { while (..) }</c>,
+        /// emitted its refill loop twice at every inlined call site of the VP9 parse kernel.)
+        /// </summary>
+        private bool TryEmitShortCircuitAsFlag(
+            BasicBlock block,
+            global::ILGPU.IR.Values.IfBranch branch,
+            BasicBlock? mergeNode,
+            global::ILGPU.IR.Analyses.Dominators<global::ILGPU.IR.Analyses.ControlFlowDirection.Backwards> pd,
+            HashSet<BasicBlock> visited,
+            Loops<ReversePostOrder, Forwards>.Node? currentLoop)
+        {
+            if (mergeNode == null) return false;
+
+            bool IsArmBlock(BasicBlock b) =>
+                b != mergeNode && !visited.Contains(b)
+                && (currentLoop == null || (currentLoop.Contains(b) && !IsLoopHeader(b, currentLoop)));
+
+            // an edge can run through a code-free block (a split critical edge) before reaching its real target
+            BasicBlock Through(BasicBlock t) =>
+                t.Terminator is global::ILGPU.IR.Values.UnconditionalBranch ub && t.Predecessors.Length == 1
+                && !HasNonPhiInstructions(t) && IsArmBlock(t) ? ub.Target : t;
+
+            for (int side = 0; side < 2; side++)
+            {
+                var shared = Through(side == 0 ? branch.TrueTarget : branch.FalseTarget);
+                var cur = side == 0 ? branch.FalseTarget : branch.TrueTarget;
+                if (!IsArmBlock(shared)) continue;
+
+                // the chain: blocks reached only from the previous link, each branching to `shared` or onward
+                var chain = new List<BasicBlock>();
+                while (cur != shared && IsArmBlock(cur)
+                    && cur.Predecessors.Length == 1
+                    && cur.Terminator is global::ILGPU.IR.Values.IfBranch cb
+                    && (Through(cb.TrueTarget) == shared) != (Through(cb.FalseTarget) == shared))
+                {
+                    chain.Add(cur);
+                    cur = Through(cb.TrueTarget) == shared ? cb.FalseTarget : cb.TrueTarget;
+                }
+                if (chain.Count == 0) continue;
+                var otherEdge = cur;
+                var other = Through(cur);
+
+                // `other` is the merge, or the else-arm reached only from the last link
+                if (other != mergeNode && (other == shared || other != otherEdge || !IsArmBlock(other) || other.Predecessors.Length != 1))
+                    continue;
+
+                // `shared` is entered only from the chain (a loop header's own back edges aside: `while` in Release IL
+                // jumps straight to its condition block, so the shared block is often the loop header)
+                Loops<ReversePostOrder, Forwards>.Node? sharedLoop = null;
+                foreach (var loop in _loops)
+                    if (IsLoopHeader(shared, loop)) { sharedLoop = loop; break; }
+                var entries = new List<BasicBlock>(chain) { block };
+                bool sharedOnlyFromChain = true;
+                foreach (var p in shared.Predecessors)
+                {
+                    bool fromChain = entries.Contains(p)
+                        || (p.Predecessors.Length == 1 && entries.Contains(p.Predecessors[0]) && Through(p) == shared);
+                    if (!fromChain && !(sharedLoop != null && sharedLoop.Contains(p)))
+                    { sharedOnlyFromChain = false; break; }
+                }
+                if (!sharedOnlyFromChain) continue;
+
+                // the moves of the edge from -> target, and of the pass-through block's own edge when it has one
+                void TakeEdge(BasicBlock target, BasicBlock from)
+                {
+                    PushPhiValues(target, from);
+                    var real = Through(target);
+                    if (real != target)
+                    {
+                        visited.Add(target);
+                        PushPhiValues(real, target);
+                    }
+                }
+
+                string flag = $"sc_{_shortCircuitFlagCounter++}";
+                AppendLine($"var {flag} : bool = false;");
+                int depth = 0;
+                var from = block;
+                for (int i = 0; ; i++)
+                {
+                    var fb = (global::ILGPU.IR.Values.IfBranch)from.Terminator!;
+                    bool sharedOnTrue = Through(fb.TrueTarget) == shared;
+                    var toShared = sharedOnTrue ? fb.TrueTarget : fb.FalseTarget;
+                    var onward = sharedOnTrue ? fb.FalseTarget : fb.TrueTarget;
+                    AppendLine(sharedOnTrue ? $"if ({Load(fb.Condition)}) {{" : $"if (!{Load(fb.Condition)}) {{");
+                    PushIndent();
+                    TakeEdge(toShared, from);
+                    AppendLine($"{flag} = true;");
+                    PopIndent();
+                    AppendLine("} else {");
+                    PushIndent();
+                    depth++;
+                    if (i == chain.Count)
+                    {
+                        TakeEdge(onward, from);
+                        // the else arm runs here, inside the chain: it is the only block a chain block's values can
+                        // reach besides later links (SSA: the shared block and the merge have other predecessors),
+                        // and it excludes the flagged body, so running it before that `if (sc)` changes nothing
+                        if (other != mergeNode)
+                            GenerateStructuredCodeRecursive(other, mergeNode, pd, visited, currentLoop);
+                        break;
+                    }
+                    var link = chain[i];
+                    visited.Add(link);
+                    GenerateBasicBlockCode(link);
+                    from = link;
+                }
+                for (; depth > 0; depth--)
+                {
+                    PopIndent();
+                    AppendLine("}");
+                }
+
+                AppendLine($"if ({flag}) {{");
+                PushIndent();
+                GenerateStructuredCodeRecursive(shared, mergeNode, pd, visited, currentLoop);
+                PopIndent();
+                AppendLine("}");
+                return true;
+            }
+            return false;
+        }
+
         private void UnvisitSharedTargets(BasicBlock falseTarget, BasicBlock? mergeNode,
             HashSet<BasicBlock> visitedBefore, HashSet<BasicBlock> visited)
         {

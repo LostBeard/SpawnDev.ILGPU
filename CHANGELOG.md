@@ -1,6 +1,22 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## Unreleased
+
+- **PERF (WebGPU, WebGL): a short-circuit condition's body is emitted once, not once per operand.** Release IL compiles
+  `if (a || b) body` (and `if (a && b) x else body`, and longer chains) to branch blocks that each jump to the same
+  body block. The structured WGSL and GLSL walkers emitted that block, loops included, in every arm that reached it, and inlining
+  multiplied it per call site: SpawnDev.Codecs' VP8 bool decoder `Fill` (`if (x < 0 || bitsLeft != 0) { while (..) }`)
+  repeated its refill loop at every inlined call site (Geordi). The chain is now lowered to a flag
+  (`var sc = false; if (a) { sc = true; } else { if (b) { sc = true; } else { other } } if (sc) { body }`), with each
+  edge's phi moves where the edge is taken; the else arm runs inside the chain, so an operand's value it uses
+  (`if (a || (t = d[i]) > k) .. else use(t)`) stays in scope. Code-free edge-split blocks between a condition and the
+  body are looked through, and a loop header as the shared block (a Release `while` jumps straight to its condition)
+  keeps its back edges.
+  SpawnDev.Codecs 3a20c7c VP9 decoder (offline, naga-valid): InterPredict 78,067 -> 33,563 lines, Wavefront 115,219 ->
+  73,853, Parse 59,417 -> 42,945, CompressedHeader 7,738 -> 7,309. `ShortCircuit_*` tests (7 shapes vs the kernel on the
+  CPU accelerator; on WebGPU / WebGL the WGSL / GLSL loop count; red-check: lowering off -> 2-4 loops where 1-2 are
+  expected, in both languages).
 ## 5.4.23 (forks 2.4.22) - 2026-11-09 - WebGPU view / reference / LocalMemory helpers as functions (VP9 WGSL up to 8x smaller), Inliner trivial-method fix (constant branches folded in large kernels), Velocity Vector256 by default, LocalMemory view Length and bool XOR fixes, Velocity small-launch host path
 
 - **PERF (forks, Velocity): small launches run ~40x faster.** Velocity executes each IR operation as a call into a

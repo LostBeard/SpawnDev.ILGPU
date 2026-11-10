@@ -266,3 +266,26 @@ automatic call-site merging in ILGPU (one call site in a dispatch loop) - a rese
 
 CONFIRMED: D3D cost = total code after full inlining; one call site in a table/state-driven loop takes CompressedHeader
 from 39 s / >240 s to 0.9 s. Parse is the blocker (Geordi rewrites it the same way next).
+
+## Short-circuit body dedup (2026-11-10 00:10, Data; Geordi's finding)
+
+Release IL compiles `if (a || b) body` to two branches into the SAME body block; the WGSL walker's
+`UnvisitSharedTargets` re-emitted that block (loops included) in every arm, multiplied by inlining. My first ten probes
+said "no repro" because `dotnet run probe.cs` builds Debug IL (Roslyn turns `||` into a bool local there); `-c Release`
+reproduced with the simplest probe. Fix: `TryEmitShortCircuitAsFlag` (flag lowering; else arm emitted inside the chain;
+looks through code-free edge-split blocks; a loop header as the shared block keeps its back edges). Offline, naga-valid:
+
+| Codecs 3a20c7c kernel | lines before | after | loops before -> after |
+|---|---|---|---|
+| InterPredict | 78,067 | 33,545 | 164 -> 68 |
+| Wavefront | 115,219 | 73,533 | 25 -> 19 |
+| Parse | 59,417 | 42,863 | 487 -> 252 |
+| CompressedHeader | 7,738 | 7,309 | 44 -> 26 |
+
+Geordi's next Codecs change (long -> int offsets, removes emu_i64 taps) stacks with this; Tint/DXC table of that commit
++ this build is the next browser measurement.
+- [ ] PMT ShortCircuit (all lanes) then full sweep (waits for Tuvok's ML sweep).
+- [x] GLSL walker had the same re-emission (acyclic `EmitIfBranch` and in-loop `EmitLoopIfBranch` Case 4): ported
+  (`GLSLCodeGenerator.TryEmitShortCircuitAsFlag`); every test shape 2-4 -> 1-2 loops, red-checked. naga cannot parse
+  GLSL ES 300; the PMT WebGL lane is the compile check.
+- [ ] Geordi's second finding (early return in an inlined helper duplicating its tail): no Release-IL repro yet.

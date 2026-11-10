@@ -1357,6 +1357,18 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 pinnedMerge = true;
             }
 
+            // `if (a || b) body` in the loop body: the body once behind a flag (the arms stop at the pinned merge)
+            if (mergeInLoop && merge != null
+                && TryEmitShortCircuitAsFlag(ib, source, merge, loop, target => GenerateLoopBody(target, loop, outerStop)))
+            {
+                if (pinnedMerge)
+                {
+                    _visitedBlocks.Remove(merge);
+                    GenerateLoopBody(merge, loop, outerStop);
+                }
+                return;
+            }
+
             // Snapshot AFTER pinning the merge. The || short-circuit restore below still lets the false
             // path re-reach a shared in-branch body block, but the merge stays pinned in the snapshot so
             // both branches keep stopping at it (the restore never un-pins it).
@@ -1388,6 +1400,130 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 _visitedBlocks.Remove(merge);
                 GenerateLoopBody(merge, loop, outerStop);
             }
+        }
+
+        private int _shortCircuitFlagCounter;
+
+        /// <summary>
+        /// A short-circuit condition (<c>if (a || b) body</c>, <c>if (a &amp;&amp; b) x else body</c>, longer chains) in
+        /// Release IL is a chain of branch blocks that each jump to the same shared block; the if/else walk re-emitted that
+        /// block (loops included) in every arm that reached it. Lowers the chain to a flag and emits the shared block once
+        /// (the WGSL generator's twin, <c>WGSLKernelFunctionGenerator.TryEmitShortCircuitAsFlag</c>):
+        /// <code>
+        /// bool sc = false;
+        /// if (a) { sc = true; } else { if (b) { sc = true; } else { other } }
+        /// if (sc) { shared }
+        /// </code>
+        /// Each edge's phi copies are emitted where the edge is taken; the else arm runs inside the chain (it excludes the
+        /// flagged body, and a chain block's values stay in scope for it). Code-free edge-split blocks are looked through;
+        /// a loop header as the shared block keeps its back edges.
+        /// </summary>
+        /// <param name="ib">The branch that starts the chain.</param>
+        /// <param name="source">The block ending in <paramref name="ib"/> (already emitted).</param>
+        /// <param name="merge">Where the arms meet; each <paramref name="walkArm"/> call stops there.</param>
+        /// <param name="loop">The loop the arms must stay in (never its own header), or null.</param>
+        /// <param name="walkArm">Emits a block and what follows it up to <paramref name="merge"/>.</param>
+        /// <returns>True when the chain was emitted.</returns>
+        protected bool TryEmitShortCircuitAsFlag(
+            IfBranch ib,
+            BasicBlock source,
+            BasicBlock merge,
+            Loops<ReversePostOrder, Forwards>.Node? loop,
+            Action<BasicBlock> walkArm)
+        {
+            bool IsArmBlock(BasicBlock b) =>
+                b != merge && !_visitedBlocks.Contains(b)
+                && (loop == null || (loop.Contains(b) && FindLoopForHeader(b) != loop));
+
+            BasicBlock Through(BasicBlock t) =>
+                t.Terminator is UnconditionalBranch ub && t.Predecessors.Length == 1
+                && !HasNonPhiInstructions(t) && IsArmBlock(t) ? ub.Target : t;
+
+            for (int side = 0; side < 2; side++)
+            {
+                var shared = Through(side == 0 ? ib.TrueTarget : ib.FalseTarget);
+                var cur = side == 0 ? ib.FalseTarget : ib.TrueTarget;
+                if (!IsArmBlock(shared)) continue;
+
+                var chain = new List<BasicBlock>();
+                while (cur != shared && IsArmBlock(cur)
+                    && cur.Predecessors.Length == 1
+                    && cur.Terminator is IfBranch cb
+                    && (Through(cb.TrueTarget) == shared) != (Through(cb.FalseTarget) == shared))
+                {
+                    chain.Add(cur);
+                    cur = Through(cb.TrueTarget) == shared ? cb.FalseTarget : cb.TrueTarget;
+                }
+                if (chain.Count == 0) continue;
+                var other = Through(cur);
+                if (other != merge && (other == shared || other != cur || !IsArmBlock(other) || other.Predecessors.Length != 1))
+                    continue;
+
+                var sharedLoop = FindLoopForHeader(shared);
+                var entries = new List<BasicBlock>(chain) { source };
+                bool sharedOnlyFromChain = true;
+                foreach (var p in shared.Predecessors)
+                {
+                    bool fromChain = entries.Contains(p)
+                        || (p.Predecessors.Length == 1 && entries.Contains(p.Predecessors[0]) && Through(p) == shared);
+                    if (!fromChain && !(sharedLoop != null && sharedLoop.Contains(p)))
+                    { sharedOnlyFromChain = false; break; }
+                }
+                if (!sharedOnlyFromChain) continue;
+
+                void TakeEdge(BasicBlock target, BasicBlock from)
+                {
+                    PushPhiValues(target, from);
+                    var real = Through(target);
+                    if (real != target)
+                    {
+                        _visitedBlocks.Add(target);
+                        PushPhiValues(real, target);
+                    }
+                }
+
+                string flag = $"sc_{_shortCircuitFlagCounter++}";
+                AppendLine($"bool {flag} = false;");
+                int depth = 0;
+                var from = source;
+                for (int i = 0; ; i++)
+                {
+                    var fb = (IfBranch)from.Terminator!;
+                    bool sharedOnTrue = Through(fb.TrueTarget) == shared;
+                    var cond = Load(fb.Condition);
+                    AppendLine(sharedOnTrue ? $"if ({cond}) {{" : $"if (!({cond})) {{");
+                    PushIndent();
+                    TakeEdge(sharedOnTrue ? fb.TrueTarget : fb.FalseTarget, from);
+                    AppendLine($"{flag} = true;");
+                    PopIndent();
+                    AppendLine("} else {");
+                    PushIndent();
+                    depth++;
+                    if (i == chain.Count)
+                    {
+                        TakeEdge(sharedOnTrue ? fb.FalseTarget : fb.TrueTarget, from);
+                        if (other != merge)
+                            walkArm(other);
+                        break;
+                    }
+                    var link = chain[i];
+                    _visitedBlocks.Add(link);
+                    GenerateBlockCode(link);
+                    from = link;
+                }
+                for (; depth > 0; depth--)
+                {
+                    PopIndent();
+                    AppendLine("}");
+                }
+                AppendLine($"if ({flag}) {{");
+                PushIndent();
+                walkArm(shared);
+                PopIndent();
+                AppendLine("}");
+                return true;
+            }
+            return false;
         }
 
         /// <summary>Return-aware if/else merges for the function-level walker (reachability cached per function).</summary>
@@ -1442,6 +1578,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     }
                 }
             }
+
+            // `if (a || b) body`: emit the body once behind a flag instead of once per operand
+            if (merge != null && TryEmitShortCircuitAsFlag(ib, source, merge, openLoop, target => GenerateStructuredCode(target, merge)))
+                return merge != stop ? merge : null;
 
             // SHORT-CIRCUIT FIX: Save visited state before true branch so that
             // blocks visited during the true path can be re-visited by the false
