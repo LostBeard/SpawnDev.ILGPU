@@ -250,3 +250,12 @@ So ceil wins when work between barriers dominates (VP9 LF) and loses when barrie
 host choice: per-kernel ADAPTIVE (time both team counts over a few launches, keep the faster, re-check). NEXT: implement
 in VelocityGroupTeamRunner (a per-kernel state, like VelocityKernel.ChooseWidePath), gate = velbarrier (no regression at
 G=64) + VP9 LF (~64 ms/frame on V256) + Velocity lanes.
+
+2026-11-11, adaptive team count DONE (285d02b; local feed 5.4.27-local.1, forks 2.4.26-local.1): per (kernel, warps,
+gridSize) the runner times both counts (2 warm + 3 timed launches each), keeps the faster by a 1.1 margin (ties keep
+the previous choice), re-checks every 1,024 launches; `VelocityAccelerator.AdaptiveTeamCount` (default on),
+`TeamCountDecisions`. Feed-DLL A/B, Codecs ab21440 EveryFrame comfyui (252 frames, bit-exact every run), alternating:
+Vector256 LF 81.0/81.5 -> 66.6/67.5 ms/frame; recon 8.5-9.0 -> 9.9-10.4 (watch); Vector128 LF unchanged (~115).
+OPEN: the recon +1 ms. Hypothesis: a barrier kernel whose group count changes per launch re-measures for every new
+gridSize and never settles. Test = TeamCountDecisions after the run (Geordi's gate). Fix if so: key by a log2 bucket
+of gridSize. Gate for release: Geordi's interleaved stage table (V256/V128/CPU/CUDA) + V256 EveryFrame, then full sweep.
