@@ -148,7 +148,8 @@ next big kernel (the encoder's wavefront, 27.7k lines) after the GPU went idle. 
 - Geordi: the same sequence (seed 0x5EED, 64x64 q30 encode -> Vp9DecoderGpu decode -> q120 encode) on a CPU accelerator
   with OptimizationLevel.Debug (ArrayView bounds assertions in every kernel) ran clean; red-checked (src[src.Length] fails).
 - Data: the full trace with EVERY storage index of IntraWaveKernel's recorded WGSL clamped (1,147 accesses: `paramN[i]` ->
-  `paramN[min(u32(i), arrayLength(&paramN) - 1u)]`, incl. the 284 atomic byte operands; naga-valid): still LOST at 828.
+  `paramN[min(u32(i), arrayLength(&paramN) - 1u)]`, incl. the 284 atomic byte operands; naga-valid): still LOST at 828. (A peer's 2-minute CUDA test run overlapped the start of
+  this replay through crossed messages; it finished green, and the loss came at the same record as every earlier run.)
 - IntraWave has no function-scope arrays (so not the NVIDIA function-array-store bug, which 5.4.9 works around).
 So neither the C# indices nor the WGSL lowering access storage out of range. Left: a code path inside IntraWave that only
 real data reaches poisons the D3D12 / NVIDIA device for the next big kernel. Next: bisect IntraWave's main body with an
