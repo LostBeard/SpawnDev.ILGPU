@@ -178,3 +178,10 @@ early `return;` at top-level statement boundaries of the recorded WGSL (~8-10 re
   Codecs keeps it on the decoder path; the real fix (Parse as shorter, resumable launches) is Codecs-side work for TJ to
   schedule. For the upstream report: a synthetic repro (a long single-thread dispatch, any dispatch after it in the same
   submit, then a big kernel) is the next step.
+- Window 4 (0 resets): ParseKernel AND IntraWaveKernel both replaced by synthetic one-thread spins (bindings copied, no
+  memory touched at run time; scratchpad hang2/spin2.py), the real encoder kernel kept as the victim: short Parse spin ->
+  alive (decode readback 5.6 ms); LONG Parse spin (readback 376.7 ms, longer than the real Parse's ~130 ms) + a spin after
+  it -> ALIVE. So duration alone is not the trigger: it is the REAL ParseKernel's work on this data, followed by any
+  dispatch in the same submit (window 3: real Parse + a synthetic spin after it -> lost). Report shape: "ParseKernel
+  (WGSL attached) on this data, then any dispatch in the same submit, poisons the device; a submit boundary after it
+  avoids it". Bisecting inside ParseKernel is left unless TJ wants a smaller report (each step can cost a reset).
