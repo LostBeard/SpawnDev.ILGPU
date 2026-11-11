@@ -1,7 +1,7 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## Unreleased
+## Unreleased (local feed 5.4.27-local.1, forks 2.4.26-local.1)
 
 - **PERF (forks, Velocity): barrier kernels use idle processors when that is faster, chosen per kernel.** A group of
   more than one warp with barriers runs as a team of warp threads; teams that fit on the processors
