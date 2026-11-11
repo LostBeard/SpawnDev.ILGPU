@@ -1,7 +1,12 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## Unreleased
+## 5.4.26 (forks 2.4.25) - 2026-11-11 - Velocity: wide launches of branchy kernels pick the faster path per kernel (VP9 reconstruction 5-7x faster)
+
+Verified outside this repo on 5.4.26-local.1 (Geordi, SpawnDev.Codecs ab21440): VP9 stage table interleaved, no regression
+on any lane (Velocity V256 recon 50.4 -> 9.3, V128 70.5 -> 10.3 ms/frame; CPU accelerator and CUDA unchanged), and
+VelocityCodecsTests.Vp9Decode_EveryFrame_MatchesLibvpx on Vector256 bit-exact on all 311 files (1,456 s; the old
+Velocity lane did not finish within 3,700 s), and on Vector128 (1,761 s).
 
 - **PERF (forks, Velocity): wide launches of branchy kernels run up to 20x faster - each kernel picks its faster path.**
   A launch of a kernel without group synchronization or shared memory can run as Velocity's vectorized code or as the
