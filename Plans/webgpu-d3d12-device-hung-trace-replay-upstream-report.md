@@ -143,3 +143,13 @@ pipeline or buffer creation, not memory reuse, not encode 1. IntraWave's WGSL: 1
 workgroupBarrier or subgroup operations. The device survives IntraWave (onSubmittedWorkDone resolves) and is lost on the
 next big kernel (the encoder's wavefront, 27.7k lines) after the GPU went idle. Minimal skip list:
 `_upstream_reports/vp9-webgpu-device-hung-case2/reduced.json`. Next (Geordi, Codecs): bisect IntraWave's paths live.
+
+### Case 2: out-of-range access ruled out (2026-11-11)
+- Geordi: the same sequence (seed 0x5EED, 64x64 q30 encode -> Vp9DecoderGpu decode -> q120 encode) on a CPU accelerator
+  with OptimizationLevel.Debug (ArrayView bounds assertions in every kernel) ran clean; red-checked (src[src.Length] fails).
+- Data: the full trace with EVERY storage index of IntraWaveKernel's recorded WGSL clamped (1,147 accesses: `paramN[i]` ->
+  `paramN[min(u32(i), arrayLength(&paramN) - 1u)]`, incl. the 284 atomic byte operands; naga-valid): still LOST at 828.
+- IntraWave has no function-scope arrays (so not the NVIDIA function-array-store bug, which 5.4.9 works around).
+So neither the C# indices nor the WGSL lowering access storage out of range. Left: a code path inside IntraWave that only
+real data reaches poisons the D3D12 / NVIDIA device for the next big kernel. Next: bisect IntraWave's main body with an
+early `return;` at top-level statement boundaries of the recorded WGSL (~8-10 resets, a dedicated window).
