@@ -248,3 +248,7 @@ mitigation); a fully synthetic victim (C) must reproduce, otherwise find what th
   did not reproduce in isolation today, so case 1 is NOT yet attributed to the same cause. Full-suite control run pending.
   Until it reproduces, the report states case 1 as "probably the same mechanism (the same kind of private arrays)", not as
   proven.
+- Geordi ~17:10: case 1 control (original wavefront arrays, encoder drain REMOVED) passed the full VP9 WebGPU filter 281/281
+  and the two Batch tests alone 2/2: case 1 no longer reproduces with today's code. It is NOT attributed to the arrays; the
+  encoder drain stays, the array-move patch is saved but not committed. Case 2 is the report: parse fix committed in Codecs
+  (live 3/3 vs control 1/1 hang, the codec-free replay, speed unchanged, CUDA + WebGPU EveryFrame bit-exact).
