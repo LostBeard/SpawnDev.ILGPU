@@ -238,4 +238,15 @@ slowest warp of their group (per-pixel filter branches = divergent SIMD lanes an
 imbalance + divergence, not barrier overhead. Levers, in order: (1) more teams when a group is smaller than the machine
 (today 4 cores idle); (2) the LF math's divergence on SIMD (Codecs-side kernel shape; a scalar path for barrier kernels
 would need the CPU accelerator's cooperative barrier, 352 ms/frame today, so no); (3) park sooner when the waited-for
-warps are far behind (saves CPU, not wall time). Not started.
+warps are far behind (saves CPU, not wall time).
+
+MEASURED lever (1) (2026-11-11 04:00, temporary EXPERIMENT_VELOCITY_TEAMS_CEIL, reverted): teams = ceil(cores / warps)
+instead of floor (slight oversubscription; waits then yield at once):
+- VP9 LF (Codecs ab21440, ILGPU 5.4.26, bit-exact): Vector256 84.1 -> **64.3 ms/frame** (1 -> 2 teams, 16 warp threads on
+  12 cores); Vector128 unchanged (16 warps/group > 12 cores: 1 team either way); recon unchanged.
+- velbarrier (64 groups x G threads x 64 two-barrier steps, little work per step), Vector256 ns per step: G=24 265 / 317
+  (same team count, noise), G=40 627 -> 501 (2 -> 3 teams, better), G=64 1,206 -> **2,718** (1 -> 2 teams, 2.25x WORSE).
+So ceil wins when work between barriers dominates (VP9 LF) and loses when barriers dominate. Same shape as the SIMD vs
+host choice: per-kernel ADAPTIVE (time both team counts over a few launches, keep the faster, re-check). NEXT: implement
+in VelocityGroupTeamRunner (a per-kernel state, like VelocityKernel.ChooseWidePath), gate = velbarrier (no regression at
+G=64) + VP9 LF (~64 ms/frame on V256) + Velocity lanes.
