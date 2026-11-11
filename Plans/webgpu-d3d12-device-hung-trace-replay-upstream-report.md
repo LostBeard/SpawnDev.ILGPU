@@ -242,3 +242,9 @@ kernel with private arrays and memory traffic), buttons / `?case=` for trigger, 
 and the workaround (submit boundary between A and B). Driver: scratchpad wgtrace/pagedrive.cs. To do before showing TJ:
 several runs per case in peer-confirmed windows; a SIZE sweep for the threshold (that number also sizes any ILGPU
 mitigation); a fully synthetic victim (C) must reproduce, otherwise find what the victim needs; ideally a second GPU.
+- Geordi 2026-11-11 ~16:45: case 2 fix VERIFIED at scale: 281/281 VP9 WebGPU tests pass with the parse wait removed (parse
+  speed unchanged on CUDA / Velocity / CPU). Case 1: the wavefront kernels' five 256-entry arrays moved to device scratch
+  and the drain removed: 281/281 pass. BUT the control (old arrays, no drain) passed the two Batch tests alone 2/2: case 1
+  did not reproduce in isolation today, so case 1 is NOT yet attributed to the same cause. Full-suite control run pending.
+  Until it reproduces, the report states case 1 as "probably the same mechanism (the same kind of private arrays)", not as
+  proven.
