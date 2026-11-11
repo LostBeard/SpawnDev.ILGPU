@@ -260,7 +260,10 @@ OPEN: the recon +1 ms. First hypothesis (re-measuring per gridSize) RULED OUT fo
 are Index1D (no barriers, never in the team runner); LF WavefrontKernel is KernelConfig(rMax+1, 64), gridSize 1..sbRows
 (5 for 512x320), so only 4 keys. Codecs EveryFrame now prints the decision count. Remaining: noise (4-run recon spread
 8.45-10.36) or the ceil LF's 16 threads on 12 cores lowering boost clock for the next recon; measure only if Geordi's
-interleaved pairs hold the +1 ms. Gate for release: Geordi's interleaved stage table (V256/V128/CPU/CUDA) + V256 EveryFrame, then full sweep.
+interleaved pairs hold the +1 ms. CLOSED (Geordi's gate, interleaved 526/527/527/526, ComfyUI, all bit-exact): V256 LF
+81.2 / 81.8 -> 64.2 / 63.9, recon means 8.78 vs 8.87 (noise), team-count decisions 9 (it settles); V128 LF unchanged
+(decisions 0); CPU accelerator and CUDA unchanged. Geordi's 32-lane LF groups: on 5.4.27 the same as 64 lanes (63.7 /
+66.5) and CUDA 1.35 -> 1.96, so the Codecs change was dropped: the team count already gets that gain. Gate for release: Geordi's interleaved stage table (V256/V128/CPU/CUDA) + V256 EveryFrame, then full sweep.
 
 Lever (3) "park sooner" closed by code reading (Data, 2026-11-11): `VelocityGroupBarrier.SignalAndWait` already yields at
 once (`SpinOnce(-1)`) whenever the launch has more warp threads than processors, which is now the V256 LF case (ceil: 16
