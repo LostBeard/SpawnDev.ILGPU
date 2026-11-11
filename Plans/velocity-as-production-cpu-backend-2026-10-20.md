@@ -281,3 +281,11 @@ sync but also the parallelism inside a group, which is the only parallelism a 1-
 Full gate (Geordi, 5.4.27-local.1): VelocityCodecsTests.Vp9Decode_EveryFrame_MatchesLibvpx on Vector256 PASSED, 311 files,
 5000 output frames == libvpx .md5, 987 s (5.4.26: 1456 s); team-count decisions 140 over the whole set (many frame sizes);
 whole-set means parse 1.99, recon 6.79, LF 159.8 ms/frame. Codecs: good to batch into the next stable.
+
+Contiguous load/store fast path (Data, 2026-11-11, PARKED, not in 5.4.27): Load32/Load64/Store32/Store64 do one vector
+access when every lane is active and the addresses are consecutive (git worktree, uncommitted). Velocity lanes
+2452/0/205 with new ContiguousAccess tests (red-checked: the mask check dropped -> 6 failures). A/B (scratchpad
+velcontig, interleaved x2, noisy: a peer test run overlapped): matmul 256 ~16-20% SLOWER on V128 and V256 (the a[row*m+k]
+load is a broadcast, the same address in every lane, and pays a check that always fails), gather faster, fma / copy64 in
+the noise. Next try: recognize broadcasts too (one scalar load + Create), or test lane 1 first so non-contiguous warps
+leave after one compare; re-measure on a quiet machine before shipping.
