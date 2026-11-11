@@ -218,3 +218,19 @@ later, on the next large kernel, after the GPU went idle in between.
 **Attachments** (`_upstream_reports/vp9-webgpu-device-hung-case2/`): `index.html`, `replay.js`, `tracer.js`, `trace.jsonl`
 (855 records, 6.7 MB), `reduced.json` (records to skip for the minimal sequence), `trace_next_dispatch_trivial.jsonl` (the
 trivial-kernel variant above). Application workaround in SpawnDev.Codecs: a submit boundary and wait after the long kernel.
+
+### Case 2 ROOT TRIGGER found (2026-11-11, Geordi live + Data replay window 5, 1 reset)
+- Geordi (live, TJ OK'd the real fix): ParseKernel's 1592-int + 64-int dynamically indexed function-scope arrays moved into
+  the device work buffer, NO parse wait -> own-encoder test 3 of 3 pass; same build with the original private array and no
+  wait -> DEVICE_HUNG 1 of 1.
+- Replay, codec-free: ParseKernel replaced by a synthetic one-thread loop that writes and reads `var big : array<i32, 1592>`
+  and `var small : array<i32, 64>` at data-dependent indices every iteration (readback 277-350 ms, under the TDR limit),
+  the next dispatch a trivial kernel: LOST at 828. Same loop, nothing dispatched after it in the submit: alive. A 377 ms loop
+  WITHOUT private arrays + the trivial dispatch: alive (window 4).
+So: **a dispatch whose kernel holds a large dynamically indexed function-scope array (an indexable temp / scratch in the
+D3D12 compile), followed by any dispatch in the same submit, leaves the device to die on the next large kernel** (the
+encoder's wavefront kernel, which itself has 9 private arrays of up to 256 ints). Update the report text above: the "long
+kernel" is "a kernel with a large dynamically indexed private array", and attach the synthetic variant
+(scratchpad wgtrace/replay2/trace_synth_parse_arrays_short.jsonl, generator hang2/spin3.py). Related: the NVIDIA
+function-array-store miscompile (nvidia-d3d12-function-array-store-upstream-report.md) is the same driver area.
+Library question (Data): should the WGSL backend move large dynamically indexed private arrays out of function scope?
