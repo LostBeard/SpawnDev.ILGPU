@@ -124,3 +124,22 @@ encode 2 at 705-812 (submit 815, lost 826). The recorded decode is one 64x64 key
 no inter kernels, so the shared-memory barrier kernel is not the trigger. Cuts drop only dispatchWorkgroups records (all
 buffer and pipeline creation stays): A no decoder dispatches, B no keyframe-decoder dispatches, C both, then one kernel at
 a time. Generator: scratchpad hang2/cuts.py; driver: scratchpad wgtrace/replaydrive.cs (skip-list argument).
+
+### Case 2 reduction RESULTS (Data, 2026-11-11, window with Geordi and Tuvok idle; fresh installed Chrome, no app code)
+8 replays, 5 device losses. Dispatch records dropped, every buffer / pipeline creation kept.
+| cut | result |
+|---|---|
+| full trace (control) | LOST at 827 (3 of 3 across days) |
+| drop all 17 decoder dispatches | alive |
+| drop Parse .. PackPlanes | alive |
+| keep through IntraWave, drop SumCounts .. PackPlanes | LOST |
+| keep through Parse, drop IntraWave .. | alive |
+| IntraWave alone (other decoder dispatches dropped: zero-initialized inputs) | alive |
+| keep every decoder buffer alive (68 destroys skipped) | LOST |
+| drop encode 1's dispatches | LOST |
+| minimal: no encode 1, no keyframe decoder, decoder through IntraWave, then encode 2 | LOST at 828 |
+So the trigger is the IntraWaveKernel dispatch (one workgroup) running on the REAL output of Parse (data-dependent), not
+pipeline or buffer creation, not memory reuse, not encode 1. IntraWave's WGSL: 15.8k lines, 84 loops, 494 atomics, no
+workgroupBarrier or subgroup operations. The device survives IntraWave (onSubmittedWorkDone resolves) and is lost on the
+next big kernel (the encoder's wavefront, 27.7k lines) after the GPU went idle. Minimal skip list:
+`_upstream_reports/vp9-webgpu-device-hung-case2/reduced.json`. Next (Geordi, Codecs): bisect IntraWave's paths live.
