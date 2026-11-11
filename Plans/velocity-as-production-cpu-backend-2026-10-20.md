@@ -256,6 +256,8 @@ gridSize) the runner times both counts (2 warm + 3 timed launches each), keeps t
 the previous choice), re-checks every 1,024 launches; `VelocityAccelerator.AdaptiveTeamCount` (default on),
 `TeamCountDecisions`. Feed-DLL A/B, Codecs ab21440 EveryFrame comfyui (252 frames, bit-exact every run), alternating:
 Vector256 LF 81.0/81.5 -> 66.6/67.5 ms/frame; recon 8.5-9.0 -> 9.9-10.4 (watch); Vector128 LF unchanged (~115).
-OPEN: the recon +1 ms. Hypothesis: a barrier kernel whose group count changes per launch re-measures for every new
-gridSize and never settles. Test = TeamCountDecisions after the run (Geordi's gate). Fix if so: key by a log2 bucket
-of gridSize. Gate for release: Geordi's interleaved stage table (V256/V128/CPU/CUDA) + V256 EveryFrame, then full sweep.
+OPEN: the recon +1 ms. First hypothesis (re-measuring per gridSize) RULED OUT for ComfyUI by Geordi: recon kernels
+are Index1D (no barriers, never in the team runner); LF WavefrontKernel is KernelConfig(rMax+1, 64), gridSize 1..sbRows
+(5 for 512x320), so only 4 keys. Codecs EveryFrame now prints the decision count. Remaining: noise (4-run recon spread
+8.45-10.36) or the ceil LF's 16 threads on 12 cores lowering boost clock for the next recon; measure only if Geordi's
+interleaved pairs hold the +1 ms. Gate for release: Geordi's interleaved stage table (V256/V128/CPU/CUDA) + V256 EveryFrame, then full sweep.
