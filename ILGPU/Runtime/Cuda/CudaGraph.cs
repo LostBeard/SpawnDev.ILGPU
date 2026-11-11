@@ -68,6 +68,17 @@ namespace ILGPU.Runtime.Cuda
         /// <summary>True when <c>cuStreamWaitEvent</c> resolved against the loaded CUDA driver.</summary>
         public static bool SupportsStreamWaitEvent { get; }
 
+        // CUresult cuFuncGetAttribute(int*, CUfunction_attribute, CUfunction) and
+        // CUresult cuFuncSetAttribute(CUfunction, CUfunction_attribute, int): the dynamic shared memory opt-in above
+        // 48 KB a block, resolved on their own like cuStreamWaitEvent
+        private static readonly delegate* unmanaged[Cdecl]<
+            int*, int, IntPtr, CudaError> cuFuncGetAttribute;
+        private static readonly delegate* unmanaged[Cdecl]<
+            IntPtr, int, int, CudaError> cuFuncSetAttribute;
+
+        /// <summary>True when <c>cuFuncGetAttribute</c> and <c>cuFuncSetAttribute</c> resolved.</summary>
+        public static bool SupportsFuncAttributes { get; }
+
         /// <summary>
         /// True when every graph entry point resolved against the loaded CUDA driver.
         /// </summary>
@@ -82,6 +93,14 @@ namespace ILGPU.Runtime.Cuda
             {
                 cuStreamWaitEvent = (delegate* unmanaged[Cdecl]<IntPtr, IntPtr, uint, CudaError>)wait;
                 SupportsStreamWaitEvent = true;
+            }
+
+            if (TryGet(driver, "cuFuncGetAttribute", out var getAttr) &&
+                TryGet(driver, "cuFuncSetAttribute", out var setAttr))
+            {
+                cuFuncGetAttribute = (delegate* unmanaged[Cdecl]<int*, int, IntPtr, CudaError>)getAttr;
+                cuFuncSetAttribute = (delegate* unmanaged[Cdecl]<IntPtr, int, int, CudaError>)setAttr;
+                SupportsFuncAttributes = true;
             }
 
             // Resolve every entry point; if any is missing (very old driver) the whole
@@ -190,6 +209,24 @@ namespace ILGPU.Runtime.Cuda
             EnsureSupported();
             CudaException.ThrowIfFailed(cuGraphUpload(graphExec, stream));
         }
+
+        /// <summary>Reads a CUfunction_attribute of a kernel function.</summary>
+        public static CudaError FuncGetAttribute(IntPtr function, int attribute, out int value)
+        {
+            value = 0;
+            if (!SupportsFuncAttributes)
+                return CudaError.CUDA_ERROR_NOT_SUPPORTED;
+            int v;
+            var error = cuFuncGetAttribute(&v, attribute, function);
+            value = v;
+            return error;
+        }
+
+        /// <summary>Sets a CUfunction_attribute of a kernel function.</summary>
+        public static CudaError FuncSetAttribute(IntPtr function, int attribute, int value) =>
+            SupportsFuncAttributes
+                ? cuFuncSetAttribute(function, attribute, value)
+                : CudaError.CUDA_ERROR_NOT_SUPPORTED;
 
         public static void StreamWaitEvent(IntPtr stream, IntPtr @event)
         {

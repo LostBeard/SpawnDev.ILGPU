@@ -140,6 +140,61 @@ namespace ILGPU.Runtime.Cuda
 
         #endregion
 
+        #region Dynamic shared memory
+
+        // CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES and CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES
+        private const int FuncAttributeSharedSizeBytes = 1;
+        private const int FuncAttributeMaxDynamicSharedSizeBytes = 8;
+
+        /// <summary>
+        /// The dynamic shared memory (bytes) this kernel can launch with as it is set up now: -1 until a launch asks
+        /// for dynamic shared memory, then the driver's default (the 48 KB a block less the kernel's static shared
+        /// memory), raised by every opt-in.
+        /// </summary>
+        private int dynamicSharedLimit = -1;
+
+        /// <summary>
+        /// Opts this kernel into <paramref name="bytes"/> of dynamic shared memory when that is more than it can use
+        /// now (more than 48 KB a block in all needs <c>CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES</c>, up to
+        /// <see cref="CudaDevice.MaxSharedMemoryPerGroupOptIn"/>). Once per new maximum; a plain compare otherwise.
+        /// </summary>
+        [System.Runtime.CompilerServices.MethodImpl(
+            System.Runtime.CompilerServices.MethodImplOptions.AggressiveInlining)]
+        internal void EnsureDynamicSharedMemory(int bytes)
+        {
+            if (bytes > 0 && bytes > System.Threading.Volatile.Read(ref dynamicSharedLimit))
+                OptInDynamicSharedMemory(bytes);
+        }
+
+        private void OptInDynamicSharedMemory(int bytes)
+        {
+            int limit = System.Threading.Volatile.Read(ref dynamicSharedLimit);
+            if (limit < 0)
+            {
+                int staticBytes = CudaGraphNativeMethods.FuncGetAttribute(
+                    functionPtr, FuncAttributeSharedSizeBytes, out int s) == CudaError.CUDA_SUCCESS ? s : 0;
+                limit = Math.Max(0, Accelerator.MaxSharedMemoryPerGroup - staticBytes);
+                System.Threading.Volatile.Write(ref dynamicSharedLimit, limit);
+                if (bytes <= limit)
+                    return;
+            }
+            var error = CudaGraphNativeMethods.FuncSetAttribute(
+                functionPtr, FuncAttributeMaxDynamicSharedSizeBytes, bytes);
+            if (error != CudaError.CUDA_SUCCESS)
+            {
+                int optIn = (Accelerator as CudaAccelerator)?.Device is CudaDevice device
+                    ? device.MaxSharedMemoryPerGroupOptIn
+                    : Accelerator.MaxSharedMemoryPerGroup;
+                throw new NotSupportedException(
+                    $"Kernel {CompiledKernel.Name} asks for {bytes} bytes of dynamic shared memory: more than the " +
+                    $"{limit} it can use by default, and the opt-in failed ({error}). This device allows " +
+                    $"{optIn} bytes of shared memory a group in all, static and dynamic.");
+            }
+            System.Threading.Volatile.Write(ref dynamicSharedLimit, bytes);
+        }
+
+        #endregion
+
         #region IDisposable
 
         /// <summary>

@@ -148,7 +148,10 @@ namespace ILGPU.Runtime.Cuda
         CU_DEVICE_ATTRIBUTE_CONCURRENT_MANAGED_ACCESS = 89,
         CU_DEVICE_ATTRIBUTE_COMPUTE_PREEMPTION_SUPPORTED = 90,
         CU_DEVICE_ATTRIBUTE_CAN_USE_HOST_POINTER_FOR_REGISTERED_MEM = 91,
-        CU_DEVICE_ATTRIBUTE_MAX = 92
+        CU_DEVICE_ATTRIBUTE_MAX = 92,
+        // the shared memory a block can opt into with CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES (CUDA 9+; above
+        // MAX listed for compatibility)
+        CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN = 97
     }
 
     public enum CudaError

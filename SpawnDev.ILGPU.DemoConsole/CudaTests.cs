@@ -216,6 +216,99 @@ public class CudaTests : BackendTestBase
         }
     }
 
+    // Dynamic shared memory above 48 KB a block (Tuvok, int8 / f16 tensor-core GEMM staging): CUDA launches it only after
+    // cuFuncSetAttribute(MAX_DYNAMIC_SHARED_SIZE_BYTES); ILGPU opts the kernel in on its first launch that needs it.
+    // Every thread fills its stride of the whole buffer, then sums the mirrored entries, so each thread reads values other
+    // threads wrote across the full size (a wrong size or a launch without the opt-in fails or reads garbage).
+    static void BigDynamicSharedKernel(Index1D i, ArrayView<int> o, int n)
+    {
+        var shared = SharedMemory.GetDynamic<int>();
+        int tid = Group.IdxX;
+        for (int k = tid; k < n; k += Group.DimX)
+            shared[k] = k * 7 + 3;
+        Group.Barrier();
+        int sum = 0;
+        for (int k = tid; k < n; k += Group.DimX)
+            sum += shared[n - 1 - k];
+        o[Grid.GlobalIndex.X] = sum ^ Grid.IdxX;
+    }
+
+    static void StaticPlusDynamicSharedKernel(Index1D i, ArrayView<int> o, int n)
+    {
+        var tiles = SharedMemory.Allocate<int>(4096);   // 16 KB static
+        var shared = SharedMemory.GetDynamic<int>();
+        int tid = Group.IdxX;
+        for (int k = tid; k < n; k += Group.DimX)
+            shared[k] = k * 7 + 3;
+        for (int k = tid; k < 4096; k += Group.DimX)
+            tiles[k] = k * 5 + Grid.IdxX;
+        Group.Barrier();
+        int sum = 0;
+        for (int k = tid; k < n; k += Group.DimX)
+            sum += shared[n - 1 - k];
+        for (int k = tid; k < 4096; k += Group.DimX)
+            sum += tiles[4095 - k];
+        o[Grid.GlobalIndex.X] = sum;
+    }
+
+    [TestMethod]
+    public async Task DynamicSharedMemory_Above48KB_OptInAndLimit() => await RunTest(async accelerator =>
+    {
+        var cuda = (CudaAccelerator)accelerator;
+        int optIn = cuda.MaxSharedMemoryPerGroupOptIn;
+        if (optIn <= cuda.MaxSharedMemoryPerGroup)
+            throw new UnsupportedTestException($"This GPU allows no shared memory above {cuda.MaxSharedMemoryPerGroup} bytes a block");
+        const int groupSize = 256, groups = 3;
+        var kernel = accelerator.LoadStreamKernel<Index1D, ArrayView<int>, int>(BigDynamicSharedKernel);
+        using var output = accelerator.Allocate1D<int>(groups * groupSize);
+        // sizes: below the default, above it (first opt-in), larger again (second opt-in), smaller (no new opt-in), the max
+        foreach (int bytes in new[] { 32 * 1024, 64 * 1024, Math.Min(optIn, 96 * 1024), 56 * 1024, optIn })
+        {
+            int n = bytes / sizeof(int);
+            output.MemSetToZero();
+            kernel(new KernelConfig(groups, groupSize, SharedMemoryConfig.RequestDynamic<int>(n)), (Index1D)(groups * groupSize), output.View, n);
+            await accelerator.SynchronizeAsync();
+            var got = await output.CopyToHostAsync<int>();
+            for (int g = 0; g < groups; g++)
+                for (int t = 0; t < groupSize; t++)
+                {
+                    int want = 0;
+                    for (int k = t; k < n; k += groupSize) want += (n - 1 - k) * 7 + 3;
+                    want ^= g;
+                    if (got[g * groupSize + t] != want)
+                        throw new Exception($"{bytes} bytes of dynamic shared memory: group {g} thread {t} got {got[g * groupSize + t]}, expected {want}");
+                }
+        }
+        // static AND dynamic over 48 KB (Tuvok's GEMM shape: 16 KB static scale tiles + 64 KB dynamic stage buffers)
+        if (optIn >= 16 * 1024 + 64 * 1024)
+        {
+            var mixed = accelerator.LoadStreamKernel<Index1D, ArrayView<int>, int>(StaticPlusDynamicSharedKernel);
+            int n = 64 * 1024 / sizeof(int);
+            output.MemSetToZero();
+            mixed(new KernelConfig(groups, groupSize, SharedMemoryConfig.RequestDynamic<int>(n)), (Index1D)(groups * groupSize), output.View, n);
+            await accelerator.SynchronizeAsync();
+            var got = await output.CopyToHostAsync<int>();
+            for (int g = 0; g < groups; g++)
+                for (int t = 0; t < groupSize; t++)
+                {
+                    int want = 0;
+                    for (int k = t; k < n; k += groupSize) want += (n - 1 - k) * 7 + 3;
+                    for (int k = t; k < 4096; k += groupSize) want += (4095 - k) * 5 + g;
+                    if (got[g * groupSize + t] != want)
+                        throw new Exception($"16 KB static + 64 KB dynamic: group {g} thread {t} got {got[g * groupSize + t]}, expected {want}");
+                }
+        }
+        // more than the device allows: a clear NotSupportedException naming the limit, not a driver error at launch
+        try
+        {
+            int n = (optIn + 4096) / sizeof(int);
+            kernel(new KernelConfig(groups, groupSize, SharedMemoryConfig.RequestDynamic<int>(n)), (Index1D)(groups * groupSize), output.View, n);
+            await accelerator.SynchronizeAsync();
+            throw new Exception($"{optIn + 4096} bytes of dynamic shared memory launched on a device that allows {optIn}");
+        }
+        catch (NotSupportedException e) when (e.Message.Contains(optIn.ToString())) { }
+    });
+
     static void ForkAddKernel(Index1D i, ArrayView<int> data, int amount) => data[i] += amount;
 
     static void ForkJoinSumKernel(Index1D i, ArrayView<int> a, ArrayView<int> b, ArrayView<int> sum) => sum[i] = a[i] + b[i];

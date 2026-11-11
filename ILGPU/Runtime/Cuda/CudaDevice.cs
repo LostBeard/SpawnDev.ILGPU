@@ -274,6 +274,17 @@ namespace ILGPU.Runtime.Cuda
                 DeviceAttributeKind.CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK,
                 DeviceId);
 
+            // Resolve the shared memory a block can opt into (dynamic shared memory above the default limit); a driver
+            // that does not know the attribute keeps the default limit
+            MaxSharedMemoryPerGroupOptIn = MaxSharedMemoryPerGroup;
+            try
+            {
+                MaxSharedMemoryPerGroupOptIn = Math.Max(MaxSharedMemoryPerGroup, CurrentAPI.GetDeviceAttribute(
+                    DeviceAttributeKind.CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN,
+                    DeviceId));
+            }
+            catch (CudaException) { }
+
             // Resolve the maximum amount of shared memory per multiprocessor
             MaxSharedMemoryPerMultiprocessor = CurrentAPI.GetDeviceAttribute(
                 DeviceAttributeKind.
@@ -409,6 +420,14 @@ namespace ILGPU.Runtime.Cuda
         /// Returns L2 cache size.
         /// </summary>
         public int L2CacheSize { get; private set; }
+
+        /// <summary>
+        /// Returns the shared memory a group (block) can use in all when the kernel opts in: more than
+        /// <see cref="Device.MaxSharedMemoryPerGroup"/> (48 KB) on Volta and newer (e.g. 99 KB on Ada, 227 KB on
+        /// Hopper). Only DYNAMIC shared memory (<c>SharedMemory.GetDynamic</c>) can use the part above 48 KB (PTX caps
+        /// static shared memory at 48 KB); ILGPU opts a kernel in on its first launch that asks for more.
+        /// </summary>
+        public int MaxSharedMemoryPerGroupOptIn { get; private set; }
 
         /// <summary>
         /// Returns the maximum shared memory size per multiprocessor.

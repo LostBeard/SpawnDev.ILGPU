@@ -686,6 +686,9 @@ namespace ILGPU.Runtime.Cuda
             IntPtr args,
             IntPtr kernelArgs)
         {
+            // dynamic shared memory above the kernel's current limit (48 KB a block in all) needs an opt-in first
+            kernel.EnsureDynamicSharedMemory(config.SharedMemoryConfig.DynamicArraySize);
+
             var binding = stream.BindScoped();
 
             var result = LaunchKernel(

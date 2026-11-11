@@ -316,6 +316,13 @@ namespace ILGPU.Runtime.Cuda
             Device.MaxSharedMemoryPerMultiprocessor;
 
         /// <summary>
+        /// Returns the shared memory a group can use in all when its kernel opts in (see
+        /// <see cref="CudaDevice.MaxSharedMemoryPerGroupOptIn"/>): dynamic shared memory up to this size (less the
+        /// kernel's static shared memory) works; ILGPU opts a kernel in on its first launch that needs it.
+        /// </summary>
+        public int MaxSharedMemoryPerGroupOptIn => Device.MaxSharedMemoryPerGroupOptIn;
+
+        /// <summary>
         /// Returns the total number of registers per multiprocessor.
         /// </summary>
         public int TotalNumRegistersPerMultiprocessor =>

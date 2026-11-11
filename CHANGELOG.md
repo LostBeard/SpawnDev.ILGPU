@@ -1,7 +1,7 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## Unreleased (local feed 5.4.27-local.1, forks 2.4.26-local.1)
+## Unreleased (local feed 5.4.27-local.2, forks 2.4.26-local.2)
 
 - **PERF (forks, Velocity): barrier kernels use idle processors when that is faster, chosen per kernel.** A group of
   more than one warp with barriers runs as a team of warp threads; teams that fit on the processors
@@ -19,6 +19,21 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   `VelocityTests.AdaptiveTeamCount_GroupsThatDoNotDivideTheProcessors_DecideAndKeepResults`: groups of
   (processors - 1) warps, the right results while measuring and after, one decision after 8 launches, none with the
   option off. Red-check: adaptive branch off -> "0 team-count decisions after 8 launches, expected 1".
+  Gate (Geordi, Codecs master, ComfyUI, interleaved 5.4.26 / 5.4.27 / 5.4.27 / 5.4.26, bit-exact): Vector256 loop filter
+  81.2 / 81.8 -> 64.2 / 63.9 ms/frame, reconstruction unchanged (noise), 9 decisions; Vector128, CPU accelerator and
+  CUDA unchanged. Full Velocity EveryFrame on Vector256 (311 files, 5,000 frames == libvpx): 1,456 -> 987 s.
+- **NEW (forks, CUDA): dynamic shared memory above 48 KB a block.** CUDA launches a kernel with more than 48 KB of
+  shared memory in all only after `cuFuncSetAttribute(CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES)`; ILGPU never
+  set it, so `SharedMemoryConfig.RequestDynamic` above the default failed at launch with `CudaException: invalid
+  argument`. A kernel is now opted in on its first launch that asks for more than it can use (once per new maximum; a
+  plain compare on every other launch), up to the new `CudaDevice` / `CudaAccelerator.MaxSharedMemoryPerGroupOptIn`
+  (`CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN`: 99 KB on Ada, 227 KB on Hopper; the default limit on a
+  driver that does not report it). Static shared memory stays capped at 48 KB by PTX, so the large stage buffers of a
+  tensor-core GEMM go in `SharedMemory.GetDynamic`. Asking for more than the device allows throws a
+  `NotSupportedException` that names the limit. Requested by SpawnDev.ILGPU.ML (Tuvok) for int8 / f16 GEMMs (llama.cpp's
+  MMQ uses ~100 KB a block). `CudaTests.DynamicSharedMemory_Above48KB_OptInAndLimit`: 32 KB, 64 KB, 96 KB, 56 KB and the
+  device maximum, 16 KB static + 64 KB dynamic in one kernel, and over the limit. Red-check: the opt-in removed from
+  the launch path -> `CudaException: invalid argument` at the 64 KB launch.
 
 ## 5.4.26 (forks 2.4.25) - 2026-11-11 - Velocity: wide launches of branchy kernels pick the faster path per kernel (VP9 reconstruction 5-7x faster)
 
