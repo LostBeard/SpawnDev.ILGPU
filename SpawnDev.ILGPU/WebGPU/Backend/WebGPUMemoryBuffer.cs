@@ -363,10 +363,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// first unaligned MemSet / copy (both synchronous APIs) finds them compiled. Without it that first call compiled a
         /// kernel synchronously on the page thread (SpawnDev.Codecs' sync-compile guard: one compile at the first unaligned
         /// MemSetToZero after every codec had warmed up; Geordi 2026-11-09). Called by <see cref="WebGPUAccelerator.CreateAsync"/>.
+        /// The loaded launchers are then HELD for the accelerator's lifetime: the accelerator's compiled-kernel cache holds
+        /// weak references, so a GC between the preload and the first unaligned MemSet / copy dropped the preloaded kernels
+        /// and that call loaded one again on the page thread (SpawnDev.Codecs' warm-up guard after a GC.Collect: WebP lossy
+        /// EncodeAsync loaded 1 kernel after its warm-up, Geordi 2026-11-11).
         /// </summary>
-        internal static Task PreloadByteKernelsAsync(WebGPUAccelerator accelerator) => Task.WhenAll(
-            accelerator.PrecompileAutoGroupedAsync((Action<Index1D, ArrayView<byte>, ArrayView<byte>>)CopyBytesKernel),
-            accelerator.PrecompileAutoGroupedAsync((Action<Index1D, ArrayView<byte>, int>)FillBytesKernel));
+        internal static async Task PreloadByteKernelsAsync(WebGPUAccelerator accelerator)
+        {
+            await Task.WhenAll(
+                accelerator.PrecompileAutoGroupedAsync((Action<Index1D, ArrayView<byte>, ArrayView<byte>>)CopyBytesKernel),
+                accelerator.PrecompileAutoGroupedAsync((Action<Index1D, ArrayView<byte>, int>)FillBytesKernel));
+            // both are compiled now, so these loads are kernel-cache hits
+            var kernels = s_byteKernels.GetValue(accelerator, _ => new ByteKernels());
+            kernels.Copy ??= accelerator.LoadAutoGroupedKernel<Index1D, ArrayView<byte>, ArrayView<byte>>(CopyBytesKernel);
+            kernels.Fill ??= accelerator.LoadAutoGroupedKernel<Index1D, ArrayView<byte>, int>(FillBytesKernel);
+        }
 
         private static void CopyBytes(WebGPUAccelerator accelerator, AcceleratorStream stream, ArrayView<byte> source, ArrayView<byte> target)
         {

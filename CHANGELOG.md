@@ -1,8 +1,19 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## Unreleased
+## Unreleased (local feed 5.4.28-local.1, forks 2.4.27-local.1)
 
+- **FIX (WebGPU): the byte copy / fill kernels preloaded at accelerator creation are held, so a GC no longer drops
+  them.** An unaligned byte `MemSet` / copy runs a small kernel; `WebGPUAccelerator.CreateAsync` precompiles both so the
+  synchronous call never compiles on the page thread (5.4.x, Codecs' sync-compile guard). The precompile only put them in
+  the accelerator's compiled-kernel cache, which holds weak references, and the launchers were stored at the first use:
+  a GC in between dropped them, and that first unaligned MemSet loaded a kernel again (a shader-artifact cache hit, or a
+  synchronous compile with that cache off). Found by SpawnDev.Codecs' warm-up guard on the new `LoadedKernelCount`
+  (WebP lossy `EncodeAsync` loaded 1 kernel after its warm-up and a GC.Collect, Geordi 2026-11-11). The preload now also
+  loads and holds both launchers for the accelerator's lifetime. `WebGPU_PreloadedByteKernels_SurviveGC`: a fresh
+  accelerator, GC.Collect, an unaligned MemSet and an unaligned copy load no kernel and give the right bytes. Passes on
+  the 4 WebGPU lanes; red-check (launchers not held): both browser WebGPU lanes fail with "an unaligned MemSet / copy
+  after a GC loaded 2 kernel(s)".
 - **NEW (forks): `Accelerator.LoadedKernelCount` (and `Backend.LoadedKernelCount`).** The kernels an accelerator loaded that
   its own kernel cache did not hold: compiled, OR rebuilt from SpawnDev.ILGPU's process-wide shader-artifact cache
   (WebGPU / WebGL / Wasm), which another accelerator in the page may have filled. `CompiledKernelCount` does not move on
