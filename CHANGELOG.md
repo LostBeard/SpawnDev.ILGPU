@@ -1,7 +1,10 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## Unreleased (local feed 5.4.27-local.2, forks 2.4.26-local.2)
+## 5.4.27 (forks 2.4.26) - 2026-11-11 - Velocity: barrier kernels pick their team count per kernel (VP9 loop filter -21%, full VP9 vector set 1,456 -> 987 s); CUDA: dynamic shared memory above 48 KB a block
+
+Verified outside this repo on 5.4.27-local.1 / local.2: SpawnDev.Codecs (Geordi) VP9 stage table and full Velocity
+EveryFrame (below); SpawnDev.ILGPU.ML (Tuvok) builds its int8 GEMM V2 (96 KB dynamic shared memory) on local.2.
 
 - **PERF (forks, Velocity): barrier kernels use idle processors when that is faster, chosen per kernel.** A group of
   more than one warp with barriers runs as a team of warp threads; teams that fit on the processors
