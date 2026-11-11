@@ -4,7 +4,9 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
 ## 5.4.27 (forks 2.4.26) - 2026-11-11 - Velocity: barrier kernels pick their team count per kernel (VP9 loop filter -21%, full VP9 vector set 1,456 -> 987 s); CUDA: dynamic shared memory above 48 KB a block
 
 Verified outside this repo on 5.4.27-local.1 / local.2: SpawnDev.Codecs (Geordi) VP9 stage table and full Velocity
-EveryFrame (below); SpawnDev.ILGPU.ML (Tuvok) builds its int8 GEMM V2 (96 KB dynamic shared memory) on local.2.
+EveryFrame (below); SpawnDev.ILGPU.ML (Tuvok) on local.2: its int8 GEMM V2 launched with 96 KB of dynamic shared memory
+(sized from `MaxSharedMemoryPerGroupOptIn`) and computed the right results (it failed at launch before).
+Release sweep (full default, code cca86b9): 8,986 cases, 8,282 passed, 0 failed, 704 skipped, 54 min (RTX 4070, Chrome).
 
 - **PERF (forks, Velocity): barrier kernels use idle processors when that is faster, chosen per kernel.** A group of
   more than one warp with barriers runs as a team of warp threads; teams that fit on the processors
