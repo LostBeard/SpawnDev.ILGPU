@@ -278,3 +278,6 @@ pixel row/column of a superblock; 32 lanes would loop lane and lane + 32; shared
 with a CUDA/Velocity A/B: on V128 that is 8 warps a group instead of 16 (> 12 cores, one oversubscribed team).
 Splitting barrier kernels into per-region loops (POCL style, one thread runs every warp of a group) would remove the thread
 sync but also the parallelism inside a group, which is the only parallelism a 1-5 group launch has: not a fit here.
+Full gate (Geordi, 5.4.27-local.1): VelocityCodecsTests.Vp9Decode_EveryFrame_MatchesLibvpx on Vector256 PASSED, 311 files,
+5000 output frames == libvpx .md5, 987 s (5.4.26: 1456 s); team-count decisions 140 over the whole set (many frame sizes);
+whole-set means parse 1.99, recon 6.79, LF 159.8 ms/frame. Codecs: good to batch into the next stable.
