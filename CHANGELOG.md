@@ -1,7 +1,10 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## Unreleased (local feed 5.4.28-local.1, forks 2.4.27-local.1)
+## 5.4.28 (forks 2.4.27) - 2026-11-11 - Velocity (Vector256 / 512): consecutive and shared-element loads as one access (matmul ~21% faster); WebGPU: preloaded byte kernels survive a GC; Accelerator.LoadedKernelCount
+
+Verified outside this repo on 5.4.28-local.1: SpawnDev.Codecs (Geordi) full WebGPU lane 1,188 passed, 0 failed, its
+warm-up guard (built on loads) passes. Release sweep: SWEEP_PENDING.
 
 - **PERF (forks, Velocity, Vector256 / Vector512): a warp's loads and stores of consecutive elements are one vector
   access; a warp's loads of one shared element are one scalar load.** Velocity loaded and stored every lane separately
