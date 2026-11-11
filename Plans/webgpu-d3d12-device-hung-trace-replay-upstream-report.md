@@ -171,3 +171,10 @@ early `return;` at top-level statement boundaries of the recorded WGSL (~8-10 re
   plus a following dispatch in the same command buffer. Next: a synthetic-only repro (long spin + short dispatch + a big
   kernel, no codec code) for the report, and a workaround test (a submit boundary right after Parse; or Parse split into
   shorter launches).
+- WORKAROUND CONFIRMED (Geordi, live, 2026-11-11): `await SynchronizeAsync()` right after the ParseKernel launch (a submit
+  boundary plus wait; WebGPU only) -> Vp9DecoderGpu_DecodesOwnKeyframeEncoder_LikeKeyframeDecoder PASSED on WebGPU (43.9 s,
+  GPU process peak 0.67 GB); it was 5 of 5 DEVICE_HUNG before. In the trace, Parse (544) and the next dispatch (551) were
+  already in separate compute passes of one command encoder, so a pass boundary is not enough; the submit boundary is.
+  Codecs keeps it on the decoder path; the real fix (Parse as shorter, resumable launches) is Codecs-side work for TJ to
+  schedule. For the upstream report: a synthetic repro (a long single-thread dispatch, any dispatch after it in the same
+  submit, then a big kernel) is the next step.
