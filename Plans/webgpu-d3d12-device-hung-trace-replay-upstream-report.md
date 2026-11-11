@@ -114,3 +114,13 @@ for the GPU to go idle after every whole step. So encode -> full decode -> fully
 Without the old keyframe decoder it still hangs; with encodes only (no decoder) it passes. The trigger is state the full
 decoder's work leaves behind, not work still in flight. Worth saying in the report: it points at the driver/Dawn keeping
 something (a resource, residency or a pipeline state) across an idle point.
+
+### Case 2 reduction (TJ 2026-11-11: OK if needed, never while Geordi or Tuvok has GPU work running)
+Purpose: not the report (the full trace already reproduces without our code) but a decoder-path workaround for Codecs,
+which has none (a drain does not prevent it). Trace map (dispatches only; 52 in all): encode 1 at 119-226 (submit 229),
+the old keyframe decoder's Vp9KeyframeDecodeStepKernel at 338/341, decoder at 425 (CopyBytes), 493-520 (CopyContext x10),
+527 CompressedHeader, 544 ParseKernel, 551 IntraWaveKernel, 555 SumCounts, 562 Adapt, 566 PackPlanes (submit 569),
+encode 2 at 705-812 (submit 815, lost 826). The recorded decode is one 64x64 keyframe: NO loop-filter WavefrontKernel and
+no inter kernels, so the shared-memory barrier kernel is not the trigger. Cuts drop only dispatchWorkgroups records (all
+buffer and pipeline creation stays): A no decoder dispatches, B no keyframe-decoder dispatches, C both, then one kernel at
+a time. Generator: scratchpad hang2/cuts.py; driver: scratchpad wgtrace/replaydrive.cs (skip-list argument).
