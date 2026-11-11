@@ -154,3 +154,7 @@ next big kernel (the encoder's wavefront, 27.7k lines) after the GPU went idle. 
 So neither the C# indices nor the WGSL lowering access storage out of range. Left: a code path inside IntraWave that only
 real data reaches poisons the D3D12 / NVIDIA device for the next big kernel. Next: bisect IntraWave's main body with an
 early `return;` at top-level statement boundaries of the recorded WGSL (~8-10 resets, a dedicated window).
+- Window 2 (both peers confirmed idle first): early `return;` as the first statement of InverseTransformAdd (DCT 16 / 8 and
+  DC-only adds): still LOST at 828; of Predict (the DC predictors this keyframe uses): still LOST at 828. So neither helper
+  alone is required. Next (1 reset): both disabled (trace_noboth, naga-valid). Alive -> either helper suffices; lost -> the
+  trigger is in main's own code (the 16-block x 3-plane loop, eob / coefficient reads, byte atomics): bisect main.
