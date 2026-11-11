@@ -224,3 +224,18 @@ DESIGN (to implement):
 3. Gates: VelocityTests / VelocityVector256Tests lanes; the HostLaunch test extended (a wide divergent kernel picks the host,
    a wide uniform elementwise kernel stays on SIMD, same results either way); velbench/velwide (no regression on SIMD-friendly
    kernels); Geordi's VP9 stage table (recon target ~8 ms/frame on Vector256, bit-exact).
+
+DONE (f3a4074, local feed 5.4.26-local.1 fd55597): Geordi's gate on Codecs ab21440, interleaved, bit-exact, no regression:
+Velocity V256 recon 50.4/50.7 -> 9.7/8.9, V128 70.4/70.6 -> 10.2/10.3; LF, parse, CPU accelerator and CUDA unchanged.
+
+### Loop filter on Velocity (84 ms/frame V256) - what the "31% barrier spin" is (Data, 2026-11-10 21:40, code reading)
+
+The LF WavefrontKernel launches `KernelConfig(rows, 64)`: on Vector256 a group is 8 warps, so `teams = cores / warps` =
+12 / 8 = ONE team of 8 warp threads (4 of 12 cores idle) running the groups one after another; not oversubscribed, so a
+waiting warp spins ~200 x SpinWait(8) and then yields. Barrier COST is small: ~1.6 us per two-barrier step (velbarrier, G=64
+on Vector256) x ~2 per superblock x ~500 superblocks = ~1.5 ms of the 84. So the 31% "spin" is warps waiting for the
+slowest warp of their group (per-pixel filter branches = divergent SIMD lanes and uneven work across warps): load
+imbalance + divergence, not barrier overhead. Levers, in order: (1) more teams when a group is smaller than the machine
+(today 4 cores idle); (2) the LF math's divergence on SIMD (Codecs-side kernel shape; a scalar path for barrier kernels
+would need the CPU accelerator's cooperative barrier, 352 ms/frame today, so no); (3) park sooner when the waited-for
+warps are far behind (saves CPU, not wall time). Not started.
