@@ -11,6 +11,8 @@
 
 using ILGPU.Backends.Velocity;
 using ILGPU.Util;
+using System;
+using System.Diagnostics;
 using System.Reflection;
 
 namespace ILGPU.Runtime.Velocity
@@ -133,12 +135,120 @@ namespace ILGPU.Runtime.Velocity
         /// </summary>
         internal bool ShouldLaunchOnHost(KernelConfig config)
         {
+            pendingStart = 0;
             int maxThreads = VelocityAccelerator.HostLaunchMaxThreads;
-            return maxThreads > 0
-                && hostEligible
-                && hostKernelState >= 0
-                && config.Size <= maxThreads;
+            if (maxThreads <= 0 || !hostEligible || hostKernelState < 0)
+                return false;
+            if (config.Size <= maxThreads)
+                return true;
+            if (!VelocityAccelerator.AdaptiveHostLaunches)
+                return false;
+            return ChooseWidePath(config.Size);
         }
+
+        #region Adaptive path choice for wide launches
+
+        // A wide launch of a kernel without group synchronization or shared memory can run either way: Velocity's vectorized
+        // code (right for uniform, arithmetic-heavy kernels) or the kernel's own IL on the host accelerator (right for
+        // branchy, serial per-thread code: SpawnDev.Codecs' VP9 reconstruction, one thread per 4x4 unit, 51.2 vs 7.6 ms per
+        // frame on Vector256, 2026-11-10). Neither wins everywhere, so each kernel measures both: after one warm-up launch per
+        // path (compilation, JIT, the host kernel's load), it alternates SamplesPerPath timed launches per path, normalized
+        // per thread, and runs on the host only when the host's median is HostMargin times faster. It measures again after
+        // RecheckAfter wide launches. (A first attempt with ONE sample per path picked the wrong path on noise.)
+
+        private const int SamplesPerPath = 3;
+        private const double HostMargin = 1.25;
+        private const int RecheckAfter = 1024;
+
+        /// <summary>0 = measuring, 1 = wide launches on the host, 2 = wide launches on Velocity.</summary>
+        private int wideDecision;
+        private int wideLaunchesSinceDecision;
+        private int measureStep;
+        private readonly double[] hostSamples = new double[SamplesPerPath];
+        private readonly double[] velocitySamples = new double[SamplesPerPath];
+        private long pendingStart;
+        private bool pendingOnHost;
+        private long pendingSize;
+
+        /// <summary>
+        /// Where wide launches of this kernel run: null while measuring, true on the host, false on Velocity (a
+        /// diagnostic; see <see cref="VelocityAccelerator.AdaptiveHostLaunches"/>).
+        /// </summary>
+        public bool? WideLaunchesOnHost => wideDecision switch { 1 => true, 2 => false, _ => null };
+
+        private bool ChooseWidePath(long size)
+        {
+            lock (hostSamples)
+            {
+                if (wideDecision != 0)
+                {
+                    if (++wideLaunchesSinceDecision < RecheckAfter)
+                        return wideDecision == 1;
+                    // measure again: the data (and so the better path) can change over a kernel's life
+                    wideDecision = 0;
+                    measureStep = 2; // both paths are warm
+                }
+                // steps 0 and 1: one untimed warm-up launch per path; then pairs of timed launches
+                bool onHost = (measureStep & 1) == 1;
+                if (measureStep >= 2)
+                {
+                    pendingStart = Stopwatch.GetTimestamp();
+                    pendingOnHost = onHost;
+                    pendingSize = size;
+                }
+                measureStep++;
+                return onHost;
+            }
+        }
+
+        /// <summary>Ends the timing of a measured launch (called after the launch has completed).</summary>
+        private void EndMeasuredLaunch(bool onHost)
+        {
+            long start = pendingStart;
+            if (start == 0)
+                return;
+            long elapsed = Stopwatch.GetTimestamp() - start;
+            lock (hostSamples)
+            {
+                pendingStart = 0;
+                if (wideDecision != 0 || pendingOnHost != onHost)
+                    return;
+                int pair = (measureStep - 1 - 2) / 2;
+                if (pair < 0 || pair >= SamplesPerPath)
+                    return;
+                double perThread = (double)elapsed / Math.Max(1L, pendingSize);
+                (onHost ? hostSamples : velocitySamples)[pair] = perThread;
+                if (measureStep >= 2 + 2 * SamplesPerPath && onHost)
+                {
+                    double host = Median(hostSamples), velocity = Median(velocitySamples);
+                    wideDecision = host * HostMargin < velocity ? 1 : 2;
+                    wideLaunchesSinceDecision = 0;
+                    Trace.WriteLine($"Velocity: kernel '{CompiledKernel.Name}' wide launches on " +
+                        $"{(wideDecision == 1 ? "the host" : "Velocity")} (median per thread: host {host:F1}, Velocity {velocity:F1} ticks)");
+                }
+            }
+        }
+
+        private static double Median(double[] values)
+        {
+            var sorted = (double[])values.Clone();
+            Array.Sort(sorted);
+            return sorted[sorted.Length / 2];
+        }
+
+        /// <summary>Called by the launcher after a launch on the Velocity path.</summary>
+        internal void EndVelocityLaunch() => EndMeasuredLaunch(onHost: false);
+
+        /// <summary>
+        /// Represents the <see cref="EndVelocityLaunch"/> method.
+        /// </summary>
+        internal static readonly MethodInfo EndVelocityLaunchMethod =
+            typeof(VelocityKernel).GetMethod(
+                nameof(EndVelocityLaunch),
+                BindingFlags.NonPublic | BindingFlags.Instance)
+            .AsNotNull();
+
+        #endregion
 
         /// <summary>
         /// Runs the launch on the host accelerator (synchronously, like a Velocity launch). Returns false when the kernel
@@ -155,6 +265,9 @@ namespace ILGPU.Runtime.Velocity
                 if (host is null)
                 {
                     hostKernelState = -1;
+                    // a measured launch that falls back to Velocity is timed as a Velocity launch; the choice settles on
+                    // Velocity because the host is no longer eligible (ShouldLaunchOnHost)
+                    pendingOnHost = false;
                     return false;
                 }
                 hostKernel = host;
@@ -167,6 +280,7 @@ namespace ILGPU.Runtime.Velocity
             args.CopyTo(reflectionArgs, KernelParameterOffset);
             host.Launcher.AsNotNull().Invoke(null, reflectionArgs);
             VelocityAccelerator.CountHostLaunch();
+            EndMeasuredLaunch(onHost: true);
             return true;
         }
 

@@ -266,6 +266,15 @@ namespace ILGPU.Runtime.Velocity
         /// </summary>
         public int HostLaunchMaxThreads { get; set; } = 64;
 
+        /// <summary>
+        /// True (the default): a WIDER launch of a kernel without group synchronization or shared memory runs on whichever
+        /// path is faster for that kernel, measured per kernel (see <see cref="VelocityKernel.WideLaunchesOnHost"/>):
+        /// Velocity's vectorized code wins on uniform arithmetic, the kernel's own IL on the host accelerator wins on
+        /// branchy serial per-thread code (SpawnDev.Codecs' VP9 reconstruction on Vector256: 51.2 vs 7.6 ms per frame).
+        /// Results are the same either way. False keeps every wider launch on Velocity.
+        /// </summary>
+        public bool AdaptiveHostLaunches { get; set; } = true;
+
         private long hostLaunchCount;
 
         /// <summary>
@@ -287,14 +296,17 @@ namespace ILGPU.Runtime.Velocity
                 CPUAccelerator host;
                 lock (hostAcceleratorLock)
                 {
-                    // Velocity's warp size (a kernel sees the same Warp.WarpSize the accelerator reports) and enough
-                    // warps for Velocity's largest group (an explicitly grouped launch keeps its group size)
+                    // Velocity's warp size (a kernel sees the same Warp.WarpSize the accelerator reports), enough warps for
+                    // Velocity's largest group (an explicitly grouped launch keeps its group size), and one multiprocessor
+                    // per logical processor: groups run in parallel, threads of a group cooperatively (Sequential), the
+                    // shape of the default CPU device. With ONE multiprocessor a wide launch ran on a single core (VP9
+                    // recon 16.1 ms/frame); Parallel mode makes every kernel thread an OS thread (37.1); this shape: 7.6.
                     hostAccelerator ??= new CPUAccelerator(
                         Context,
                         new CPUDevice(
                             WarpSize,
                             Math.Max(1, VelocityDevice.MaxGroupThreads / WarpSize),
-                            1),
+                            Math.Max(1, Environment.ProcessorCount)),
                         CPUAcceleratorMode.Sequential,
                         ThreadPriority.Normal);
                     host = hostAccelerator;
@@ -555,6 +567,10 @@ namespace ILGPU.Runtime.Velocity
 
             // Launch kernel execution
             emitter.EmitCall(RunMethodInfo);
+
+            // Close the timing of a measured wide launch (see VelocityKernel.ChooseWidePath; a no-op otherwise)
+            emitter.Emit(LocalOperation.Load, velocityKernel);
+            emitter.EmitCall(VelocityKernel.EndVelocityLaunchMethod);
 
             // End of launch method
             emitter.Emit(OpCodes.Ret);

@@ -1,6 +1,26 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## Unreleased
+
+- **PERF (forks, Velocity): wide launches of branchy kernels run up to 20x faster - each kernel picks its faster path.**
+  A launch of a kernel without group synchronization or shared memory can run as Velocity's vectorized code or as the
+  kernel's own IL on Velocity's internal host accelerator. Vectorized code wins on uniform arithmetic; the IL wins on
+  branchy serial per-thread code, where lanes diverge and loads are per-lane gathers. Small launches (up to
+  `HostLaunchMaxThreads`) already took the host; now every wider launch is measured per kernel: one warm-up launch per
+  path, then 3 timed launches per path, alternating and normalized per thread. The host is chosen only when its median
+  is 1.25x faster, and the choice is measured again after 1,024 wide launches (a shelved first attempt used one sample
+  per path and picked wrong on noise). `VelocityAccelerator.AdaptiveHostLaunches` (default true; false keeps wide
+  launches on Velocity), `VelocityKernel.WideLaunchesOnHost` (the choice, a diagnostic).
+  The host accelerator now has one multiprocessor per logical processor (groups in parallel, the default CPU device's
+  shape): it had ONE, so a wide launch on it used a single core. Small launches are unchanged within noise.
+  SpawnDev.Codecs VP9 decode (Codecs ab21440, ComfyUI 252 frames, bit-exact to libvpx), reconstruction ms/frame:
+  Vector256 51.2 -> 9.6, Vector128 217 -> 10.6 (the plain CPU accelerator: 5.0); loop filter (barrier kernel)
+  unchanged. Found by profiling: 31% of Velocity's CPU there was barrier spinning, and the Vec256 helper calls were
+  under 1%. `VelocityTests.AdaptiveHostLaunch_WideLaunchesChooseAPath_SameResults` checks the mechanics, not the winner,
+  since that depends on the kernel and the machine: 8 measuring launches with 4 on the host, then the chosen path, the
+  same results every launch, nothing on the host when the option is off. Red-check: with the adaptive branch off, "no
+  path chosen after 8 wide launches".
 ## 5.4.25 (forks 2.4.24) - 2026-11-10 - WebGPU value helper with an early return in a loop no longer falls off the end; no stack overflow on self-reaching reference types
 
 Verified outside this repo on 5.4.25-local.1: SpawnDev.Codecs WebGPU lazy-load guard with the BCn + VP9 warm-ups and the

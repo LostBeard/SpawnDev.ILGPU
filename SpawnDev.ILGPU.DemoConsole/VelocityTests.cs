@@ -93,6 +93,9 @@ public class VelocityTests : BackendTestBase
         try { await Check(1, 5000, expectHost: false); }
         finally { velocity.HostLaunchMaxThreads = saved; }
 
+        // a single wide launch is the adaptive choice's first (untimed, Velocity) warm-up: still not on the host
+        // (AdaptiveHostLaunch_WideLaunchesChooseAPath_SameResults covers the choice itself)
+
         // a kernel with a barrier + shared memory never takes the host path, however small
         using var bOut = accelerator.Allocate1D<int>(16);
         var barrierKernel = accelerator.LoadStreamKernel<ArrayView<int>, ArrayView<int>>(HostBarrierKernel);
@@ -104,5 +107,69 @@ public class VelocityTests : BackendTestBase
         var b = await bOut.CopyToHostAsync<int>();
         for (int t = 0; t < 16; t++)
             if (b[t] != data[(t + 1) % 16]) throw new Exception($"barrier kernel [{t}] = {b[t]}, expected {data[(t + 1) % 16]}");
+    });
+
+    // Wide launches of a barrier-free kernel run on whichever path measures faster for that kernel
+    // (VelocityAccelerator.AdaptiveHostLaunches; SpawnDev.Codecs' VP9 reconstruction 51.2 -> 9.6 ms per frame on
+    // Vector256, 2026-11-10). Which path wins depends on the kernel and the machine, so this checks the mechanics, not the
+    // winner: the first 8 wide launches measure (one untimed warm-up per path, then 3 timed per path, alternating: 4 on
+    // the host), then the kernel has decided and the next launches all take the chosen path; every launch gives the same
+    // results either way; with the option off, wide launches stay on Velocity.
+    [TestMethod]
+    public async Task AdaptiveHostLaunch_WideLaunchesChooseAPath_SameResults() => await RunTest(async accelerator =>
+    {
+        var velocity = (VelocityAccelerator)accelerator;
+        var data = new int[1024];
+        var rnd = new Random(11);
+        for (int i = 0; i < data.Length; i++) data[i] = rnd.Next();
+        const int threads = 4096, iters = 200;
+        using var dData = accelerator.Allocate1D(data);
+        using var dOut = accelerator.Allocate1D<int>(threads);
+        var kernel = accelerator.LoadAutoGroupedKernel<Index1D, ArrayView<int>, ArrayView<int>, int>(HostSerialKernel);
+        var velocityKernel = ((Delegate)kernel).Target as VelocityKernel
+            ?? throw new Exception("the launcher delegate's target is not the VelocityKernel");
+        if (!velocity.AdaptiveHostLaunches) throw new Exception("AdaptiveHostLaunches is off by default");
+        if (velocityKernel.WideLaunchesOnHost != null) throw new Exception("a fresh kernel has already chosen a path");
+
+        async Task Launch(int round)
+        {
+            dOut.MemSetToZero();
+            kernel(accelerator.DefaultStream, threads, dData.View, dOut.View, iters);
+            await accelerator.SynchronizeAsync();
+            var got = await dOut.CopyToHostAsync<int>();
+            for (int i = 0; i < threads; i++)
+                if (got[i] != HostSerialExpected(i, data, iters))
+                    throw new Exception($"launch {round} (host launches so far {velocity.HostLaunchCount}): [{i}] = {got[i]}, expected {HostSerialExpected(i, data, iters)}");
+        }
+
+        long before = velocity.HostLaunchCount;
+        for (int r = 0; r < 8; r++)
+        {
+            await Launch(r);
+            if (r < 7 && velocityKernel.WideLaunchesOnHost != null)
+                throw new Exception($"decided after {r + 1} wide launches, before measuring both paths 3 times");
+        }
+        var onHost = velocityKernel.WideLaunchesOnHost
+            ?? throw new Exception("no path chosen after 8 wide launches");
+        long measuring = velocity.HostLaunchCount - before;
+        if (measuring != 4) throw new Exception($"{measuring} of the 8 measuring launches ran on the host, expected 4 (alternating)");
+        for (int r = 8; r < 12; r++) await Launch(r);
+        long chosen = velocity.HostLaunchCount - before - measuring;
+        if (chosen != (onHost ? 4 : 0))
+            throw new Exception($"chose {(onHost ? "the host" : "Velocity")}, but {chosen} of the next 4 launches ran on the host");
+
+        velocity.AdaptiveHostLaunches = false;
+        try
+        {
+            var other = accelerator.LoadAutoGroupedKernel<Index1D, ArrayView<int>, ArrayView<int>, int>(HostSerialKernel);
+            long off = velocity.HostLaunchCount;
+            for (int r = 0; r < 3; r++)
+            {
+                other(accelerator.DefaultStream, threads, dData.View, dOut.View, iters);
+                await accelerator.SynchronizeAsync();
+            }
+            if (velocity.HostLaunchCount != off) throw new Exception("with AdaptiveHostLaunches off, a wide launch ran on the host");
+        }
+        finally { velocity.AdaptiveHostLaunches = true; }
     });
 }
