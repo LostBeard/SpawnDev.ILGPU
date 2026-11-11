@@ -234,3 +234,11 @@ kernel" is "a kernel with a large dynamically indexed private array", and attach
 (scratchpad wgtrace/replay2/trace_synth_parse_arrays_short.jsonl, generator hang2/spin3.py). Related: the NVIDIA
 function-array-store miscompile (nvidia-d3d12-function-array-store-upstream-report.md) is the same driver area.
 Library question (Data): should the WGSL backend move large dynamically indexed private arrays out of function scope?
+
+### Standalone repro plan (TJ 2026-11-11: reports must be undeniable; own repo + GitHub Pages repro is his idea)
+Page drafted (not published): `_upstream_reports/webgpu-private-array-device-hung/index.html` - plain WebGPU, three WGSL
+kernels (A: one thread, a dynamically indexed `array<i32, SIZE>` loop touching no memory; B: trivial; C: an ordinary
+kernel with private arrays and memory traffic), buttons / `?case=` for trigger, controls (A alone; A without the array + B)
+and the workaround (submit boundary between A and B). Driver: scratchpad wgtrace/pagedrive.cs. To do before showing TJ:
+several runs per case in peer-confirmed windows; a SIZE sweep for the threshold (that number also sizes any ILGPU
+mitigation); a fully synthetic victim (C) must reproduce, otherwise find what the victim needs; ideally a second GPU.
