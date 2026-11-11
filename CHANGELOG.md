@@ -8,6 +8,9 @@ on any lane (Velocity V256 recon 50.4 -> 9.3, V128 70.5 -> 10.3 ms/frame; CPU ac
 VelocityCodecsTests.Vp9Decode_EveryFrame_MatchesLibvpx on Vector256 bit-exact on all 311 files (1,456 s; the old
 Velocity lane did not finish within 3,700 s), and on Vector128 (1,761 s).
 
+- Release sweep (RTX 4070, all lanes, default exclusions, code = 80e075a): **8,984 cases, 8,280 passed, 704 skipped,
+  0 failed, 48.7 min**. Earlier local build: 5.4.26-local.1 (forks 2.4.25-local.1).
+
 - **PERF (forks, Velocity): wide launches of branchy kernels run up to 20x faster - each kernel picks its faster path.**
   A launch of a kernel without group synchronization or shared memory can run as Velocity's vectorized code or as the
   kernel's own IL on Velocity's internal host accelerator. Vectorized code wins on uniform arithmetic; the IL wins on
