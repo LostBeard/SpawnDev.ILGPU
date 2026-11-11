@@ -277,6 +277,14 @@ namespace ILGPU.Runtime
         /// </summary>
         public long CompiledKernelCount => Backend?.CompiledKernelCount ?? 0;
 
+        /// <summary>
+        /// The number of kernels this accelerator loaded that its own kernel cache did not already hold: compiled, or
+        /// rebuilt from a process-wide shader-artifact cache another accelerator filled (where
+        /// <see cref="CompiledKernelCount"/> stays put). Diagnostic, for checks such as "a warm-up loads every kernel and
+        /// the work after it loads none" that must not depend on what else ran in the process.
+        /// </summary>
+        public long LoadedKernelCount => Backend?.LoadedKernelCount ?? 0;
+
         #endregion
 
         #region Methods

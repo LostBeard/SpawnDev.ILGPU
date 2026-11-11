@@ -1,6 +1,19 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## Unreleased
+
+- **NEW (forks): `Accelerator.LoadedKernelCount` (and `Backend.LoadedKernelCount`).** The kernels an accelerator loaded that
+  its own kernel cache did not hold: compiled, OR rebuilt from SpawnDev.ILGPU's process-wide shader-artifact cache
+  (WebGPU / WebGL / Wasm), which another accelerator in the page may have filled. `CompiledKernelCount` does not move on
+  such an artifact hit (by design: it tells a compile from a hit), so a check such as "the warm-up loads every kernel and
+  the work after it loads none" built on it passed or failed depending on what ran earlier in the process (SpawnDev.Codecs'
+  FLAC warm-up guard on a fresh WebGPU accelerator counted +0 after an earlier FLAC test, Geordi 2026-11-11). Counted in the
+  two public `Backend.Compile` entry points (the accelerator's kernel load and the specialization cache), which never call
+  each other. `LoadedKernelCount_CountsLoadsIncludingArtifactHits` (all backends): a new kernel +1, a reload +0, after
+  `ClearCache` +1 again with `CompiledKernelCount` moving no more than it. Red-check: the load-path increment removed ->
+  "LoadedKernelCount +0, expected +1".
+
 ## 5.4.27 (forks 2.4.26) - 2026-11-11 - Velocity: barrier kernels pick their team count per kernel (VP9 loop filter -21%, full VP9 vector set 1,456 -> 987 s); CUDA: dynamic shared memory above 48 KB a block
 
 Verified outside this repo on 5.4.27-local.1 / local.2: SpawnDev.Codecs (Geordi) VP9 stage table and full Velocity

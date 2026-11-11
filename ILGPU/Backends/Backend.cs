@@ -641,6 +641,17 @@ namespace ILGPU.Backends
         /// </summary>
         public long CompiledKernelCount => System.Threading.Interlocked.Read(ref compiledKernelCount);
 
+        private long loadedKernelCount;
+
+        /// <summary>
+        /// The number of kernels this backend produced for its accelerator: compiled, OR rebuilt from a process-wide
+        /// shader-artifact cache (SpawnDev.ILGPU's WebGPU / WebGL / Wasm precompiled-shader cache, which other
+        /// accelerators in the process may have filled). A kernel the accelerator serves from its own compiled-kernel
+        /// cache does not count. Diagnostic: "did this work load any kernel?" independent of process-wide caches, where
+        /// <see cref="CompiledKernelCount"/> answers "did it run the compiler?".
+        /// </summary>
+        public long LoadedKernelCount => System.Threading.Interlocked.Read(ref loadedKernelCount);
+
         /// <summary>
         /// Part of the accelerator's compiled-kernel cache key: backend state that changes the generated code for the SAME
         /// kernel method (the browser backends' f64 emulation mode). A kernel compiled under one variant is never handed
@@ -657,8 +668,11 @@ namespace ILGPU.Backends
         /// <returns>The compiled kernel that represents the compilation result.</returns>
         public CompiledKernel Compile(
             in EntryPointDescription entry,
-            in KernelSpecialization specialization) =>
-            Compile(entry, specialization, new NoHook());
+            in KernelSpecialization specialization)
+        {
+            System.Threading.Interlocked.Increment(ref loadedKernelCount);
+            return Compile(entry, specialization, new NoHook());
+        }
 
         /// <summary>
         /// Compiles a given compile unit with the specified entry point using
@@ -693,8 +707,11 @@ namespace ILGPU.Backends
         public CompiledKernel Compile(
             Method kernelMethod,
             in EntryPointDescription entry,
-            in KernelSpecialization specialization) =>
-            Compile(kernelMethod, entry, specialization, new NoHook());
+            in KernelSpecialization specialization)
+        {
+            System.Threading.Interlocked.Increment(ref loadedKernelCount);
+            return Compile(kernelMethod, entry, specialization, new NoHook());
+        }
 
         /// <summary>
         /// Compiles a given method into a compiled kernel.
