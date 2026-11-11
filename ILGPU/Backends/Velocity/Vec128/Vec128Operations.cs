@@ -6706,6 +6706,45 @@ namespace ILGPU.Backends.Velocity.Vec128
 
         #region IO
 
+        // (Warps of 8+ lanes only: on Vector128's 4 lanes the per-lane path is cheap and the checks did not pay off.)
+        // Byte offsets of the lanes of a warp from lane 0's address for 4-byte and 8-byte elements, split in the halves
+        // of the 64-bit warp type: a warp whose lanes are all active and address consecutive elements loads and stores
+        // as one vector instead of one scalar access per lane (a thread-indexed view access, the common case)
+        private static readonly Vector128<long> ContiguousOffsets4Lo = Vector128.Create(0L, 4L);
+        private static readonly Vector128<long> ContiguousOffsets4Hi = Vector128.Create(8L, 12L);
+        private static readonly Vector128<long> ContiguousOffsets8Lo = Vector128.Create(0L, 8L);
+        private static readonly Vector128<long> ContiguousOffsets8Hi = Vector128.Create(16L, 24L);
+
+        // All lanes active and every lane at the same address (a uniform load such as a matrix row element shared by the
+        // warp): one scalar load replaces one load per lane.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool IsBroadcast(
+            Vector128<int> mask,
+            (Vector128<long>, Vector128<long>) address,
+            out long first)
+        {
+            first = address.Item1.GetElement(0);
+            var start = Vector128.Create(first);
+            return !Vector128.EqualsAny(mask, Vector128<int>.Zero) &&
+                Vector128.EqualsAll(address.Item1, start) &&
+                Vector128.EqualsAll(address.Item2, start);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool IsContiguous(
+            Vector128<int> mask,
+            (Vector128<long>, Vector128<long>) address,
+            Vector128<long> offsetsLo,
+            Vector128<long> offsetsHi,
+            out long first)
+        {
+            first = address.Item1.GetElement(0);
+            var start = Vector128.Create(first);
+            return !Vector128.EqualsAny(mask, Vector128<int>.Zero) &&
+                Vector128.EqualsAll(address.Item1, start + offsetsLo) &&
+                Vector128.EqualsAll(address.Item2, start + offsetsHi);
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveOptimization |
                     MethodImplOptions.AggressiveInlining)]
         internal static unsafe Vector128<int> Load8(

@@ -1207,6 +1207,45 @@ namespace ILGPU.Backends.Velocity.<#= vecNamespace #>
 
         #region IO
 
+        // (Warps of 8+ lanes only: on Vector128's 4 lanes the per-lane path is cheap and the checks did not pay off.)
+        // Byte offsets of the lanes of a warp from lane 0's address for 4-byte and 8-byte elements, split in the halves
+        // of the 64-bit warp type: a warp whose lanes are all active and address consecutive elements loads and stores
+        // as one vector instead of one scalar access per lane (a thread-indexed view access, the common case)
+        private static readonly <#= vecName #><long> ContiguousOffsets4Lo = <#= vecName #>.Create(<#= Join(0, half, i => (4 * i) + "L") #>);
+        private static readonly <#= vecName #><long> ContiguousOffsets4Hi = <#= vecName #>.Create(<#= Join(half, warpSize, i => (4 * i) + "L") #>);
+        private static readonly <#= vecName #><long> ContiguousOffsets8Lo = <#= vecName #>.Create(<#= Join(0, half, i => (8 * i) + "L") #>);
+        private static readonly <#= vecName #><long> ContiguousOffsets8Hi = <#= vecName #>.Create(<#= Join(half, warpSize, i => (8 * i) + "L") #>);
+
+        // All lanes active and every lane at the same address (a uniform load such as a matrix row element shared by the
+        // warp): one scalar load replaces one load per lane.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool IsBroadcast(
+            <#= warpType32 #> mask,
+            <#= warpType64 #> address,
+            out long first)
+        {
+            first = address.Item1.GetElement(0);
+            var start = <#= vecName #>.Create(first);
+            return !<#= vecName #>.EqualsAny(mask, <#= vecName #><int>.Zero) &&
+                <#= vecName #>.EqualsAll(address.Item1, start) &&
+                <#= vecName #>.EqualsAll(address.Item2, start);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool IsContiguous(
+            <#= warpType32 #> mask,
+            <#= warpType64 #> address,
+            <#= vecName #><long> offsetsLo,
+            <#= vecName #><long> offsetsHi,
+            out long first)
+        {
+            first = address.Item1.GetElement(0);
+            var start = <#= vecName #>.Create(first);
+            return !<#= vecName #>.EqualsAny(mask, <#= vecName #><int>.Zero) &&
+                <#= vecName #>.EqualsAll(address.Item1, start + offsetsLo) &&
+                <#= vecName #>.EqualsAll(address.Item2, start + offsetsHi);
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveOptimization |
                     MethodImplOptions.<#= inliningAttribute #>)]
         internal static unsafe <#= warpType32 #> Load8(
@@ -1247,6 +1286,12 @@ namespace ILGPU.Backends.Velocity.<#= vecNamespace #>
             <#= warpType32 #> mask,
             <#= warpType64 #> address)
         {
+<# if (warpSize >= 8) { #>
+            if (IsContiguous(mask, address, ContiguousOffsets4Lo, ContiguousOffsets4Hi, out long first))
+                return <#= vecName #>.Load((int*)first);
+            if (IsBroadcast(mask, address, out first))
+                return <#= vecName #>.Create(*(int*)first);
+<# } #>
 <# for (int i = 0; i < warpSize; ++i) { #>
             int mask<#= i #> = mask.GetElement(<#= i #>);
 <# } #>
@@ -1264,6 +1309,15 @@ namespace ILGPU.Backends.Velocity.<#= vecNamespace #>
             <#= warpType32 #> mask,
             <#= warpType64 #> address)
         {
+<# if (warpSize >= 8) { #>
+            if (IsContiguous(mask, address, ContiguousOffsets8Lo, ContiguousOffsets8Hi, out long first))
+                return (<#= vecName #>.Load((long*)first), <#= vecName #>.Load((long*)first + <#= half #>));
+            if (IsBroadcast(mask, address, out first))
+            {
+                var v = <#= vecName #>.Create(*(long*)first);
+                return (v, v);
+            }
+<# } #>
 <# for (int i = 0; i < warpSize; ++i) { #>
             int mask<#= i #> = mask.GetElement(<#= i #>);
 <# } #>
@@ -1326,6 +1380,13 @@ namespace ILGPU.Backends.Velocity.<#= vecNamespace #>
             <#= warpType64 #> address,
             <#= warpType32 #> value)
         {
+<# if (warpSize >= 8) { #>
+            if (IsContiguous(mask, address, ContiguousOffsets4Lo, ContiguousOffsets4Hi, out long first))
+            {
+                value.Store((int*)first);
+                return;
+            }
+<# } #>
 <# for (int i = 0; i < warpSize; ++i) { #>
             int mask<#= i #> = mask.GetElement(<#= i #>);
 <# } #>
@@ -1348,6 +1409,14 @@ namespace ILGPU.Backends.Velocity.<#= vecNamespace #>
             <#= warpType64 #> address,
             <#= warpType64 #> value)
         {
+<# if (warpSize >= 8) { #>
+            if (IsContiguous(mask, address, ContiguousOffsets8Lo, ContiguousOffsets8Hi, out long first))
+            {
+                value.Item1.Store((long*)first);
+                value.Item2.Store((long*)first + <#= half #>);
+                return;
+            }
+<# } #>
 <# for (int i = 0; i < warpSize; ++i) { #>
             int mask<#= i #> = mask.GetElement(<#= i #>);
 <# } #>

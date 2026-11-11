@@ -1,7 +1,22 @@
-# SpawnDev.ILGPU Changelog
+﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 ## Unreleased (local feed 5.4.28-local.1, forks 2.4.27-local.1)
+
+- **PERF (forks, Velocity, Vector256 / Vector512): a warp's loads and stores of consecutive elements are one vector
+  access; a warp's loads of one shared element are one scalar load.** Velocity loaded and stored every lane separately
+  (a masked scalar access per lane). Now a 4- or 8-byte load or store whose lanes are all active and address consecutive
+  elements (the thread-indexed `view[i]`) is one `VectorN.Load` / `Store`, and a load whose lanes are all active and read
+  the same element (a uniform index, e.g. a matrix row value the warp shares) is one scalar load broadcast to the warp;
+  any other warp takes the per-lane path, so results are unchanged. Only for warps of 8+ lanes: on Vector128's 4 lanes the
+  per-lane path is cheap and the checks did not pay off. MEASURED (RTX 4070 desktop, 12 logical, quiet, interleaved x3,
+  median of 9, identical checksums) on Vector256: matmul 256 0.79x, random gather 0.74x, fma (3 loads + store) 0.87x,
+  long copy, heavy-math and strided kernels unchanged. Without the broadcast case (an earlier version) matmul was ~16%
+  slower: its broadcast loads paid a failing contiguity check. Tests `ContiguousAccess_*` (all backends): Int32 / Int64
+  partial last warps and views at odd elements with guard elements around them, divergent lanes not written, scatter /
+  gather, broadcast loads with divergent stores. Red-checks (run while Vector128 still had the fast paths): the all-lanes-active
+  check dropped -> 6 failures on Velocity and Velocity Vector256 (partial warps, divergent lanes); a wrong broadcast value
+  -> the broadcast test fails on both.
 
 - **FIX (WebGPU): the byte copy / fill kernels preloaded at accelerator creation are held, so a GC no longer drops
   them.** An unaligned byte `MemSet` / copy runs a small kernel; `WebGPUAccelerator.CreateAsync` precompiles both so the

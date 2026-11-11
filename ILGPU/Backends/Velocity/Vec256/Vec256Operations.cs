@@ -8122,6 +8122,45 @@ namespace ILGPU.Backends.Velocity.Vec256
 
         #region IO
 
+        // (Warps of 8+ lanes only: on Vector128's 4 lanes the per-lane path is cheap and the checks did not pay off.)
+        // Byte offsets of the lanes of a warp from lane 0's address for 4-byte and 8-byte elements, split in the halves
+        // of the 64-bit warp type: a warp whose lanes are all active and address consecutive elements loads and stores
+        // as one vector instead of one scalar access per lane (a thread-indexed view access, the common case)
+        private static readonly Vector256<long> ContiguousOffsets4Lo = Vector256.Create(0L, 4L, 8L, 12L);
+        private static readonly Vector256<long> ContiguousOffsets4Hi = Vector256.Create(16L, 20L, 24L, 28L);
+        private static readonly Vector256<long> ContiguousOffsets8Lo = Vector256.Create(0L, 8L, 16L, 24L);
+        private static readonly Vector256<long> ContiguousOffsets8Hi = Vector256.Create(32L, 40L, 48L, 56L);
+
+        // All lanes active and every lane at the same address (a uniform load such as a matrix row element shared by the
+        // warp): one scalar load replaces one load per lane.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool IsBroadcast(
+            Vector256<int> mask,
+            (Vector256<long>, Vector256<long>) address,
+            out long first)
+        {
+            first = address.Item1.GetElement(0);
+            var start = Vector256.Create(first);
+            return !Vector256.EqualsAny(mask, Vector256<int>.Zero) &&
+                Vector256.EqualsAll(address.Item1, start) &&
+                Vector256.EqualsAll(address.Item2, start);
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static bool IsContiguous(
+            Vector256<int> mask,
+            (Vector256<long>, Vector256<long>) address,
+            Vector256<long> offsetsLo,
+            Vector256<long> offsetsHi,
+            out long first)
+        {
+            first = address.Item1.GetElement(0);
+            var start = Vector256.Create(first);
+            return !Vector256.EqualsAny(mask, Vector256<int>.Zero) &&
+                Vector256.EqualsAll(address.Item1, start + offsetsLo) &&
+                Vector256.EqualsAll(address.Item2, start + offsetsHi);
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveOptimization |
                     MethodImplOptions.AggressiveInlining)]
         internal static unsafe Vector256<int> Load8(
@@ -8210,6 +8249,10 @@ namespace ILGPU.Backends.Velocity.Vec256
             Vector256<int> mask,
             (Vector256<long>, Vector256<long>) address)
         {
+            if (IsContiguous(mask, address, ContiguousOffsets4Lo, ContiguousOffsets4Hi, out long first))
+                return Vector256.Load((int*)first);
+            if (IsBroadcast(mask, address, out first))
+                return Vector256.Create(*(int*)first);
             int mask0 = mask.GetElement(0);
             int mask1 = mask.GetElement(1);
             int mask2 = mask.GetElement(2);
@@ -8251,6 +8294,13 @@ namespace ILGPU.Backends.Velocity.Vec256
             Vector256<int> mask,
             (Vector256<long>, Vector256<long>) address)
         {
+            if (IsContiguous(mask, address, ContiguousOffsets8Lo, ContiguousOffsets8Hi, out long first))
+                return (Vector256.Load((long*)first), Vector256.Load((long*)first + 4));
+            if (IsBroadcast(mask, address, out first))
+            {
+                var v = Vector256.Create(*(long*)first);
+                return (v, v);
+            }
             int mask0 = mask.GetElement(0);
             int mask1 = mask.GetElement(1);
             int mask2 = mask.GetElement(2);
@@ -8391,6 +8441,11 @@ namespace ILGPU.Backends.Velocity.Vec256
             (Vector256<long>, Vector256<long>) address,
             Vector256<int> value)
         {
+            if (IsContiguous(mask, address, ContiguousOffsets4Lo, ContiguousOffsets4Hi, out long first))
+            {
+                value.Store((int*)first);
+                return;
+            }
             int mask0 = mask.GetElement(0);
             int mask1 = mask.GetElement(1);
             int mask2 = mask.GetElement(2);
@@ -8440,6 +8495,12 @@ namespace ILGPU.Backends.Velocity.Vec256
             (Vector256<long>, Vector256<long>) address,
             (Vector256<long>, Vector256<long>) value)
         {
+            if (IsContiguous(mask, address, ContiguousOffsets8Lo, ContiguousOffsets8Hi, out long first))
+            {
+                value.Item1.Store((long*)first);
+                value.Item2.Store((long*)first + 4);
+                return;
+            }
             int mask0 = mask.GetElement(0);
             int mask1 = mask.GetElement(1);
             int mask2 = mask.GetElement(2);
