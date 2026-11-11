@@ -185,3 +185,36 @@ early `return;` at top-level statement boundaries of the recorded WGSL (~8-10 re
   dispatch in the same submit (window 3: real Parse + a synthetic spin after it -> lost). Report shape: "ParseKernel
   (WGSL attached) on this data, then any dispatch in the same submit, poisons the device; a submit boundary after it
   avoids it". Bisecting inside ParseKernel is left unless TJ wants a smaller report (each step can cost a reset).
+
+## Case 2 - report text (ready to attach; TJ decides whether and where to file)
+
+**Title:** D3D12 on NVIDIA (RTX 4070, driver 596.21): after one long single-thread compute dispatch, any further dispatch in
+the same submit leaves the device to die (DXGI_ERROR_DEVICE_HUNG) on a later kernel, after the GPU went idle
+
+**Summary.** A page runs a VP9 decode (compute only) and then an encode. The decode's submit holds, in separate compute
+passes of one command encoder: a one-workgroup kernel that runs ~130 ms (`ParseKernel`, one active thread, the frame's one
+tile), then a few small dispatches. The submit completes, `onSubmittedWorkDone` resolves, a readback succeeds. The encode's
+next submit then loses the device with `DXGI_ERROR_DEVICE_HUNG` within ~13 ms. Every WebGPU call was recorded; the replay in
+a fresh Chrome profile with no application code loses the device at the same record (3 of 3 across two days, plus every
+reduction below).
+
+**What decides it** (each line one replay; dispatch records dropped or kernels replaced, every other call kept):
+| replay | result |
+|---|---|
+| full trace | lost at 827/828 |
+| the long kernel's dispatch dropped (and everything after it in that submit) | alive |
+| the long kernel kept, nothing dispatched after it in that submit | alive |
+| the long kernel kept, the next dispatch replaced by a trivial kernel (one thread, a 1,000-step loop, touches no memory) | **lost** |
+| that next dispatch alone on zeroed inputs (no long kernel) | alive |
+| the long kernel replaced by a synthetic 377 ms one-thread loop (touches no memory), trivial kernel after it | alive |
+| every storage index of the second kernel clamped to its buffer | lost |
+| a submit boundary + wait right after the long kernel (in the application) | alive (5 of 5 lost before) |
+
+So it takes the real long kernel's work (a 11.3k-line WGSL kernel with atomics, one thread active, writing its buffers)
+followed by ANY dispatch in the same submit; a long dispatch that touches no memory does not do it, and nothing reads out of
+range (bounds-checked on a CPU implementation of the same kernels; storage indices clamped in the replay). The device dies
+later, on the next large kernel, after the GPU went idle in between.
+
+**Attachments** (`_upstream_reports/vp9-webgpu-device-hung-case2/`): `index.html`, `replay.js`, `tracer.js`, `trace.jsonl`
+(855 records, 6.7 MB), `reduced.json` (records to skip for the minimal sequence), `trace_next_dispatch_trivial.jsonl` (the
+trivial-kernel variant above). Application workaround in SpawnDev.Codecs: a submit boundary and wait after the long kernel.
