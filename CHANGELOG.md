@@ -6,6 +6,23 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
 Verified outside this repo on 5.4.28-local.1: SpawnDev.Codecs (Geordi) full WebGPU lane 1,188 passed, 0 failed, its
 warm-up guard (built on loads) passes. Release sweep: SWEEP_PENDING.
 
+- **FIX (WebGPU): `view.Length` / `IntLength` read inside a kernel is the view's own length for a host SubView at any
+  offset.** WebGPU binds a storage buffer from the 256-byte boundary below the view (the binding offset alignment) and
+  sizes the binding to include that padding; the kernel took a view parameter's length from `arrayLength()` of the
+  binding, so a view not starting on a 256-byte boundary read its length too large by the padding (an `ArrayView<int>`
+  SubView at element 1: 1,001 for 1,000). Indexing was right (the element offset is added at every access), so only
+  kernels that read the length were affected: e.g. `o[(i * 7) % o.IntLength]` wrote the wrong elements. Found by the new
+  `ContiguousAccess_ScatterAndGather_MatchHost` in the first 5.4.28 release sweep (both WebGPU lanes failed). The true
+  element count, which the host already computed, now goes to the kernel in a scalar slot for every view whose length
+  the kernel reads (direct view parameters, any element type; and every `ArrayView1D` view field), where before only
+  packed-4-bit, sub-word and packed-struct views had one. `SubViewLength_HostSubViewAtAnyOffset_ReadsItsOwnLength` (all
+  backends): `ArrayView<int>` / `<long>` / `<float>` and `ArrayView1D<int>` SubViews at offsets 0, 1, 3, 31, 32, 33, 63,
+  64, 65 (64 ints = 256 bytes) and several lengths; passes on the 4 WebGPU lanes, and
+  `ContiguousAccess_ScatterAndGather_MatchHost` passes there now. Red-check (the generator change reverted): both browser
+  WebGPU lanes fail, and the FIRST failure was a second form of the same bug: `ArrayView<long>.SubView(0, 1)` read length
+  2. 64-bit elements are emulated as two u32 words on WebGPU and `arrayLength()` counted words, so a 64-bit view's
+  in-kernel Length was doubled at ANY offset; the true-count slot fixes that too.
+
 - **PERF (forks, Velocity, Vector256 / Vector512): a warp's loads and stores of consecutive elements are one vector
   access; a warp's loads of one shared element are one scalar load.** Velocity loaded and stored every lane separately
   (a masked scalar access per lane). Now a 4- or 8-byte load or store whose lanes are all active and address consecutive

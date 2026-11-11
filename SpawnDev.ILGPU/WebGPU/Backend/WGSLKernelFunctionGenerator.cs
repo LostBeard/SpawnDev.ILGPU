@@ -1103,17 +1103,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                                 _viewOffsetScalarSlots[syntheticIdx] = globalScalarSlotOffset;
                                 globalScalarSlotOffset++;
 
-                                // Packed-struct view fields AND single-view packed-4-bit (QInt4/QUInt4/FP4)
-                                // views get a count slot (must match the GenerateHeader/2299 order). For
-                                // packed-4-bit, arrayLength()*8 rounds UP to the word boundary, which is
-                                // wrong for any N not a multiple of 8 (the FP4/QInt4 radix mis-sort at
-                                // N=180: 23 words*8=184 -> 4 phantom zero padding nibbles sorted as real
-                                // elements). Send the TRUE element count from the host instead.
-                                bool isPacked4Res = GetBufferElementType(fieldInfo.FieldType) is PrimitiveType p4ResPt
-                                    && (p4ResPt.BasicValueType == BasicValueType.QInt4
-                                        || p4ResPt.BasicValueType == BasicValueType.Float4E2M1);
-                                if (_packedStructBSFieldLayouts.ContainsKey((param.Index, fieldInfo.FieldIndex))
-                                    || isPacked4Res)
+                                // EVERY view field gets a true-element-count slot, sent by the host (must match the
+                                // GenerateHeader manifest pass in order). arrayLength() is wrong for its length in three
+                                // ways: a packed struct's CPU element size differs from its GPU size; packed-4-bit
+                                // arrayLength()*8 rounds UP to the word boundary (the FP4/QInt4 radix mis-sort at N=180);
+                                // and the binding starts at the 256-byte boundary below the view, so a view not starting
+                                // on one read its padding as elements (the 5.4.28 release sweep, 2026-11-11).
                                 {
                                     fieldInfo.ViewCountSlot = globalScalarSlotOffset;
                                     // Propagate to associated metadata fields (length field, etc.)
@@ -1144,10 +1139,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // arrayLength() counts the u32 WORDS of the binding, so `words * 4` rounded a byte view's
                     // length up to a multiple of 4 (SpawnDev.Codecs SnappyCompressorGpu, data.IntLength of the last
                     // block: every input whose length % 4 != 0 framed wrong on WebGPU only, 2026-10-26).
-                    if (GetBufferElementType(param.ParameterType) is PrimitiveType dpCntPt
+                    // ANY element type when the kernel reads the length: the binding starts at the 256-byte boundary
+                    // below the view and its size includes that padding, so arrayLength() counted the padding as
+                    // elements: a host SubView not starting on a 256-byte boundary read Length too large on WebGPU
+                    // only (ContiguousAccess_ScatterAndGather_MatchHost, the 5.4.28 release sweep, 2026-11-11).
+                    if ((GetBufferElementType(param.ParameterType) is PrimitiveType dpCntPt
                         && (dpCntPt.BasicValueType == BasicValueType.QInt4
-                            || dpCntPt.BasicValueType == BasicValueType.Float4E2M1
-                            || (IsSubWordElement(dpCntPt.BasicValueType) && ParamLengthIsRead(param.Index))))
+                            || dpCntPt.BasicValueType == BasicValueType.Float4E2M1))
+                        || ParamLengthIsRead(param.Index))
                     {
                         _viewCountScalarSlots[param.Index] = globalScalarSlotOffset;
                         globalScalarSlotOffset++;
@@ -3007,17 +3006,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 {
                     int realParamIndex2 = (viewParamIndex / 1000) - 1;
                     int fieldIndex2 = viewParamIndex % 1000;
-                    // Same condition as the slot RESERVATION (~899): packed-struct view fields OR
-                    // single-view packed-4-bit (QInt4/QUInt4/FP4) views get a true-element-count slot.
-                    // Both passes MUST agree or the scalar layout desyncs from the host.
+                    // Same set as the slot RESERVATION in ScanBodyStructParams: EVERY body-struct view field gets a
+                    // true-element-count slot. Both passes MUST agree or the scalar layout desyncs from the host.
                     var f4Ent = (_bodyStructParams.TryGetValue(realParamIndex2, out var bsf2Ent)
                         && fieldIndex2 < bsf2Ent.Count) ? bsf2Ent[fieldIndex2] : null;
-                    bool isPacked4Ent = f4Ent != null
-                        && GetBufferElementType(f4Ent.FieldType) is PrimitiveType p4EntPt
-                        && (p4EntPt.BasicValueType == BasicValueType.QInt4
-                            || p4EntPt.BasicValueType == BasicValueType.Float4E2M1);
-                    if (_packedStructBSFieldLayouts.ContainsKey((realParamIndex2, fieldIndex2))
-                        || isPacked4Ent)
+                    if (f4Ent != null)
                     {
                         var countEntry = new ScalarPackingEntry
                         {
