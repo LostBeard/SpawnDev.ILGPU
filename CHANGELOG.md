@@ -1,6 +1,25 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## Unreleased
+
+- **PERF (forks, Velocity): barrier kernels use idle processors when that is faster, chosen per kernel.** A group of
+  more than one warp with barriers runs as a team of warp threads; teams that fit on the processors
+  (`processors / warps`) can leave cores idle, e.g. groups of 8 warps on 12 processors run as one team with 4 cores
+  idle. One more team oversubscribes slightly, and its waits then yield at once. That is faster when the work between
+  barriers dominates and slower when barriers do (a barrier-bound microbenchmark at that shape: 2.25x slower), so each
+  kernel measures both per launch shape: a warm-up launch per count, then 3 timed launches per count, alternating and
+  normalized per group. It switches only on a 1.1x median margin and keeps its previous choice inside the margin;
+  it measures again after 1,024 launches. Launch shapes are kept apart because a kernel launched with different group
+  counts (VP9's loop filter: the luma plane, then the smaller chroma planes) has different work per group.
+  `VelocityAccelerator.AdaptiveTeamCount` (default true), `TeamCountDecisions` (diagnostic).
+  SpawnDev.Codecs VP9 decode (ab21440, ComfyUI 252 frames, bit-exact), loop filter ms/frame on Vector256: 84.1 ->
+  64.7 / 66.6 (always-extra-team: 64.3); Vector128 unchanged (its groups already exceed the processors).
+  velbarrier steady state unchanged: it keeps the fitting teams where the extra team loses.
+  `VelocityTests.AdaptiveTeamCount_GroupsThatDoNotDivideTheProcessors_DecideAndKeepResults`: groups of
+  (processors - 1) warps, the right results while measuring and after, one decision after 8 launches, none with the
+  option off. Red-check: adaptive branch off -> "0 team-count decisions after 8 launches, expected 1".
+
 ## 5.4.26 (forks 2.4.25) - 2026-11-11 - Velocity: wide launches of branchy kernels pick the faster path per kernel (VP9 reconstruction 5-7x faster)
 
 Verified outside this repo on 5.4.26-local.1 (Geordi, SpawnDev.Codecs ab21440): VP9 stage table interleaved, no regression

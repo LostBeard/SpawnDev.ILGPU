@@ -12,6 +12,7 @@
 using ILGPU.Util;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Runtime.ExceptionServices;
 using System.Threading;
 
@@ -102,9 +103,48 @@ namespace ILGPU.Runtime.Velocity
         {
             int warpSize = accelerator.WarpSize;
             int numWarps = IntrinsicMath.DivRoundUp(groupDim, warpSize);
-            int teams = Math.Max(
-                1,
-                Math.Min(gridSize, accelerator.NumMultiprocessors / numWarps));
+            // Teams that fit on the processors (floor), or one more that oversubscribes them slightly (ceil): with 8 warps
+            // a group on 12 processors, floor runs ONE team and leaves 4 processors idle. Which is faster depends on the
+            // kernel's work between barriers (SpawnDev.Codecs' VP9 loop filter, Vector256: 84.1 -> 64.3 ms per frame with
+            // ceil; a barrier-bound microbenchmark at the same shape: 2.25x slower), so each kernel measures both.
+            int floorTeams = Math.Max(1, Math.Min(gridSize, accelerator.NumMultiprocessors / numWarps));
+            int ceilTeams = Math.Max(1, Math.Min(gridSize,
+                IntrinsicMath.DivRoundUp(accelerator.NumMultiprocessors, numWarps)));
+            TeamChoice? choice = null;
+            bool useCeil = false, timed = false;
+            int sample = -1;
+            if (ceilTeams != floorTeams && accelerator.AdaptiveTeamCount)
+            {
+                // per launch shape: a kernel launched with different group counts (VP9's loop filter: the luma plane and
+                // the smaller chroma planes in turn) has different work per group, so one shared choice mixed them
+                var key = (handler, numWarps, gridSize);
+                if (!teamChoices.TryGetValue(key, out choice))
+                    teamChoices.Add(key, choice = new TeamChoice());
+                if (choice.Decision != 0)
+                {
+                    useCeil = choice.Decision == 2;
+                    if (++choice.Since >= TeamChoice.RecheckAfter)
+                    {
+                        choice.Previous = choice.Decision;
+                        choice.Decision = 0;
+                        choice.Step = 2; // both counts are warm: measure again from the timed launches
+                    }
+                }
+                else
+                {
+                    // steps 0 and 1: one untimed warm-up per count (ceil's first launch creates its worker threads);
+                    // then alternating timed launches
+                    useCeil = (choice.Step & 1) == 1;
+                    if (choice.Step >= 2)
+                    {
+                        timed = true;
+                        sample = (choice.Step - 2) / 2;
+                    }
+                    choice.Step++;
+                }
+            }
+            int teams = useCeil ? ceilTeams : floorTeams;
+            long started = timed ? Stopwatch.GetTimestamp() : 0;
             int workersNeeded = teams * numWarps;
             EnsureWorkers(workersNeeded);
 
@@ -153,7 +193,55 @@ namespace ILGPU.Runtime.Velocity
 
             if (launch.Error is Exception error)
                 ExceptionDispatchInfo.Capture(error).Throw();
+
+            if (timed && choice != null && sample >= 0 && sample < TeamChoice.SamplesPerCount)
+            {
+                double perGroup = (double)(Stopwatch.GetTimestamp() - started) / Math.Max(1, gridSize);
+                (useCeil ? choice.Ceil : choice.Floor)[sample] = perGroup;
+                if (useCeil && choice.Step >= 2 + 2 * TeamChoice.SamplesPerCount)
+                {
+                    double floor = TeamChoice.Median(choice.Floor), ceil = TeamChoice.Median(choice.Ceil);
+                    // switch only on a clear margin either way; within it keep the previous choice (the work per launch
+                    // varies, so a re-check can come out close: VP9's loop filter once flipped to floor that way)
+                    choice.Decision = ceil * TeamChoice.CeilMargin < floor ? 2
+                        : floor * TeamChoice.CeilMargin < ceil ? 1
+                        : choice.Previous != 0 ? choice.Previous : 1;
+                    choice.Since = 0;
+                    accelerator.CountTeamCountDecision();
+                    Trace.WriteLine($"Velocity: groups of {numWarps} warps run as {(choice.Decision == 2 ? ceilTeams : floorTeams)} " +
+                        $"team(s) (median per group: {floorTeams} teams {floor:F0}, {ceilTeams} teams {ceil:F0} ticks)");
+                }
+            }
         }
+
+        /// <summary>
+        /// The measured team count of one kernel at one group shape (see <see cref="Run"/>): floor (the teams that fit on
+        /// the processors) or ceil (one more), each timed over <see cref="SamplesPerCount"/> launches after a warm-up.
+        /// </summary>
+        private sealed class TeamChoice
+        {
+            public const int SamplesPerCount = 3;
+            public const double CeilMargin = 1.1;
+            public const int RecheckAfter = 1024;
+            /// <summary>0 = measuring, 1 = floor, 2 = ceil.</summary>
+            public int Decision;
+            /// <summary>The decision before a re-check (kept when the re-check is within the margin).</summary>
+            public int Previous;
+            public int Step;
+            public int Since;
+            public readonly double[] Floor = new double[SamplesPerCount];
+            public readonly double[] Ceil = new double[SamplesPerCount];
+
+            public static double Median(double[] values)
+            {
+                var sorted = (double[])values.Clone();
+                Array.Sort(sorted);
+                return sorted[sorted.Length / 2];
+            }
+        }
+
+        /// <summary>The team count each kernel measured, per group shape; launches run one at a time, so no lock.</summary>
+        private readonly Dictionary<(VelocityEntryPointHandler, int, int), TeamChoice> teamChoices = new();
 
         private void EnsureWorkers(int count)
         {

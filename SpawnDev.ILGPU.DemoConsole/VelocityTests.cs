@@ -109,6 +109,82 @@ public class VelocityTests : BackendTestBase
             if (b[t] != data[(t + 1) % 16]) throw new Exception($"barrier kernel [{t}] = {b[t]}, expected {data[(t + 1) % 16]}");
     });
 
+    static void TeamCountBarrierKernel(ArrayView<int> data, ArrayView<int> output)
+    {
+        var shared = SharedMemory.Allocate<int>(256);
+        int t = Group.IdxX;
+        int g = Grid.GlobalIndex.X;
+        shared[t] = data[g];
+        Group.Barrier();
+        int v = shared[(t + 1) % Group.DimX];
+        Group.Barrier();
+        shared[t] = v * 3 + Grid.IdxX;
+        Group.Barrier();
+        output[g] = shared[(t + Group.DimX - 1) % Group.DimX];
+    }
+
+    // A barrier kernel whose groups do not divide the processors evenly measures one extra team of warps against the
+    // teams that fit (VelocityAccelerator.AdaptiveTeamCount; SpawnDev.Codecs' VP9 loop filter on Vector256 84.1 -> 64.7 ms
+    // per frame, 2026-11-11). Which count wins depends on the kernel and the machine, so this checks the mechanics: groups
+    // of (processors - 1) warps (1 team vs 2), the right results on every launch while measuring and after, a decision
+    // after the 8 measuring launches (a warm-up and 3 timed launches per count), none with the option off.
+    [TestMethod]
+    public async Task AdaptiveTeamCount_GroupsThatDoNotDivideTheProcessors_DecideAndKeepResults() => await RunTest(async accelerator =>
+    {
+        var velocity = (VelocityAccelerator)accelerator;
+        int processors = velocity.NumMultiprocessors, warp = velocity.WarpSize;
+        int warps = Math.Min(processors - 1, 256 / warp);
+        if (warps < 2 || processors % warps == 0)
+            throw new UnsupportedTestException($"{processors} processors: no group shape where an extra team differs");
+        int groupSize = warps * warp, groups = 4, n = groupSize * groups;
+        if (!velocity.AdaptiveTeamCount) throw new Exception("AdaptiveTeamCount is off by default");
+        var data = new int[n];
+        var rnd = new Random(12);
+        for (int i = 0; i < n; i++) data[i] = rnd.Next(1 << 20);
+        using var dData = accelerator.Allocate1D(data);
+        using var dOut = accelerator.Allocate1D<int>(n);
+        var kernel = accelerator.LoadStreamKernel<ArrayView<int>, ArrayView<int>>(TeamCountBarrierKernel);
+
+        int Expected(int g)
+        {
+            int group = g / groupSize, t = g % groupSize;
+            int prevT = (t + groupSize - 1) % groupSize;
+            int v = data[group * groupSize + (prevT + 1) % groupSize];
+            return v * 3 + group;
+        }
+
+        async Task Launch(int round)
+        {
+            dOut.MemSetToZero();
+            kernel(new KernelConfig(groups, groupSize), dData.View, dOut.View);
+            await accelerator.SynchronizeAsync();
+            var got = await dOut.CopyToHostAsync<int>();
+            for (int g = 0; g < n; g++)
+                if (got[g] != Expected(g))
+                    throw new Exception($"launch {round} (groups of {warps} warps, {processors} processors): [{g}] = {got[g]}, expected {Expected(g)}");
+        }
+
+        long before = velocity.TeamCountDecisions;
+        for (int r = 0; r < 8; r++)
+        {
+            await Launch(r);
+            if (r < 7 && velocity.TeamCountDecisions != before)
+                throw new Exception($"decided after {r + 1} launches, before measuring both team counts 3 times");
+        }
+        if (velocity.TeamCountDecisions != before + 1)
+            throw new Exception($"{velocity.TeamCountDecisions - before} team-count decisions after 8 launches, expected 1");
+        for (int r = 8; r < 12; r++) await Launch(r);
+
+        velocity.AdaptiveTeamCount = false;
+        try
+        {
+            long off = velocity.TeamCountDecisions;
+            for (int r = 0; r < 9; r++) await Launch(100 + r);
+            if (velocity.TeamCountDecisions != off) throw new Exception("with AdaptiveTeamCount off, a team count was still decided");
+        }
+        finally { velocity.AdaptiveTeamCount = true; }
+    });
+
     // Wide launches of a barrier-free kernel run on whichever path measures faster for that kernel
     // (VelocityAccelerator.AdaptiveHostLaunches; SpawnDev.Codecs' VP9 reconstruction 51.2 -> 9.6 ms per frame on
     // Vector256, 2026-11-10). Which path wins depends on the kernel and the machine, so this checks the mechanics, not the

@@ -275,6 +275,23 @@ namespace ILGPU.Runtime.Velocity
         /// </summary>
         public bool AdaptiveHostLaunches { get; set; } = true;
 
+        /// <summary>
+        /// True (the default): a kernel with group barriers whose groups do not divide the processors evenly measures
+        /// whether one extra team of warps (slightly more warp threads than processors) is faster than leaving processors
+        /// idle, and keeps the faster. It depends on the work between barriers: SpawnDev.Codecs' VP9 loop filter on
+        /// Vector256 runs 84.1 -> 64.3 ms per frame with the extra team, a barrier-bound microbenchmark 2.25x slower.
+        /// Results are the same either way. False always uses the teams that fit on the processors.
+        /// </summary>
+        public bool AdaptiveTeamCount { get; set; } = true;
+
+        private long teamCountDecisions;
+
+        /// <summary>How many times a kernel's team count was decided (see <see cref="AdaptiveTeamCount"/>); a diagnostic.</summary>
+        public long TeamCountDecisions => Interlocked.Read(ref teamCountDecisions);
+
+        /// <summary>Counts a team-count decision.</summary>
+        internal void CountTeamCountDecision() => Interlocked.Increment(ref teamCountDecisions);
+
         private long hostLaunchCount;
 
         /// <summary>
