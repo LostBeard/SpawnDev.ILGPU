@@ -158,3 +158,16 @@ early `return;` at top-level statement boundaries of the recorded WGSL (~8-10 re
   DC-only adds): still LOST at 828; of Predict (the DC predictors this keyframe uses): still LOST at 828. So neither helper
   alone is required. Next (1 reset): both disabled (trace_noboth, naga-valid). Alive -> either helper suffices; lost -> the
   trigger is in main's own code (the 16-block x 3-plane loop, eob / coefficient reads, byte atomics): bisect main.
+- Window 3 (both peers confirmed idle first; the replay now logs every GPU wait's duration):
+  - no-reset timing (stopped before encode 2): the decode submit's readback settles after 148.6 ms with IntraWave and
+    129.6 ms without, so IntraWave runs ~19 ms and Parse et al ~130 ms (Parse: one thread for the frame's one tile).
+  - IntraWave's WGSL REPLACED by a synthetic kernel (one thread, an LCG loop, touches no memory at run time; all 8 bindings
+    declared so the recorded bind group stays valid): 1e7 iterations LOST at 828; 1e3 iterations (practically instant)
+    LOST at 828.
+  Combined with the earlier cuts (Parse on real data with nothing dispatched after it in that submit: alive; IntraWave
+  alone on zeroed inputs, no Parse: alive): ParseKernel running long on real data, FOLLOWED BY ANY dispatch, poisons the
+  device; it is lost on the next big kernel later, after the GPU went idle. Not IntraWave's code, not out-of-range access,
+  not the second dispatch's length. Candidate mechanism: WDDM mid-dispatch preemption of the long single-thread dispatch
+  plus a following dispatch in the same command buffer. Next: a synthetic-only repro (long spin + short dispatch + a big
+  kernel, no codec code) for the report, and a workaround test (a submit boundary right after Parse; or Parse split into
+  shorter launches).
