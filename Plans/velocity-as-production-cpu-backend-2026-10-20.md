@@ -261,3 +261,14 @@ are Index1D (no barriers, never in the team runner); LF WavefrontKernel is Kerne
 (5 for 512x320), so only 4 keys. Codecs EveryFrame now prints the decision count. Remaining: noise (4-run recon spread
 8.45-10.36) or the ceil LF's 16 threads on 12 cores lowering boost clock for the next recon; measure only if Geordi's
 interleaved pairs hold the +1 ms. Gate for release: Geordi's interleaved stage table (V256/V128/CPU/CUDA) + V256 EveryFrame, then full sweep.
+
+Lever (3) "park sooner" closed by code reading (Data, 2026-11-11): `VelocityGroupBarrier.SignalAndWait` already yields at
+once (`SpinOnce(-1)`) whenever the launch has more warp threads than processors, which is now the V256 LF case (ceil: 16
+threads on 12 cores) and always V128 (16 warps a group). When a team fits on the processors the spinning warp holds a core
+nobody else needs, so parking it does not speed the slow warp it waits for. Barrier cost itself was ~1.5 of 84 ms. Expected
+gain <= ~2%: not pursued. What remains of the LF gap (66 V256 / 115 V128 vs CUDA 1.35) is the kernel's SHAPE, Codecs-side:
+1-5 groups a wavefront launch (few teams busy), warps waiting for the slowest warp of their group (divergent per-pixel
+filter branches). Candidates for Geordi: filter the chroma planes in the same launch as luma (more groups a launch), or
+group size from the warp size (V128: 64 threads = 16 warps > 12 cores, one team; 32 threads = 8 warps fits).
+Splitting barrier kernels into per-region loops (POCL style, one thread runs every warp of a group) would remove the thread
+sync but also the parallelism inside a group, which is the only parallelism a 1-5 group launch has: not a fit here.
