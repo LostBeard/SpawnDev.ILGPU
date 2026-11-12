@@ -334,3 +334,19 @@ TJ asked for a clean-boot retest before any ILGPU rewrite (a stale GPU state onc
 Identical to every earlier window. Not a stale GPU state, and not fixed in the latest driver: the report can say "reproduces
 on 621.14". Logged in _TestStats/SpawnDev.ILGPU.jsonl. Per TJ, the ILGPU mitigation waits for a review by Fable of whether it
 is the REQUIRED path.
+
+### Review by Seven (Fable 5.2) + Data's variant replays (2026-11-12 11:20-11:36)
+- RTX 2060 (turing, driver 610.88, Chrome 157.0.8103.78, D3D12, shader-f16 present; Seven): all 5 traces ALIVE, the original
+  2 of 2 with 9/9 readbacks byte-identical to the recording. Not reproducible there; architecture vs Chrome patch vs timing
+  not separated. Seven's review: `_DevComms/2026-11-12-1121-Seven-TO-Data-webgpu-hang-2060-alive-and-rewrite-review.md`.
+- Seven: window 7 was confounded (the victim's 448 sub-word store blocks are its ONLY storage writes; removing them lets the
+  compiler drop the private arrays too). Confirmed on the 4070: victim with atomicOr only (v1a) LOST; with atomicLoad +
+  atomicStore (v1b) LOST. The sub-word store lowering is NOT a factor.
+- Trigger arrays as module-scope `var<private>` (v2): LOST. Submit boundary WITHOUT a wait right after the trigger (v3):
+  ALIVE 2 of 2, and ALIVE applied to the original trace (real ParseKernel).
+- Trigger threshold (deterministic): total function-scope array ints per thread in the TRIGGER kernel > 1652 (6608 bytes)
+  -> lost. 1588+64 alive / 1589+64 lost (2 of 2 each), 1620+32 alive / 1621+32 lost; the follow-up kernel's size does not
+  matter. Generators: `_upstream_reports/vp9-webgpu-device-hung-case2/seven/gen.py`, `tools/v4n.py`, `tools/v4x.py`.
+- Conclusion (Seven + Data): the device-memory rewrite is NOT required. Candidates for TJ: the upstream report with the
+  threshold and v3; optionally a submit boundary (FlushPending) after any kernel above the threshold (a WORKAROUND, needs
+  TJ's approval; cost not measured); a compile-time diagnostic. Logged: _TestStats config case2-seven-variants-4070.
