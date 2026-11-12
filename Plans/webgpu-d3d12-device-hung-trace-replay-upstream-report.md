@@ -357,3 +357,6 @@ is the REQUIRED path.
   two submits, red-checked with an off switch on WebGPUBackend; Codecs: original Parse arrays, no parse wait, must pass with
   the flush and hang with it off), gate (if any) on adapter vendor "nvidia" not architecture, and the report openly states
   the 2060 result and the Chrome .52 / .78 difference; module scope (v2) is not advice to give.
+- Chrome version ruled out (11:41): Seven, RTX 2060 on Chrome for Testing 157.0.8103.50 (older than our .52): ALIVE. Data,
+  RTX 4070 on Chrome for Testing 157.0.8103.78 (Seven's version): LOST at 828. Same Chrome, different result per GPU: the
+  difference is the GPU (lovelace vs turing) or timing, not Chrome. Reproduces on the latest Chrome and the latest driver.
