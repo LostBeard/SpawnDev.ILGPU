@@ -252,3 +252,16 @@ mitigation); a fully synthetic victim (C) must reproduce, otherwise find what th
   and the two Batch tests alone 2/2: case 1 no longer reproduces with today's code. It is NOT attributed to the arrays; the
   encoder drain stays, the array-move patch is saved but not committed. Case 2 is the report: parse fix committed in Codecs
   (live 3/3 vs control 1/1 hang, the codec-free replay, speed unchanged, CUDA + WebGPU EveryFrame bit-exact).
+
+### Standalone repro attempt, window 6 (2026-11-12 ~03:30, 0 resets): a fully synthetic page does NOT reproduce yet
+Page `_upstream_reports/webgpu-private-array-device-hung/index.html` (plain WebGPU; A = one thread looping over a
+dynamically indexed `array<i32, 1592>` ~94 ms; B = trivial; C = victim). All ALIVE on the RTX 4070:
+- controls: A alone then C; A without the array + B then C; A, submit + wait, B, then C.
+- trigger A + B in one submit, then C with 2 x 256-int private arrays (wide, many workgroups); then with 9 x 256 (like the
+  encoder); then with an A-like one-thread private-array victim.
+- in the REAL trace: ParseKernel and IntraWaveKernel synthetic (as window 5, which hung) AND Vp9EncodeWavefrontBatchKernel
+  replaced by a synthetic one-thread private-array kernel: alive.
+So the trigger part is codec-free (a large dynamically indexed private array, then any dispatch in the same submit), but the
+device dies only on the REAL encoder wavefront kernel (27.7k lines, 9 private arrays up to 256 ints, ~1,335 atomics). What
+the victim needs is still unknown: the report is NOT yet "undeniable" by TJ's standard. Next: bisect the victim (its WGSL
+in the trace) the way IntraWave was, or find what it does that the synthetic victims do not.
