@@ -190,7 +190,14 @@ namespace ILGPU.IR.Construction
                     }
                     else
                     {
-                        canSimplify = innerBasicType > sourceBasicType &&
+                        // NOT through a float: (byte)(int)f truncates the float to an int, then
+                        // keeps the low 8 bits; one float-to-8-bit conversion is a different
+                        // operation (PTX cvt saturates to the 8-bit range: 254.9f became 127 on
+                        // CUDA, SpawnDev.Codecs' float RGB -> RGBA8, Geordi 2026-11-12), and
+                        // (int)(long)d differs from (int)d beyond the int range. The float types
+                        // sort after the integers, so a float source landed in this branch.
+                        canSimplify = !innerBasicType.IsFloat() &&
+                            innerBasicType > sourceBasicType &&
                             targetBasicType < sourceBasicType;
                     }
                 }

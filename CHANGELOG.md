@@ -1,6 +1,18 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## Unreleased (local feed 5.4.29-local.1, forks 2.4.28-local.1)
+
+- **FIX (forks, IR; seen on CUDA): `(byte)(int)f` and the like keep the low bits of the INT, not a saturated float.** When a
+  conversion is built from another conversion, an integer narrowing of an integer narrowing is folded into one. The float
+  types sort after the integers in `BasicValueType`, so a float SOURCE matched that case too: `(byte)(int)f` became one
+  float-to-8-bit conversion, which PTX implements as saturating, so every value >= 128 came out 127 on CUDA
+  (SpawnDev.Codecs' float RGB -> RGBA8 kernel: 13.8 dB on CUDA against 30 dB elsewhere; Geordi 2026-11-12), and
+  `(int)(long)d` became one double-to-int conversion, wrong beyond the int range. The fold now never goes through a float.
+  `FloatToNarrowInt_ThroughInt_KeepsTheLowBits` (all backends): (byte) / (sbyte) / (short) / (ushort) of (int)f and
+  (int)(long)d against C#; passes on CUDA, OpenCL, CPU, Velocity, Velocity Vector256 and the 6 browser lanes. Red-check
+  (fold restored): CUDA fails with "(sbyte)(int)128.2: got 127, expected -128" (the CPU accelerator runs the IL itself).
+
 ## 5.4.28 (forks 2.4.27) - 2026-11-11 - Velocity (Vector256 / 512): consecutive and shared-element loads as one access (matmul ~21% faster); WebGPU: preloaded byte kernels survive a GC; Accelerator.LoadedKernelCount
 
 Verified outside this repo on 5.4.28-local.1: SpawnDev.Codecs (Geordi) full WebGPU lane 1,188 passed, 0 failed, its
