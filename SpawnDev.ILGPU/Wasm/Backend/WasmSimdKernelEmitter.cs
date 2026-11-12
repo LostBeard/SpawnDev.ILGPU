@@ -1598,6 +1598,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 EmitGetLocal(op);                                      // already a v128 local
                 return true;
             }
+            // A uniform 64-bit scalar (an i64 / f64 local, e.g. a view's Length) has no 4-lane splat: i32x4.splat of an i64
+            // local made an invalid module ("i32x4.splat[0] expected type i32, found local.get of type i64":
+            // SubViewLength_HostSubViewAtAnyOffset_ReadsItsOwnLength on Wasm, the 5.4.28 sweep). Scalar fallback.
+            if (cls != LaneClass.F32x4 && cls != LaneClass.I32x4) return false;
             EmitGetLocal(op);                                          // uniform scalar
             WasmModuleBuilder.EmitSimd(Code, cls == LaneClass.F32x4 ? WasmOpCodes.F32x4Splat : WasmOpCodes.I32x4Splat);
             return true;

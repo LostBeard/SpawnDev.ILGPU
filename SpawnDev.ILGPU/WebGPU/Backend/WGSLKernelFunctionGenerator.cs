@@ -1126,11 +1126,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     continue;
                 }
 
-                if (ownBinding && isView)
+                if (ownBinding)
                 {
-                    // This param gets a buffer binding → reserve a view offset slot
+                    // This param gets a buffer binding → reserve a view offset slot. EVERY param with its own binding,
+                    // as GenerateHeader does (it gives a by-value struct param bound as a buffer an offset slot too):
+                    // reserving only for views left every later slot of the body two short in Autolykos2.MineKernel
+                    // (header / target are by-value structs), so its winningCount offset and winningNonces count were
+                    // read from the wrong slots (invisible while the shifted slots held zero offsets; the 5.4.28 sweep).
                     _viewOffsetScalarSlots[param.Index] = globalScalarSlotOffset;
                     globalScalarSlotOffset++;
+                }
+
+                if (ownBinding && isView)
+                {
 
                     // Packed-4-bit (QInt4/QUInt4/FP4) DIRECT view params ALSO reserve a count slot right
                     // after the offset slot - GetViewLength can't use arrayLength*8 for them (rounds up to
@@ -2958,6 +2966,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     CoalesceFieldIndex = coalesceFieldIdx,
                 };
                 scalarManifest.Add(viewOffsetEntry);
+                // The body was generated with the slots ScanBodyStructParams reserved: a different slot here means the
+                // kernel reads another value than the host packs there (silently wrong; Autolykos2.MineKernel, 5.4.28).
+                if (_viewOffsetScalarSlots.TryGetValue(viewParamIndex, out int reservedOffsetSlot) && reservedOffsetSlot != scalarSlotOffset)
+                    throw new InvalidOperationException(
+                        $"WGSL scalar slots drifted: param{viewParamIndex}'s view offset was reserved at slot {reservedOffsetSlot}, the header put it at {scalarSlotOffset} ({Method.Name})");
                 _viewOffsetScalarSlots[viewParamIndex] = scalarSlotOffset;
                 builder.AppendLine($"// View offset for param{viewParamIndex} at scalar slot {scalarSlotOffset}{(isCoalesceMemberOffset ? " (coalesce member)" : "")}");
 
@@ -2993,6 +3006,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             ? -(viewParamIndex + 1) : viewBindIdx,
                     };
                     scalarManifest.Add(dpCountEntry);
+                    if (_viewCountScalarSlots[viewParamIndex] != scalarSlotOffset)
+                        throw new InvalidOperationException(
+                            $"WGSL scalar slots drifted: param{viewParamIndex}'s view count was reserved at slot {_viewCountScalarSlots[viewParamIndex]}, the header put it at {scalarSlotOffset} ({Method.Name})");
                     _viewCountScalarSlots[viewParamIndex] = scalarSlotOffset;
                     builder.AppendLine($"// View element count for direct packed-4-bit / sub-word param{viewParamIndex} at scalar slot {scalarSlotOffset}");
                     scalarSlotOffset++;

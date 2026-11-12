@@ -4745,9 +4745,13 @@ EmitSaveAllLocals();
         /// </summary>
         public override void GenerateCode(GetViewLength value)
         {
-            // GetViewLength returns i64 (long) in ILGPU, but our length local is i32.
-            // We must extend i32 → i64 using I64ExtendI32S.
-            var target = AllocateLocal(value, WasmOpCodes.I64);
+            // The length is computed as an i64 below. The node is Int64 (Length / LongLength) OR Int32 (IntLength:
+            // CreateGetViewLength's default); its local takes the NODE's width, wrapped below. An i64 local for an Int32
+            // node was fine for the scalar code (it coerces by the local's type) but not for the SIMD emitter, which types
+            // by the IR: it splatted the i64 local with i32x4.splat, an invalid module (`o[i] = v.IntLength` of an
+            // ArrayView<long>; SubViewLength_HostSubViewAtAnyOffset_ReadsItsOwnLength, the 5.4.28 sweep).
+            bool lengthIs32 = value.BasicValueType == BasicValueType.Int32;
+            var target = AllocateLocal(value, lengthIs32 ? WasmOpCodes.I32 : WasmOpCodes.I64);
 
             // Trace the view back to its kernel parameter.
             // For ArrayView<T> params, value.View.Resolve() IS the Parameter directly.
@@ -4763,6 +4767,7 @@ EmitSaveAllLocals();
             // arms' lengths; it fell through to the 0L fallback below (ChosenView_Length_IsTheChosenViewsLength).
             if (TryEmitViewLength(viewSource, depth: 0))
             {
+                if (lengthIs32) Code.Add(WasmOpCodes.I32WrapI64);
                 WasmModuleBuilder.EmitLocalSet(Code, target);
                 return;
             }
@@ -4779,6 +4784,7 @@ EmitSaveAllLocals();
                 if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-GetViewLength] WARN: could not resolve view to parameter (source={viewSource?.GetType().Name}), emitting 0L");
             }
 
+            if (lengthIs32) Code.Add(WasmOpCodes.I32WrapI64);
             WasmModuleBuilder.EmitLocalSet(Code, target);
         }
 

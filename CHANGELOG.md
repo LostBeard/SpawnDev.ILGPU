@@ -6,6 +6,20 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
 Verified outside this repo on 5.4.28-local.1: SpawnDev.Codecs (Geordi) full WebGPU lane 1,188 passed, 0 failed, its
 warm-up guard (built on loads) passes. Release sweep: SWEEP_PENDING.
 
+- **FIX (WebGPU): a kernel with a by-value struct parameter reads its later scalar slots from the right place.** The
+  generator reserves each parameter's scalar slots (view offsets, view counts) BEFORE it writes the kernel body, and the
+  header that the host packs from assigns them again after. The reservation skipped by-value struct parameters (bound as
+  buffers, which the header gives an offset slot), so every later slot of the body was off by one per struct: in
+  `Autolykos2.MineKernel` (`header`, `target` are structs) the winningCount offset and the winningNonces length were read
+  from other parameters' slots. While those slots only held zero offsets nothing showed; with the length fix below the
+  length read 0 and `Autolykos2_Mine_SmallN_FindsKnownHits` lost its hit on both WebGPU lanes (the second 5.4.28 sweep).
+  The reservation now covers every parameter with its own binding, and the header THROWS if a slot it assigns differs
+  from the reserved one ("WGSL scalar slots drifted"), so a mismatch can no longer be silent.
+- **FIX (Wasm): `IntLength` of a view in a SIMD-emitted kernel compiles.** `IntLength` is an Int32 view-length node, but
+  its local was always i64; the scalar code coerces by the local's type, the SIMD emitter types by the IR and splatted the
+  i64 local with `i32x4.splat` (an invalid module: `o[i] = v.IntLength` of an `ArrayView<long>`, found by the new
+  `SubViewLength_*` test). The local now takes the node's width; and the SIMD emitter falls back to scalar for a uniform
+  64-bit value (it has no 4-lane splat for one).
 - **FIX (forks): a `DelegateSpecialization` kernel launches through ITS accelerator's launcher.** The router cached the
   typed launcher of each specialized kernel in a static dictionary keyed by `accelerator.GetHashCode()`; object hash codes
   are not unique, so a new accelerator whose hash matched a disposed one's got the disposed one's launcher and failed
