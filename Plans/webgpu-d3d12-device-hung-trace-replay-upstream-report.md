@@ -321,3 +321,16 @@ storage. A size threshold decides which arrays move (both failing kernels' array
 in registers). Estimate: several days with tests on all WebGPU lanes. Alternative narrower mitigation: only for kernels
 that would otherwise hit the failing combination; but the combination spans two kernels, so a per-kernel rule is the
 practical one.
+
+### Retest after a reboot, then on the latest NVIDIA driver (Data, 2026-11-12, 6 resets)
+TJ asked for a clean-boot retest before any ILGPU rewrite (a stale GPU state once mimicked a bug). Fresh installed Chrome
+157.0.8103.52, replaydrive.cs, RTX 4070:
+| replay | 596.21 after reboot (09:05) | 621.14 Studio, 32.0.16.2114 (09:13) |
+|---|---|---|
+| trace.jsonl (original) | LOST at 828 | LOST at 828 |
+| trace_next_dispatch_trivial.jsonl | LOST at 828 | LOST at 828 |
+| variants/trace_synth_parse_arrays_short.jsonl | LOST at 828 | LOST at 828 |
+| variants/trace_victim_stores.jsonl (control) | ALIVE 854/855 | ALIVE 854/855 |
+Identical to every earlier window. Not a stale GPU state, and not fixed in the latest driver: the report can say "reproduces
+on 621.14". Logged in _TestStats/SpawnDev.ILGPU.jsonl. Per TJ, the ILGPU mitigation waits for a review by Fable of whether it
+is the REQUIRED path.
