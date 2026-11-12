@@ -373,3 +373,13 @@ is the REQUIRED path.
   Instance reference no longer exists"): a separate D3D11-path failure, not this case, not investigated.
 - Public test page: https://lostbeard.github.io/webgpu-device-hung-test/ (repo LostBeard/webgpu-device-hung-test): control
   1652 / test 1653 / fix. RTX 4070 test LOST 828; RTX 2060 (Seven) and RX 590 (Lore) all pass on the page.
+- Warf's laptop (12:4x, page, Windows 10, Chrome .51, D3D12): GeForce 940MX (maxwell, 430.63) and Intel HD 620 (gen-9,
+  31.0.101.2145): control, test and fix all pass, no TDR. Chrome on Windows ignores powerPreference (crbug 369219127): GPU
+  chosen per pass via the Windows per-app graphics preference. Affected so far: RTX 4070 ONLY (5 GPUs, 3 vendors tested).
+- SEPARATE FINDING, D3D11 (`--use-webgpu-adapter=d3d11`): compiling only Vp9EncodeWavefrontBatchKernel (27,667 lines) on the
+  4070: synchronous createComputePipeline -> WebGPU instance dropped at exactly 60.1 s ("A valid external Instance reference
+  no longer exists"); createComputePipelineAsync -> done after 193.0 s; D3D12 sync -> 9.8 s. Explains the D3D11 control
+  loss at record 243/244 (4070 and RX 590). ILGPU's default load path is the SYNC createComputePipeline
+  (WebGPUComputeShader ctor, ~line 77); the async precompile path (CreateAsync) survives. Probe: case2/d3d11/compile.html +
+  probedrive.cs. Not filed; TJ to decide (Chromium report: sync compile > 60 s drops the instance; ILGPU: D3D11 compile
+  time of giant kernels / prefer async pipeline creation).
