@@ -3,6 +3,12 @@
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 ## 5.4.30 (forks 2.4.29) - 2026-11-12 - WebGPU / WebGL: 64-bit index arithmetic computed in 32 bits; WebGPU on NVIDIA: submit after a kernel with large function-scope arrays (workaround, issue #10)
 
+Verified outside this repo on 5.4.30-local.2: SpawnDev.Codecs 4affcf4 (Geordi, RTX 4070) WebGPU lane 1,194 passed, 0
+failed, 2 skipped; WebGL lane 405 passed, 0 failed, 1 skipped; the 282 VP9 WebGPU tests took 1,243.3 s on 5.4.30-local.1
+and 1,106.1 s on local.2 (11.0% less, same machine and day, nothing else running). On 5.4.30-local.1: the original VP9
+parse kernel (1,656 ints of function-scope arrays) passes with the NVIDIA flush and loses the device with it switched off.
+Release sweep (full default, code 29f2ea9): 9,116 cases, 8,388 passed, 0 failed, 728 skipped, 54 min (RTX 4070, Chrome).
+
 - **PERF (WebGPU, WebGL; shader size, compile time, speed): 64-bit integer arithmetic whose low 32 bits are all that is
   read is computed in 32 bits.** Both backends emulate 64-bit integers (a library function per operation, which the
   D3D shader compiler inlines), and both index views with 32 bits. `view[(long)i * stride + offset]`, a sub-view offset
