@@ -360,3 +360,9 @@ is the REQUIRED path.
 - Chrome version ruled out (11:41): Seven, RTX 2060 on Chrome for Testing 157.0.8103.50 (older than our .52): ALIVE. Data,
   RTX 4070 on Chrome for Testing 157.0.8103.78 (Seven's version): LOST at 828. Same Chrome, different result per GPU: the
   difference is the GPU (lovelace vs turing) or timing, not Chrome. Reproduces on the latest Chrome and the latest driver.
+- AMD (Lore, 11:57): f16-free portable traces (`tools/portable.py`: `enable f16;` removed, no optional features, only
+  maxStorageBuffersPerShaderStage 10; validated on the 4070: trace LOST 828, control ALIVE, same as the originals). RX 590
+  (amd / gcn-4, driver 31.0.21925.1001, Chrome 157.0.8103.51): all 5 traces ALIVE on D3D12 and on Vulkan (11 runs, device
+  verified created, 0 errors, original trace 9/9 readbacks identical, no TDR). Vulkan selected by flags, not read back.
+  Affected so far: RTX 4070 (lovelace) only. Unaffected: RTX 2060 (turing), RX 590 (gcn-4). Details:
+  `_DevComms/2026-11-12-1157-Lore-TO-Data-rx590-portable-results.md`, `case2/lore/`.
