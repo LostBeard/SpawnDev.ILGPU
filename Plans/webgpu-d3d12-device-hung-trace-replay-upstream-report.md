@@ -366,3 +366,10 @@ is the REQUIRED path.
   verified created, 0 errors, original trace 9/9 readbacks identical, no TDR). Vulkan selected by flags, not read back.
   Affected so far: RTX 4070 (lovelace) only. Unaffected: RTX 2060 (turing), RX 590 (gcn-4). Details:
   `_DevComms/2026-11-12-1157-Lore-TO-Data-rx590-portable-results.md`, `case2/lore/`.
+- CORRECTION (Lore, 12:31): the RX 590 "Vulkan" runs above were D3D12. Chrome on Windows has no real-GPU Vulkan WebGPU:
+  `--use-webgpu-adapter` takes default / d3d11 / opengles / swiftshader, and with `--enable-webgpu-developer-features`
+  adapter.info.backend reads "D3D12" with the Vulkan flags set. RX 590 = D3D12 only (11 + 3 runs, all alive). On D3D11
+  (`--use-webgpu-adapter=d3d11`) even the control loses the device at record 243/244 after 89.6 s ("A valid external
+  Instance reference no longer exists"): a separate D3D11-path failure, not this case, not investigated.
+- Public test page: https://lostbeard.github.io/webgpu-device-hung-test/ (repo LostBeard/webgpu-device-hung-test): control
+  1652 / test 1653 / fix. RTX 4070 test LOST 828; RTX 2060 (Seven) and RX 590 (Lore) all pass on the page.
