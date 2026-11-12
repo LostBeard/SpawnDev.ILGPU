@@ -5,7 +5,7 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
 
 Verified outside this repo on 5.4.29-local.1: SpawnDev.Codecs (Geordi) CUDA repro gives 254 for 254.9 (was 127), and its
 float RGB -> RGBA8 frames-to-video helper on CUDA now matches Velocity / CPU exactly (worst 30.0 dB, identical file sizes).
-Release sweep: SWEEP_PENDING.
+Release sweep (full default, code 2a7b206): 9,056 cases, 8,344 passed, 0 failed, 712 skipped, 54 min (RTX 4070, Chrome).
 
 - **FIX (forks, IR; seen on CUDA): `(byte)(int)f` and the like keep the low bits of the INT, not a saturated float.** When a
   conversion is built from another conversion, an integer narrowing of an integer narrowing is folded into one. The float
