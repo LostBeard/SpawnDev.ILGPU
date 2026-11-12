@@ -1,7 +1,11 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## Unreleased (local feed 5.4.29-local.1, forks 2.4.28-local.1)
+## 5.4.29 (forks 2.4.28) - 2026-11-12 - (byte)(int)f and similar conversion chains keep the int's low bits (were saturated on CUDA)
+
+Verified outside this repo on 5.4.29-local.1: SpawnDev.Codecs (Geordi) CUDA repro gives 254 for 254.9 (was 127), and its
+float RGB -> RGBA8 frames-to-video helper on CUDA now matches Velocity / CPU exactly (worst 30.0 dB, identical file sizes).
+Release sweep: SWEEP_PENDING.
 
 - **FIX (forks, IR; seen on CUDA): `(byte)(int)f` and the like keep the low bits of the INT, not a saturated float.** When a
   conversion is built from another conversion, an integer narrowing of an integer narrowing is folded into one. The float
