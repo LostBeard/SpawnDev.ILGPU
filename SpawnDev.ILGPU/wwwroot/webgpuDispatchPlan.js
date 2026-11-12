@@ -3,7 +3,10 @@
 // _content/SpawnDev.ILGPU/webgpuDispatchPlan.js - the glWorker.js static-asset pattern).
 //
 // A dispatch plan is a flat JS array of 7-element tagged records:
-//   [0, pipeline, bindGroup, x, y, z, 0]                      - compute dispatch
+//   [0, pipeline, bindGroup, x, y, z, submitAfter]            - compute dispatch (submitAfter 1 = end the
+//                                                               command buffer right after it: the NVIDIA
+//                                                               large-function-array WORKAROUND,
+//                                                               https://github.com/LostBeard/SpawnDev.ILGPU/issues/10)
 //   [1, srcBuffer, srcOffset, dstBuffer, dstOffset, size, 0]  - copyBufferToBuffer
 //   [2, buffer, offset, size, 0, 0, 0]                        - clearBuffer (zero-fill)
 // It is recorded ONCE by WebGPUDispatchPlan during a capture forward (the plan array holding the
@@ -273,8 +276,10 @@
                     pass.setBindGroup(0, plan[i + 2]);
                     pass.dispatchWorkgroups(plan[i + 3], plan[i + 4], plan[i + 5]);
                     pass.end();
-                    // Close the batch only BETWEEN operations, never inside a pass.
-                    if (++passesInBatch >= cap) {
+                    // Close the batch only BETWEEN operations, never inside a pass. A dispatch marked submitAfter
+                    // (WORKAROUND, issue #10) must not share its command buffer with anything after it.
+                    ++passesInBatch;
+                    if (plan[i + 6] === 1 || passesInBatch >= cap) {
                         flush();
                         enc = device.createCommandEncoder();
                     }
@@ -318,7 +323,7 @@
             const qsOf = k => querySets[Math.floor(k / QS_CAP)];
             const qiOf = k => k % QS_CAP;
 
-            const enc = device.createCommandEncoder();
+            let enc = device.createCommandEncoder();
             // The last pass also writes the closing timestamp (its end). timestampWrites targets ONE
             // query set, so if that end index would land in the next chunk (passes ≡ 0 mod 4096),
             // skip it - the last pass then simply has no duration row (correct, just one row short).
@@ -337,6 +342,12 @@
                     pass.dispatchWorkgroups(plan[i + 3], plan[i + 4], plan[i + 5]);
                     pass.end();
                     k++;
+                    // WORKAROUND (issue #10): keep the live path's submit boundary. Query sets are device objects, so
+                    // the resolve in the final command buffer still reads every timestamp written before it.
+                    if (plan[i + 6] === 1) {
+                        device.queue.submit([enc.finish()]);
+                        enc = device.createCommandEncoder();
+                    }
                 } else if (tag === 1) {
                     enc.copyBufferToBuffer(plan[i + 1], plan[i + 2], plan[i + 3], plan[i + 4], plan[i + 5]);
                 } else if (tag === 2) {

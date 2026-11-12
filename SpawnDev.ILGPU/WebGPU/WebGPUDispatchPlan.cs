@@ -213,6 +213,23 @@ public sealed class WebGPUDispatchPlan : IDisposable
         DispatchCount++;
     }
 
+    /// <summary>
+    /// Marks the dispatch just recorded so the replay submits right after it (its record's 7th slot = 1). WORKAROUND
+    /// support for https://github.com/LostBeard/SpawnDev.ILGPU/issues/10: the live dispatch path submits after a kernel
+    /// with large function-scope arrays on NVIDIA, and a replay of the captured plan must keep that boundary.
+    /// </summary>
+    internal void MarkSubmitAfterLastDispatch()
+    {
+        if (DispatchCount == 0) return;
+        // Every record is 7 slots (Record / RecordCopy / RecordClear each push 7 and count 1), and this is called
+        // right after Record, so the last record is the dispatch to mark.
+        _plan.JSRef!.Set(DispatchCount * 7 - 1, 1);
+        SubmitBoundaryCount++;
+    }
+
+    /// <summary>Number of recorded dispatches the replay submits after (see <see cref="MarkSubmitAfterLastDispatch"/>).</summary>
+    public int SubmitBoundaryCount { get; private set; }
+
     /// <summary>Record an encoder-level buffer copy (Concat assembly, coalesce gathers, device copies) -
     /// these move data recomputed by earlier replayed dispatches, so a replay must re-run them in order.</summary>
     internal void RecordCopy(GPUBuffer src, ulong srcOffset, GPUBuffer dst, ulong dstOffset, ulong size)

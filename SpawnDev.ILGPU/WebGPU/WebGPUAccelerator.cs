@@ -267,6 +267,42 @@ namespace SpawnDev.ILGPU.WebGPU
         /// </summary>
         public int BindGroupCacheEntryCount => _bindGroupCache.Count;
 
+        private bool? _isNvidiaAdapter;
+        /// <summary>
+        /// True when the GPU behind this accelerator is NVIDIA: the device's <c>adapterInfo.vendor</c> (which also covers
+        /// a device handed in by another library), else the adapter's vendor read at device creation. False when neither
+        /// is available. Gates <see cref="WebGPUBackend.NvidiaLargeFunctionArrayFlush"/>.
+        /// </summary>
+        public bool IsNvidiaAdapter => _isNvidiaAdapter ??= DetectNvidiaAdapter();
+
+        private bool DetectNvidiaAdapter()
+        {
+            string? vendor = null;
+            try
+            {
+                using var info = NativeAccelerator?.NativeDevice?.AdapterInfo;
+                vendor = info?.Vendor;
+            }
+            catch { /* GPUDevice.adapterInfo is newer than WebGPU itself; fall back to the adapter read at creation */ }
+            if (string.IsNullOrWhiteSpace(vendor) && Device is WebGPUILGPUDevice ilgpuDevice)
+            {
+                try { vendor = ilgpuDevice.NativeDevice?.Vendor; } catch { }
+            }
+            return vendor != null && vendor.Contains("nvidia", StringComparison.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Number of times this accelerator's stream submitted its pending work (each <c>FlushPending</c> that had
+        /// anything to submit). A diagnostic: tests use it to see where batch boundaries fall.
+        /// </summary>
+        public long StreamSubmitCount { get; private set; }
+
+        /// <summary>
+        /// Number of submits made by the NVIDIA large-function-array workaround
+        /// (<see cref="WebGPUBackend.NvidiaLargeFunctionArrayFlush"/>, https://github.com/LostBeard/SpawnDev.ILGPU/issues/10).
+        /// </summary>
+        public long LargeFunctionArrayFlushCount { get; private set; }
+
         /// <summary>Called by the stream immediately after a Submit: every recorded dispatch is now on the
         /// queue, so no cached entry's scalar buffer can still be referenced by unexecuted work and each
         /// becomes rewritable again. Cheap - the cache is small and this runs once per flush, not per
@@ -3066,6 +3102,20 @@ namespace SpawnDev.ILGPU.WebGPU
                     coalescedBuffersToDestroyAfterDispatch.Clear();
                 }
 
+                // WORKAROUND: https://github.com/LostBeard/SpawnDev.ILGPU/issues/10 (upstream crbug 585125915).
+                // On NVIDIA, a kernel with large function-scope arrays followed by any other dispatch in the SAME
+                // submit leaves the device to die on a later kernel (DXGI_ERROR_DEVICE_HUNG, measured on an RTX 4070).
+                // Submit right after it (no wait) so nothing shares its submit; a captured plan gets the same
+                // boundary at replay. See WebGPUBackend.NvidiaLargeFunctionArrayFlush. Remove when upstream is fixed.
+                if (WebGPUBackend.NvidiaLargeFunctionArrayFlush
+                    && compiledKernel.FunctionArrayBytes > WebGPUBackend.NvidiaLargeFunctionArrayFlushBytes
+                    && webGpuAccel.IsNvidiaAdapter)
+                {
+                    capturePlan?.MarkSubmitAfterLastDispatch();
+                    webGpuStream.FlushPending();
+                    webGpuAccel.LargeFunctionArrayFlushCount++;
+                }
+
                 // CPU-prologue profiling: record this dispatch's phase split (encode phase includes the
                 // post-encode dispatch-record bookkeeping). Only reached on the success path.
                 if (_prof)
@@ -3787,6 +3837,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 // fixed-shape decode loop keep rewriting its scalars every step while a batched graph
                 // cannot corrupt an in-flight dispatch. See BindGroupCacheEntry.UsedSinceFlush.
                 _webGpuAccelerator.MarkBindGroupCacheFlushed();
+                _webGpuAccelerator.StreamSubmitCount++;
 
                 // Clean up deferred resources
                 foreach (var bg in _pendingBindGroups)

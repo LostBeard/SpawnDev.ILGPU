@@ -284,6 +284,29 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public static bool EnableDispatchBatching { get; set; } = true;
 
         /// <summary>
+        /// WORKAROUND for https://github.com/LostBeard/SpawnDev.ILGPU/issues/10 (upstream:
+        /// https://issues.chromium.org/issues/585125915): on an NVIDIA adapter, end the batch (one queue submit, no
+        /// wait) right after dispatching a kernel whose WGSL function-scope arrays exceed
+        /// <see cref="NvidiaLargeFunctionArrayFlushBytes"/> per invocation. True by default.
+        /// </summary>
+        /// <remarks>
+        /// On an RTX 4070 (Chrome, Edge, Chrome Canary; D3D12), a kernel holding more than 6608 bytes of such arrays per
+        /// thread, followed by ANY other dispatch in the same submit, leaves the device to die later, on the next large
+        /// kernel, with DXGI_ERROR_DEVICE_HUNG. A submit right after that kernel prevents it (measured; the public test
+        /// page https://lostbeard.github.io/webgpu-device-hung-test/ reproduces it). Other GPUs tested and Firefox are
+        /// not affected. The cost is one extra submit per such kernel, which are rare. To be removed when the upstream
+        /// issue is fixed. Set false to measure, or to check whether a driver / browser still needs it.
+        /// </remarks>
+        public static bool NvidiaLargeFunctionArrayFlush { get; set; } = true;
+
+        /// <summary>
+        /// Per-invocation function-scope array bytes above which <see cref="NvidiaLargeFunctionArrayFlush"/> submits after
+        /// the kernel. Default 4096: the edge measured on the RTX 4070 is 6608 bytes (1652 i32 pass, 1653 lose the
+        /// device); 4096 leaves a margin for NVIDIA GPUs not tested (TJ 2026-11-12).
+        /// </summary>
+        public static long NvidiaLargeFunctionArrayFlushBytes { get; set; } = 4096;
+
+        /// <summary>
         /// The batch submit encodes a run of consecutive dispatches into ONE compute pass instead of a pass per dispatch
         /// (wwwroot/webgpuDispatchPlan.js <c>submitBatch</c>). Ordering is unchanged by the spec: each dispatch in a
         /// compute pass is its own usage scope, so storage writes are visible to the next dispatch as across passes.
@@ -1769,6 +1792,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         public bool UsesGridIdxZ =>
             _usesGridIdxZ ??= WGSLSource.Contains("// @uses_grid_idx_z");
+
+        private long? _functionArrayBytes;
+        /// <summary>
+        /// Bytes of <c>function</c> / <c>private</c> address-space arrays the kernel's WGSL declares per invocation (an
+        /// upper bound; see <see cref="WgslFunctionArrays"/>). Measured once from <see cref="WGSLSource"/>, so it also
+        /// holds for kernels rebuilt from the shader artifact cache. Drives the NVIDIA large-function-array workaround
+        /// (<see cref="WebGPUBackend.NvidiaLargeFunctionArrayFlush"/>, https://github.com/LostBeard/SpawnDev.ILGPU/issues/10).
+        /// </summary>
+        public long FunctionArrayBytes =>
+            _functionArrayBytes ??= WgslFunctionArrays.EstimateBytes(WGSLSource);
 
         private static (int X, int Y, int Z) ParseCompiledWorkgroupSize(string wgsl)
         {

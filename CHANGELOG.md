@@ -1,6 +1,29 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.30 (forks 2.4.28) - unreleased (5.4.30-local.1) - WebGPU on NVIDIA: submit after a kernel with large function-scope arrays (workaround, issue #10)
+
+- **WORKAROUND (WebGPU, NVIDIA only): the batch is submitted right after a kernel whose function-scope arrays exceed
+  4096 bytes per thread.** On an NVIDIA RTX 4070 (Chrome, Edge, Chrome Canary; D3D12), a kernel holding more than 6608
+  bytes of such arrays per thread, followed by ANY other dispatch in the same submit, leaves the device to die later, on
+  the next large kernel, with `DXGI_ERROR_DEVICE_HUNG`; a submit right after that kernel prevents it. RTX 2060, GeForce
+  940MX, RX 590, Intel HD 620 and Firefox (wgpu) on the 4070 are not affected. Reported upstream as
+  https://issues.chromium.org/issues/585125915, tracked in https://github.com/LostBeard/SpawnDev.ILGPU/issues/10, public
+  test page https://lostbeard.github.io/webgpu-device-hung-test/. The workaround will be removed when upstream is fixed.
+  - `WebGPUBackend.NvidiaLargeFunctionArrayFlush` (default true) and `NvidiaLargeFunctionArrayFlushBytes` (default 4096; the
+    measured edge is 6608, the margin covers NVIDIA GPUs not tested).
+  - The measure comes from the finished WGSL (`WgslFunctionArrays.EstimateBytes`, exposed as
+    `WebGPUCompiledKernel.FunctionArrayBytes`): `function` and `private` arrays, an upper bound, so it also holds for
+    kernels rebuilt from the shader artifact cache.
+  - `WebGPUAccelerator.IsNvidiaAdapter` (the device's `adapterInfo.vendor`, else the adapter's), `StreamSubmitCount` and
+    `LargeFunctionArrayFlushCount` (diagnostics).
+  - A captured dispatch plan keeps the boundary: the dispatch record's 7th slot marks "submit after", and `replay` /
+    `replayTimed` end the command buffer there (`WebGPUDispatchPlan.SubmitBoundaryCount`).
+  - Tests: `LargeFunctionArray_ThenFollowUp_MatchesOracle` (all backends), `LargeFunctionArray_NvidiaFlush_SubmitsRightAfterKernel`
+    and `LargeFunctionArray_DispatchPlan_KeepsSubmitBoundary` (WebGPU: one submit right after the kernel on NVIDIA, none
+    with the switch off or under the threshold), `WgslFunctionArrays_Measure`. Red-check (hook disabled): both WebGPU
+    guards fail ("workaround flushes 0", "plan has 0 submit boundaries, expected 1").
+
 ## 5.4.29 (forks 2.4.28) - 2026-11-12 - (byte)(int)f and similar conversion chains keep the int's low bits (were saturated on CUDA)
 
 Verified outside this repo on 5.4.29-local.1: SpawnDev.Codecs (Geordi) CUDA repro gives 254 for 254.9 (was 127), and its
