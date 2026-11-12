@@ -288,3 +288,10 @@ mechanism partly isolated; NOT yet a codec-free repro.
 Real-kernel cut available (Geordi): SpawnDev.Codecs\_patches\vp9-encoder-wavefront-device-scratch-2026-11-11.patch moves the
 victim's 5 big private arrays to device scratch; a trace recorded with it (tracer.js via Codecs PMT_INIT_SCRIPT) tests
 "real victim without its private arrays" alongside the synthetic steps.
+
+### Window 9 (2026-11-12 ~08:30, 0 resets): the mixed synthetic victim does not reproduce either
+`?victim=mixed`: 9 private arrays (5 x 256 + 2 x 16 + 2 x 8) passed by pointer into a helper that mixes them and stores bytes
+as atomicOr + atomicAnd (plus atomicLoad), 64 sites a call, 64 threads; ran ~4 ms (the driver may simplify it). Control and
+trigger both ALIVE. Synthetic search PAUSED here. Status for the report: the trigger half is codec-free and shown; the victim
+needs the real encoder kernel (its sub-word stores necessary, window 7). Most informative next step: a real-kernel cut via a
+trace recorded with Geordi's device-scratch patch (victim without its big private arrays).
