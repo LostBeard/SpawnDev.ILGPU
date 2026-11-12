@@ -383,3 +383,9 @@ is the REQUIRED path.
   (WebGPUComputeShader ctor, ~line 77); the async precompile path (CreateAsync) survives. Probe: case2/d3d11/compile.html +
   probedrive.cs. Not filed; TJ to decide (Chromium report: sync compile > 60 s drops the instance; ILGPU: D3D11 compile
   time of giant kernels / prefer async pipeline creation).
+- FILED 2026-11-12: Chromium https://issues.chromium.org/issues/585125915 (TJ, Blink>WebGPU; text in
+  _upstream_reports/webgpu-device-hung-drafts/chromium-form/). Tracking: https://github.com/LostBeard/SpawnDev.ILGPU/issues/10.
+  Browsers on the 4070: Canary + Edge affected, Firefox (wgpu) not. TJ APPROVED the workaround: submit (no wait) after a
+  kernel whose local arrays exceed 6608 B per thread, NVIDIA adapters only, WebGPUBackend off switch, removed when upstream
+  is fixed. Tests (Seven): ILGPU mechanics (two submits, red-checked with the switch) + Codecs end to end (original Parse
+  arrays, no parse wait: passes with the flush, hangs with it off). Every `// WORKAROUND:` links issue #10.
