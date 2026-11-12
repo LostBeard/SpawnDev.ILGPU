@@ -6,6 +6,15 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
 Verified outside this repo on 5.4.28-local.1: SpawnDev.Codecs (Geordi) full WebGPU lane 1,188 passed, 0 failed, its
 warm-up guard (built on loads) passes. Release sweep: SWEEP_PENDING.
 
+- **FIX (forks): a `DelegateSpecialization` kernel launches through ITS accelerator's launcher.** The router cached the
+  typed launcher of each specialized kernel in a static dictionary keyed by `accelerator.GetHashCode()`; object hash codes
+  are not unique, so a new accelerator whose hash matched a disposed one's got the disposed one's launcher and failed
+  ("Creating compute shader 'Kernel_BroadcastBinaryKernel_Specialized': this WebGPU accelerator has been disposed",
+  SpawnDev.ILGPU.ML's `Vad_Reset_ReproducesTheStreamExactly` on WebGPU, only in suite order; Tuvok 2026-11-11). Now a
+  `ConditionalWeakTable` keyed by the accelerator object, so an accelerator's launchers also go when it is collected.
+  A hash collision cannot be forced in a test; the existing DelegateSpecialization tests run on every backend, and ML's
+  suite (which hit it) re-runs on 5.4.28. (Found on the way: the unused `DelegateSpecializationHelper` caches a kernel by
+  method pair with no accelerator in the key; it has no callers.)
 - **FIX (WebGPU): `view.Length` / `IntLength` read inside a kernel is the view's own length for a host SubView at any
   offset.** WebGPU binds a storage buffer from the 256-byte boundary below the view (the binding offset alignment) and
   sizes the binding to include that padding; the kernel took a view parameter's length from `arrayLength()` of the

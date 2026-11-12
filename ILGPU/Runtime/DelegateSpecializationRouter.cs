@@ -13,6 +13,7 @@ using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Diagnostics.CodeAnalysis;
 
 namespace ILGPU.Runtime
@@ -33,10 +34,15 @@ namespace ILGPU.Runtime
     /// </remarks>
     internal static class DelegateSpecializationRouter
     {
-        // (accelerator, original kernel method, specialization target) -> typed launcher of the synthetic kernel
-        private static readonly ConcurrentDictionary<
-            (int accelId, MethodInfo original, MethodInfo target),
-            Delegate> _launchers = new();
+        // accelerator -> (original kernel method, specialization target) -> typed launcher of the synthetic kernel.
+        // Keyed by the accelerator OBJECT (a weak key: an accelerator's launchers go when it is collected). It was keyed by
+        // accelerator.GetHashCode(), which is not unique: a new accelerator with the hash of a disposed one got the
+        // disposed one's cached launcher ("Creating compute shader ...: this WebGPU accelerator has been disposed",
+        // SpawnDev.ILGPU.ML's Vad_Reset test in suite order on WebGPU, Tuvok 2026-11-11), and the static dictionary kept
+        // every disposed accelerator alive through its launchers.
+        private static readonly ConditionalWeakTable<
+            Accelerator,
+            ConcurrentDictionary<(MethodInfo original, MethodInfo target), Delegate>> _launchers = new();
 
         /// <summary>The wrapped delegate of a DelegateSpecialization&lt;T&gt; argument, read without reflection.</summary>
         private static Delegate SpecializedDelegate<TSpec>(TSpec specialization) where TSpec : struct =>
@@ -51,10 +57,11 @@ namespace ILGPU.Runtime
             Delegate specialized)
             where TLauncher : Delegate
         {
-            var key = (accelerator.GetHashCode(), originalMethod, specialized.Method);
-            if (_launchers.TryGetValue(key, out var launcher))
+            var launchers = _launchers.GetValue(accelerator, static _ => new());
+            var key = (originalMethod, specialized.Method);
+            if (launchers.TryGetValue(key, out var launcher))
                 return (TLauncher)launcher;
-            return (TLauncher)_launchers.GetOrAdd(
+            return (TLauncher)launchers.GetOrAdd(
                 key,
                 static (k, acc) => CreateLauncher<TLauncher>(acc, k.original, k.target),
                 accelerator);
