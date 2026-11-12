@@ -277,3 +277,11 @@ WGSLCodeGenerator.SubWordAtomicStore). Next: a fully synthetic page whose victim
 stores matter (recon planes vs coefficient shorts, store-site count vs dynamic count). ILGPU note: if it holds, a
 WebGPU-side mitigation could change the sub-word store lowering on D3D12 (the CAS form was measured to multiply D3D
 compile time in 5.4.8) - only after the report is nailed down (TJ 2026-11-11).
+
+### Window 8 (2026-11-12 ~05:45, 0 resets): byte stores alone do not make a synthetic victim die
+Page victim `?victim=bytes` (64 threads, unrolled byte stores as atomicOr + atomicAnd on packed atomic<u32> words, exactly
+ILGPU's lowering): control (A alone, then S) alive; trigger (A + B in one submit, then S) alive with 64 store sites x 4096
+loops and with 448 sites x 512 loops. So the victim's sub-word stores are NECESSARY (window 7) but not SUFFICIENT: the real
+victim also has 9 private arrays (5 x 256 + small, passed by pointer into a large NoInlining helper) and 432 atomicLoads.
+Next synthetic steps: a victim combining private arrays and byte stores; then the helper-call shape. Report status for TJ:
+mechanism partly isolated; NOT yet a codec-free repro.
