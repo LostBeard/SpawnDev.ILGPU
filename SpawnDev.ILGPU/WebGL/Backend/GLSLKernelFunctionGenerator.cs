@@ -4195,6 +4195,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
             if (isEmulatedI64)
             {
+                // both operands widened from 32 bits: a 32 x 32 -> 64 multiply (TryWideningMultiplyExpr)
+                if (TryWideningMultiplyExpr(value) is string wideningMultiply)
+                {
+                    AppendLine($"{prefix}{target} = {wideningMultiply};");
+                    return;
+                }
                 string? emulFunc = value.Kind switch
                 {
                     BinaryArithmeticKind.Add => "i64_add",

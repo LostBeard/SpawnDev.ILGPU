@@ -654,6 +654,64 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         #endregion
 
+        #region Widening multiply
+
+        /// <summary>
+        /// A 64-bit multiply whose operands are BOTH 32-bit values widened to 64 bits (a sign- or zero-extending
+        /// conversion of an int, or a constant in that range), as a 32 x 32 -> 64 multiply: <c>i64_mul_i32</c> /
+        /// <c>u64_mul_u32</c> (WGSLEmulationLibrary) do four 16-bit partial products where the general <c>u64_mul</c>
+        /// adds the two cross products of the high words. The shape of fixed-point transforms: SpawnDev.Codecs' AV1
+        /// encode kernel has 368 such products of an int by a cosine constant (2026-11-12). Null when
+        /// <paramref name="value"/> is not such a product.
+        /// </summary>
+        protected string? TryWideningMultiplyExpr(BinaryArithmeticValue value)
+        {
+            if (!Backend.EnableI64Emulation || value.Kind != BinaryArithmeticKind.Mul
+                || value.BasicValueType != BasicValueType.Int64)
+                return null;
+            var left = value.Left.Resolve();
+            var right = value.Right.Resolve();
+            if (left is PrimitiveValue && right is PrimitiveValue)
+                return null;
+            if (WidenedOperandExpr(left, signed: true) is string signedLeft
+                && WidenedOperandExpr(right, signed: true) is string signedRight)
+                return $"i64_mul_i32({signedLeft}, {signedRight})";
+            if (WidenedOperandExpr(left, signed: false) is string unsignedLeft
+                && WidenedOperandExpr(right, signed: false) is string unsignedRight)
+                return $"u64_mul_u32({unsignedLeft}, {unsignedRight})";
+            return null;
+        }
+
+        /// <summary>
+        /// The 32-bit value a 64-bit multiply operand was widened from, as an i32 (<paramref name="signed"/>) or u32
+        /// expression; null when the operand is not a 32-bit value extended that way.
+        /// </summary>
+        private string? WidenedOperandExpr(Value operand, bool signed)
+        {
+            if (operand is PrimitiveValue constant)
+            {
+                if (constant.BasicValueType != BasicValueType.Int64)
+                    return null;
+                long c = constant.Int64Value;
+                if (signed)
+                    return c >= int.MinValue && c <= int.MaxValue ? $"i32({c})" : null;
+                return c >= 0 && c <= uint.MaxValue ? $"{c}u" : null;
+            }
+            if (operand is ConvertValue convert
+                && convert.BasicValueType == BasicValueType.Int64
+                && convert.Value.BasicValueType == BasicValueType.Int32
+                && convert.IsSourceUnsigned != signed)
+            {
+                // The low word of the widened value, not the conversion's source: the widened value is the product's
+                // own operand, so it is in scope wherever the product is emitted (its source need not be).
+                string widened = Load(convert).ToString();
+                return signed ? $"bitcast<i32>({widened}.x)" : $"{widened}.x";
+            }
+            return null;
+        }
+
+        #endregion
+
         #region IR Traversal
 
         /// <summary>
@@ -1398,6 +1456,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     BinaryArithmeticKind.Xor => "i64_xor",
                     _ => null
                 };
+                if (TryWideningMultiplyExpr(value) is string wideningMultiply)
+                {
+                    AppendLine($"{target} = {wideningMultiply};");
+                    return;
+                }
                 if (emulI64Func != null)
                 {
                     AppendLine($"{target} = {emulI64Func}({left}, {right});");

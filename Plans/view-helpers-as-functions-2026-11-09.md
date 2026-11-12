@@ -324,3 +324,29 @@ Geordi 06:15: WebGPUCodecsTests.Vp9DecoderGpu_TypedArrayOverloads_MatchLibvpx PA
 5.4.24-local.1 (fence lifted for the run only), Chrome GPU peak 1.03 GB (5.4.23-local.3 before the call-site work:
 4.16 GB, device lost). The VP9 decoder runs on WebGPU. DONE for this plan's VP9 goal; remaining items are general
 (GLSL ported; Geordi's early-return tail duplication still unreproduced).
+
+## 2026-11-12 (Data): what D3D compiles now, and the next two levers
+
+Tool: `Scripts/WgslScreen` (`run.cmd`): every kernel of the suite and of a consumer assembly through
+`ShaderCompiler.Generate`, naga over each shader, and `wgsl_inline.py` (per fn: own lines, copies after full inlining,
+inlined size), with the narrowing pass on and off.
+
+Measured on all 568 Codecs kernels (c7d83bd): after Geordi's call-site rewrites the inlined size was mostly emulated
+64-bit arithmetic, not repeated helpers. Done in 5.4.30: `NarrowLowWordArithmetic` (index arithmetic in i32),
+`i64_mul` = `u64_mul`, `i64_mul_i32` / `u64_mul_u32` for products of widened 32-bit values (CHANGELOG has the table).
+
+Open, in order of measured size:
+- [ ] **Call-site merging (automatic).** Still real where the source has several call sites of one large helper:
+  `Vp8KeyframeDecodeStepKernel` = `DecodeOneBlock` 4,177 lines x 6 call sites = 25,062 of 44,542 inlined lines;
+  `Vp9EntropyStepKernel` = `EncodeBool` 265 x 22. Design (not started): an IR pass after
+  `InlineAddressParameterCalls`, per (callee, view-root tuple) group with >= 2 kept call sites and
+  (sites - 1) x callee size over a threshold: wrap the smallest single-entry region holding the sites in a dispatch
+  loop (`pc` variable + switch), one CALL case that reads its arguments / return case from local allocas, every other
+  case a single-entry chunk of the original CFG (chunk entries = the blocks whose immediate dominator is the virtual
+  root when every post-call block is a root; loops without a call site stay structured inside one case). Values live
+  across chunks go through local allocas; address values (views, element / field addresses) are rebuilt in the
+  using chunk from their scalar operands; a view-typed phi live across chunks, a barrier or a warp operation in the
+  region = no merge. The IR shape is the one a C# `for (;;) switch (pc)` produces, which every backend already
+  compiles (it is what Geordi wrote by hand for the VP9 decoder).
+- [ ] The i64 emulation library is emitted whole (about 315 lines, 49 fns) whenever one 64-bit value exists; unused
+  functions cost Tint a parse only (D3D never sees them). Trim if Tint time ever shows up.

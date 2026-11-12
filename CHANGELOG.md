@@ -1,7 +1,38 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.30 (forks 2.4.28) - unreleased (5.4.30-local.1) - WebGPU on NVIDIA: submit after a kernel with large function-scope arrays (workaround, issue #10)
+## 5.4.30 (forks 2.4.29) - unreleased - WebGPU / WebGL: 64-bit index arithmetic computed in 32 bits; WebGPU on NVIDIA: submit after a kernel with large function-scope arrays (workaround, issue #10)
+
+- **PERF (WebGPU, WebGL; shader size, compile time, speed): 64-bit integer arithmetic whose low 32 bits are all that is
+  read is computed in 32 bits.** Both backends emulate 64-bit integers (a library function per operation, which the
+  D3D shader compiler inlines), and both index views with 32 bits. `view[(long)i * stride + offset]`, a sub-view offset
+  and `(int)` / `(short)` / `(byte)` casts of `long` arithmetic paid an emulated add / multiply per operation for bits
+  that were then dropped. New IR pass `NarrowLowWordArithmetic` (forks): a 64-bit add, subtract, multiply, and / or /
+  xor, negate, not or constant left shift EVERY reader of which reads the low word (directly, or through other such
+  values, phis and selects) is computed on the low words of its operands; results are identical. A value with a
+  full-width reader (a comparison, a right shift, a division, a store) is untouched.
+  - Switches (default true): `WebGPUBackend.NarrowInt64LowWordArithmetic`, `WebGLBackend.NarrowInt64LowWordArithmetic`.
+  - `kernel-dump --no-narrow` (DemoConsole) dumps a kernel without it.
+- **PERF (WebGPU, WebGL): the emulated signed 64-bit multiply is one unsigned multiply.** `i64_mul` negated both
+  operands and the result around `u64_mul` (three `i64_neg`, each an `i64_add`); the low 64 bits of a product do not
+  depend on the signs. 63 lines per call after inlining, now 22.
+- **PERF (WebGPU, WebGL): a 64-bit product of two widened 32-bit values is a 32 x 32 -> 64 multiply.** When both
+  operands of a `long` multiply are an `int` (or `uint`) converted to 64 bits, or a constant in that range - the
+  `(long)x * cosine` of fixed-point transforms - the generators emit `i64_mul_i32` / `u64_mul_u32` (four 16-bit partial
+  products; the general multiply adds the two cross products of the high words).
+- Measured offline (no GPU; `ShaderCompiler.Generate`, WebGPU baseline profile; fully inlined line count = what the D3D
+  compiler sees), all 568 kernels of SpawnDev.Codecs c7d83bd, every one naga-valid before and after: 1,827,417 ->
+  1,342,153 lines in total (the two multiply changes alone, narrowing off: 1,605,707). AV1 encode step 77,268 ->
+  43,141, VP8 encode wavefront 66,785 -> 28,894, SILK output 62,937 -> 32,355, VP9 encode wavefront 55,606 -> 26,819,
+  AV1 decode step 42,104 -> 24,560. One kernel grew (Deflate emit, 1,686 -> 1,709). The 652 suite kernels: 214,611 ->
+  206,131, all naga-valid.
+  - Tests (all backends, host oracle): `LowWordNarrowing_ViewIndexArithmetic_MatchesHost` (intermediates far outside 32
+    bits that cancel, a loop-carried and a selected 64-bit index, a sub-view offset; on WebGPU also: no emulated
+    add / subtract / multiply left in the kernel, and at least 10 with the switch off) and
+    `LowWordNarrowing_CastsAndFullWidthReaders_MatchHost` (casts of results that do not fit 32 bits, shifts by 31 / 32 /
+    40 and by a run-time count, values read in both their low word and all 64 bits, signed products of every sign
+    combination read in their high bits, products of widened 32-bit operands: both signs, constants down to
+    int.MinValue, unsigned operands above 2^31).
 
 - **WORKAROUND (WebGPU, NVIDIA only): the batch is submitted right after a kernel whose function-scope arrays exceed
   4096 bytes per thread.** On an NVIDIA RTX 4070 (Chrome, Edge, Chrome Canary; D3D12), a kernel holding more than 6608

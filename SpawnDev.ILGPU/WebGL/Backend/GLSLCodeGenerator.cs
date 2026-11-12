@@ -510,6 +510,68 @@ namespace SpawnDev.ILGPU.WebGL.Backend
 
         #endregion
 
+        #region Widening multiply
+
+        /// <summary>
+        /// A 64-bit multiply whose operands are BOTH 32-bit values widened to 64 bits (a sign- or zero-extending
+        /// conversion of an int, or a constant in that range), as a 32 x 32 -> 64 multiply: <c>i64_mul_i32</c> /
+        /// <c>u64_mul_u32</c> (GLSLEmulationLibrary) do four 16-bit partial products where the general <c>u64_mul</c>
+        /// adds the two cross products of the high words (the shape of fixed-point transforms; see the WGSL generator).
+        /// Null when <paramref name="value"/> is not such a product.
+        /// </summary>
+        protected string? TryWideningMultiplyExpr(BinaryArithmeticValue value)
+        {
+            if (!Backend.EnableI64Emulation || value.Kind != BinaryArithmeticKind.Mul
+                || value.BasicValueType != BasicValueType.Int64)
+                return null;
+            var left = value.Left.Resolve();
+            var right = value.Right.Resolve();
+            if (left is PrimitiveValue && right is PrimitiveValue)
+                return null;
+            if (WidenedOperandExpr(left, signed: true) is string signedLeft
+                && WidenedOperandExpr(right, signed: true) is string signedRight)
+                return $"i64_mul_i32({signedLeft}, {signedRight})";
+            if (WidenedOperandExpr(left, signed: false) is string unsignedLeft
+                && WidenedOperandExpr(right, signed: false) is string unsignedRight)
+                return $"u64_mul_u32({unsignedLeft}, {unsignedRight})";
+            return null;
+        }
+
+        /// <summary>
+        /// The 32-bit value a 64-bit multiply operand was widened from, as an int (<paramref name="signed"/>) or uint
+        /// expression; null when the operand is not a 32-bit value extended that way.
+        /// </summary>
+        private string? WidenedOperandExpr(Value operand, bool signed)
+        {
+            if (operand is PrimitiveValue constant)
+            {
+                if (constant.BasicValueType != BasicValueType.Int64)
+                    return null;
+                long c = constant.Int64Value;
+                if (signed)
+                {
+                    if (c < int.MinValue || c > int.MaxValue)
+                        return null;
+                    // GLSL has no literal for int.MinValue (the minus is an operator on 2147483648, which is not an int)
+                    return c == int.MinValue ? "(-2147483647 - 1)" : $"({c})";
+                }
+                return c >= 0 && c <= uint.MaxValue ? $"{c}u" : null;
+            }
+            if (operand is ConvertValue convert
+                && convert.BasicValueType == BasicValueType.Int64
+                && convert.Value.BasicValueType == BasicValueType.Int32
+                && convert.IsSourceUnsigned != signed)
+            {
+                // The low word of the widened value, not the conversion's source: the widened value is the product's
+                // own operand, so it is in scope wherever the product is emitted (its source need not be).
+                string widened = Load(convert).ToString();
+                return signed ? $"int({widened}.x)" : $"{widened}.x";
+            }
+            return null;
+        }
+
+        #endregion
+
         #region IR Traversal
 
         /// <summary>
@@ -2194,6 +2256,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // already give the correct 64-bit result.
             if (leftIsEmuI64 && value.Kind is BinaryArithmeticKind.Add or BinaryArithmeticKind.Sub or BinaryArithmeticKind.Mul)
             {
+                // both operands widened from 32 bits: a 32 x 32 -> 64 multiply
+                if (TryWideningMultiplyExpr(value) is string wideningMultiply)
+                {
+                    AppendLine($"{target} = {wideningMultiply};");
+                    return;
+                }
                 string emulFn = value.Kind switch
                 {
                     BinaryArithmeticKind.Add => "i64_add",

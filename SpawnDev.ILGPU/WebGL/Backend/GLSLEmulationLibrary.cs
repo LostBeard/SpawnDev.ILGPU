@@ -750,14 +750,36 @@ uvec2 u64_mul(uvec2 a, uvec2 b) {
 }
 
 // emu_i64 multiplication
+// The low 64 bits of a product are the same for signed and unsigned operands (two's complement): this IS u64_mul.
+// It used to negate both operands and the result around it.
 uvec2 i64_mul(uvec2 a, uvec2 b) {
-    bool neg_a = (a.y & 0x80000000u) != 0u;
-    bool neg_b = (b.y & 0x80000000u) != 0u;
-    uvec2 abs_a = neg_a ? i64_neg(a) : a;
-    uvec2 abs_b = neg_b ? i64_neg(b) : b;
-    uvec2 result = u64_mul(abs_a, abs_b);
-    if (neg_a != neg_b) { result = i64_neg(result); }
-    return result;
+    return u64_mul(a, b);
+}
+
+// 32 x 32 -> 64-bit unsigned product: u64_mul without the two cross terms of the high words. For a product whose
+// operands are both 32-bit values widened to 64 bits (GLSLCodeGenerator.TryWideningMultiplyExpr).
+uvec2 u64_mul_u32(uint a, uint b) {
+    uint a_lo = a & 0xFFFFu;
+    uint a_hi = a >> 16u;
+    uint b_lo = b & 0xFFFFu;
+    uint b_hi = b >> 16u;
+    uint p0 = a_lo * b_lo;
+    uint p1 = a_lo * b_hi;
+    uint p2 = a_hi * b_lo;
+    uint p3 = a_hi * b_hi;
+    uint mid = (p0 >> 16u) + (p1 & 0xFFFFu) + (p2 & 0xFFFFu);
+    uint lo = (p0 & 0xFFFFu) | ((mid & 0xFFFFu) << 16u);
+    uint hi = p3 + (p1 >> 16u) + (p2 >> 16u) + (mid >> 16u);
+    return uvec2(lo, hi);
+}
+
+// 32 x 32 -> 64-bit signed product: the unsigned product of the bit patterns, less (b << 32) when a is negative and
+// (a << 32) when b is negative (a negative int read as uint is 2^32 too large).
+uvec2 i64_mul_i32(int a, int b) {
+    uint ua = uint(a);
+    uint ub = uint(b);
+    uvec2 p = u64_mul_u32(ua, ub);
+    return uvec2(p.x, p.y - (a < 0 ? ub : 0u) - (b < 0 ? ua : 0u));
 }
 
 // emu_u64 division and remainder: (quotient.lo, quotient.hi, remainder.lo, remainder.hi). Restoring long division,

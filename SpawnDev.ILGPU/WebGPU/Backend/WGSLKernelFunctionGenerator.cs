@@ -7627,6 +7627,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             if (isEmulatedI64)
             {
+                // both operands widened from 32 bits: a 32 x 32 -> 64 multiply (TryWideningMultiplyExpr)
+                if (TryWideningMultiplyExpr(value) is string wideningMultiply)
+                {
+                    AppendLine($"{prefix}{target} = {wideningMultiply};");
+                    return;
+                }
                 // Use emu_i64 emulation functions
                 // NOTE: TypeGenerator returns "emu_i64" for BOTH long AND ulong, because ILGPU's
                 // BasicValueType enum has no UInt64 member (only Int64). Signedness is tracked

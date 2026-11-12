@@ -6,7 +6,7 @@ using SpawnDev.ILGPU;
 
 // Offline shader dump for ANY static kernel method on BackendTestBase (public or private): writes
 // the WGSL, GLSL and Wasm that the browser backends would compile, with no device or browser.
-//   dotnet run -c Release --project SpawnDev.ILGPU.DemoConsole -- kernel-dump <MethodName> [outDir] [--ozaki] [--simd] [--verbose]
+//   dotnet run -c Release --project SpawnDev.ILGPU.DemoConsole -- kernel-dump <MethodName> [outDir] [--ozaki] [--simd] [--verbose] [--no-narrow]
 // --ozaki switches the WGSL/GLSL f64 emulation from the default Dekker (vec2) to Ozaki (vec4).
 // --verbose turns on the Wasm backend's codegen log (unhandled intrinsics, mappings).
 // --simd forces the Wasm SIMD128 kernel_simd variant (the browser default; desktop reports no SIMD).
@@ -23,7 +23,10 @@ public static class KernelDump
         bool ozaki = Array.IndexOf(args, "--ozaki") >= 0;
         bool simd = Array.IndexOf(args, "--simd") >= 0;
         bool verbose = Array.IndexOf(args, "--verbose") >= 0;
-        args = Array.FindAll(args, a => a != "--ozaki" && a != "--simd" && a != "--verbose");
+        // --no-narrow keeps emulated 64-bit index arithmetic in the WGSL (WebGPUBackend.NarrowInt64LowWordArithmetic = false)
+        if (Array.IndexOf(args, "--no-narrow") >= 0)
+            SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.NarrowInt64LowWordArithmetic = false;
+        args = Array.FindAll(args, a => a != "--ozaki" && a != "--simd" && a != "--verbose" && a != "--no-narrow");
         string name = args[1];
         var method = typeof(SpawnDev.ILGPU.Demo.Shared.UnitTests.BackendTestBase).GetMethod(
             name, BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Static)

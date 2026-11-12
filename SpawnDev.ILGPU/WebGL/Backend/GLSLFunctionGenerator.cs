@@ -73,6 +73,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             Builder.AppendLine("uvec2 i64_sub(uvec2 a, uvec2 b);");
             Builder.AppendLine("uvec2 i64_mul(uvec2 a, uvec2 b);");
             Builder.AppendLine("uvec2 u64_mul(uvec2 a, uvec2 b);");
+            Builder.AppendLine("uvec2 u64_mul_u32(uint a, uint b);");
+            Builder.AppendLine("uvec2 i64_mul_i32(int a, int b);");
             Builder.AppendLine("uvec2 i64_neg(uvec2 a);");
             Builder.AppendLine("uvec2 i64_abs(uvec2 a);");
             Builder.AppendLine("uvec2 i64_and(uvec2 a, uvec2 b);");

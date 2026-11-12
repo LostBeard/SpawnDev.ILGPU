@@ -284,6 +284,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         public static bool EnableDispatchBatching { get; set; } = true;
 
         /// <summary>
+        /// Computes 64-bit integer arithmetic in 32 bits where only its low 32 bits are read: the element index of a view
+        /// access, the offset of a sub-view, a conversion to a 32-bit or narrower integer
+        /// (<see cref="global::ILGPU.IR.Transformations.NarrowLowWordArithmetic"/>). Results are identical (the low word
+        /// of an add, subtract, multiply, and / or / xor, negate, not and a constant left shift depends only on the low
+        /// words of its operands; WGSL already indexes with 32 bits); the shader loses its emulated 64-bit calls for that
+        /// arithmetic. True by default; false keeps the 64-bit arithmetic (to compare shader size or speed). While false,
+        /// compiles neither read nor write the shader artifact cache (the setting is not part of its key); a kernel an
+        /// accelerator has already loaded keeps the shader it was loaded with.
+        /// </summary>
+        public static bool NarrowInt64LowWordArithmetic { get; set; } = true;
+
+        /// <summary>
         /// WORKAROUND for https://github.com/LostBeard/SpawnDev.ILGPU/issues/10 (upstream:
         /// https://issues.chromium.org/issues/585125915): on an NVIDIA adapter, end the batch (one queue submit, no
         /// wait) right after dispatching a kernel whose WGSL function-scope arrays exceed
@@ -801,6 +813,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     // `default(T)`); fold it before codegen (Tuvok's `if (default(TStruct).Flag)`, 2026-11-09).
                     new UnreachableCodeElimination(),
                     new SimplifyControlFlow(),
+                    // 64-bit integers are emulated here (a library function per operation, inlined by the D3D shader
+                    // compiler): index arithmetic done in `long` whose low word is all that is read - a view index, a
+                    // sub-view offset, an (int) cast - is computed in i32 instead (NarrowLowWordArithmetic). The dead
+                    // 64-bit originals go with the elimination below.
+                    new NarrowLowWordArithmetic(narrowViewIndices: true, () => NarrowInt64LowWordArithmetic),
                     new DeadCodeElimination()));
             });
 
@@ -1493,7 +1510,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             TBackendHook backendHook)
         {
             var method = entry.MethodSource;
-            if (method != null && ShaderArtifactCache.Enabled
+            // NarrowInt64LowWordArithmetic off is a different shader for the same key: that (diagnostic) setting neither
+            // reads nor writes the artifact cache
+            if (method != null && ShaderArtifactCache.Enabled && NarrowInt64LowWordArithmetic
                 && !ShaderArtifactCache.UsesRuntimeValueSpecialization(method)
                 && ShaderArtifactCache.TryPeek(method, ProfileForThisBackend(), specialization, out var art)
                 && art.Source is { } cachedWgsl
@@ -1544,7 +1563,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // this hook (SpecializationCache), so two distinct values are indistinguishable here -
             // there is no complete key. Skip the cache entirely (the per-value compiled-kernel cache
             // one level up already memoizes them, and they are never offline-precompilable).
-            bool cacheable = method != null && ShaderArtifactCache.Enabled
+            bool cacheable = method != null && ShaderArtifactCache.Enabled && NarrowInt64LowWordArithmetic
                 && !ShaderArtifactCache.UsesRuntimeValueSpecialization(method);
             if (cacheable)
             {

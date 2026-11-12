@@ -803,17 +803,37 @@ fn u64_mul(a: emu_u64, b: emu_u64) -> emu_u64 {
     return emu_u64(lo, hi);
 }
 
-// emu_i64 multiplication (uses u64_mul internally)
+// emu_i64 multiplication: the low 64 bits of a product are the same for signed and unsigned operands (two's
+// complement), so this IS u64_mul. It used to negate both operands and the result around it (three i64_neg, each an
+// i64_add): 63 lines per call once the shader compiler has inlined it, against 22.
 fn i64_mul(a: emu_i64, b: emu_i64) -> emu_i64 {
-    let neg_a = (a.y & 0x80000000u) != 0u;
-    let neg_b = (b.y & 0x80000000u) != 0u;
-    var abs_a = a;
-    var abs_b = b;
-    if (neg_a) { abs_a = i64_neg(a); }
-    if (neg_b) { abs_b = i64_neg(b); }
-    var result = u64_mul(abs_a, abs_b);
-    if (neg_a != neg_b) { result = i64_neg(result); }
-    return result;
+    return u64_mul(a, b);
+}
+
+// 32 x 32 -> 64-bit unsigned product: u64_mul without the two cross terms of the high words. For a product whose
+// operands are both 32-bit values widened to 64 bits (WGSLCodeGenerator.TryWideningMultiplyExpr).
+fn u64_mul_u32(a: u32, b: u32) -> emu_u64 {
+    let a_lo = a & 0xFFFFu;
+    let a_hi = a >> 16u;
+    let b_lo = b & 0xFFFFu;
+    let b_hi = b >> 16u;
+    let p0 = a_lo * b_lo;
+    let p1 = a_lo * b_hi;
+    let p2 = a_hi * b_lo;
+    let p3 = a_hi * b_hi;
+    let mid = (p0 >> 16u) + (p1 & 0xFFFFu) + (p2 & 0xFFFFu);
+    let lo = (p0 & 0xFFFFu) | ((mid & 0xFFFFu) << 16u);
+    let hi = p3 + (p1 >> 16u) + (p2 >> 16u) + (mid >> 16u);
+    return emu_u64(lo, hi);
+}
+
+// 32 x 32 -> 64-bit signed product: the unsigned product of the bit patterns, less (b << 32) when a is negative and
+// (a << 32) when b is negative (a negative i32 read as u32 is 2^32 too large).
+fn i64_mul_i32(a: i32, b: i32) -> emu_i64 {
+    let ua = bitcast<u32>(a);
+    let ub = bitcast<u32>(b);
+    let p = u64_mul_u32(ua, ub);
+    return emu_i64(p.x, p.y - select(0u, ub, a < 0) - select(0u, ua, b < 0));
 }
 
 // emu_u64 division and remainder: (quotient.lo, quotient.hi, remainder.lo, remainder.hi). Restoring long division,

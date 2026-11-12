@@ -51,6 +51,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         public static bool EnableShaderCaching { get; set; } = true;
 
         /// <summary>
+        /// Computes 64-bit integer arithmetic in 32 bits where only its low 32 bits are read: the element index of a view
+        /// access, the offset of a sub-view, a conversion to a 32-bit or narrower integer
+        /// (<see cref="global::ILGPU.IR.Transformations.NarrowLowWordArithmetic"/>). Results are identical; the shader
+        /// loses its emulated 64-bit calls for that arithmetic. True by default; false keeps the 64-bit arithmetic.
+        /// </summary>
+        public static bool NarrowInt64LowWordArithmetic { get; set; } = true;
+
+        /// <summary>
         /// Stores the last generated GLSL source for debugging.
         /// </summary>
         public static string? LastGeneratedGLSL { get; set; }
@@ -165,6 +173,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     // (Tuvok's `if (default(TStruct).Flag)`, 2026-11-09).
                     new UnreachableCodeElimination(),
                     new SimplifyControlFlow(),
+                    // As on WebGPU: 64-bit integers are emulated, and a view is indexed with an int. Index arithmetic done
+                    // in `long` whose low word is all that is read is computed in int instead.
+                    new NarrowLowWordArithmetic(narrowViewIndices: true, () => NarrowInt64LowWordArithmetic),
                     new DeadCodeElimination()));
             });
 
