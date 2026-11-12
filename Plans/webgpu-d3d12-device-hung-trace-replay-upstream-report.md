@@ -295,3 +295,17 @@ as atomicOr + atomicAnd (plus atomicLoad), 64 sites a call, 64 threads; ran ~4 m
 trigger both ALIVE. Synthetic search PAUSED here. Status for the report: the trigger half is codec-free and shown; the victim
 needs the real encoder kernel (its sub-word stores necessary, window 7). Most informative next step: a real-kernel cut via a
 trace recorded with Geordi's device-scratch patch (victim without its big private arrays).
+
+### Real-victim cut (Geordi, live, 2026-11-12 ~08:50, 0 resets): the victim's private arrays are required too
+Build: the ORIGINAL ParseKernel (1592-int private array, no parse wait) + the encoder wavefront kernels with their 5 big
+private arrays moved to device scratch (Codecs _patches/vp9-encoder-wavefront-device-scratch-2026-11-11.patch, not committed):
+`Vp9DecoderGpu_DecodesOwnKeyframeEncoder_LikeKeyframeDecoder` PASSED 1 of 1 on WebGPU; the same state with the unpatched
+victim was DEVICE_HUNG 5 of 5. Trace of the passing run (3,257 calls):
+`_upstream_reports/vp9-webgpu-device-hung-case2/geordi/case2_victim_devscratch_ALIVE.jsonl`.
+Picture now: (1) a kernel with large dynamically indexed function-scope arrays (DXC indexable temps / scratch), then ANY
+dispatch in the same submit; (2) later, a kernel that ALSO has large private arrays AND does sub-word atomic stores
+(window 7) loses the device. Moving the private arrays to device memory at EITHER end removes the hang (Parse: Codecs
+9292785, 281/281; victim: this cut). Synthetic victims with both features did not reproduce yet (window 9's ran ~4 ms;
+possibly simplified by the compiler), so the report still lacks a codec-free victim; but the evidence for an ILGPU
+mitigation (TJ 2026-11-11: "move large run-time-indexed private arrays out of function scope ... if 100% nailed down") is
+now on both ends of the failure.
