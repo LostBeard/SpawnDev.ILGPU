@@ -285,3 +285,6 @@ loops and with 448 sites x 512 loops. So the victim's sub-word stores are NECESS
 victim also has 9 private arrays (5 x 256 + small, passed by pointer into a large NoInlining helper) and 432 atomicLoads.
 Next synthetic steps: a victim combining private arrays and byte stores; then the helper-call shape. Report status for TJ:
 mechanism partly isolated; NOT yet a codec-free repro.
+Real-kernel cut available (Geordi): SpawnDev.Codecs\_patches\vp9-encoder-wavefront-device-scratch-2026-11-11.patch moves the
+victim's 5 big private arrays to device scratch; a trace recorded with it (tracer.js via Codecs PMT_INIT_SCRIPT) tests
+"real victim without its private arrays" alongside the synthetic steps.
