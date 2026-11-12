@@ -1,7 +1,7 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.30 (forks 2.4.29) - unreleased - WebGPU / WebGL: 64-bit index arithmetic computed in 32 bits; WebGPU on NVIDIA: submit after a kernel with large function-scope arrays (workaround, issue #10)
+## 5.4.30 (forks 2.4.29) - 2026-11-12 - WebGPU / WebGL: 64-bit index arithmetic computed in 32 bits; WebGPU on NVIDIA: submit after a kernel with large function-scope arrays (workaround, issue #10)
 
 - **PERF (WebGPU, WebGL; shader size, compile time, speed): 64-bit integer arithmetic whose low 32 bits are all that is
   read is computed in 32 bits.** Both backends emulate 64-bit integers (a library function per operation, which the
