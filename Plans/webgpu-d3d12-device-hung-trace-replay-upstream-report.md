@@ -350,3 +350,10 @@ is the REQUIRED path.
 - Conclusion (Seven + Data): the device-memory rewrite is NOT required. Candidates for TJ: the upstream report with the
   threshold and v3; optionally a submit boundary (FlushPending) after any kernel above the threshold (a WORKAROUND, needs
   TJ's approval; cost not measured); a compile-time diagnostic. Logged: _TestStats config case2-seven-variants-4070.
+- Unit (Seven's question; Data 11:39): the edge is identical at @workgroup_size 1, 64 and 256 (1652 alive, 1653 lost each):
+  PER-THREAD function-scope array bytes, not per group. Proven for i32 arrays on one GPU / driver only; any cut below 6608 B
+  is a safety margin for TJ to choose, not a finding. Real ParseKernel was 1592 + 64 = 1656 ints (4 over); the victim holds
+  1,328 (under). Seven's further points for the package: tests that can fail (ILGPU: kernel over the cut + second launch ->
+  two submits, red-checked with an off switch on WebGPUBackend; Codecs: original Parse arrays, no parse wait, must pass with
+  the flush and hang with it off), gate (if any) on adapter vendor "nvidia" not architecture, and the report openly states
+  the 2060 result and the Chrome .52 / .78 difference; module scope (v2) is not advice to give.
