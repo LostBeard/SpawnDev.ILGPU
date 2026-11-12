@@ -265,3 +265,15 @@ So the trigger part is codec-free (a large dynamically indexed private array, th
 device dies only on the REAL encoder wavefront kernel (27.7k lines, 9 private arrays up to 256 ints, ~1,335 atomics). What
 the victim needs is still unknown: the report is NOT yet "undeniable" by TJ's standard. Next: bisect the victim (its WGSL
 in the trace) the way IntraWave was, or find what it does that the synthetic victims do not.
+
+### Window 7 (2026-11-12 ~05:15, 1 reset): the VICTIM's sub-word atomic stores are required
+In the trace with the synthetic private-array ParseKernel + trivial dispatch (window 5, lost), the real
+Vp9EncodeWavefrontBatchKernel with its 448 sub-word store blocks removed (`{ let _swp = &paramN[i / 4u]; ...;
+atomicOr(_swp, b << s); atomicAnd(_swp, ~(~b & 0xFF) << s); }` -> `{ }`, everything else intact; scratchpad
+hang2/victimcut.py `stores`): ALIVE 2 of 2. The same trace with the victim uncut, run as a control in the same window: LOST
+at 828. So the device dies when, after a large private-array kernel + a dispatch in the same submit, a later kernel does
+byte / short stores as atomicOr + atomicAnd on packed atomic<u32> words (ILGPU's WGSL sub-word store lowering,
+WGSLCodeGenerator.SubWordAtomicStore). Next: a fully synthetic page whose victim does many such byte stores; and which
+stores matter (recon planes vs coefficient shorts, store-site count vs dynamic count). ILGPU note: if it holds, a
+WebGPU-side mitigation could change the sub-word store lowering on D3D12 (the CAS form was measured to multiply D3D
+compile time in 5.4.8) - only after the report is nailed down (TJ 2026-11-11).
