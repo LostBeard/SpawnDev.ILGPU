@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Build only through run.cmd. It passes:
+         -p:RefsDir=<outputRoot>\refs              the ILGPU snapshot this tool compiles against and runs against
+         -p:BaseIntermediateOutputPath=<root>/obj/ and -o <root>\bin, so no bin or obj folder is created in the repo.
+       This project is not in SpawnDev.ILGPU.slnx and has no PlaywrightMultiTest element or Playwright package, so
+       neither the solution nor PlaywrightMultiTest project discovery picks it up. -->
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <!-- CS8981: lower-case type name P is deliberate; NU1701: some snapshot references target older frameworks. -->
+    <NoWarn>$(NoWarn);CS8981;NU1701</NoWarn>
+    <!-- Keep the tool independent of any repo-wide strictness or packaging settings. -->
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <EnableNETAnalyzers>false</EnableNETAnalyzers>
+    <EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>
+  </PropertyGroup>
+
+  <Target Name="RequireRefsDir" BeforeTargets="ResolveAssemblyReferences;CoreCompile" Condition="'$(RefsDir)' == ''">
+    <Error Text="RefsDir is not set. Build through run.cmd, or pass -p:RefsDir=&lt;folder with the ILGPU snapshot&gt;." />
+  </Target>
+
+  <!-- Private=false: the snapshot DLLs are NOT copied into the output folder. The tool loads them from the refs
+       folder at run time (Program.cs resolving handler), so the loaded path is provably the snapshot copy. -->
+  <ItemGroup>
+    <Reference Include="SpawnDev.ILGPU"><HintPath>$(RefsDir)\SpawnDev.ILGPU.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="ILGPU"><HintPath>$(RefsDir)\ILGPU.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="ILGPU.Algorithms"><HintPath>$(RefsDir)\ILGPU.Algorithms.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="SpawnDev.ILGPU.Demo.Shared"><HintPath>$(RefsDir)\SpawnDev.ILGPU.Demo.Shared.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+
+</Project>
