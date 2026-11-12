@@ -309,3 +309,15 @@ dispatch in the same submit; (2) later, a kernel that ALSO has large private arr
 possibly simplified by the compiler), so the report still lacks a codec-free victim; but the evidence for an ILGPU
 mitigation (TJ 2026-11-11: "move large run-time-indexed private arrays out of function scope ... if 100% nailed down") is
 now on both ends of the failure.
+
+### ILGPU mitigation scope (Data, code reading only, 2026-11-12; awaiting TJ's go)
+Moving large dynamically indexed private arrays out of function scope on WebGPU touches: the two emission sites
+(WGSLCodeGenerator ~1027 local allocas, ~2703 `new T[N]` arrays); a per-dispatch device scratch buffer sized at launch
+(thread count x array size; the host allocates it, like the existing scalar arena) and one extra binding (maxStorageBuffers
+= 10: kernels near the limit need the coalescing path); every access rewritten to a per-invocation slice
+(base = invocation index x size); helpers that take arrays by pointer (`ptr<function, array<T, N>>`) reworked, because
+storage pointers as function parameters are restricted in WGSL; sub-word (byte / short) arrays as packed atomic<u32>
+storage. A size threshold decides which arrays move (both failing kernels' arrays were >= 256 ints; small arrays stay
+in registers). Estimate: several days with tests on all WebGPU lanes. Alternative narrower mitigation: only for kernels
+that would otherwise hit the failing combination; but the combination spans two kernels, so a per-kernel rule is the
+practical one.
