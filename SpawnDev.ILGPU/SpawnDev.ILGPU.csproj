@@ -4,7 +4,7 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.4.31-local.1</Version>
+		<Version>5.4.31</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
 		<!-- This is the text nuget.org shows on the listing page. It MUST lead with the version being shipped:
 		     Directory.Build.targets (SDPKG001) fails the build when the leading version differs from <Version>.
@@ -71,8 +71,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.4.30-local.1" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.4.30-local.1" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.4.30" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.4.30" />
 	</ItemGroup>
 
 	<ItemGroup>
