@@ -1,7 +1,27 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.31 (forks 2.4.30) - unreleased - OpenCL: signed integer arithmetic wraps around, as in .NET and on every other backend
+## 5.4.31 (forks 2.4.30) - unreleased - two silent wrong-result fixes (unsigned division by a power of two on every compiled backend; signed overflow on OpenCL); CUDA: division by a constant power of two as shifts
+
+- **FIX (CUDA, OpenCL, Velocity, WebGPU, WebGL, Wasm; silent wrong results): an unsigned division by a constant
+  power of two is a LOGICAL shift.** The IR rewrites `x / 2^k` of an unsigned `x` to a shift, and the shift it
+  created did not carry the unsigned flag: it was an arithmetic shift, which fills with the sign bit. Every
+  dividend with its top bit set came out wrong: `4294967295u / 2u` gave 4294967295 (2147483647 is right), and the
+  same for `ulong`. The CPU accelerator was not affected (it runs the kernel's IL). One line in
+  `ILGPU/Static/BinaryMathOperations.xml` (the shift now gets the operation's flags).
+  - Tests (every backend, host oracle): `DivisionByConstant_Int32_MatchesHost`, `DivisionByConstant_Int64_MatchesHost`:
+    signed and unsigned division and remainder by constants (powers of two up to 2^30 / 2^62 / 2^63, their
+    negatives, and 3, 7, 10, 1000 as controls) over 96 / 64 values around every boundary. With the fix switched
+    off they fail on all nine compiled lanes and pass on the CPU accelerator; 22 / 0 with it.
+- **PERF (CUDA): a signed or unsigned division or remainder by a constant power of two (or its negative) is shifts
+  and masks.** The assembler behind PTX does not reduce `div.s32 r, a, 16`: it is a real division. Measured with
+  `int-op-cost` (RTX 4070, 1,048,576 threads x 2,000 iterations of a small generator loop): the loop alone 0.63 ms,
+  with `x / 16` 3.95 ms before and 1.03 ms now (`x >> 4`: 0.75 ms). `.NET` results exactly: the quotient rounds toward
+  zero, the remainder has the sign of the dividend. Switch: `PTXCodeGenerator.ReduceDivisionByPowerOfTwo` (default
+  true). Divisors that are not powers of two are still divisions (3.95 ms for `x / 7`; NVIDIA's OpenCL compiler
+  does that one in 1.46 ms): open.
+  - The same tests check the PTX on CUDA: no `div` / `rem` left for powers of two, the division kept for `x / 7`,
+    and 4 `div` + 5 `rem` back with the switch off.
 
 - **FIX (OpenCL, silent wrong results): signed `+`, `-`, `*`, `<<` and unary `-` wrap around.** The backend emitted
   them as signed `int` / `long` operations, and in OpenCL C (as in C) signed overflow is undefined: a compiler may

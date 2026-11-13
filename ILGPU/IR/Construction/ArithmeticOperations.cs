@@ -1402,7 +1402,7 @@ namespace ILGPU.IR.Construction
                     if (right.HasIntValue(1))
                         return left;
                     if (right.IsInt && right.RawValue > 0 &&Utilities.IsPowerOf2(right.RawValue) &&(flags & ArithmeticFlags.Unsigned) == ArithmeticFlags.Unsigned)
-                        return CreateArithmetic(location,left,GetDivMulShiftAmount(location, right),BinaryArithmeticKind.Shr);
+                        return CreateArithmetic(location,left,GetDivMulShiftAmount(location, right),BinaryArithmeticKind.Shr,flags);
                     break;
                 case BinaryArithmeticKind.And:
                     if (left == right)

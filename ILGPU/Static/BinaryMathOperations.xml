@@ -99,7 +99,12 @@
                  1 for odd-negative dividends - e.g. (-1)/2 is 0 (truncate)
                  but -1>>1 is -1 (floor). Diagnosed by Tuvok 2026-04-28
                  against `Vp9ForwardDct8x8Kernel`; reproduced on CUDA + OpenCL
-                 via SpawnDev.Codecs minimal repro tests. -->
+                 via SpawnDev.Codecs minimal repro tests.
+                 The shift carries {Flags} (Unsigned): without them it was an
+                 ARITHMETIC shift, so an unsigned dividend with its top bit set
+                 got sign bits shifted in (4294967295u / 2u gave 4294967295 on
+                 every compiled backend). Found 2026-11-13 by
+                 DivisionByConstant_Int32_MatchesHost / _Int64_. -->
             <Source>
                 {Value1}.IsInt &amp;&amp; {Value1}.RawValue > 0 &amp;&amp;
                 Utilities.IsPowerOf2({Value1}.RawValue) &amp;&amp;
@@ -110,7 +115,8 @@
                     {Location},
                     {Value0},
                     GetDivMulShiftAmount({Location}, {Value1}),
-                    BinaryArithmeticKind.Shr)
+                    BinaryArithmeticKind.Shr,
+                    {Flags})
             </Target>
         </Rewriter>
     </Operation>
