@@ -392,6 +392,7 @@ _research/fp8_oracle/oracle_float16.json
 .cursor/
 Scripts/*
 !Scripts/WgslScreen/
+!Scripts/BranchCost/
 Research/
 _research/
 CLAUDE.md

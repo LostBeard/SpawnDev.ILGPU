@@ -335,7 +335,7 @@ namespace PlaywrightMultiTest
                                 // Log WGSL/Wasm traces, errors, and P2P-layer diagnostic lines so
                                 // multi-popup WebRTC flows (P2P two-tab test) leave a trail for
                                 // offline diagnosis.
-                                if (text.Contains("WGSL") || text.Contains("@compute") || text.Contains("@workgroup_size") || text.Contains("WGSL_DUMP") || text.Contains("GLSL_DUMP") || text.Contains("[WasmWorker]") || text.Contains("[Wasm") || text.Contains("CONV2D_TRACE") || text.Contains("TEX_UNIT") || text.Contains("PREPROCESS_TRACE") || text.Contains("LAYER_TRACE") || text.Contains("LOGITS_TRACE") || text.Contains("CPU_LOGITS") || text.Contains("DISP_TRACE") || text.Contains("TF_OFFSET") || text.Contains("[Peer]") || text.Contains("[RtcPeer]") || text.Contains("[sd_compute]") || text.Contains("[P2PCompute") || text.Contains("[P2P ") || text.Contains("[Torrent") || msg.Type == "error")
+                                if (text.Contains("WGSL") || text.Contains("@compute") || text.Contains("@workgroup_size") || text.Contains("WGSL_DUMP") || text.Contains("GLSL_DUMP") || text.Contains("[WasmWorker]") || text.Contains("[Wasm") || text.Contains("[report]") || text.Contains("CONV2D_TRACE") || text.Contains("TEX_UNIT") || text.Contains("PREPROCESS_TRACE") || text.Contains("LAYER_TRACE") || text.Contains("LOGITS_TRACE") || text.Contains("CPU_LOGITS") || text.Contains("DISP_TRACE") || text.Contains("TF_OFFSET") || text.Contains("[Peer]") || text.Contains("[RtcPeer]") || text.Contains("[sd_compute]") || text.Contains("[P2PCompute") || text.Contains("[P2P ") || text.Contains("[Torrent") || msg.Type == "error")
                                 {
                                     try
                                     {
@@ -522,6 +522,11 @@ namespace PlaywrightMultiTest
                             var desktopTimeoutMs = (int.TryParse(Environment.GetEnvironmentVariable("PMT_DESKTOP_TEST_TIMEOUT_SEC"), out var desktopSec) && desktopSec > 0 ? desktopSec : 1200) * 1000;
                             var result = await ProcessRunner.Run(publishedBinary, rowTest.Name, timeout: desktopTimeoutMs).ConfigureAwait(false);
                             var resultLines = result.Text.Split(new[] { '\n', '\r' }, StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+                            // A test's measurements ("[report] ..." lines, e.g. BranchCost_ByFunctionSize_Report) reach the
+                            // run log; the browser lanes' reach browser_console.log through the console hook.
+                            foreach (var line in resultLines)
+                                if (line.StartsWith("[report]", StringComparison.Ordinal))
+                                    LogStatus($"{rowTest.Name}: {line}");
                             var testResltTest = resultLines.LastOrDefault(o => o.StartsWith("TEST: "))?.Substring(6);
                             var unitTest = testResltTest != null ? JsonSerializer.Deserialize<UnitTest>(testResltTest) : null;
                             if (unitTest == null)
