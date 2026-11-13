@@ -97,6 +97,10 @@ namespace ILGPU.Backends.Velocity
                     // warp-wide vector operations out of loops again
                     keepValuesOutOfLoops: true);
 
+                // A switch that leaves a loop becomes a chain of if branches, which the
+                // passes below order like any other branch (see VelocityLowerLoopSwitches)
+                transformerBuilder.Add(new VelocityLowerLoopSwitches());
+
                 // A loop exit that branches straight to a loop header gets a block of its
                 // own, so the branch builder sees an exit (see VelocityLoopExitSplitting)
                 transformerBuilder.Add(new VelocityLoopExitSplitting());

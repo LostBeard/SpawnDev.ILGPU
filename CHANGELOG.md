@@ -1,6 +1,38 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## Unreleased (5.4.32 candidate) - Wasm: structured control flow; WebGPU: irreducible control flow; Velocity: a switch that leaves a loop
+
+- **PERF (Wasm): a function without barriers is emitted with wasm's own `block` / `loop` / `if` and direct `br`.**
+  Until now every multi-block function went through a `loop` + `br_table` state machine over all of its blocks
+  (needed only by a kernel that yields at a barrier), and the cost of a branch grew with the function's size:
+  one thread, a loop of xorshift steps each followed by a data-dependent branch, ns per step for 12 / 120 / 960
+  steps: desktop CPU accelerator 1.65 / 1.73 / 2.32, Wasm 2.66 / 3.85 / 22.76. New file
+  `Wasm/Backend/WasmStructuredControlFlow.cs` (N. Ramsey, "Beyond Relooper", ICFP 2022, iterative, on the
+  dominator tree). It applies to functions with no barrier-like value, no phase mode and a reducible graph; the
+  rest keep the state machine. Switch: `WasmBackend.StructuredControlFlow` (default true); diagnostic
+  `WasmBackend.StructuredFunctionCount`; PMT: `PMT_WASM_SCF=off` runs a sweep with it off.
+  - Offline: all 802 test-suite kernels compile both ways and pass `wasm-validate` (298 use structured control
+    flow). Wasm lane, back to back on an idle machine: off 467 s, on 456 s, 925 passed / 0 failed both times.
+  - Tests: `BackendTestBase.StructuredControlFlow_*` (10 branchy kernels against the same C# on the host, every
+    backend: if / else chains, nested loops with continue / break / break out of both, do-while, a switch in a
+    loop, values swapped through phis, a kernel return in a loop, a multi-block helper with a result, a long
+    branch chain, an irreducible goto graph, a struct store between blocks) and
+    `WasmTests.StructuredControlFlow_OnAndOff_MatchHostAndTakeTheirPath` (each kernel with the path on and off;
+    fails if the expected path was not taken). Red-checks: swapping the `if` arms and dropping the phi copies of
+    back edges both fail them.
+  - Also in the state machine: the block map counted a state for a struct store to global memory (a disabled
+    yield) that the emitter never creates, so a block after such a store would have been one state off. No suite
+    kernel reaches it (struct stores are split into field stores first); the count is gone.
+- **FIX (WebGPU, silent wrong results): a kernel with irreducible control flow (two entries into one loop, a
+  `goto` into a cycle) lost the code after that region**: no result was stored, every thread read 0
+  (`StructuredControlFlow_IrreducibleGoto_MatchesHost`). Such a kernel is now a state machine
+  (`loop { switch (current_block) }`, entry block at function scope); with barriers it throws a
+  `NotSupportedException` naming the kernel instead. No other suite kernel takes that path.
+- **FIX (Velocity): a `switch` with a case that leaves its loop (a return, a `goto` out) threw** in
+  `VelocityBlockScheduling` ("Skip this case for now"), and the message itself failed to format (a
+  `FormatException` hid it). New `VelocityLowerLoopSwitches` turns such a switch into a chain of `if` branches, one
+  per distinct target, before the scheduling passes (`StructuredControlFlow_SwitchInLoop_MatchesHost`).
 ## 5.4.31 (forks 2.4.30) - 2026-11-13 - two silent wrong-result fixes (unsigned division by a power of two on every compiled backend; signed overflow on OpenCL); CUDA: division by a constant power of two as shifts
 
 Release sweep (full default, code 8c5ec9e): 9,156 cases, 8,428 passed, 0 failed, 728 skipped, 53 min (RTX 4070, Chrome).

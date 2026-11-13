@@ -4017,6 +4017,22 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 GenerateCodeInternal();
             }
+            else if (HasIrreducibleLoop())
+            {
+                // Two or more entries into one cycle (a goto into a loop): the structured generator below assumes one
+                // header per loop and dropped the blocks after such a region (BackendTestBase.ScfIrreducible: no code
+                // after the loops, the result store never ran, every thread read 0). A state machine runs any graph.
+                _useDeferredDeclarations = true;
+                _deferredVarDeclarations.Clear();
+                GenerateIrreducibleStateMachine();
+                _useDeferredDeclarations = false;
+                if (_deferredVarDeclarations.Count > 0)
+                {
+                    var deferred = string.Join(Environment.NewLine, _deferredVarDeclarations) + Environment.NewLine;
+                    Builder.Insert(codeGenStartPosition, deferred);
+                    codeGenStartPosition += deferred.Length;
+                }
+            }
             else if (_loops.Count == 0) // No Loops -> Acyclic
             {
                 // Enable deferred declarations: in WGSL, 'var' inside if/else/loop is
@@ -9001,6 +9017,126 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         #endregion
 
+
+        /// <summary>
+        /// True when a loop of the kernel has more than one header: an irreducible region (two entries into one
+        /// cycle), which the structured generator cannot express.
+        /// </summary>
+        private bool HasIrreducibleLoop()
+        {
+            foreach (var loop in _loops)
+                if (loop.Headers.Length > 1)
+                    return true;
+            return false;
+        }
+
+        /// <summary>
+        /// Emits the kernel body as a state machine, for an irreducible control flow graph: the entry block at
+        /// function scope (its pointer aliases stay visible to every block), then
+        /// <c>loop { switch (current_block) { case k: { block k; phi copies; current_block = next; } } }</c>.
+        /// A return is a plain <c>return;</c>. Kernels with barriers are rejected: a barrier in a state machine is
+        /// not in uniform control flow.
+        /// </summary>
+        private void GenerateIrreducibleStateMachine()
+        {
+            if (_usesBarriers)
+                throw new NotSupportedException(
+                    $"WebGPU: kernel '{Method.Name}' has irreducible control flow (a goto into a loop) and uses barriers; " +
+                    "WGSL cannot express that in uniform control flow. Restructure the loop so it has a single entry.");
+            if (WebGPUBackend.VerboseLogging)
+                WebGPUBackend.Log($"[WGSL-SM] '{Method.Name}': irreducible control flow, {Method.Blocks.Count} blocks as a state machine");
+
+            var entry = Method.EntryBlock;
+            bool entryOutside = entry.Predecessors.Length == 0;
+            AppendLine("var current_block : i32 = 0;");
+            if (entryOutside)
+            {
+                GenerateBasicBlockCode(entry);
+                EmitStateMachineTerminator(entry);
+            }
+            AppendLine("loop {");
+            PushIndent();
+            AppendLine("switch (current_block) {");
+            PushIndent();
+            foreach (var block in Method.Blocks)
+            {
+                if (entryOutside && block == entry)
+                    continue;
+                AppendLine($"case {GetBlockIndex(block)}: {{");
+                PushIndent();
+                GenerateBasicBlockCode(block);
+                EmitStateMachineTerminator(block);
+                PopIndent();
+                AppendLine("}");
+            }
+            AppendLine("default: { return; }");
+            PopIndent();
+            AppendLine("}");
+            PopIndent();
+            AppendLine("}");
+        }
+
+        /// <summary>
+        /// A block's terminator in <see cref="GenerateIrreducibleStateMachine"/>: the phi copies of the edge taken,
+        /// then <c>current_block</c> = its target; a return returns.
+        /// </summary>
+        private void EmitStateMachineTerminator(BasicBlock block)
+        {
+            switch (block.Terminator)
+            {
+                case ReturnTerminator:
+                    AppendLine("return;");
+                    break;
+                case UnconditionalBranch jump:
+                    PushPhiValues(jump.Target, block);
+                    AppendLine($"current_block = {GetBlockIndex(jump.Target)};");
+                    break;
+                case IfBranch branch:
+                {
+                    var condition = Load(branch.Condition);
+                    AppendLine($"if ({condition}) {{");
+                    PushIndent();
+                    PushPhiValues(branch.TrueTarget, block);
+                    AppendLine($"current_block = {GetBlockIndex(branch.TrueTarget)};");
+                    PopIndent();
+                    AppendLine("} else {");
+                    PushIndent();
+                    PushPhiValues(branch.FalseTarget, block);
+                    AppendLine($"current_block = {GetBlockIndex(branch.FalseTarget)};");
+                    PopIndent();
+                    AppendLine("}");
+                    break;
+                }
+                case SwitchBranch select:
+                {
+                    var selector = Load(select.Condition);
+                    AppendLine($"switch ({selector}) {{");
+                    PushIndent();
+                    for (int i = 0; i < select.NumCasesWithoutDefault; i++)
+                    {
+                        var target = select.GetCaseTarget(i);
+                        AppendLine($"case {i}: {{");
+                        PushIndent();
+                        PushPhiValues(target, block);
+                        AppendLine($"current_block = {GetBlockIndex(target)};");
+                        PopIndent();
+                        AppendLine("}");
+                    }
+                    AppendLine("default: {");
+                    PushIndent();
+                    PushPhiValues(select.DefaultBlock, block);
+                    AppendLine($"current_block = {GetBlockIndex(select.DefaultBlock)};");
+                    PopIndent();
+                    AppendLine("}");
+                    PopIndent();
+                    AppendLine("}");
+                    break;
+                }
+                default:
+                    throw new NotSupportedException(
+                        $"WebGPU: terminator {block.Terminator} in the state machine of '{Method.Name}'");
+            }
+        }
 
         private void GenerateBasicBlockCode(BasicBlock block)
         {

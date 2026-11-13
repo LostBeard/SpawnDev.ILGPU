@@ -376,6 +376,13 @@ namespace PlaywrightMultiTest
                             testPageUrl += (testPageUrl.Contains('?') ? "&" : "?") + "wasmsimd=off";
                             LogStatus("PMT_WASM_SIMD=off -> forcing scalar Wasm path for this sweep");
                         }
+                        // PMT_WASM_SCF=off appends ?wasmscf=off: the Wasm backend keeps the br_table state machine for every
+                        // function (WasmBackend.StructuredControlFlow = false), the A/B of WasmStructuredControlFlow.cs.
+                        if (string.Equals(Environment.GetEnvironmentVariable("PMT_WASM_SCF"), "off", StringComparison.OrdinalIgnoreCase))
+                        {
+                            testPageUrl += (testPageUrl.Contains('?') ? "&" : "?") + "wasmscf=off";
+                            LogStatus("PMT_WASM_SCF=off -> Wasm structured control flow off for this sweep");
+                        }
                         LogStatus($"Navigating to {testPageUrl}...");
                         await testableProject.Page.GotoAsync(testPageUrl).ConfigureAwait(false);
                         LogStatus("Page loaded, waiting for test table...");
@@ -1392,6 +1399,8 @@ namespace PlaywrightMultiTest
                 var testPageUrl = new Uri(new Uri("https://localhost:5451/"), blazor.TestPage).ToString();
                 if (string.Equals(Environment.GetEnvironmentVariable("PMT_WASM_SIMD"), "off", StringComparison.OrdinalIgnoreCase))
                     testPageUrl += (testPageUrl.Contains('?') ? "&" : "?") + "wasmsimd=off";
+                if (string.Equals(Environment.GetEnvironmentVariable("PMT_WASM_SCF"), "off", StringComparison.OrdinalIgnoreCase))
+                    testPageUrl += (testPageUrl.Contains('?') ? "&" : "?") + "wasmscf=off";
                 LogStatus($"Recycling browser page (memory hygiene) -> {testPageUrl}");
                 await newPage.GotoAsync(testPageUrl).ConfigureAwait(false);
                 await newPage.WaitForSelectorAsync("table.unit-test-ready", new() { Timeout = 30000 }).ConfigureAwait(false);

@@ -160,6 +160,17 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         public static bool CompactLocals { get; set; } = true;
 
         /// <summary>
+        /// Emit a multi-block function that never yields (no barrier-like value, no phase mode, reducible control
+        /// flow) with wasm's own block / loop / if and direct branches instead of the loop + br_table state machine
+        /// (see WasmStructuredControlFlow.cs: in a large function every branch through the state machine cost
+        /// ten times what it costs natively). Default on; off only for an A/B check or to rule it out.
+        /// </summary>
+        public static bool StructuredControlFlow { get; set; } = true;
+
+        /// <summary>Diagnostic: functions (kernels and helpers) emitted with structured control flow since process start.</summary>
+        public static int StructuredFunctionCount { get; set; }
+
+        /// <summary>
         /// Forces the SIMD codegen path ON regardless of runtime detection — for OFFLINE codegen
         /// verification (the <c>wasm-dump</c> / DemoConsole path where <see cref="RuntimeSupportsWasmSimd"/>
         /// is false because it's the desktop CLR, not browser-wasm). Do NOT enable in a browser whose

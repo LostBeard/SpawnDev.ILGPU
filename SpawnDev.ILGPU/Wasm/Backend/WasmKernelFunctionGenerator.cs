@@ -459,7 +459,7 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                         GenerateCodeFor(singleBlock.Terminator);
                 }
             }
-            else
+            else if (!TryGenerateStructuredCode(blocks))
             {
                 GenerateStateMachineCode(blocks);
             }
@@ -1242,9 +1242,15 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 // i32 return value (0 = done)
                 WasmModuleBuilder.EmitI32Const(Code, 0);
             }
+            else if (TryGenerateStructuredCode(blocks))
+            {
+                // Multi-block, never yields: wasm block / loop / if (WasmStructuredControlFlow.cs).
+                // i32 return value (0 = done) for a path that reaches the end of the body.
+                WasmModuleBuilder.EmitI32Const(Code, 0);
+            }
             else
             {
-                // Multi-block OR single-block-with-barriers: use state machine
+                // Multi-block with barriers (or irreducible), OR single-block-with-barriers: use state machine
                 GenerateStateMachineCode(blocks);
             }
             EmitNonPhaseHelperScratchBases();
@@ -1391,11 +1397,10 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                     else if (entry.Value is global::ILGPU.IR.Values.Broadcast) count += 2;
                     else if (entry.Value is global::ILGPU.IR.Values.ShuffleOperation) count += 2;
                     else if (entry.Value is PredicateBarrier) count += 3;
-                    else if (!_isHelperFunction && entry.Value is global::ILGPU.IR.Values.Store st2
-                        && st2.Value.Resolve().Type is StructureType
-                        && st2.Target.Resolve().Type is AddressSpaceType ast2
-                        && ast2.AddressSpace == MemoryAddressSpace.Global)
-                        count += 1;
+                    // A struct Store to Global memory used to count one state here, for the yield after it ("Fix B"),
+                    // which is disabled (the `if (false && ...)` in GenerateCode(Store), structStoreYields = 0 above):
+                    // counting a state the emitter never creates maps every later block one state too far. Removed
+                    // 5.4.32; the smIndex == expandedBlockCount check below keeps the two in step.
                     else if (!_isHelperFunction && entry.Value is MethodCall mc2)
                     {
                         // Only count helper barriers for yield-per-phase (no own barriers).
@@ -1418,6 +1423,8 @@ namespace SpawnDev.ILGPU.Wasm.Backend
                 _blockMap[block] = smIndex;
                 smIndex += 1 + count;
             }
+            if (WasmBackend.VerboseLogging && smIndex != expandedBlockCount)
+                WasmBackend.Log($"[Wasm-SM] block map: {smIndex} states, expandedBlockCount {expandedBlockCount} in '{Method.Name}'");
 
             // Expand _blockCount for both kernels and helpers.
             _blockCount = expandedBlockCount;

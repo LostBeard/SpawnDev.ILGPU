@@ -86,6 +86,12 @@ var host = builder.Build();
         // scalar-mode sweep actually engaged, vs the query being lost across the COI service-worker reload).
         Console.WriteLine("[Wasm-SIMD-Mode] PMT_WASM_SIMD=off -> WasmBackend.ForceScalar=true (scalar-mode sweep engaged)");
     }
+    // PMT_WASM_SCF=off: the state machine for every Wasm function (A/B of WasmStructuredControlFlow.cs)
+    if (nav.Uri.Contains("wasmscf=off", StringComparison.OrdinalIgnoreCase))
+    {
+        SpawnDev.ILGPU.Wasm.Backend.WasmBackend.StructuredControlFlow = false;
+        Console.WriteLine("[Wasm-SCF-Mode] PMT_WASM_SCF=off -> WasmBackend.StructuredControlFlow=false (state-machine sweep engaged)");
+    }
 }
 
 await host.Services.StartBackgroundServices();

@@ -56,9 +56,11 @@ namespace ILGPU.Backends.Velocity.Transformations
                     }
                     else if (breaker.Terminator is SwitchBranch switchBranch)
                     {
-                        // Skip this case for now
-                        throw switchBranch.Location.GetNotSupportedException(
-                            ErrorMessages.NotSupportedILInstruction);
+                        // VelocityLowerLoopSwitches turns every switch that leaves a
+                        // loop into if branches before this pass
+                        throw switchBranch.Location.GetInvalidOperationException(
+                            "Velocity: a switch leaves a loop after " +
+                            "VelocityLowerLoopSwitches");
                     }
                 }
             });
