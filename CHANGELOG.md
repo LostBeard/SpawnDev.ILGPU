@@ -1,6 +1,24 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.31 (forks 2.4.30) - unreleased - OpenCL: signed integer arithmetic wraps around, as in .NET and on every other backend
+
+- **FIX (OpenCL, silent wrong results): signed `+`, `-`, `*`, `<<` and unary `-` wrap around.** The backend emitted
+  them as signed `int` / `long` operations, and in OpenCL C (as in C) signed overflow is undefined: a compiler may
+  assume it never happens. NVIDIA's did. `x = (x * 1664525 + 1013904223) & 0x7FFFFFFF` lost its mask (a product and
+  a sum of non-negative values "cannot" be negative), `(x + y) < x` became `y < 0`. A kernel that relies on
+  wrap-around (hashes, random generators, checksums, fixed-point code) could return other values on OpenCL than on
+  CUDA, the CPU and the browser backends, with no error. The operations are now computed in the unsigned type of
+  the same width, where wrap-around is defined, and converted back (`(int)((uint)a * (uint)b)`); 8 and 16 bit types,
+  unsigned ones included, go through `uint` because C promotes them to `int` first.
+  - Found with the new DemoConsole probe `int-op-cost` (the cost of integer operations in a kernel loop): its
+    checksums on OpenCL differed from CUDA's and from a host computation in 7 of 9 variants (every variant that
+    masks the generator's value).
+  - Tests (every backend, host oracle): `IntegerWraparound_Int32_MatchesHost`, `IntegerWraparound_Int64_MatchesHost`
+    (64 x 64 and 40 x 40 value pairs through 12 expressions each, among them `(x + 1) > x`, `(x + y) < x`,
+    `(x * 2) / 2`, `-x` at the minimum, a shift into the sign bit, and the masked generator loop). Before the fix
+    both failed on OpenCL only (`(x + y) < x with x = 1, y = 2147483647: 0, expected 1`).
+
 ## 5.4.30 (forks 2.4.29) - 2026-11-12 - WebGPU / WebGL: 64-bit index arithmetic computed in 32 bits; WebGPU on NVIDIA: submit after a kernel with large function-scope arrays (workaround, issue #10)
 
 Verified outside this repo on 5.4.30-local.2: SpawnDev.Codecs 4affcf4 (Geordi, RTX 4070) WebGPU lane 1,194 passed, 0

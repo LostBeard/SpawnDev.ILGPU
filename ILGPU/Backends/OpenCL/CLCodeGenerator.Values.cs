@@ -63,6 +63,42 @@ namespace ILGPU.Backends.OpenCL
             // Phi values are already assigned to variables
         }
 
+        /// <summary>
+        /// The type an integer +, -, *, &lt;&lt; or unary - of <paramref name="type"/> has to be computed in so that it
+        /// wraps around, as the same operation does in .NET (unchecked) and on every other backend.
+        /// </summary>
+        /// <remarks>
+        /// In OpenCL C, as in C, the overflow of a SIGNED integer operation is undefined, and a compiler may assume it
+        /// never happens: NVIDIA's deleted the mask of <c>(x * 1664525 + 1013904223) &amp; 0x7FFFFFFF</c> (a product
+        /// and a sum of non-negative values "cannot" be negative) and folded <c>(x + y) &lt; x</c> to
+        /// <c>y &lt; 0</c> (2026-11-13, BackendTestBase.IntegerWraparound). Unsigned arithmetic is defined to wrap, and
+        /// the conversion back to the signed type keeps the bits. The 8 and 16 bit types, unsigned ones included, are
+        /// promoted to <c>int</c> by C before the operation (65535 * 65535 overflows it), so they go through
+        /// <c>uint</c> too.
+        /// </remarks>
+        /// <returns>False when the operation wraps as it is (32 and 64 bit unsigned) or is not an integer one.</returns>
+        private static bool TryGetWrappingType(
+            ArithmeticBasicValueType type,
+            out ArithmeticBasicValueType wrappingType)
+        {
+            switch (type)
+            {
+                case ArithmeticBasicValueType.Int8:
+                case ArithmeticBasicValueType.Int16:
+                case ArithmeticBasicValueType.Int32:
+                case ArithmeticBasicValueType.UInt8:
+                case ArithmeticBasicValueType.UInt16:
+                    wrappingType = ArithmeticBasicValueType.UInt32;
+                    return true;
+                case ArithmeticBasicValueType.Int64:
+                    wrappingType = ArithmeticBasicValueType.UInt64;
+                    return true;
+                default:
+                    wrappingType = type;
+                    return false;
+            }
+        }
+
         /// <summary cref="IBackendCodeGenerator.GenerateCode(UnaryArithmeticValue)"/>
         public void GenerateCode(UnaryArithmeticValue value)
         {
@@ -80,13 +116,18 @@ namespace ILGPU.Backends.OpenCL
                 value.ArithmeticBasicValueType,
                 out bool isFunction);
 
+            // -x of the smallest signed value overflows: negate in the unsigned type (see TryGetWrappingType)
+            var operandType = value.ArithmeticBasicValueType;
+            if (value.Kind == UnaryArithmeticKind.Neg && !isFunction)
+                TryGetWrappingType(operandType, out operandType);
+
             if (isFunction)
                 statement.AppendCommand(operation);
             statement.BeginArguments();
             if (!isFunction)
                 statement.AppendCommand(operation);
 
-            statement.AppendCast(value.ArithmeticBasicValueType);
+            statement.AppendCast(operandType);
             statement.AppendArgument(argument);
             statement.EndArguments();
         }
@@ -105,6 +146,18 @@ namespace ILGPU.Backends.OpenCL
                 value.BasicValueType.IsFloat(),
                 out bool isFunction);
 
+            // Integer +, -, * and << wrap around: computed in the unsigned type (see TryGetWrappingType), the cast in
+            // front of the expression converts the result back
+            var operandType = value.ArithmeticBasicValueType;
+            if (!isFunction &&
+                (value.Kind == BinaryArithmeticKind.Add ||
+                value.Kind == BinaryArithmeticKind.Sub ||
+                value.Kind == BinaryArithmeticKind.Mul ||
+                value.Kind == BinaryArithmeticKind.Shl))
+            {
+                TryGetWrappingType(operandType, out operandType);
+            }
+
             if (isFunction)
             {
                 statement.AppendCommand(operation);
@@ -115,14 +168,14 @@ namespace ILGPU.Backends.OpenCL
                 statement.OpenParen();
             }
 
-            statement.AppendCast(value.ArithmeticBasicValueType);
+            statement.AppendCast(operandType);
             statement.AppendArgument(left);
 
             if (!isFunction)
                 statement.AppendCommand(operation);
 
             statement.AppendArgument();
-            statement.AppendCast(value.ArithmeticBasicValueType);
+            statement.AppendCast(operandType);
             statement.Append(right);
 
             if (isFunction)

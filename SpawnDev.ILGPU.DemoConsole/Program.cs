@@ -69,6 +69,10 @@ try
     if (args.Length > 0 && args[0] == "f64-op-cost")
         return await F64OpCostProbe.Run(args);
 
+    // Cost of an integer operation in a kernel loop (division by a constant, by a run-time value, shifts): uses the GPU.
+    if (args.Length > 0 && args[0] == "int-op-cost")
+        return await IntOpCostProbe.Run(args);
+
     // Offline WGSL/GLSL/Wasm dump of any BackendTestBase kernel method (KernelDump.cs).
     if (args.Length > 0 && args[0] == "kernel-dump")
         return await KernelDump.Run(args);
