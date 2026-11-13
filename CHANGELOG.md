@@ -1,7 +1,13 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.31 (forks 2.4.30) - unreleased - two silent wrong-result fixes (unsigned division by a power of two on every compiled backend; signed overflow on OpenCL); CUDA: division by a constant power of two as shifts
+## 5.4.31 (forks 2.4.30) - 2026-11-13 - two silent wrong-result fixes (unsigned division by a power of two on every compiled backend; signed overflow on OpenCL); CUDA: division by a constant power of two as shifts
+
+Release sweep (full default, code 8c5ec9e): 9,156 cases, 8,428 passed, 0 failed, 728 skipped, 53 min (RTX 4070, Chrome).
+Verified outside this repo on 5.4.31-local.1: SpawnDev.Codecs 4ddefa44 (AV1, VP9 and VP8 encoder families, file
+encoder) CUDA 217 / 0, OpenCL 217 / 0, Velocity 217 / 0, encoded bytes identical to 5.4.30; AV1 keyframe encode
+832x480 on CUDA 6.31 -> 6.15 ms (the tile kernel's PTX has 45 `div` / `rem` instead of 96), on OpenCL 5.09 -> 5.12 ms
+(the wrap-around fix costs nothing measurable there).
 
 - **FIX (CUDA, OpenCL, Velocity, WebGPU, WebGL, Wasm; silent wrong results): an unsigned division by a constant
   power of two is a LOGICAL shift.** The IR rewrites `x / 2^k` of an unsigned `x` to a shift, and the shift it
