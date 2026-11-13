@@ -1,0 +1,43 @@
+<!doctype html><meta charset="utf-8"><title>WGSL compile probe</title>
+<pre id="log">idle</pre>
+<script>
+// Compile ONE WGSL file on a fresh device and time the two stages. ?file=<relative url>
+// Protocol with the driver: P.ready is set once the device exists; the page then waits for window.__go so the driver
+// can read the GPU process's memory before the compile starts. P.done ends the run; P.result is the record.
+window.__probe = { ready: false, done: false, result: {} };
+const P = window.__probe, R = P.result;
+const show = () => { document.getElementById('log').textContent = JSON.stringify(R, null, 1); };
+(async () => {
+  try {
+    const q = new URLSearchParams(location.search);
+    const code = await (await fetch(q.get('file'), { cache: 'no-store' })).text();
+    R.file = q.get('file'); R.lines = code.split('\n').length; R.bytes = code.length;
+    const a = await navigator.gpu.requestAdapter({ powerPreference: 'high-performance' });
+    const want = Math.min(a.limits.maxStorageBuffersPerShaderStage, 16);
+    const d = await a.requestDevice({ requiredLimits: { maxStorageBuffersPerShaderStage: want } });
+    R.adapter = `${a.info.vendor} ${a.info.architecture} ${a.info.description || ''}`.trim();
+    R.maxStorageBuffers = want;
+    let t0 = 0;
+    d.lost.then(i => { R.lost = `${i.reason} ${i.message}`.slice(0, 300); R.lostAtMs = Math.round(performance.now() - t0); show(); P.done = true; });
+    P.ready = true;
+    while (!window.__go) await new Promise(r => setTimeout(r, 20));
+    t0 = performance.now();
+    d.pushErrorScope('validation');
+    const m = d.createShaderModule({ code });
+    const info = await m.getCompilationInfo();
+    R.moduleMs = Math.round(performance.now() - t0);
+    const errs = info.messages.filter(x => x.type === 'error');
+    R.messages = info.messages.length; R.errors = errs.length;
+    if (errs.length) R.firstError = `${errs[0].lineNum}:${errs[0].linePos} ${errs[0].message}`.slice(0, 300);
+    const t1 = performance.now();
+    if (!errs.length) {
+      try { await d.createComputePipelineAsync({ layout: 'auto', compute: { module: m, entryPoint: 'main' } }); R.pipelineMs = Math.round(performance.now() - t1); }
+      catch (e) { R.pipelineError = String(e.message || e).slice(0, 300); R.pipelineMs = Math.round(performance.now() - t1); }
+    }
+    const e = await d.popErrorScope();
+    if (e) R.validation = e.message.slice(0, 300);
+    R.totalMs = Math.round(performance.now() - t0);
+  } catch (e) { R.threw = String(e && e.message || e).slice(0, 300); }
+  show(); P.done = true;
+})();
+</script>

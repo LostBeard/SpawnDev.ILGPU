@@ -348,5 +348,15 @@ Open, in order of measured size:
   using chunk from their scalar operands; a view-typed phi live across chunks, a barrier or a warp operation in the
   region = no merge. The IR shape is the one a C# `for (;;) switch (pc)` produces, which every backend already
   compiles (it is what Geordi wrote by hand for the VP9 decoder).
+  **MEASURED 2026-11-12 evening, before building it (`Scripts/WgslScreen/CompileProbe`, Chrome 157 D3D12, RTX 4070,
+  cold compile, fresh browser per shader, Codecs 1f63cdf, 3 interleaved reps): NOT worth building for D3D12 compile
+  time.** The whole VP9 kernel set (19 kernels) compiles in 28.3 s on 5.4.30 (33.5 s on 5.4.29); the worst kernel,
+  `Vp9EncodeWavefrontBatchKernel`, takes 5.2 s (8.5 s on 5.4.29), `Vp9EntropyStepKernel` (`EncodeBool` x 22) 2.6 s,
+  the new `Vp9InterEntropy.StepKernel` (`EncodeBool` x 23) 2.3 s, GPU-process peak under 600 MB everywhere. Merging
+  `EncodeBool`'s sites would remove about a quarter of two 2.5 s compiles, at the price of a dispatch loop in the
+  generated code. Reopen only with a measurement that says otherwise: a kernel over about 20 s on D3D12, or D3D11
+  (the Wavefront kernel took 193 s there on 5.4.29, not re-measured on 5.4.30), or VP8's
+  `Vp8KeyframeDecodeStepKernel` (not probed). Numbers: `_TestStats/SpawnDev.ILGPU.jsonl`
+  (config `compile-probe-codecs-vp9-19-kernels`).
 - [ ] The i64 emulation library is emitted whole (about 315 lines, 49 fns) whenever one 64-bit value exists; unused
   functions cost Tint a parse only (D3D never sees them). Trim if Tint time ever shows up.

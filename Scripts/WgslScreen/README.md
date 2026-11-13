@@ -83,6 +83,48 @@ kernel in progress to `_current.txt`. If a child exits abnormally the parent rec
 kernel runs longer than 120 seconds the parent kills that child (by its own recorded PID only) and records TIMEOUT.
 Then it continues with the rest.
 
+## Per-kernel table (`kernel_table.py`)
+
+```
+python -P Scripts\WgslScreen\kernel_table.py Scripts\WgslScreen\wgsl_inline.py <run folder> <out.tsv>
+```
+
+One row per `*.wgsl` of a run folder, largest first: WGSL lines and bytes, fully inlined lines, the number of
+emulated 64-bit operations after inlining (calls of `i64_*` / `u64_*` / `f64_*` from other code, times the copies of
+the caller) and the inlined lines they expand to, the bytes of function-scope arrays (the NVIDIA large-array flush
+engages above `WebGPUBackend.NvidiaLargeFunctionArrayFlushBytes`), loop count, the naga verdict when `naga.tsv` is in
+the folder, and the three helpers with the most inlined lines (own lines x copies).
+
+## Compile probe (`CompileProbe\`): what the browser pays for a shader
+
+The line counts above are a proxy. `CompileProbe` measures the real thing for a set of WGSL files, without running
+any kernel: one fresh Chrome per shader, `createShaderModule` + `getCompilationInfo` (Tint: parse and validate),
+then `createComputePipelineAsync` (the backend compile: D3D12 on Windows), and the private bytes of that Chrome's
+GPU process before the compile and at its peak.
+
+```
+cd <folder holding compile_one.html and the WGSL files>
+dotnet run <repo>\Scripts\WgslScreen\CompileProbe\compileprobe.cs -- <rootDir> <out.tsv> <limitGB> <reps> <rel\a.wgsl> <rel\b.wgsl> ...
+python -P <repo>\Scripts\WgslScreen\CompileProbe\ab_summary.py <out.tsv> [table_before.tsv table_after.tsv]
+```
+
+- `rootDir` is served on `http://localhost:<free port>/` by the driver and must contain `compile_one.html` (copy it
+  there) and the WGSL files. Use a folder outside the repository.
+- It uses the GPU (compile only, nothing is dispatched) and opens a small Chrome window per shader: agree the GPU
+  with the other agents first, as for any browser run.
+- Guard: the driver reads the GPU process id of ITS OWN browser from CDP (`SystemInfo.getProcessInfo`) and closes
+  that browser when the GPU process passes `limitGB` (status `KILLED`). It never touches another process. Use 3 for
+  a new giant kernel.
+- `--disable-gpu-shader-disk-cache` and a fresh profile per launch: every compile is cold.
+- `reps` repeats the whole file list; list the files of two versions alternately (`v1/k.wgsl v2/k.wgsl ...`) for an
+  interleaved A/B. `ab_summary.py` expects the version to be the first folder of the relative path and prints the
+  median and range per kernel and version. The backend compile varies run to run (10% is common): one run under
+  about 15% apart is not a result.
+- It is a file-based app (`#:package Microsoft.Playwright`); that is allowed here because it does not create an ILGPU
+  context (project rule 9 is about ILGPU / GPU compute in file-based apps). It needs Chrome installed (channel
+  `chrome`).
+- A shader that compiles here can still fail or hang when it runs: nothing is dispatched.
+
 ## Known limits
 
 - naga does not check WGSL uniformity rules (barriers or derivative-like operations in non-uniform control flow) and
