@@ -60,6 +60,11 @@ Release sweep (full default, code 29f2ea9): 9,116 cases, 8,388 passed, 0 failed,
     and `LargeFunctionArray_DispatchPlan_KeepsSubmitBoundary` (WebGPU: one submit right after the kernel on NVIDIA, none
     with the switch off or under the threshold), `WgslFunctionArrays_Measure`. Red-check (hook disabled): both WebGPU
     guards fail ("workaround flushes 0", "plan has 0 submit boundaries, expected 1").
+- **FIX (packaging): the release notes on the nuget.org listing name the version that ships.** The package's
+  `PackageReleaseNotes` read "v5.4.16" on 5.4.17 through 5.4.29 (nothing checked it; found while verifying the 5.4.30
+  nupkg before the push). New `Directory.Build.targets`: build error `SDPKG001` when notes that start with a version
+  name a different one than `<Version>` (prerelease suffix ignored). Red-check: the target with `Version=9.9.9` fails
+  with SDPKG001; the real version passes. No code change against the sweep's commit.
 
 ## 5.4.29 (forks 2.4.28) - 2026-11-12 - (byte)(int)f and similar conversion chains keep the int's low bits (were saturated on CUDA)
 

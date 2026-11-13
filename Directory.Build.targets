@@ -1,0 +1,20 @@
+<Project>
+  <!--
+    SDPKG001: a package whose PackageReleaseNotes names a different version than it ships tells the nuget.org
+    listing page the wrong story, and nothing else in the build checks it. SpawnDev.ILGPU shipped 5.4.17 through
+    5.4.29 with notes reading "v5.4.16" (found 2026-11-12 while verifying the 5.4.30 nupkg, before the push).
+    Notes that do not START with a version make no claim and are left alone (the forks' notes are a URL).
+    Prerelease suffixes are ignored: 5.4.31-local.2 may carry notes that start "v5.4.31".
+  -->
+  <Target Name="ValidatePackageReleaseNotesVersion"
+          BeforeTargets="GenerateNuspec;Build"
+          Condition="'$(PackageReleaseNotes)' != '' and '$(Version)' != ''">
+    <PropertyGroup>
+      <_ShipVersion>$([System.Text.RegularExpressions.Regex]::Match($(Version), '^[0-9]+[.][0-9]+[.][0-9]+').Value)</_ShipVersion>
+      <_NotesVersion>$([System.Text.RegularExpressions.Regex]::Match($(PackageReleaseNotes), '^v?[0-9]+[.][0-9]+[.][0-9]+').Value.TrimStart('v'))</_NotesVersion>
+    </PropertyGroup>
+    <Error Condition="'$(_NotesVersion)' != '' and '$(_NotesVersion)' != '$(_ShipVersion)'"
+           Code="SDPKG001"
+           Text="PackageReleaseNotes describes version $(_NotesVersion) but this package ships $(_ShipVersion). The release notes are what nuget.org shows on the listing page - update them, or drop the leading version from the text if it is not meant to name one." />
+  </Target>
+</Project>

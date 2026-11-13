@@ -6,7 +6,10 @@
 		<Nullable>enable</Nullable>
 		<Version>5.4.30</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
-		<PackageReleaseNotes>v5.4.16 (forks 2.4.15) - NEW: (ulong)Unsafe.AsPointer(ref x) inside a kernel gives the address a reference holds; on CUDA a SharedMemory pointer is a shared-state-space address, so inline PTX (CudaAsm) can address shared memory (ldmatrix, cp.async, ld.shared). SpawnJS 3.0.8. Full history: CHANGELOG.md</PackageReleaseNotes>
+		<!-- This is the text nuget.org shows on the listing page. It MUST lead with the version being shipped:
+		     Directory.Build.targets (SDPKG001) fails the build when the leading version differs from <Version>.
+		     It sat at "v5.4.16" through 5.4.29 because nothing checked it. -->
+		<PackageReleaseNotes>v5.4.30 (forks 2.4.29) - PERF (WebGPU, WebGL): 64-bit integer arithmetic whose low 32 bits are all that is read (view index math, casts to int) is computed in 32 bits; the emulated signed 64-bit multiply is one unsigned multiply; a 64-bit product of two widened 32-bit values is a 32 x 32 multiply. WORKAROUND (WebGPU, NVIDIA only): the batch is submitted right after a kernel with large function-scope arrays (device loss on the next dispatch; Chromium issue 585125915, SpawnDev.ILGPU issue 10; switch WebGPUBackend.NvidiaLargeFunctionArrayFlush). SpawnJS 3.0.8. Full history: CHANGELOG.md</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>

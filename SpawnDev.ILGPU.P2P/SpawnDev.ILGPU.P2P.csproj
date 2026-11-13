@@ -5,7 +5,9 @@
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
 		<Version>5.0.0-local.1</Version>
-		<PackageReleaseNotes>v4.9.5-rc.8: P2PMemoryBuffer.CopyTo/CopyFrom semantics swapped to match the ILGPU contract — CopyTo is the READ path (buffer-&gt;CPU), CopyFrom is the WRITE path (CPU-&gt;buffer + dirty). Without this fix `view.CopyToCPU(...)` against a P2P-allocated buffer silently returned zeros (renderer-side ShadowData read never landed), and `view.CopyFromCPU(...)` left the shadow not-dirty. Unblocks zero-copy SpawnDev.ILGPU.Rendering.CanvasRendererFactory rendering on the P2P backend (ComputeSwarm Mandelbrot demo).</PackageReleaseNotes>
+		<!-- Leads with no version on purpose: Directory.Build.targets (SDPKG001) fails the build when notes that START
+		     with a version name a different one than <Version>. Write "vX.Y.Z - ..." here when this package next ships. -->
+		<PackageReleaseNotes>Last functional change (4.9.5-rc.8): P2PMemoryBuffer.CopyTo/CopyFrom semantics swapped to match the ILGPU contract — CopyTo is the READ path (buffer-&gt;CPU), CopyFrom is the WRITE path (CPU-&gt;buffer + dirty). Without this fix `view.CopyToCPU(...)` against a P2P-allocated buffer silently returned zeros (renderer-side ShadowData read never landed), and `view.CopyFromCPU(...)` left the shadow not-dirty. Unblocks zero-copy SpawnDev.ILGPU.Rendering.CanvasRendererFactory rendering on the P2P backend (ComputeSwarm Mandelbrot demo).</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
