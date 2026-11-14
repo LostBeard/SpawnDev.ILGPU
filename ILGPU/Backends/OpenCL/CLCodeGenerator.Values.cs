@@ -254,6 +254,34 @@ namespace ILGPU.Backends.OpenCL
             }
         }
 
+        /// <summary>
+        /// Rounds the result of an arithmetic operation (or an intrinsic) whose type OpenCL holds in a float (bf16, FP8,
+        /// FP4, and Half without cl_khr_fp16) to that type, in place: the operation ran in float and the managed operator
+        /// rounds its result ((T)((float)a op (float)b)). Without it Half and bf16 sums stayed float-exact until a store
+        /// (OpenCL: 3,344 of 4,096 Half sums differed from .NET; LowPrecisionArithmetic_HalfAndBFloat16_RoundEachResult).
+        /// </summary>
+        internal void RoundLowPrecisionResult(Value value)
+        {
+            if (value is not (ArithmeticValue or MethodCall))
+                return;
+            string? roundTrip = value.BasicValueType switch
+            {
+                BasicValueType.Float16 when !TypeGenerator.Capabilities.Float16Native => "_f32_round_half({0})",
+                BasicValueType.BFloat16 => "_bf16_bits_to_f32(_f32_to_bf16_bits({0}))",
+                BasicValueType.Float8E4M3 => "_e4m3_bits_to_f32(_f32_to_e4m3_bits({0}))",
+                BasicValueType.Float8E5M2 => "_e5m2_bits_to_f32(_f32_to_e5m2_bits({0}))",
+                BasicValueType.Float4E2M1 => "_e2m1_bits_to_f32(_f32_to_e2m1_bits({0}))",
+                _ => null,
+            };
+            if (roundTrip is null)
+                return;
+            var variable = Load(value);
+            // Reassign the existing variable (no second declaration), as Move does.
+            using var statement = new StatementEmitter(this);
+            statement.AppendTarget(variable, false);
+            statement.AppendCommand(string.Format(System.Globalization.CultureInfo.InvariantCulture, roundTrip, variable));
+        }
+
         /// <summary cref="IBackendCodeGenerator.GenerateCode(ConvertValue)"/>
         public void GenerateCode(ConvertValue value)
         {

@@ -166,7 +166,13 @@ namespace ILGPU.Runtime.OpenCL
                 if (string.IsNullOrWhiteSpace(errorLog))
                     Trace.WriteLine(">> No error information available");
                 else
+                {
                     Trace.WriteLine(errorLog);
+                    // The build log is the only account of why the driver rejected the generated source.
+                    var log = errorLog!.Trim();
+                    throw new CLException(errorCode,
+                        "Build log: " + (log.Length > 4000 ? log.Substring(0, 4000) + " ..." : log));
+                }
             }
             CLException.ThrowIfFailed(errorCode);
         }

@@ -552,6 +552,7 @@ namespace ILGPU.Backends.PTX
                         // Emit value
                         this.GenerateCodeFor(value);
                     }
+                    RoundLowPrecisionResult(value);
                 }
 
                 DebugInfoGenerator.ResetLocation();

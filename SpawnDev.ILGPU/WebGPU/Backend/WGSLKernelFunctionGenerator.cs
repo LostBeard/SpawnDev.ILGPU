@@ -2284,13 +2284,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             case BasicValueType.Float8E5M2: _kernelReferencesFP8Helpers = true; break;
                             case BasicValueType.BFloat16: _kernelReferencesBF16Helpers = true; break;
                         }
-            // A conversion into bf16 / FP8 / FP4 calls the encode + decode helpers too (BuildConvertExpression)
+            // A conversion into bf16 / FP8 / FP4 calls the encode + decode helpers too (BuildConvertExpression), and so
+            // does the per-result rounding of arithmetic in those types (and in emulated Half): RoundLowPrecisionResult
             foreach (var hm in EnumerateAllHelperMethods().Prepend(Method))
                 foreach (var hb in hm.Blocks)
                     foreach (var hv in hb)
-                        if (hv.Value is ConvertValue hcv && hcv.Value.BasicValueType != hcv.BasicValueType)
-                            switch (hcv.BasicValueType)
+                        if ((hv.Value is ConvertValue hcv && hcv.Value.BasicValueType != hcv.BasicValueType)
+                            || (hv.Value is ArithmeticValue or MethodCall && LowPrecisionRoundTrip(hv.Value.BasicValueType) is not null))
+                            switch (hv.Value.BasicValueType)
                             {
+                                case BasicValueType.Float16 when !Backend.HasShaderF16: _kernelReferencesF16Helpers = true; break;
                                 case BasicValueType.Float4E2M1: _kernelReferencesFP4Helpers = true; break;
                                 case BasicValueType.Float8E4M3:
                                 case BasicValueType.Float8E5M2: _kernelReferencesFP8Helpers = true; break;
@@ -2313,6 +2316,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // the trim. (Idempotent for the radix path, which already has them in the kernel body.)
                 // AppendUsedFunctions matches `name + "("`, so the forced refs MUST include the open paren.
                 string emulScanBody = Builder.ToString();
+                if (_kernelReferencesF16Helpers) emulScanBody += "\n_f16_to_f32( _f32_to_f16(\n";
                 if (_kernelReferencesBF16Helpers) emulScanBody += "\n_bf16_to_f32( _f32_to_bf16(\n";
                 if (_kernelReferencesFP8Helpers) emulScanBody += "\n_e4m3_to_f32( _e5m2_to_f32( _f32_to_e4m3( _f32_to_e5m2(\n";
                 if (_kernelReferencesFP4Helpers) emulScanBody += "\n_e2m1_to_f32( _f32_to_e2m1(\n";
@@ -7820,6 +7824,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 // correctly rounded, as .NET (WGSL allows 2.5 ulp; WGSLEmulationLibrary.F32CorrectlyRoundedFunctions)
                 AppendLine($"{prefix}{target} = _f32_div_rn({left}, {right});");
+            }
+            else if (value.Kind == BinaryArithmeticKind.Div && leftType == "f16" && rightType == "f16" && CorrectlyRoundedF32)
+            {
+                // native f16 division is not correctly rounded (1,160 of 4,096 quotients 1 ulp off .NET); .NET divides in
+                // float and rounds, which equals the correctly rounded f16 quotient (24 >= 2 * 11 + 2 bits)
+                AppendLine($"{prefix}{target} = f16(_f32_div_rn(f32({left}), f32({right})));");
             }
             else
                 AppendLine($"{prefix}{target} = {left} {op} {right};");

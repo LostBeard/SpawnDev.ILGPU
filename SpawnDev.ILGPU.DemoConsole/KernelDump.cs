@@ -41,7 +41,7 @@ public static class KernelDump
         Directory.CreateDirectory(dir);
         var spec = new KernelSpecialization(64, null);
 
-        foreach (var (tag, baseProfile) in new[] { ("wgsl", CapabilityProfiles.WebGPUFull), ("glsl", CapabilityProfiles.WebGL2Baseline) })
+        foreach (var (tag, baseProfile) in new[] { ("wgsl", CapabilityProfiles.WebGPUFull), ("baseline.wgsl", CapabilityProfiles.WebGPUBaseline), ("glsl", CapabilityProfiles.WebGL2Baseline) })
         {
             var profile = ozaki ? baseProfile with { Float64Mode = F64EmulationMode.Ozaki, Name = baseProfile.Name.Replace("Dekker", "Ozaki") } : baseProfile;
             var g = ShaderCompiler.Generate(method, profile, spec);

@@ -1,6 +1,35 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.33 (forks 2.4.32) - unreleased - low-precision values round like .NET: conversions into bf16 / FP8 / FP4 and every Half / bf16 / FP8 / FP4 arithmetic result
+
+- **FIX (silent wrong results): a conversion into bf16, FP8 E4M3, FP8 E5M2 or FP4 E2M1 was the identity on CUDA, OpenCL,
+  WebGPU, WebGL and Wasm.** These types live in an f32 register on those backends and were rounded only at a store to a
+  buffer of the type, so `(float)(BFloat16)x` returned `x`. Found by SpawnDev.ILGPU.ML (Tuvok): an exact bf16 hi + lo split
+  of FLUX.1 Krea's fp16 biases got lo = 0 (the Half twin was fixed in 5.4.32). Each conversion now encodes and decodes
+  with the same helpers the loads and stores use; a double source is first demoted with round-to-odd. WebGL's FP8 / FP4
+  decoders also lost the sign of a decoded -0 through ANGLE / FXC (fixed with an opaque zero). Test:
+  `LowPrecisionRoundTrip_FloatToTypeToFloat_RoundsAsHost` (8,192 values per type, bit-exact against the host).
+- **FIX (silent wrong results): Half / bf16 / FP8 / FP4 arithmetic results were not rounded to the type.** The managed
+  operators compute `(T)((float)a op (float)b)`; a backend that holds the type in an f32 kept the f32-exact result until a
+  store. Of 4,096 random operand pairs, Half + - * / differed from .NET on 3,344 / 3,362 / 4,085 / 4,077 (OpenCL without
+  `cl_khr_fp16`, WebGL, Wasm) and bf16 on 3,339 / 3,317 / 3,985 / 3,996 (CUDA, OpenCL, WebGL, Wasm). Every arithmetic or
+  call result of such a type is now rounded in place (`RoundLowPrecisionResult` in the PTX, OpenCL, WGSL, GLSL and Wasm
+  generators). Native f16 (CUDA, OpenCL with `cl_khr_fp16`, WebGPU with `shader-f16`) already rounds per operation.
+  - WebGPU, emulated Half (no `shader-f16`): `(Half)x` was also the identity there; now rounded (1,139 to 1,362 of 4,096
+    results were 1 ulp off).
+  - WebGPU, native f16: division is not correctly rounded in WGSL (1,160 of 4,096 quotients 1 ulp off). It is now computed
+    as `f16(_f32_div_rn(f32(a), f32(b)))`, which equals .NET (division in float, then one rounding to f16, is exact
+    rounding because 24 >= 2 * 11 + 2). `MathMode.Fast` keeps the native division.
+  - Test: `LowPrecisionArithmetic_HalfAndBFloat16_RoundEachResult` (all lanes, WebGL included: the stores are positional)
+    and `..._WebGPUEmulatedF16`. Red-checks: every backend failed it before its fix, and disabling the GLSL and Wasm hooks
+    brings back the counts above. Filtered all-lane run of every Half / bf16 / FP8 / FP4 / precision / rounding / division
+    test: 1,078 passed, 0 failed, 63 skipped.
+- **OpenCL: a kernel that fails to compile now carries the driver's build log in the `CLException` message.** It went
+  only to a `Trace` listener, so the exception said `CL_BUILD_PROGRAM_FAILURE` and nothing else.
+- KernelDump also writes the WebGPU baseline profile (`.baseline.wgsl`: emulated f16, no subgroups) for offline `naga`
+  checks.
+
 ## 5.4.32 (forks 2.4.31) - 2026-11-14 - silent wrong-result fixes (fp32 division / sqrt on OpenCL, WebGPU, WebGL; float -> Half on OpenCL, Wasm, WebGL; WebGPU irreducible control flow); Wasm structured control flow; Velocity host-path speed
 
 Release sweep (full default, code 889d890): 9,301 cases, 8,571 passed, 0 failed, 730 skipped, 56 min (RTX 4070, Chrome).

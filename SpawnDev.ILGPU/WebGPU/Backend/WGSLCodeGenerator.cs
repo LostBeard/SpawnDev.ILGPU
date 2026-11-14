@@ -1098,9 +1098,53 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         #region Value Visitors - Dispatch
 
         /// <summary>
-        /// Generates code for a value using the visitor pattern.
+        /// Generates code for a value using the visitor pattern, then rounds a low-precision arithmetic result to its type.
         /// </summary>
         protected void GenerateCodeFor(Value value)
+        {
+            GenerateCodeForCore(value);
+            RoundLowPrecisionResult(value);
+        }
+
+        /// <summary>
+        /// The WGSL helper pair that rounds an f32 to a low-precision type held in an f32 register (Half without
+        /// shader-f16, bf16, FP8, FP4), as <c>{0}</c>-formatted text, or null when the type rounds natively.
+        /// </summary>
+        internal string? LowPrecisionRoundTrip(BasicValueType type) => type switch
+        {
+            BasicValueType.Float16 when !Backend.HasShaderF16 => "_f16_to_f32(_f32_to_f16({0}))",
+            BasicValueType.BFloat16 => "_bf16_to_f32(_f32_to_bf16({0}))",
+            BasicValueType.Float8E4M3 => "_e4m3_to_f32(_f32_to_e4m3({0}))",
+            BasicValueType.Float8E5M2 => "_e5m2_to_f32(_f32_to_e5m2({0}))",
+            BasicValueType.Float4E2M1 => "_e2m1_to_f32(_f32_to_e2m1({0}))",
+            _ => null,
+        };
+
+        /// <summary>
+        /// Rounds the result of an arithmetic operation (or a call / intrinsic) whose type WGSL holds in an f32 to that
+        /// type, in place: the managed operators round each result ((T)((float)a op (float)b)), and without this the
+        /// value stayed f32-exact until a store (LowPrecisionArithmetic_HalfAndBFloat16_RoundEachResult).
+        /// </summary>
+        private void RoundLowPrecisionResult(Value value)
+        {
+            if (value is not (ArithmeticValue or MethodCall))
+                return;
+            var type = value.BasicValueType;
+            var roundTrip = LowPrecisionRoundTrip(type);
+            if (roundTrip is null)
+                return;
+            switch (type)
+            {
+                case BasicValueType.Float16: _kernelReferencesF16Helpers = true; break;
+                case BasicValueType.BFloat16: _kernelReferencesBF16Helpers = true; break;
+                case BasicValueType.Float4E2M1: _kernelReferencesFP4Helpers = true; break;
+                default: _kernelReferencesFP8Helpers = true; break;
+            }
+            var target = Load(value);
+            AppendLine($"{target} = {string.Format(System.Globalization.CultureInfo.InvariantCulture, roundTrip, target)};");
+        }
+
+        private void GenerateCodeForCore(Value value)
         {
             // Skip void values that have no observable side effects. The
             // exclusions list contains every void-typed IR node whose handler
@@ -1612,6 +1656,13 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // correctly rounded, as .NET (WGSL allows 2.5 ulp; WGSLEmulationLibrary.F32CorrectlyRoundedFunctions)
                 AppendLine($"{target} = _f32_div_rn({left}, {right});");
             }
+            else if (value.Kind == BinaryArithmeticKind.Div && CorrectlyRoundedF32
+                && TypeGenerator[value.Left.Type] == "f16" && TypeGenerator[value.Right.Type] == "f16")
+            {
+                // native f16 division is not correctly rounded (1,160 of 4,096 quotients 1 ulp off .NET); .NET divides in
+                // float and rounds, which equals the correctly rounded f16 quotient (24 >= 2 * 11 + 2 bits)
+                AppendLine($"{target} = f16(_f32_div_rn(f32({left}), f32({right})));");
+            }
             else
             {
                 AppendLine($"{target} = {left} {op} {right};");
@@ -2115,6 +2166,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             {
                 switch (value.BasicValueType)
                 {
+                    // Half without shader-f16 is held in an f32 too: (Half)x was f32(x), the identity (+ - * / of Half
+                    // operands converted from float were 1 ulp off .NET on 1,139 to 1,362 of 4,096)
+                    case BasicValueType.Float16 when !Backend.HasShaderF16:
+                        _kernelReferencesF16Helpers = true;
+                        return $"_f16_to_f32(_f32_to_f16(f32({core})))";
                     case BasicValueType.BFloat16: return $"_bf16_to_f32(_f32_to_bf16(f32({core})))";
                     case BasicValueType.Float8E4M3: return $"_e4m3_to_f32(_f32_to_e4m3(f32({core})))";
                     case BasicValueType.Float8E5M2: return $"_e5m2_to_f32(_f32_to_e5m2(f32({core})))";

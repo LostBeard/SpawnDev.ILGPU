@@ -3665,9 +3665,46 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         #region Dispatch
 
         /// <summary>
-        /// Generates code for a value using the visitor pattern.
+        /// Generates code for a value using the visitor pattern, then rounds a low-precision arithmetic result to its type.
         /// </summary>
         protected void GenerateCodeFor(Value value)
+        {
+            GenerateCodeForCore(value);
+            RoundLowPrecisionResult(value);
+        }
+
+        /// <summary>
+        /// Rounds the result of an arithmetic operation (or a call / intrinsic) whose type Wasm holds in an f32 (Half,
+        /// bf16, FP8, FP4) to that type, in place: the managed operators round each result ((T)((float)a op (float)b)),
+        /// and without this the value stayed f32-exact until a store (LowPrecisionArithmetic_HalfAndBFloat16_RoundEachResult).
+        /// </summary>
+        private void RoundLowPrecisionResult(Value value)
+        {
+            if (value is not (ArithmeticValue or MethodCall))
+                return;
+            var lowp = value.BasicValueType;
+            if (lowp != BasicValueType.Float16 && lowp != BasicValueType.BFloat16 && lowp != BasicValueType.Float8E4M3
+                && lowp != BasicValueType.Float8E5M2 && lowp != BasicValueType.Float4E2M1)
+                return;
+            if (!_localMap.TryGetValue(GetValueKey(value), out var local))
+                return;
+            TouchLocal(local);
+            WasmModuleBuilder.EmitLocalGet(Code, local);
+            switch (lowp)
+            {
+                case BasicValueType.Float16: EmitF32ToF16(); EmitF16ToF32(); break;
+                case BasicValueType.BFloat16: EmitF32ToBF16(); EmitBF16ToF32(); break;
+                case BasicValueType.Float4E2M1: EmitF32ToFP4(); EmitFP4ToF32(); break;
+                default:
+                    bool isE4M3 = lowp == BasicValueType.Float8E4M3;
+                    EmitF32ToFP8(isE4M3);
+                    EmitFP8ToF32(isE4M3);
+                    break;
+            }
+            WasmModuleBuilder.EmitLocalSet(Code, local);
+        }
+
+        private void GenerateCodeForCore(Value value)
         {
             if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-IR] Visit: {value.GetType().Name} Type={value.Type} IsVoid={value.Type.IsVoidType}");
 

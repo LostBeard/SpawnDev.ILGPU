@@ -372,6 +372,39 @@ namespace ILGPU.Backends.PTX
             || type == BasicValueType.Float8E5M2
             || type == BasicValueType.Float4E2M1;
 
+        /// <summary>
+        /// Rounds the result of an arithmetic operation (or an intrinsic) whose type PTX keeps in an f32 register (bf16,
+        /// FP8, FP4) to that type, in place: the operation ran in f32 and the managed operator rounds its result
+        /// ((T)((float)a op (float)b)). Without it a bf16 a + b was f32-exact until a store (CUDA: 3,339 of 4,096 sums
+        /// differed from .NET; LowPrecisionArithmetic_HalfAndBFloat16_RoundEachResult). Half is native f16 on PTX.
+        /// </summary>
+        internal void RoundLowPrecisionResult(Value value)
+        {
+            var type = value.BasicValueType;
+            if (!IsF32RegisterLowPrecision(type) || value is not (ArithmeticValue or MethodCall))
+                return;
+            if (Load(value) is not HardwareRegister register)
+                return;
+            var raw = AllocateRegister(BasicValueType.Int16, PTXRegisterKind.Int16);
+            switch (type)
+            {
+                case BasicValueType.BFloat16:
+                    EmitF32ToBF16Bits(register, raw);
+                    EmitBF16BitsToF32(raw, register);
+                    break;
+                case BasicValueType.Float4E2M1:
+                    EmitF32ToFP4Bits(register, raw);
+                    EmitFP4BitsToF32(raw, register);
+                    break;
+                default:
+                    bool isE4M3 = type == BasicValueType.Float8E4M3;
+                    EmitF32ToFP8Bits(register, raw, isE4M3);
+                    EmitFP8BitsToF32(raw, register, isE4M3);
+                    break;
+            }
+            FreeRegister(raw);
+        }
+
         /// <summary cref="IBackendCodeGenerator.GenerateCode(ConvertValue)"/>
         public void GenerateCode(ConvertValue value)
         {

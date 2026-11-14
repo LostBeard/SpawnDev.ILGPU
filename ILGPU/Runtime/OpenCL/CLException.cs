@@ -41,6 +41,18 @@ namespace ILGPU.Runtime.OpenCL
         }
 
         /// <summary>
+        /// Constructs a new OpenCL exception that carries the driver's detail (a program build log), so a kernel that
+        /// fails to compile says why in the exception instead of only in a Trace listener nobody attached.
+        /// </summary>
+        /// <param name="errorCode">The OpenCL runtime error.</param>
+        /// <param name="detail">The driver's detail, such as the program build log.</param>
+        public CLException(CLError errorCode, string detail)
+            : base($"OpenCL error: {errorCode}{System.Environment.NewLine}{detail}")
+        {
+            Error = errorCode;
+        }
+
+        /// <summary>
         /// Constructs a new OpenCL exception.
         /// </summary>
         /// <param name="message">The message that describes the error.</param>

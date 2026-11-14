@@ -1986,6 +1986,38 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// <param name="value">The IR value.</param>
         protected void GenerateCodeFor(Value value)
         {
+            GenerateCodeForCore(value);
+            RoundLowPrecisionResult(value);
+        }
+
+        /// <summary>
+        /// Rounds the result of an arithmetic operation (or a call / intrinsic) whose type GLSL holds in a float (Half,
+        /// bf16, FP8, FP4: all emulated on WebGL) to that type, in place: the managed operators round each result
+        /// ((T)((float)a op (float)b)), and without this the value stayed float-exact until a store
+        /// (LowPrecisionArithmetic_HalfAndBFloat16_RoundEachResult). The helper libraries are included because the
+        /// kernel then has a value of the type (KernelUsesEmulatedTypes).
+        /// </summary>
+        private void RoundLowPrecisionResult(Value value)
+        {
+            if (value is not (ArithmeticValue or MethodCall))
+                return;
+            string? roundTrip = value.BasicValueType switch
+            {
+                BasicValueType.Float16 => "_f16_to_f32(_f32_to_f16({0}))",
+                BasicValueType.BFloat16 => "_bf16_to_f32(_f32_to_bf16({0}))",
+                BasicValueType.Float8E4M3 => "_e4m3_to_f32(_f32_to_e4m3({0}))",
+                BasicValueType.Float8E5M2 => "_e5m2_to_f32(_f32_to_e5m2({0}))",
+                BasicValueType.Float4E2M1 => "_e2m1_to_f32(_f32_to_e2m1({0}))",
+                _ => null,
+            };
+            if (roundTrip is null)
+                return;
+            var target = Load(value);
+            AppendLine($"{target} = {string.Format(System.Globalization.CultureInfo.InvariantCulture, roundTrip, target)};");
+        }
+
+        private void GenerateCodeForCore(Value value)
+        {
             // Same exclusion list as WGSL: void-typed Values without observable
             // side effects are skipped, but void-returning MethodCalls must be
             // visited (helpers may write through ref/out pointer params).

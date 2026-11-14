@@ -679,6 +679,7 @@ namespace ILGPU.Backends.OpenCL
                         // Emit value
                         this.GenerateCodeFor(value);
                     }
+                    RoundLowPrecisionResult(value);
                 }
 
                 // Per-target phi binding emission moved into the terminator emit
