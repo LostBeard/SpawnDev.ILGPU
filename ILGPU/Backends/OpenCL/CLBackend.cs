@@ -114,33 +114,31 @@ namespace ILGPU.Backends.OpenCL
             // emulated path calls these helpers instead. They are tiny, no-op when unused,
             // and let the OpenCL compiler optimize out the call when inlined. This helper is the
             // radix FloatAsInt(Half) bit-encoder - its inputs are already representable Half values
-            // (widened to f32), so the encoding is exact regardless of rounding mode. General
-            // float->half conversion on OpenCL goes through vstore_half (IEEE round-to-nearest, like
-            // CUDA's cvt.rn and the managed/WGSL/GLSL/Wasm RNE path as of 4.14.0).
+            // (widened to f32). 5.4.32: a float -> Half CONVERSION was `(float)(float)x` (no rounding at all;
+            // ML's exact fp16 hi + lo split got lo = 0), the old bit encoder truncated and the decoder flushed
+            // fp16 subnormals to 0; all three now go through vstore_half_rte / vload_half (IEEE round to
+            // nearest even, like CUDA's cvt.rn and the managed / WGSL / GLSL / Wasm paths).
             if (!Capabilities.Float16Native)
             {
                 extensionBuilder.AppendLine();
-                extensionBuilder.AppendLine("// Float16 bit-conversion helpers (cl_khr_fp16 unavailable - Half emulated as float).");
+                extensionBuilder.AppendLine("// Float16 helpers (cl_khr_fp16 unavailable - Half emulated as float). vstore_half_rte / vload_half are");
+                extensionBuilder.AppendLine("// core OpenCL (no extension) and exact: IEEE round to nearest even, fp16 subnormals, inf and NaN.");
                 extensionBuilder.AppendLine("static inline short _f32_to_half_bits(float f) {");
-                extensionBuilder.AppendLine("    int bits = as_int(f);");
-                extensionBuilder.AppendLine("    int sign = (bits >> 31) & 1;");
-                extensionBuilder.AppendLine("    int exp_raw = (bits >> 23) & 0xFF;");
-                extensionBuilder.AppendLine("    int exp_adj = exp_raw - 112;");
-                extensionBuilder.AppendLine("    int mant = (bits >> 13) & 0x3FF;");
-                extensionBuilder.AppendLine("    if (exp_adj < 0) { exp_adj = 0; mant = 0; }");
-                extensionBuilder.AppendLine("    if (exp_adj > 31) { exp_adj = 31; }");
-                extensionBuilder.AppendLine("    return (short)((sign << 15) | (exp_adj << 10) | mant);");
+                extensionBuilder.AppendLine("    ushort h; vstore_half_rte(f, 0, (__private half*)&h); return (short)h;");
                 extensionBuilder.AppendLine("}");
                 extensionBuilder.AppendLine("static inline float _half_bits_to_f32(short h) {");
-                extensionBuilder.AppendLine("    int sign = (h >> 15) & 1;");
-                extensionBuilder.AppendLine("    int exp_raw = (h >> 10) & 0x1F;");
-                extensionBuilder.AppendLine("    int mant = h & 0x3FF;");
-                extensionBuilder.AppendLine("    int out_bits;");
-                extensionBuilder.AppendLine("    if (exp_raw == 0) { out_bits = sign << 31; }");
-                extensionBuilder.AppendLine("    else if (exp_raw == 0x1F) { out_bits = (sign << 31) | (0xFF << 23) | (mant << 13); }");
-                extensionBuilder.AppendLine("    else { out_bits = (sign << 31) | ((exp_raw + 112) << 23) | (mant << 13); }");
-                extensionBuilder.AppendLine("    return as_float(out_bits);");
+                extensionBuilder.AppendLine("    ushort u = (ushort)h; return vload_half(0, (__private const half*)&u);");
                 extensionBuilder.AppendLine("}");
+                extensionBuilder.AppendLine("static inline float _f32_round_half(float f) {");
+                extensionBuilder.AppendLine("    ushort h; vstore_half_rte(f, 0, (__private half*)&h); return vload_half(0, (__private const half*)&h);");
+                extensionBuilder.AppendLine("}");
+                if (Capabilities.Extensions.Contains("cl_khr_fp64"))
+                {
+                    // a double rounds to fp16 once, as .NET does (through float it could round twice)
+                    extensionBuilder.AppendLine("static inline float _f64_round_half(double d) {");
+                    extensionBuilder.AppendLine("    ushort h; vstore_half_rte(d, 0, (__private half*)&h); return vload_half(0, (__private const half*)&h);");
+                    extensionBuilder.AppendLine("}");
+                }
                 extensionBuilder.AppendLine();
             }
 

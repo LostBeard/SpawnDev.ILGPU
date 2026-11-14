@@ -261,6 +261,27 @@ namespace ILGPU.Backends.OpenCL
 
             var target = Allocate(value, value.TargetType);
             using var statement = BeginStatement(target);
+
+            // EMULATED HALF (no cl_khr_fp16): a Half value lives in a float, so `(float)(float)x` did not round at all
+            // and float -> Half -> float was the identity (SpawnDev.ILGPU.ML's exact fp16 hi + lo split got lo = 0 for
+            // every weight; CUDA rounds). Round to fp16 (nearest even) through vstore_half_rte, as .NET does; a double
+            // rounds once (_f64_round_half) when the program has fp64.
+            if (value.TargetType == ArithmeticBasicValueType.Float16
+                && value.Value.BasicValueType != BasicValueType.Float16
+                && !TypeGenerator.Capabilities.Float16Native)
+            {
+                bool fromDouble = value.Value.BasicValueType == BasicValueType.Float64
+                    && TypeGenerator.Capabilities.Extensions.Contains("cl_khr_fp64");
+                statement.AppendCommand(fromDouble ? "_f64_round_half" : "_f32_round_half");
+                statement.BeginArguments();
+                if (!fromDouble)
+                    statement.AppendCast(ArithmeticBasicValueType.Float32);
+                statement.AppendCast(value.SourceType);
+                statement.AppendArgument(sourceValue);
+                statement.EndArguments();
+                return;
+            }
+
             statement.AppendCast(value.TargetType);
             statement.AppendCast(value.SourceType);
             statement.AppendArgument(sourceValue);

@@ -42,6 +42,14 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
     such as 24 / 48, random normal operands, sqrt, floor(i * a / b)) and
     `OpenCLTests.OpenCL_CorrectlyRoundedDivideSqrt_OnAndOff` (every OpenCL device; RTX 4070: 7,808 mismatches with the
     option off, 0 with it on; AMD RX 590, run by Lore at 5300733: 7,812 off, 0 on, both tests pass).
+- **FIX (OpenCL without cl_khr_fp16; silent wrong results): a conversion to Half rounds to fp16.** With Half emulated
+  in a `float`, the conversion was `(float)(float)x`: float -> Half -> float was the identity (RTX 4070: 8,711 of 8,716
+  values came back unrounded; SpawnDev.ILGPU.ML's exact fp16 hi + lo split of fp32 VAE weights got lo = 0 for all
+  1,179,648 weights; found by Tuvok). The conversion now rounds through `vstore_half_rte` / `vload_half` (IEEE round to
+  nearest even, core OpenCL; a double rounds once when the program has fp64). The Half bit-pattern helpers behind
+  `Interop.FloatAsInt(Half)` (Half radix sort) use them too: the old encoder truncated and the old decoder flushed fp16
+  subnormals to 0. Test: `HalfRoundTrip_FloatToHalfToFloat_RoundsAsDotNet` (every backend; bit-exact against .NET over
+  normals, fp16 subnormals, exact ties, overflow; with the fix off OpenCL fails 8,711 / 8,716).
 - **FIX (WebGPU, WebGL; silent wrong results): fp32 division and square root are correctly rounded, as .NET.**
   WGSL and GLSL ES allow 2.5 ulp for f32 `/` (and sqrt is no better), and D3D uses it: on an RTX 4070 4,529 of 16,384
   quotients and 3,060 roots of `FloatDivision_AndSqrt_CorrectlyRounded_MatchHost` differed from .NET (3 / 1920 one ulp
