@@ -2107,6 +2107,25 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         protected string BuildConvertExpression(ConvertValue value, Variable source)
         {
+            // A conversion INTO bf16 / FP8 / FP4 (held in an f32) rounds to the type's grid; it was the plain f32
+            // conversion and rounded only at a store to a buffer of the type, so float -> T -> float was the identity
+            // (SpawnDev.ILGPU.ML's bf16 hi + lo split of fp16 biases got lo = 0; Tuvok 2026-11-14).
+            string core = BuildConvertExpressionCore(value, source);
+            if (value.Value.BasicValueType != value.BasicValueType)
+            {
+                switch (value.BasicValueType)
+                {
+                    case BasicValueType.BFloat16: return $"_bf16_to_f32(_f32_to_bf16(f32({core})))";
+                    case BasicValueType.Float8E4M3: return $"_e4m3_to_f32(_f32_to_e4m3(f32({core})))";
+                    case BasicValueType.Float8E5M2: return $"_e5m2_to_f32(_f32_to_e5m2(f32({core})))";
+                    case BasicValueType.Float4E2M1: return $"_e2m1_to_f32(_f32_to_e2m1(f32({core})))";
+                }
+            }
+            return core;
+        }
+
+        private string BuildConvertExpressionCore(ConvertValue value, Variable source)
+        {
             var targetType = TypeGenerator[value.Type];
 
             // Fix: Handle Vector to Scalar conversion (e.g. i32(vec2)) which WGSL forbids

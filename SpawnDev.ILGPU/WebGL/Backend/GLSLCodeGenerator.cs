@@ -2897,9 +2897,19 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // it was the plain float conversion, and float -> Half -> float returned the input (8,711 of 8,716 values;
             // SpawnDev.ILGPU.ML's exact fp16 hi + lo split, Tuvok 2026-11-14). _f32_to_f16 is IEEE round to nearest even.
             // Known limit: an emulated-double source is rounded to float first (two roundings; .NET rounds once).
+            // bf16 / FP8 / FP4 (also held in a float) had the same identity conversion (Tuvok, 2026-11-14).
             string core = BuildConvertExpressionCore(value, source);
-            if (value.BasicValueType == BasicValueType.Float16 && value.Value.BasicValueType != BasicValueType.Float16)
-                return $"_f16_to_f32(_f32_to_f16(float({core})))";
+            if (value.Value.BasicValueType != value.BasicValueType)
+            {
+                switch (value.BasicValueType)
+                {
+                    case BasicValueType.Float16: return $"_f16_to_f32(_f32_to_f16(float({core})))";
+                    case BasicValueType.BFloat16: return $"_bf16_to_f32(_f32_to_bf16(float({core})))";
+                    case BasicValueType.Float8E4M3: return $"_e4m3_to_f32(_f32_to_e4m3(float({core})))";
+                    case BasicValueType.Float8E5M2: return $"_e5m2_to_f32(_f32_to_e5m2(float({core})))";
+                    case BasicValueType.Float4E2M1: return $"_e2m1_to_f32(_f32_to_e2m1(float({core})))";
+                }
+            }
             return core;
         }
 

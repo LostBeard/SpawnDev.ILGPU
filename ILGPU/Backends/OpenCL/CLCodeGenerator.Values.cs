@@ -282,6 +282,31 @@ namespace ILGPU.Backends.OpenCL
                 return;
             }
 
+            // bf16 / FP8 / FP4 are always held in a float on OpenCL and were rounded only at a store to a buffer of the
+            // type: float -> T -> float in registers was the identity (SpawnDev.ILGPU.ML's bf16 hi + lo split of fp16
+            // biases got lo = 0; Tuvok 2026-11-14). Round through the bit pattern with the prologue helpers.
+            string? encode = null, decode = null;
+            switch (value.BasicValueType)
+            {
+                case BasicValueType.BFloat16: encode = "_f32_to_bf16_bits"; decode = "_bf16_bits_to_f32"; break;
+                case BasicValueType.Float8E4M3: encode = "_f32_to_e4m3_bits"; decode = "_e4m3_bits_to_f32"; break;
+                case BasicValueType.Float8E5M2: encode = "_f32_to_e5m2_bits"; decode = "_e5m2_bits_to_f32"; break;
+                case BasicValueType.Float4E2M1: encode = "_f32_to_e2m1_bits"; decode = "_e2m1_bits_to_f32"; break;
+            }
+            if (encode is not null && value.Value.BasicValueType != value.BasicValueType)
+            {
+                statement.AppendCommand(decode!);
+                statement.BeginArguments();
+                statement.AppendCommand(encode);
+                statement.BeginArguments();
+                statement.AppendCast(ArithmeticBasicValueType.Float32);
+                statement.AppendCast(value.SourceType);
+                statement.AppendArgument(sourceValue);
+                statement.EndArguments();
+                statement.EndArguments();
+                return;
+            }
+
             statement.AppendCast(value.TargetType);
             statement.AppendCast(value.SourceType);
             statement.AppendArgument(sourceValue);

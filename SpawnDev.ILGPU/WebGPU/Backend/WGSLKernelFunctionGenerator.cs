@@ -2284,6 +2284,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             case BasicValueType.Float8E5M2: _kernelReferencesFP8Helpers = true; break;
                             case BasicValueType.BFloat16: _kernelReferencesBF16Helpers = true; break;
                         }
+            // A conversion into bf16 / FP8 / FP4 calls the encode + decode helpers too (BuildConvertExpression)
+            foreach (var hm in EnumerateAllHelperMethods().Prepend(Method))
+                foreach (var hb in hm.Blocks)
+                    foreach (var hv in hb)
+                        if (hv.Value is ConvertValue hcv && hcv.Value.BasicValueType != hcv.BasicValueType)
+                            switch (hcv.BasicValueType)
+                            {
+                                case BasicValueType.Float4E2M1: _kernelReferencesFP4Helpers = true; break;
+                                case BasicValueType.Float8E4M3:
+                                case BasicValueType.Float8E5M2: _kernelReferencesFP8Helpers = true; break;
+                                case BasicValueType.BFloat16: _kernelReferencesBF16Helpers = true; break;
+                            }
 
             bool needsF16Emulation = _subWordFloat16Params.Count > 0 || _kernelReferencesF16Helpers;
             bool needsBF16Emulation = _subWordBFloat16Params.Count > 0 || _kernelReferencesBF16Helpers;

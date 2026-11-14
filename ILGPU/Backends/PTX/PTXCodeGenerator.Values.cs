@@ -363,9 +363,65 @@ namespace ILGPU.Backends.PTX
             }
         }
 
+        /// <summary>
+        /// True for the low-precision float types PTX keeps in an f32 register (bf16, FP8 E4M3 / E5M2, FP4 E2M1).
+        /// </summary>
+        private static bool IsF32RegisterLowPrecision(BasicValueType type) =>
+            type == BasicValueType.BFloat16
+            || type == BasicValueType.Float8E4M3
+            || type == BasicValueType.Float8E5M2
+            || type == BasicValueType.Float4E2M1;
+
         /// <summary cref="IBackendCodeGenerator.GenerateCode(ConvertValue)"/>
         public void GenerateCode(ConvertValue value)
         {
+            // A conversion INTO bf16 / FP8 / FP4 rounds to that type's grid, as the managed conversion does. These types
+            // live in an f32 register and were rounded only when stored to a buffer of the type, so float -> T -> float
+            // in registers was the identity (SpawnDev.ILGPU.ML's exact bf16 hi + lo split of fp16 biases got lo = 0;
+            // Tuvok 2026-11-14). Encode to the bit pattern and decode back, with the same helpers as store and load.
+            var loweredTarget = value.BasicValueType;
+            if (IsF32RegisterLowPrecision(loweredTarget) && value.Value.BasicValueType != loweredTarget)
+            {
+                var sourceBasic = value.Value.BasicValueType;
+                bool sourceIsF32Register = sourceBasic == BasicValueType.Float32 || IsF32RegisterLowPrecision(sourceBasic);
+                HardwareRegister f32Source;
+                if (sourceIsF32Register)
+                {
+                    f32Source = EnsureHardwareRegister(LoadPrimitive(value.Value));
+                }
+                else
+                {
+                    f32Source = AllocateRegister(BasicValueType.Float32, PTXRegisterKind.Float32);
+                    using var toF32 = BeginCommand(PTXInstructions.GetConvertOperation(
+                        value.SourceType,
+                        ArithmeticBasicValueType.Float32));
+                    toF32.AppendArgument(f32Source);
+                    toF32.AppendArgument(LoadPrimitive(value.Value));
+                }
+                var raw = AllocateRegister(BasicValueType.Int16, PTXRegisterKind.Int16);
+                var rounded = AllocateHardware(value);
+                switch (loweredTarget)
+                {
+                    case BasicValueType.BFloat16:
+                        EmitF32ToBF16Bits(f32Source, raw);
+                        EmitBF16BitsToF32(raw, rounded);
+                        break;
+                    case BasicValueType.Float4E2M1:
+                        EmitF32ToFP4Bits(f32Source, raw);
+                        EmitFP4BitsToF32(raw, rounded);
+                        break;
+                    default:
+                        bool isE4M3 = loweredTarget == BasicValueType.Float8E4M3;
+                        EmitF32ToFP8Bits(f32Source, raw, isE4M3);
+                        EmitFP8BitsToF32(raw, rounded, isE4M3);
+                        break;
+                }
+                FreeRegister(raw);
+                if (!sourceIsF32Register)
+                    FreeRegister(f32Source);
+                return;
+            }
+
             var sourceType = value.SourceType;
             var targetType = value.TargetType;
 
