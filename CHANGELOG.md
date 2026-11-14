@@ -41,7 +41,19 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   - Tests: `FloatDivision_AndSqrt_CorrectlyRounded_MatchHost` (every backend, bit-exact against .NET: integer ratios
     such as 24 / 48, random normal operands, sqrt, floor(i * a / b)) and
     `OpenCLTests.OpenCL_CorrectlyRoundedDivideSqrt_OnAndOff` (every OpenCL device; RTX 4070: 7,808 mismatches with the
-    option off, 0 with it on).
+    option off, 0 with it on; AMD RX 590, run by Lore at 5300733: 7,812 off, 0 on, both tests pass).
+- **FIX (WebGPU, WebGL; silent wrong results): fp32 division and square root are correctly rounded, as .NET.**
+  WGSL and GLSL ES allow 2.5 ulp for f32 `/` (and sqrt is no better), and D3D uses it: on an RTX 4070 4,529 of 16,384
+  quotients and 3,060 roots of `FloatDivision_AndSqrt_CorrectlyRounded_MatchHost` differed from .NET (3 / 1920 one ulp
+  high), the same class of error as the OpenCL fix above. There is no compiler option in the browser, so the emitters
+  call `_f32_div_rn` / `_f32_sqrt_rn` (WGSLEmulationLibrary / GLSLEmulationLibrary `F32CorrectlyRoundedFunctions`):
+  exact u32 arithmetic on the bit patterns (long division of the significands in 8-bit chunks, restoring integer
+  square root, round to nearest even, subnormals, zeros, infinities and NaN as IEEE). Checked offline against numpy
+  float32 on 300,000 random divisions and 300,000 roots (subnormals included): 0 differences; the test passes on
+  WebGPU, WebGPU without subgroups and WebGL. `MathMode.Fast` keeps the hardware `/` and `sqrt()`. Cost: a division
+  is now three u32 divisions and some integer work. Wasm (`f32.div` / `f32.sqrt`) was already exact.
+  - Known, not changed here: an f32 `%` on WebGPU / WebGL is still `a - b * trunc(a / b)`, not the exact fmod .NET
+    computes.
 - **PERF (Velocity host path, CPU accelerator): kernels run optimized code from their first launch.** Velocity runs
   small launches (up to `HostLaunchMaxThreads`) and adaptively chosen wide ones through the IL backend, which called
   the kernel's own method. The runtime compiles that at tier 0 and replaces it after about 30 calls or by on-stack

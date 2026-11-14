@@ -986,6 +986,10 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                     includeFP4: kernelNeedsFP4));
             }
 
+            // Correctly rounded f32 division / sqrt (the emitters call them unless MathMode.Fast)
+            Builder.AppendLine("// ============ Correctly rounded f32 division / sqrt ============");
+            Builder.AppendLine(GLSLEmulationLibrary.F32CorrectlyRoundedFunctions);
+
             // 5. Insert a placeholder for struct type definitions.
             //    Struct types are discovered lazily during EmitParameterDeclarations() and
             //    later code generation, so we can't emit them here yet. The placeholder
@@ -4385,6 +4389,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // with a zero the compiler cannot prove (gl_VertexID >> 31: the vertex shader's id is never negative) makes the
             // rounded product opaque, so it is never fused. Skipped when the context opts in to contraction.
                 AppendLine($"{prefix}{target} = uintBitsToFloat(floatBitsToUint({left} * {right}) | uint(gl_VertexID >> 31));");
+                return;
+            }
+
+            if (value.Kind == BinaryArithmeticKind.Div && resultGlslType == "float" && CorrectlyRoundedF32
+                && TypeGenerator[value.Left.Type] == "float" && TypeGenerator[value.Right.Type] == "float")
+            {
+                // correctly rounded, as .NET (GLSL ES allows 2.5 ulp; GLSLEmulationLibrary.F32CorrectlyRoundedFunctions)
+                AppendLine($"{prefix}{target} = _f32_div_rn({left}, {right});");
                 return;
             }
 

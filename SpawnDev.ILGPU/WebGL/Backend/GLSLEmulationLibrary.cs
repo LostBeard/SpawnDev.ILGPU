@@ -20,6 +20,106 @@ namespace SpawnDev.ILGPU.WebGL.Backend
     /// </summary>
     public static class GLSLEmulationLibrary
     {
+        /// <summary>
+        /// Correctly rounded fp32 division and square root, as .NET computes them (GLSL ES allows 2.5 ulp for `/`;
+        /// ANGLE / D3D differed from .NET in 4,529 of 16,384 quotients and 3,060 roots on an RTX 4070,
+        /// FloatDivision_AndSqrt_CorrectlyRounded_MatchHost 2026-11-14). The same integer algorithms as
+        /// WGSLEmulationLibrary.F32CorrectlyRoundedFunctions (long division of the significands in 8-bit uint chunks,
+        /// restoring integer square root, round to nearest even with round + sticky bits, subnormals included),
+        /// written for GLSL ES 3.0: no countLeadingZeros (a binary search), no division of negative ints, and the
+        /// non-finite results built with a zero the compiler cannot fold (gl_VertexID >> 31). MathMode.Fast keeps `/`.
+        /// </summary>
+        public const string F32CorrectlyRoundedFunctions = @"
+uint _f32_clz(uint x) {
+    uint n = 0u;
+    if ((x & 0xFFFF0000u) == 0u) { n += 16u; x <<= 16u; }
+    if ((x & 0xFF000000u) == 0u) { n += 8u; x <<= 8u; }
+    if ((x & 0xF0000000u) == 0u) { n += 4u; x <<= 4u; }
+    if ((x & 0xC0000000u) == 0u) { n += 2u; x <<= 2u; }
+    if ((x & 0x80000000u) == 0u) { n += 1u; }
+    return n;
+}
+
+float _f32_bits(uint b) { return uintBitsToFloat(b | uint(gl_VertexID >> 31)); }
+
+float _f32_round_pack(uint sgn, int ex, uint q, bool sticky) {
+    if (ex >= 1) {
+        uint m = q >> 1u;
+        bool r = (q & 1u) != 0u;
+        if (r && (sticky || (m & 1u) != 0u)) { m = m + 1u; }
+        int e = ex;
+        if (m == 0x1000000u) { m = m >> 1u; e = e + 1; }
+        if (e >= 255) { return _f32_bits(sgn | 0x7F800000u); }
+        return _f32_bits(sgn | (uint(e) << 23u) | (m & 0x7FFFFFu));
+    }
+    uint s = uint(2 - ex);
+    if (s > 26u) { return _f32_bits(sgn); }
+    uint m = q >> s;
+    bool r = ((q >> (s - 1u)) & 1u) != 0u;
+    bool st = sticky || (q & ((1u << (s - 1u)) - 1u)) != 0u;
+    if (r && (st || (m & 1u) != 0u)) { m = m + 1u; }
+    return _f32_bits(sgn | m);
+}
+
+float _f32_div_rn(float a, float b) {
+    uint ua = floatBitsToUint(a);
+    uint ub = floatBitsToUint(b);
+    uint sgn = (ua ^ ub) & 0x80000000u;
+    int ea = int((ua >> 23u) & 0xFFu);
+    int eb = int((ub >> 23u) & 0xFFu);
+    uint ma = ua & 0x7FFFFFu;
+    uint mb = ub & 0x7FFFFFu;
+    if (ea == 255 && ma != 0u) { return _f32_bits(ua | 0x400000u); }
+    if (eb == 255 && mb != 0u) { return _f32_bits(ub | 0x400000u); }
+    bool aInf = ea == 255;
+    bool bInf = eb == 255;
+    bool aZero = ea == 0 && ma == 0u;
+    bool bZero = eb == 0 && mb == 0u;
+    if ((aInf && bInf) || (aZero && bZero)) { return _f32_bits(0xFFC00000u); }
+    if (aInf || bZero) { return _f32_bits(sgn | 0x7F800000u); }
+    if (bInf || aZero) { return _f32_bits(sgn); }
+    if (ea == 0) { uint z = _f32_clz(ma) - 8u; ma = ma << z; ea = 1 - int(z); } else { ma = ma | 0x800000u; }
+    if (eb == 0) { uint z = _f32_clz(mb) - 8u; mb = mb << z; eb = 1 - int(z); } else { mb = mb | 0x800000u; }
+    int ex = ea - eb + 127;
+    if (ma < mb) { ma = ma << 1u; ex = ex - 1; }
+    uint r = ma - mb;
+    uint frac = 0u;
+    uint d;
+    r = r << 8u; d = r / mb; r = r - d * mb; frac = d;
+    r = r << 8u; d = r / mb; r = r - d * mb; frac = (frac << 8u) | d;
+    r = r << 8u; d = r / mb; r = r - d * mb; frac = (frac << 8u) | d;
+    return _f32_round_pack(sgn, ex, 0x1000000u | frac, r != 0u);
+}
+
+float _f32_sqrt_rn(float x) {
+    uint ux = floatBitsToUint(x);
+    int e = int((ux >> 23u) & 0xFFu);
+    uint m = ux & 0x7FFFFFu;
+    if (e == 255 && m != 0u) { return _f32_bits(ux | 0x400000u); }
+    if ((ux & 0x7FFFFFFFu) == 0u) { return x; }
+    if ((ux & 0x80000000u) != 0u) { return _f32_bits(0xFFC00000u); }
+    if (e == 255) { return x; }
+    if (e == 0) { uint z = _f32_clz(m) - 8u; m = m << z; e = 1 - int(z); } else { m = m | 0x800000u; }
+    int k = e - 150;
+    if (((k + 400) & 1) == 0) { m = m << 1u; k = k - 1; }
+    uint hi = m >> 7u;
+    uint lo = m << 25u;
+    uint rem = 0u;
+    uint root = 0u;
+    for (int i = 24; i >= 0; i--) {
+        uint bit = uint(2 * i);
+        uint pair = bit >= 32u ? ((hi >> (bit - 32u)) & 3u) : ((lo >> bit) & 3u);
+        rem = (rem << 2u) | pair;
+        uint trial = (root << 2u) | 1u;
+        root = root << 1u;
+        if (rem >= trial) { rem = rem - trial; root = root | 1u; }
+    }
+    // (k - 25) is even and >= -200: halve a non-negative number (GLSL leaves negative int division undefined)
+    int half_k = (k - 25 + 400) / 2 - 200;
+    return _f32_round_pack(0u, 151 + half_k, root, rem != 0u);
+}
+";
+
         #region emu_f64 Emulation (Double-Float using vec2)
 
         /// <summary>

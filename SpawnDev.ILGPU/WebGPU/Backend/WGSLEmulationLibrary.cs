@@ -52,6 +52,101 @@ fn _f32_neg_zero() -> f32 { return bitcast<f32>(0x80000000u | _ilgpu_runtime_zer
 ";
 
         /// <summary>
+        /// Correctly rounded fp32 division and square root, as .NET computes them. WGSL allows 2.5 ulp for f32 `/`
+        /// and inherits sqrt's accuracy from inverseSqrt, and D3D uses that: on an RTX 4070 4,529 of 16,384 quotients
+        /// and 3,060 roots differed from .NET (3 / 1920 one ulp high; FloatDivision_AndSqrt_CorrectlyRounded_MatchHost,
+        /// 2026-11-14). Both work on the bit patterns with exact u32 arithmetic: the division is a long division of the
+        /// normalized significands in 8-bit chunks (u32 `/` and `%` are exact), the square root a restoring integer
+        /// square root; then round to nearest even with a round and a sticky bit, subnormal results included.
+        /// Needs <see cref="F32SpecialValueFunctions"/> (the runtime zero). MathMode.Fast keeps `/` and sqrt().
+        /// </summary>
+        public const string F32CorrectlyRoundedFunctions = @"
+fn _f32_round_pack(sign: u32, exp: i32, q: u32, sticky: bool) -> f32 {
+    // q: 25 bits, the leading 1 at bit 24 (value q * 2^(exp - 151)), plus a sticky bit below it
+    if (exp >= 1) {
+        var m = q >> 1u;
+        let r = (q & 1u) != 0u;
+        if (r && (sticky || (m & 1u) != 0u)) { m = m + 1u; }
+        var e = exp;
+        if (m == 0x1000000u) { m = m >> 1u; e = e + 1; }
+        if (e >= 255) { return bitcast<f32>(sign | 0x7F800000u | _ilgpu_runtime_zero); }
+        return bitcast<f32>(sign | (u32(e) << 23u) | (m & 0x7FFFFFu));
+    }
+    // subnormal: the field is q * 2^(exp - 2)
+    let s = u32(2 - exp);
+    if (s > 26u) { return bitcast<f32>(sign | _ilgpu_runtime_zero); }
+    var m = q >> s;
+    let r = ((q >> (s - 1u)) & 1u) != 0u;
+    let st = sticky || (q & ((1u << (s - 1u)) - 1u)) != 0u;
+    if (r && (st || (m & 1u) != 0u)) { m = m + 1u; }
+    return bitcast<f32>(sign | m);
+}
+
+fn _f32_div_rn(a: f32, b: f32) -> f32 {
+    let ua = bitcast<u32>(a);
+    let ub = bitcast<u32>(b);
+    let sign = (ua ^ ub) & 0x80000000u;
+    var ea = i32((ua >> 23u) & 0xFFu);
+    var eb = i32((ub >> 23u) & 0xFFu);
+    var ma = ua & 0x7FFFFFu;
+    var mb = ub & 0x7FFFFFu;
+    let aNan = ea == 255 && ma != 0u;
+    let bNan = eb == 255 && mb != 0u;
+    if (aNan) { return bitcast<f32>(ua | 0x400000u | _ilgpu_runtime_zero); }
+    if (bNan) { return bitcast<f32>(ub | 0x400000u | _ilgpu_runtime_zero); }
+    let aInf = ea == 255;
+    let bInf = eb == 255;
+    let aZero = ea == 0 && ma == 0u;
+    let bZero = eb == 0 && mb == 0u;
+    if ((aInf && bInf) || (aZero && bZero)) { return bitcast<f32>(0xFFC00000u | _ilgpu_runtime_zero); }
+    if (aInf || bZero) { return bitcast<f32>(sign | 0x7F800000u | _ilgpu_runtime_zero); }
+    if (bInf || aZero) { return bitcast<f32>(sign | _ilgpu_runtime_zero); }
+    // normalize: significands in [2^23, 2^24)
+    if (ea == 0) { let z = countLeadingZeros(ma) - 8u; ma = ma << z; ea = 1 - i32(z); } else { ma = ma | 0x800000u; }
+    if (eb == 0) { let z = countLeadingZeros(mb) - 8u; mb = mb << z; eb = 1 - i32(z); } else { mb = mb | 0x800000u; }
+    var exp = ea - eb + 127;
+    if (ma < mb) { ma = ma << 1u; exp = exp - 1; }
+    // ma / mb in [1, 2): integer bit 1, then 24 fraction bits in three 8-bit steps
+    var r = ma - mb;
+    var frac = 0u;
+    r = r << 8u; var d = r / mb; r = r - d * mb; frac = d;
+    r = r << 8u; d = r / mb; r = r - d * mb; frac = (frac << 8u) | d;
+    r = r << 8u; d = r / mb; r = r - d * mb; frac = (frac << 8u) | d;
+    return _f32_round_pack(sign, exp, 0x1000000u | frac, r != 0u);
+}
+
+fn _f32_sqrt_rn(x: f32) -> f32 {
+    let ux = bitcast<u32>(x);
+    var e = i32((ux >> 23u) & 0xFFu);
+    var m = ux & 0x7FFFFFu;
+    if (e == 255 && m != 0u) { return bitcast<f32>(ux | 0x400000u | _ilgpu_runtime_zero); }
+    if ((ux & 0x7FFFFFFFu) == 0u) { return x; }
+    if ((ux & 0x80000000u) != 0u) { return bitcast<f32>(0xFFC00000u | _ilgpu_runtime_zero); }
+    if (e == 255) { return x; }
+    if (e == 0) { let z = countLeadingZeros(m) - 8u; m = m << z; e = 1 - i32(z); } else { m = m | 0x800000u; }
+    // x = m * 2^k, k = e - 150; make k odd so that sqrt(m << 25) carries the whole exponent
+    var k = e - 150;
+    if ((k & 1) == 0) { m = m << 1u; k = k - 1; }
+    // restoring square root of M = m << 25 (50 bits: hi = m >> 7, lo = m << 25): 25 root bits
+    let hi = m >> 7u;
+    let lo = m << 25u;
+    var rem = 0u;
+    var root = 0u;
+    for (var i = 24; i >= 0; i = i - 1) {
+        let bit = u32(2 * i);
+        var pair = 0u;
+        if (bit >= 32u) { pair = (hi >> (bit - 32u)) & 3u; } else { pair = (lo >> bit) & 3u; }
+        rem = (rem << 2u) | pair;
+        let trial = (root << 2u) | 1u;
+        root = root << 1u;
+        if (rem >= trial) { rem = rem - trial; root = root | 1u; }
+    }
+    // value = root * 2^((k - 25) / 2), root in [2^24, 2^25): biased exponent 127 + 24 + (k - 25) / 2
+    return _f32_round_pack(0u, 151 + (k - 25) / 2, root, rem != 0u);
+}
+";
+
+        /// <summary>
         /// Exact f64 &lt;-&gt; IEEE-754 bit pattern and f64 &lt;-&gt; integer conversions, shared by BOTH
         /// f64 emulation modes (appended to <see cref="F64Functions"/> and
         /// <see cref="OzakiF64Functions"/>). Everything happens in the integer domain on the IEEE bit

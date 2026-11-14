@@ -1606,11 +1606,24 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // the wrong quotient/remainder. Same bitcast as the kernel handler.
                 AppendLine($"{target} = bitcast<i32>(bitcast<u32>({left}) {op} bitcast<u32>({right}));");
             }
+            else if (value.Kind == BinaryArithmeticKind.Div && CorrectlyRoundedF32
+                && TypeGenerator[value.Left.Type] == "f32" && TypeGenerator[value.Right.Type] == "f32")
+            {
+                // correctly rounded, as .NET (WGSL allows 2.5 ulp; WGSLEmulationLibrary.F32CorrectlyRoundedFunctions)
+                AppendLine($"{target} = _f32_div_rn({left}, {right});");
+            }
             else
             {
                 AppendLine($"{target} = {left} {op} {right};");
             }
         }
+
+        /// <summary>
+        /// True unless the context runs <see cref="MathMode.Fast"/>: f32 `/` and sqrt are emitted as the correctly
+        /// rounded _f32_div_rn / _f32_sqrt_rn (WGSLEmulationLibrary.F32CorrectlyRoundedFunctions), which give what .NET
+        /// gives; WGSL's own `/` (2.5 ulp) and sqrt differed from .NET on D3D.
+        /// </summary>
+        protected bool CorrectlyRoundedF32 => Backend.Context.Properties.MathMode < MathMode.Fast;
 
         /// <summary>Emits a unary arithmetic operation (delegates to <c>GenerateUnOp</c>).</summary>
         /// <param name="value">The IR value.</param>
@@ -1706,7 +1719,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 UnaryArithmeticKind.Exp2F => $"exp2({operand})",
                 UnaryArithmeticKind.LogF => $"log({operand})",
                 UnaryArithmeticKind.Log2F => $"log2({operand})",
-                UnaryArithmeticKind.SqrtF => $"sqrt({operand})",
+                UnaryArithmeticKind.SqrtF => operandType == "f32" && CorrectlyRoundedF32 ? $"_f32_sqrt_rn({operand})" : $"sqrt({operand})",
                 UnaryArithmeticKind.RsqrtF => $"1.0 / sqrt({operand})", // Manual inverseSqrt
                 UnaryArithmeticKind.RcpF => $"1.0 / {operand}",
                 UnaryArithmeticKind.FloorF => $"floor({operand})",
@@ -3521,6 +3534,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     if (wgslFunc == "rsqrt_custom")
                     {
                         AppendLine($"{target} = 1.0 / sqrt({arg});");
+                        return;
+                    }
+                    // MathF.Sqrt / Math.Sqrt reached as a call: correctly rounded on f32, as the SqrtF value
+                    if (wgslFunc == "sqrt" && CorrectlyRoundedF32 && TypeGenerator[methodCall[0].Type] == "f32")
+                    {
+                        AppendLine($"{target} = _f32_sqrt_rn({arg});");
                         return;
                     }
 

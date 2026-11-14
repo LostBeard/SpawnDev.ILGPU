@@ -2347,11 +2347,23 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // rounded product opaque, so it is never fused. Skipped when the context opts in to contraction.
                 AppendLine($"{target} = uintBitsToFloat(floatBitsToUint({leftExpr} * {rightExpr}) | uint(gl_VertexID >> 31));");
             }
+            else if (value.Kind == BinaryArithmeticKind.Div && target.Type == "float" && CorrectlyRoundedF32
+                && TypeGenerator[value.Left.Type] == "float" && TypeGenerator[value.Right.Type] == "float")
+            {
+                // correctly rounded, as .NET (GLSL ES allows 2.5 ulp; GLSLEmulationLibrary.F32CorrectlyRoundedFunctions)
+                AppendLine($"{target} = _f32_div_rn({leftExpr}, {rightExpr});");
+            }
             else
             {
                 AppendLine($"{target} = {leftExpr} {op} {rightExpr};");
             }
         }
+
+        /// <summary>
+        /// True unless the context runs <see cref="MathMode.Fast"/>: f32 `/` and sqrt are emitted as the correctly
+        /// rounded _f32_div_rn / _f32_sqrt_rn (GLSLEmulationLibrary.F32CorrectlyRoundedFunctions).
+        /// </summary>
+        protected bool CorrectlyRoundedF32 => Backend.Context.Properties.MathMode < MathMode.Fast;
 
         /// <summary>True when <paramref name="value"/> is an integer constant zero.</summary>
         protected static bool IsConstantZero(Value value) =>
@@ -2477,7 +2489,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 UnaryArithmeticKind.Exp2F => $"exp2({operand})",
                 UnaryArithmeticKind.LogF => $"log({operand})",
                 UnaryArithmeticKind.Log2F => $"log2({operand})",
-                UnaryArithmeticKind.SqrtF => $"sqrt({operand})",
+                UnaryArithmeticKind.SqrtF => TypeGenerator[value.Value.Type] == "float" && CorrectlyRoundedF32 ? $"_f32_sqrt_rn({operand})" : $"sqrt({operand})",
                 UnaryArithmeticKind.RsqrtF => $"inversesqrt({operand})",
                 UnaryArithmeticKind.RcpF => $"1.0 / {operand}",
                 UnaryArithmeticKind.FloorF => $"floor({OpaqueFloat(operand.ToString())})",
@@ -3732,6 +3744,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 if (glslFunc == "rcp_custom" && methodCall.Count == 1)
                 {
                     AppendLine($"{target} = 1.0 / {Load(methodCall[0])};");
+                    return;
+                }
+                // MathF.Sqrt / Math.Sqrt reached as a call: correctly rounded on f32, as the SqrtF value
+                if (glslFunc == "sqrt" && methodCall.Count == 1 && CorrectlyRoundedF32 && TypeGenerator[methodCall[0].Type] == "float")
+                {
+                    AppendLine($"{target} = _f32_sqrt_rn({Load(methodCall[0])});");
                     return;
                 }
                 if (glslFunc == "fma_custom" && methodCall.Count == 3)

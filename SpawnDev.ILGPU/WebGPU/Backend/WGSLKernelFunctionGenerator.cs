@@ -2332,6 +2332,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             //      explicitly permitted.
             builder.AppendLine("// ============ F32 Special Value Helpers ============");
             builder.AppendLine(WGSLEmulationLibrary.F32SpecialValueFunctions);
+            // Correctly rounded f32 division / sqrt (the emitters call them unless MathMode.Fast); uncalled functions cost
+            // nothing in the compiled pipeline.
+            builder.AppendLine(WGSLEmulationLibrary.F32CorrectlyRoundedFunctions);
 
             // Emit hoisted i64 constants (deduplicated across kernel + helper bodies)
             if (_baseArgs.I64Constants.Count > 0)
@@ -7798,6 +7801,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 // (signed two's complement). Bitcast through u32 fixes both Div and
                 // Rem for any high-bit-set uint operand.
                 AppendLine($"{prefix}{target} = bitcast<i32>(bitcast<u32>({left}) {op} bitcast<u32>({right}));");
+            }
+            else if (value.Kind == BinaryArithmeticKind.Div && leftType == "f32" && rightType == "f32" && CorrectlyRoundedF32)
+            {
+                // correctly rounded, as .NET (WGSL allows 2.5 ulp; WGSLEmulationLibrary.F32CorrectlyRoundedFunctions)
+                AppendLine($"{prefix}{target} = _f32_div_rn({left}, {right});");
             }
             else
                 AppendLine($"{prefix}{target} = {left} {op} {right};");
