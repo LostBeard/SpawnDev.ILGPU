@@ -45,8 +45,9 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
 - **FIX (OpenCL without cl_khr_fp16, Wasm, WebGL; silent wrong results): a conversion to Half rounds to fp16.** With Half emulated
   in a `float`, the conversion was `(float)(float)x`: float -> Half -> float was the identity (RTX 4070: 8,711 of 8,716
   values of the in-register round trip came back unrounded; reported by Tuvok for SpawnDev.ILGPU.ML's exact fp16 hi + lo
-  split, though his OpenCL observation itself did not reproduce on a clean 5.4.31 build: ML's split goes through an fp16
-  buffer, whose `vstore_half` store already rounded). The conversion now rounds through `vstore_half_rte` / `vload_half` (IEEE round to
+  split; measured with the new test's kernel, also on a 5.4.31 build: 8,711 / 8,716 unrounded. ML's own split kernel
+  rounded on 5.4.31 OpenCL (his first report did not reproduce on a clean build); why that kernel shape escaped is not
+  known). The conversion now rounds through `vstore_half_rte` / `vload_half` (IEEE round to
   nearest even, core OpenCL; a double rounds once when the program has fp64). The Half bit-pattern helpers behind
   `Interop.FloatAsInt(Half)` (Half radix sort) use them too: the old encoder truncated and the old decoder flushed fp16
   subnormals to 0. Test: `HalfRoundTrip_FloatToHalfToFloat_RoundsAsDotNet` (every backend; bit-exact against .NET over
