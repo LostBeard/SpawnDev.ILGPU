@@ -44,6 +44,10 @@ namespace ILGPU.Backends.IL
         /// </summary>
         [UnconditionalSuppressMessage("Trimming", "IL2075",
             Justification = TrimmingAnnotations.EmittedType)]
+        [UnconditionalSuppressMessage("Trimming", "IL2026",
+            Justification = "OptimizedMethodCopy reads the IL of a kernel method the launcher calls anyway (kept), and resolves the members that IL references (kept by that IL).")]
+        [UnconditionalSuppressMessage("AOT", "IL3050",
+            Justification = "The IL backend emits its launchers with Reflection.Emit already; it does not run without dynamic code.")]
         protected override void GenerateCode<TEmitter>(
             EntryPoint entryPoint,
             in BackendContext backendContext,
@@ -101,8 +105,10 @@ namespace ILGPU.Backends.IL
             for (int i = 0; i < localCount; i++)
                 emitter.Emit(LocalOperation.Load, locals[i]);
 
-            // Invoke kernel
-            emitter.EmitCall(entryPoint.MethodInfo);
+            // Invoke kernel (Velocity's host accelerator: its optimized copy, see OptimizedMethodCopy)
+            emitter.EmitCall(CallOptimizedKernelCopy
+                ? OptimizedMethodCopy.GetOrCreate(entryPoint.MethodInfo)
+                : entryPoint.MethodInfo);
         }
 
         #endregion

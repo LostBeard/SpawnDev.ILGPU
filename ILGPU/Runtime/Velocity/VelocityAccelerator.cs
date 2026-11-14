@@ -276,6 +276,22 @@ namespace ILGPU.Runtime.Velocity
         public bool AdaptiveHostLaunches { get; set; } = true;
 
         /// <summary>
+        /// True (the default): a kernel loaded for the host path runs a copy of its method in a dynamic method, which
+        /// the JIT compiles fully optimized at once. Its own method starts at tier 0 and is replaced only after about
+        /// 30 calls (or by on-stack replacement, which did not happen for a large loop body): a one-thread kernel with
+        /// 960 branchy steps per iteration ran 13 ns per step, 2.3 with the copy (and ArrayView's accessors marked
+        /// AggressiveOptimization). A kernel the copy cannot express exactly (an instance method such as a lambda,
+        /// exception handling, calli) runs its own method. Read when a kernel is loaded for the host path.
+        /// </summary>
+        public bool OptimizedHostKernels { get; set; } = true;
+
+        /// <summary>
+        /// Kernel methods copied for the host path since process start (see <see cref="OptimizedHostKernels"/>); a
+        /// diagnostic.
+        /// </summary>
+        public static int OptimizedHostKernelCount => OptimizedMethodCopy.CopiedCount;
+
+        /// <summary>
         /// True (the default): a kernel with group barriers whose groups do not divide the processors evenly measures
         /// whether one extra team of warps (slightly more warp threads than processors) is faster than leaving processors
         /// idle, and keeps the faster. It depends on the work between barriers: SpawnDev.Codecs' VP9 loop filter on
@@ -326,6 +342,9 @@ namespace ILGPU.Runtime.Velocity
                             Math.Max(1, Environment.ProcessorCount)),
                         CPUAcceleratorMode.Sequential,
                         ThreadPriority.Normal);
+                    // Run each kernel's optimized copy: its own method starts at tier 0 (OptimizedHostKernels)
+                    if (hostAccelerator.Backend is ILBackend ilBackend)
+                        ilBackend.CallOptimizedKernelCopy = OptimizedHostKernels;
                     host = hostAccelerator;
                 }
                 var entryPoint = kernel.EntryPoint;

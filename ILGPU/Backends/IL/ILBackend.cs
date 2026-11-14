@@ -48,6 +48,17 @@ namespace ILGPU.Backends.IL
 
         #endregion
 
+        #region Optimized kernel copies
+
+        /// <summary>
+        /// True: the launcher calls a fully optimized copy of a static kernel method (see
+        /// <see cref="OptimizedMethodCopy"/>) instead of the method itself, which the runtime compiles at tier 0 first.
+        /// Set by Velocity for its host accelerator; the CPU accelerator keeps the original method (debugging).
+        /// </summary>
+        internal bool CallOptimizedKernelCopy { get; set; }
+
+        #endregion
+
         #region Static
 
         /// <summary>

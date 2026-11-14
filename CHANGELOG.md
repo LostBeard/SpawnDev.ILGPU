@@ -29,6 +29,24 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   (`StructuredControlFlow_IrreducibleGoto_MatchesHost`). Such a kernel is now a state machine
   (`loop { switch (current_block) }`, entry block at function scope); with barriers it throws a
   `NotSupportedException` naming the kernel instead. No other suite kernel takes that path.
+- **PERF (Velocity host path, CPU accelerator): kernels run optimized code from their first launch.** Velocity runs
+  small launches (up to `HostLaunchMaxThreads`) and adaptively chosen wide ones through the IL backend, which called
+  the kernel's own method. The runtime compiles that at tier 0 and replaces it after about 30 calls or by on-stack
+  replacement, which did not happen for a large loop body (JIT summary: "Instrumented Tier0" for the whole run).
+  ArrayView's element accessors were tier-0 calls too once the kernel was too large for the JIT to inline them.
+  One-thread branch-cost probe, ns per step for loop bodies of 12 / 120 / 960 steps: 1.65 / 7.9 / 13 before,
+  1.66 / 1.97 / 2.28 now (tiering switched off for the whole process: 1.65 / 1.82 / 2.21). Two changes, both
+  needed (each alone: 960 steps at 10.6 and 3.5):
+  - New `OptimizedMethodCopy` (IL backend): Velocity's host accelerator calls a copy of a static kernel method in a
+    `DynamicMethod` (compiled fully optimized at once; every metadata token re-issued through `DynamicILInfo` in the
+    method's generic context). An instance method (a lambda), exception handling or `calli` keeps the original.
+    The CPU accelerator keeps calling the original method (debugging). Switch
+    `VelocityAccelerator.OptimizedHostKernels` (default true); diagnostic `OptimizedHostKernelCount`.
+  - `ArrayView<T>`'s indexers and `LoadEffectiveAddress` are `AggressiveOptimization | AggressiveInlining` (still
+    inlined into small kernels: 12-step number unchanged).
+  - Test: `VelocityTests.HostLaunch_RunsAnOptimizedCopyOfTheKernel_SameResults` (generic kernels over int / double,
+    a switch with a return in a loop; asserts the copy was made and the results; with the switch off no copy and the
+    same results). Red-check: switch off by default -> fails.
 - **FIX (Velocity): a `switch` with a case that leaves its loop (a return, a `goto` out) threw** in
   `VelocityBlockScheduling` ("Skip this case for now"), and the message itself failed to format (a
   `FormatException` hid it). New `VelocityLowerLoopSwitches` turns such a switch into a chain of `if` branches, one

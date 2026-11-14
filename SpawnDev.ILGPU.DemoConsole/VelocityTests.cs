@@ -109,6 +109,120 @@ public class VelocityTests : BackendTestBase
             if (b[t] != data[(t + 1) % 16]) throw new Exception($"barrier kernel [{t}] = {b[t]}, expected {data[(t + 1) % 16]}");
     });
 
+    // Kernels for HostLaunch_RunsAnOptimizedCopyOfTheKernel (each loaded only there: the copy is made once per method).
+    // Generic: T locals, INumber<T> operators through constrained calls, a method type argument for every token.
+    static void HostCopyGenericKernel<T>(Index1D i, ArrayView<T> data, ArrayView<T> output, int iters) where T : unmanaged, System.Numerics.INumber<T>
+    {
+        T acc = data[i];
+        for (int k = 0; k < iters; k++)
+        {
+            T v = data[(i + k) & 1023];
+            if (v > acc) acc += v;
+            else acc -= T.One;
+        }
+        output[i] = acc;
+    }
+
+    static T HostCopyGenericExpected<T>(int i, T[] data, int iters) where T : unmanaged, System.Numerics.INumber<T>
+    {
+        T acc = data[i];
+        for (int k = 0; k < iters; k++)
+        {
+            T v = data[(i + k) & 1023];
+            if (v > acc) acc += v;
+            else acc -= T.One;
+        }
+        return acc;
+    }
+
+    static void HostCopySwitchKernel(Index1D i, ArrayView<int> data, ArrayView<int> output, int iters)
+    {
+        int acc = i;
+        for (int k = 0; k < iters; k++)
+        {
+            switch (data[(acc + k) & 1023] & 7)
+            {
+                case 0: acc += 3; break;
+                case 1: case 5: acc ^= k; break;
+                case 2: acc = acc * 5 + 1; break;
+                case 6: output[i] = -acc; return;
+                default: acc -= 1; break;
+            }
+        }
+        output[i] = acc;
+    }
+
+    static int HostCopySwitchExpected(int i, int[] data, int iters)
+    {
+        int acc = i;
+        for (int k = 0; k < iters; k++)
+        {
+            switch (data[(acc + k) & 1023] & 7)
+            {
+                case 0: acc += 3; break;
+                case 1: case 5: acc ^= k; break;
+                case 2: acc = acc * 5 + 1; break;
+                case 6: return -acc;
+                default: acc -= 1; break;
+            }
+        }
+        return acc;
+    }
+
+    /// <summary>
+    /// A kernel on the host path runs an optimized copy of its method (VelocityAccelerator.OptimizedHostKernels; the
+    /// method itself starts at tier 0 and stayed there for a large loop body: BranchCost_ByFunctionSize_Report). Checks
+    /// that the copy is made for generic and switch kernels, that it computes what the host does, and that with the
+    /// switch off a kernel runs its own method (no copy) with the same results.
+    /// </summary>
+    [TestMethod]
+    public async Task HostLaunch_RunsAnOptimizedCopyOfTheKernel_SameResults() => await RunTest(async accelerator =>
+    {
+        var velocity = (VelocityAccelerator)accelerator;
+        var rnd = new Random(11);
+        var ints = new int[1024];
+        var doubles = new double[1024];
+        for (int k = 0; k < ints.Length; k++) { ints[k] = rnd.Next(-1000, 1000); doubles[k] = rnd.NextDouble() * 10 - 5; }
+        using var dInts = accelerator.Allocate1D(ints);
+        using var dDoubles = accelerator.Allocate1D(doubles);
+        using var oInts = accelerator.Allocate1D<int>(8);
+        using var oDoubles = accelerator.Allocate1D<double>(8);
+        using var oLongs = accelerator.Allocate1D<long>(8);
+        using var dLongs = accelerator.Allocate1D(Array.ConvertAll(ints, v => (long)v));
+        const int iters = 3000;
+
+        async Task Run<T>(string name, Action<Index1D, ArrayView<T>, ArrayView<T>, int> kernelMethod, MemoryBuffer1D<T, Stride1D.Dense> input,
+            MemoryBuffer1D<T, Stride1D.Dense> output, Func<int, T> expected, bool expectCopy) where T : unmanaged, IEquatable<T>
+        {
+            int copiesBefore = VelocityAccelerator.OptimizedHostKernelCount;
+            long hostBefore = velocity.HostLaunchCount;
+            var kernel = accelerator.LoadAutoGroupedStreamKernel(kernelMethod);
+            kernel(8, input.View, output.View, iters);
+            await accelerator.SynchronizeAsync();
+            if (velocity.HostLaunchCount - hostBefore != 1)
+                throw new Exception($"{name}: did not run on the host path");
+            int copies = VelocityAccelerator.OptimizedHostKernelCount - copiesBefore;
+            if (copies != (expectCopy ? 1 : 0))
+                throw new Exception($"{name}: {copies} optimized copies made, expected {(expectCopy ? 1 : 0)} (OptimizedHostKernels {velocity.OptimizedHostKernels})");
+            var got = await output.CopyToHostAsync<T>();
+            for (int t = 0; t < 8; t++)
+                if (!got[t].Equals(expected(t)))
+                    throw new Exception($"{name}: [{t}] = {got[t]}, expected {expected(t)}");
+        }
+
+        await Run<int>("generic<int>", HostCopyGenericKernel<int>, dInts, oInts, t => HostCopyGenericExpected(t, ints, iters), expectCopy: true);
+        await Run<double>("generic<double>", HostCopyGenericKernel<double>, dDoubles, oDoubles, t => HostCopyGenericExpected(t, doubles, iters), expectCopy: true);
+        await Run<int>("switch", HostCopySwitchKernel, dInts, oInts, t => HostCopySwitchExpected(t, ints, iters), expectCopy: true);
+        bool saved = velocity.OptimizedHostKernels;
+        velocity.OptimizedHostKernels = false;
+        try
+        {
+            var longs = Array.ConvertAll(ints, v => (long)v);
+            await Run<long>("generic<long>, copies off", HostCopyGenericKernel<long>, dLongs, oLongs, t => HostCopyGenericExpected(t, longs, iters), expectCopy: false);
+        }
+        finally { velocity.OptimizedHostKernels = saved; }
+    });
+
     static void TeamCountBarrierKernel(ArrayView<int> data, ArrayView<int> output)
     {
         var shared = SharedMemory.Allocate<int>(256);

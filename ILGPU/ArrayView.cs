@@ -355,7 +355,7 @@ namespace ILGPU
         /// <returns>The element at the given index.</returns>
         public readonly unsafe ref T this[Index1D index]
         {
-            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            [MethodImpl(MethodImplOptions.AggressiveOptimization | MethodImplOptions.AggressiveInlining)]
             [ViewIntrinsic(ViewIntrinsicKind.GetViewElementAddressByIndex)]
             get => ref this[(long)index.X];
         }
@@ -367,7 +367,7 @@ namespace ILGPU
         /// <returns>The element at the given index.</returns>
         public readonly unsafe ref T this[LongIndex1D index]
         {
-            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            [MethodImpl(MethodImplOptions.AggressiveOptimization | MethodImplOptions.AggressiveInlining)]
             [ViewIntrinsic(ViewIntrinsicKind.GetViewElementAddressByIndex)]
             get => ref this[index.X];
         }
@@ -379,7 +379,7 @@ namespace ILGPU
         /// <returns>The element at the given index.</returns>
         public readonly unsafe ref T this[int index]
         {
-            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            [MethodImpl(MethodImplOptions.AggressiveOptimization | MethodImplOptions.AggressiveInlining)]
             [ViewIntrinsic(ViewIntrinsicKind.GetViewElementAddress)]
             get => ref this[(long)index];
         }
@@ -391,7 +391,7 @@ namespace ILGPU
         /// <returns>The element at the given index.</returns>
         public readonly unsafe ref T this[long index]
         {
-            [MethodImpl(MethodImplOptions.AggressiveInlining)]
+            [MethodImpl(MethodImplOptions.AggressiveOptimization | MethodImplOptions.AggressiveInlining)]
             [ViewIntrinsic(ViewIntrinsicKind.GetViewElementAddress)]
             get
             {
@@ -515,7 +515,7 @@ namespace ILGPU
         /// <see cref="ElementSize"/> is 1, but two 4-bit elements share a byte, so an element offset k is byte
         /// k * BitsPerElement / 8. <see cref="SubView(long, long)"/> only creates packed views that start on a byte.
         /// </remarks>
-        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        [MethodImpl(MethodImplOptions.AggressiveOptimization | MethodImplOptions.AggressiveInlining)]
         internal readonly unsafe ref byte LoadEffectiveAddress(long index) =>
             ref BitsPerElement < 8
             ? ref Unsafe.Add(
