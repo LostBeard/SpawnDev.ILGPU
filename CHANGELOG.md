@@ -3,6 +3,10 @@
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 ## 5.4.33 (forks 2.4.32) - unreleased - low-precision values round like .NET: conversions into bf16 / FP8 / FP4 and every Half / bf16 / FP8 / FP4 arithmetic result
 
+Release sweep (full default, code 91cd8e9 = 5.4.33-local.1): 9,331 cases, 8,592 passed, 1 failed, 738 skipped, 68 min. The
+failure, `CudaTests.Tests_MemoryPressure_ReclaimsIdleMemoryBeforeAllocating` ("free device memory fell to 0 MiB" while the
+browser lanes shared the GPU), passed alone right after and in the 5.4.32 sweep.
+
 - **FIX (silent wrong results): a conversion into bf16, FP8 E4M3, FP8 E5M2 or FP4 E2M1 was the identity on CUDA, OpenCL,
   WebGPU, WebGL and Wasm.** These types live in an f32 register on those backends and were rounded only at a store to a
   buffer of the type, so `(float)(BFloat16)x` returned `x`. Found by SpawnDev.ILGPU.ML (Tuvok): an exact bf16 hi + lo split
