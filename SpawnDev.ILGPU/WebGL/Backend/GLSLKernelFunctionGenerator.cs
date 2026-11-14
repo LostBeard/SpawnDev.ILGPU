@@ -987,8 +987,9 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             }
 
             // Correctly rounded f32 division / sqrt (the emitters call them unless MathMode.Fast)
-            Builder.AppendLine("// ============ Correctly rounded f32 division / sqrt ============");
-            Builder.AppendLine(GLSLEmulationLibrary.F32CorrectlyRoundedFunctions);
+            // A placeholder WebGLBackend replaces with the functions only when the finished shader calls one (else every
+            // shader carried ~100 dead lines; Geordi measured the WGSL twin at +4,034 chars per VP9 shader, 2026-11-14).
+            Builder.AppendLine(GLSLEmulationLibrary.F32CorrectlyRoundedPlaceholder);
 
             // 5. Insert a placeholder for struct type definitions.
             //    Struct types are discovered lazily during EmitParameterDeclarations() and

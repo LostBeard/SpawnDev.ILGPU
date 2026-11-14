@@ -2332,9 +2332,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             //      explicitly permitted.
             builder.AppendLine("// ============ F32 Special Value Helpers ============");
             builder.AppendLine(WGSLEmulationLibrary.F32SpecialValueFunctions);
-            // Correctly rounded f32 division / sqrt (the emitters call them unless MathMode.Fast); uncalled functions cost
-            // nothing in the compiled pipeline.
-            builder.AppendLine(WGSLEmulationLibrary.F32CorrectlyRoundedFunctions);
+            // Correctly rounded f32 division / sqrt (the emitters call them unless MathMode.Fast): a placeholder that
+            // WebGPUBackend.Compile replaces with the functions only when the finished module (helpers included, which
+            // are generated after this header) calls one; every shader carrying them grew SpawnDev.Codecs' VP9 shaders
+            // by 4,034 chars each, all dead code (Geordi, 2026-11-14).
+            builder.AppendLine(WGSLEmulationLibrary.F32CorrectlyRoundedPlaceholder);
 
             // Emit hoisted i64 constants (deduplicated across kernel + helper bodies)
             if (_baseArgs.I64Constants.Count > 0)

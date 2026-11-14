@@ -60,6 +60,21 @@ fn _f32_neg_zero() -> f32 { return bitcast<f32>(0x80000000u | _ilgpu_runtime_zer
         /// square root; then round to nearest even with a round and a sticky bit, subnormal results included.
         /// Needs <see cref="F32SpecialValueFunctions"/> (the runtime zero). MathMode.Fast keeps `/` and sqrt().
         /// </summary>
+        public const string F32CorrectlyRoundedPlaceholder = "/*__WGSL_F32_CORRECTLY_ROUNDED_PLACEHOLDER__*/";
+
+        /// <summary>
+        /// Replaces <see cref="F32CorrectlyRoundedPlaceholder"/> in a finished module with
+        /// <see cref="F32CorrectlyRoundedFunctions"/> when the module calls _f32_div_rn or _f32_sqrt_rn, else removes it.
+        /// </summary>
+        public static string ResolveF32CorrectlyRounded(string wgsl)
+        {
+            if (!wgsl.Contains(F32CorrectlyRoundedPlaceholder))
+                return wgsl;
+            bool used = wgsl.Contains("_f32_div_rn(") || wgsl.Contains("_f32_sqrt_rn(");
+            return wgsl.Replace(F32CorrectlyRoundedPlaceholder, used ? F32CorrectlyRoundedFunctions : "");
+        }
+
+        /// <summary>The functions behind <see cref="F32CorrectlyRoundedPlaceholder"/> (see the remarks above).</summary>
         public const string F32CorrectlyRoundedFunctions = @"
 fn _f32_round_pack(sign: u32, exp: i32, q: u32, sticky: bool) -> f32 {
     // q: 25 bits, the leading 1 at bit 24 (value q * 2^(exp - 151)), plus a sticky bit below it

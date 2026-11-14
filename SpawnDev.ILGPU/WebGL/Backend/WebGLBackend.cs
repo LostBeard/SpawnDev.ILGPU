@@ -560,7 +560,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // of representation (even constant-folded expressions). Replace with
             // -2147483647 which is semantically equivalent for bounds checks.
             builder.Replace("int(-2147483648)", "int(-2147483647)");
-            var glslSource = builder.ToString();
+            var glslSource = GLSLEmulationLibrary.ResolveF32CorrectlyRounded(builder.ToString());
             if (VerboseLogging)
             {
                 Log("--- GENERATED GLSL ---");

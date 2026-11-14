@@ -29,6 +29,21 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// written for GLSL ES 3.0: no countLeadingZeros (a binary search), no division of negative ints, and the
         /// non-finite results built with a zero the compiler cannot fold (gl_VertexID >> 31). MathMode.Fast keeps `/`.
         /// </summary>
+        public const string F32CorrectlyRoundedPlaceholder = "/*__GLSL_F32_CORRECTLY_ROUNDED_PLACEHOLDER__*/";
+
+        /// <summary>
+        /// Replaces <see cref="F32CorrectlyRoundedPlaceholder"/> in a finished shader with
+        /// <see cref="F32CorrectlyRoundedFunctions"/> when it calls _f32_div_rn or _f32_sqrt_rn, else removes it.
+        /// </summary>
+        public static string ResolveF32CorrectlyRounded(string glsl)
+        {
+            if (!glsl.Contains(F32CorrectlyRoundedPlaceholder))
+                return glsl;
+            bool used = glsl.Contains("_f32_div_rn(") || glsl.Contains("_f32_sqrt_rn(");
+            return glsl.Replace(F32CorrectlyRoundedPlaceholder, used ? F32CorrectlyRoundedFunctions : "");
+        }
+
+        /// <summary>The functions behind <see cref="F32CorrectlyRoundedPlaceholder"/> (see the remarks above).</summary>
         public const string F32CorrectlyRoundedFunctions = @"
 uint _f32_clz(uint x) {
     uint n = 0u;

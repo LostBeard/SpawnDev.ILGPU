@@ -1612,6 +1612,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         {
             var wgslSource = builder.ToString();
 
+            // Correctly rounded f32 division / sqrt: only into modules that call them (WGSLEmulationLibrary)
+            wgslSource = WGSLEmulationLibrary.ResolveF32CorrectlyRounded(wgslSource);
+
             // Resolve the deferred enable subgroups placeholder.
             // The placeholder was emitted in GenerateHeader() because the IR pre-scan
             // may flag subgroup usage for nodes that are later handled via shared-memory
