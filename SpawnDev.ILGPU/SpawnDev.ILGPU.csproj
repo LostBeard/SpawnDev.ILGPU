@@ -4,12 +4,12 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.4.31</Version>
+		<Version>5.4.32-local.1</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
 		<!-- This is the text nuget.org shows on the listing page. It MUST lead with the version being shipped:
 		     Directory.Build.targets (SDPKG001) fails the build when the leading version differs from <Version>.
 		     It sat at "v5.4.16" through 5.4.29 because nothing checked it. -->
-		<PackageReleaseNotes>v5.4.31 (forks 2.4.30) - FIX (CUDA, OpenCL, Velocity, WebGPU, WebGL, Wasm; silent wrong results): an unsigned division by a constant power of two was an arithmetic shift (4294967295u / 2u gave 4294967295); it is a logical shift now. FIX (OpenCL; silent wrong results): signed +, -, *, &lt;&lt; and unary - wrap around as in .NET (they were undefined on overflow in OpenCL C and NVIDIA's compiler used that: a mask deleted, (x + y) &lt; x folded to y &lt; 0). PERF (CUDA): a division or remainder by a constant power of two is shifts and masks (the PTX assembler does not reduce it: a loop with x / 16 took 3.95 ms, 1.03 ms now). New tests on every backend: IntegerWraparound_*, DivisionByConstant_*. See CHANGELOG.md.</PackageReleaseNotes>
+		<PackageReleaseNotes>v5.4.32 (forks 2.4.31) - FIX (OpenCL, WebGPU, WebGL; silent wrong results): fp32 division and square root are correctly rounded, as .NET computes them (OpenCL: -cl-fp32-correctly-rounded-divide-sqrt, AMD RX 590 and NVIDIA RTX 4070 both differed from .NET before; WebGPU / WebGL: integer-exact division and sqrt, D3D was up to 2.5 ulp off). FIX (WebGPU; silent wrong results): a kernel with irreducible control flow (a goto into a loop) lost the code after that region. FIX (Velocity): a switch leaving a loop threw. PERF (Wasm): functions without barriers use structured control flow (block / loop / if) instead of a br_table state machine: a 960-step branchy loop 25 -&gt; 2.8 ns per step. PERF (Velocity host path): kernels run optimized code from their first launch (were tier-0 .NET code: 13 -&gt; 2.3 ns per step). New tests on every backend: StructuredControlFlow_*, BranchCost_*, FloatDivision_*. See CHANGELOG.md.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -71,8 +71,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.4.30" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.4.30" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.4.31-local.1" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.4.31-local.1" />
 	</ItemGroup>
 
 	<ItemGroup>
