@@ -2114,7 +2114,7 @@ float _e5m2_to_f32(uint raw) {
     uint expo = (bits >> 2u) & 0x1Fu;
     uint mant = bits & 0x03u;
     if (expo == 0u) {
-        if (mant == 0u) { return uintBitsToFloat(sign); }
+        if (mant == 0u) { return uintBitsToFloat(sign | uint(gl_VertexID >> 31)); } // opaque zero keeps -0 (ANGLE / FXC lost it)
         uint e = 127u - 15u + 1u;
         uint m = mant;
         while ((m & 0x04u) == 0u) { m = m << 1u; e = e - 1u; }
@@ -2163,7 +2163,7 @@ float _e4m3_to_f32(uint raw) {
     uint mant = bits & 0x07u;
     if ((bits & 0x7Fu) == 0x7Fu) { return uintBitsToFloat(sign | 0x7FC00000u); }
     if (expo == 0u) {
-        if (mant == 0u) { return uintBitsToFloat(sign); }
+        if (mant == 0u) { return uintBitsToFloat(sign | uint(gl_VertexID >> 31)); } // opaque zero keeps -0 (ANGLE / FXC lost it)
         uint e = 127u - 7u + 1u;
         uint m = mant;
         while ((m & 0x08u) == 0u) { m = m << 1u; e = e - 1u; }
@@ -2225,7 +2225,7 @@ float _e2m1_to_f32(uint raw) {
     uint e = (code >> 1u) & 0x3u;
     uint m = code & 0x1u;
     if (e == 0u) {
-        if (m == 0u) { return uintBitsToFloat(sign); }
+        if (m == 0u) { return uintBitsToFloat(sign | uint(gl_VertexID >> 31)); } // opaque zero keeps -0
         return uintBitsToFloat(sign | (126u << 23u)); // subnormal 0.5
     }
     uint f32Exp = e - 1u + 127u;
