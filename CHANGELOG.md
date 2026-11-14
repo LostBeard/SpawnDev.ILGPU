@@ -42,7 +42,7 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
     such as 24 / 48, random normal operands, sqrt, floor(i * a / b)) and
     `OpenCLTests.OpenCL_CorrectlyRoundedDivideSqrt_OnAndOff` (every OpenCL device; RTX 4070: 7,808 mismatches with the
     option off, 0 with it on; AMD RX 590, run by Lore at 5300733: 7,812 off, 0 on, both tests pass).
-- **FIX (OpenCL without cl_khr_fp16; silent wrong results): a conversion to Half rounds to fp16.** With Half emulated
+- **FIX (OpenCL without cl_khr_fp16, Wasm, WebGL; silent wrong results): a conversion to Half rounds to fp16.** With Half emulated
   in a `float`, the conversion was `(float)(float)x`: float -> Half -> float was the identity (RTX 4070: 8,711 of 8,716
   values came back unrounded; SpawnDev.ILGPU.ML's exact fp16 hi + lo split of fp32 VAE weights got lo = 0 for all
   1,179,648 weights; found by Tuvok). The conversion now rounds through `vstore_half_rte` / `vload_half` (IEEE round to
@@ -50,6 +50,13 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   `Interop.FloatAsInt(Half)` (Half radix sort) use them too: the old encoder truncated and the old decoder flushed fp16
   subnormals to 0. Test: `HalfRoundTrip_FloatToHalfToFloat_RoundsAsDotNet` (every backend; bit-exact against .NET over
   normals, fp16 subnormals, exact ties, overflow; with the fix off OpenCL fails 8,711 / 8,716).
+  - Wasm and WebGL had the same identity conversion (the same test failed 8,711 / 8,716 on both): Wasm now rounds
+    through its IEEE f16 emitters (moved to `WasmCodeGenerator` so every function generator has them; a double source
+    is demoted with round-to-odd, so the fp16 rounding is the single one), WebGL through `_f16_to_f32(_f32_to_f16(..))`.
+    WebGPU already rounded.
+  - Known, not changed here: double -> Half rounds twice on the CPU accelerator / host (`ILGPU.Half`'s operator is
+    `(Half)(float)d`) and on WebGL / WebGPU emulated f64, once on CUDA / OpenCL / Wasm (as `System.Half`). Rare (a
+    double within float precision of an fp16 midpoint); the managed operator should round once.
 - **FIX (WebGPU, WebGL; silent wrong results): fp32 division and square root are correctly rounded, as .NET.**
   WGSL and GLSL ES allow 2.5 ulp for f32 `/` (and sqrt is no better), and D3D uses it: on an RTX 4070 4,529 of 16,384
   quotients and 3,060 roots of `FloatDivision_AndSqrt_CorrectlyRounded_MatchHost` differed from .NET (3 / 1920 one ulp

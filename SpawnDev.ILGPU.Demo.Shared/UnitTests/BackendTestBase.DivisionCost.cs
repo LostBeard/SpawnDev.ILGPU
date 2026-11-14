@@ -7,14 +7,15 @@ using SpawnDev.UnitTesting;
 namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 {
     // What a correctly rounded f32 division costs. 5.4.32 made `/` exact on WebGPU / WebGL (an integer routine:
-    // WGSLEmulationLibrary.F32CorrectlyRoundedFunctions) and OpenCL (-cl-fp32-correctly-rounded-divide-sqrt). 65,536
-    // threads, each a loop of 256 dependent divisions by a varying divisor, against the same loop with a multiply (the
+    // WGSLEmulationLibrary.F32CorrectlyRoundedFunctions) and OpenCL (-cl-fp32-correctly-rounded-divide-sqrt). 262,144
+    // threads (65,536 x 256 measured only the launch overhead: multiply = divide on WebGPU, 2026-11-14), each a loop of
+    // 4,096 dependent divisions by a varying divisor, against the same loop with a multiply (the
     // loop's own cost); ns per operation as a [report] line, and the result bit-exact against .NET (every backend now
     // divides as .NET does). WebGPUTests.DivisionCost_DefaultAndFastMath_Report adds MathMode.Fast (hardware `/`).
     public abstract partial class BackendTestBase
     {
-        public const int DivisionCostThreads = 65536;
-        public const int DivisionCostIterations = 256;
+        public const int DivisionCostThreads = 262144;
+        public const int DivisionCostIterations = 4096;
 
         public static void DivisionCostKernel(Index1D i, ArrayView<float> io, int iterations)
         {
