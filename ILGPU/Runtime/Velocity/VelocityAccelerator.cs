@@ -276,14 +276,17 @@ namespace ILGPU.Runtime.Velocity
         public bool AdaptiveHostLaunches { get; set; } = true;
 
         /// <summary>
-        /// True (the default): a kernel loaded for the host path runs a copy of its method in a dynamic method, which
-        /// the JIT compiles fully optimized at once. Its own method starts at tier 0 and is replaced only after about
-        /// 30 calls (or by on-stack replacement, which did not happen for a large loop body): a one-thread kernel with
-        /// 960 branchy steps per iteration ran 13 ns per step, 2.3 with the copy (and ArrayView's accessors marked
-        /// AggressiveOptimization). A kernel the copy cannot express exactly (an instance method such as a lambda,
-        /// exception handling, calli) runs its own method. Read when a kernel is loaded for the host path.
+        /// False (the default): a kernel on the host path runs its own method. True: it runs a copy in a dynamic method,
+        /// which the JIT compiles fully optimized at once instead of starting at tier 0. OFF BY DEFAULT because the JIT
+        /// does not inline callees into the copy: SpawnDev.Codecs' Vp9MotionSearchKernels.RefineKernel (8-tap convolve
+        /// helpers) ran its refine stage 690 ms per frame with the copy, 94 ms without; the original's tier-1 / OSR code
+        /// inlines the whole prediction chain (JIT summary: the callees stayed tier-0 stubs without the copy, became
+        /// tier-1 standalone methods with it; Geordi, 5.4.32-local.2 A/B). It helps only a kernel without hot callees
+        /// that is launched too rarely to reach tier 1 (one-thread probe, 960 branchy steps: 3.5 ns per step without
+        /// it, 2.3 with it). A kernel the copy cannot express exactly (an instance method such as a lambda, exception
+        /// handling, calli) runs its own method either way. Read when a kernel is loaded for the host path.
         /// </summary>
-        public bool OptimizedHostKernels { get; set; } = true;
+        public bool OptimizedHostKernels { get; set; }
 
         /// <summary>
         /// Kernel methods copied for the host path since process start (see <see cref="OptimizedHostKernels"/>); a

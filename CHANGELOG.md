@@ -73,24 +73,24 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   is now three u32 divisions and some integer work. Wasm (`f32.div` / `f32.sqrt`) was already exact.
   - Known, not changed here: an f32 `%` on WebGPU / WebGL is still `a - b * trunc(a / b)`, not the exact fmod .NET
     computes.
-- **PERF (Velocity host path, CPU accelerator): kernels run optimized code from their first launch.** Velocity runs
-  small launches (up to `HostLaunchMaxThreads`) and adaptively chosen wide ones through the IL backend, which called
-  the kernel's own method. The runtime compiles that at tier 0 and replaces it after about 30 calls or by on-stack
-  replacement, which did not happen for a large loop body (JIT summary: "Instrumented Tier0" for the whole run).
-  ArrayView's element accessors were tier-0 calls too once the kernel was too large for the JIT to inline them.
-  One-thread branch-cost probe, ns per step for loop bodies of 12 / 120 / 960 steps: 1.65 / 7.9 / 13 before,
-  1.66 / 1.97 / 2.28 now (tiering switched off for the whole process: 1.65 / 1.82 / 2.21). Two changes, both
-  needed (each alone: 960 steps at 10.6 and 3.5):
-  - New `OptimizedMethodCopy` (IL backend): Velocity's host accelerator calls a copy of a static kernel method in a
-    `DynamicMethod` (compiled fully optimized at once; every metadata token re-issued through `DynamicILInfo` in the
-    method's generic context). An instance method (a lambda), exception handling or `calli` keeps the original.
-    The CPU accelerator keeps calling the original method (debugging). Switch
-    `VelocityAccelerator.OptimizedHostKernels` (default true); diagnostic `OptimizedHostKernelCount`.
-  - `ArrayView<T>`'s indexers and `LoadEffectiveAddress` are `AggressiveOptimization | AggressiveInlining` (still
-    inlined into small kernels: 12-step number unchanged).
-  - Test: `VelocityTests.HostLaunch_RunsAnOptimizedCopyOfTheKernel_SameResults` (generic kernels over int / double,
-    a switch with a return in a loop; asserts the copy was made and the results; with the switch off no copy and the
-    same results). Red-check: switch off by default -> fails.
+- **PERF (Velocity host path, CPU accelerator): ArrayView's element accessors are optimized from the first call.**
+  Velocity runs small launches (up to `HostLaunchMaxThreads`) and adaptively chosen wide ones through the IL backend,
+  which calls the kernel's own method. The runtime compiles it at tier 0 first, and in a large kernel ArrayView's
+  indexers (and `LoadEffectiveAddress`) were tier-0 CALLS (the JIT stops inlining in a big body). They are now
+  `AggressiveOptimization | AggressiveInlining` (still inlined into small kernels). One-thread branch-cost probe, ns per
+  step for loop bodies of 12 / 120 / 960 steps: 1.65 / 7.9 / 13 before, 1.69 / 2.17 / 3.88 now. SpawnDev.Codecs VP9
+  (Geordi, quiet machine, same commit): Velocity 512x512 inter frame 787 -> 245 ms, key frame -30..38%, decode parse
+  ~20% faster; CPU accelerator encode +5% (key frame 71 -> 74 ms; accessors opted out of tier-1 PGO), decode faster.
+  - Opt-in, OFF by default: `VelocityAccelerator.OptimizedHostKernels` runs a copy of a static kernel method in a
+    `DynamicMethod` (new `OptimizedMethodCopy`: compiled fully optimized at once, every metadata token re-issued through
+    `DynamicILInfo` in the method's generic context; an instance method, exception handling or `calli` keeps the
+    original). It reaches 2.28 ns at 960 steps in the probe, but the JIT does not inline callees into the copy: Codecs'
+    `Vp9MotionSearchKernels.RefineKernel` (8-tap convolve helpers) ran its refine stage at 690 ms per frame with the copy,
+    94 ms without (JIT summary: without the copy the callees stay tier-0 stubs because the kernel's tier-1 / OSR code
+    inlines them; with it they become standalone tier-1 methods, called for real). Diagnostic `OptimizedHostKernelCount`.
+  - Test: `VelocityTests.HostLaunch_RunsAnOptimizedCopyOfTheKernel_SameResults` (asserts the switch is off by default;
+    with it on, generic kernels over int / double and a switch with a return in a loop are copied and give the host's
+    results; off: no copy, same results). Red-check: copies disabled -> fails.
 - **FIX (Velocity): a `switch` with a case that leaves its loop (a return, a `goto` out) threw** in
   `VelocityBlockScheduling` ("Skip this case for now"), and the message itself failed to format (a
   `FormatException` hid it). New `VelocityLowerLoopSwitches` turns such a switch into a chain of `if` branches, one

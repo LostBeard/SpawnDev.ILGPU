@@ -210,10 +210,14 @@ public class VelocityTests : BackendTestBase
                     throw new Exception($"{name}: [{t}] = {got[t]}, expected {expected(t)}");
         }
 
+        // off by default (the copy loses inlining of callees: VelocityAccelerator.OptimizedHostKernels); on for this test
+        if (velocity.OptimizedHostKernels)
+            throw new Exception("OptimizedHostKernels is on by default; it is meant to be opt-in");
+        bool saved = velocity.OptimizedHostKernels;
+        velocity.OptimizedHostKernels = true;
         await Run<int>("generic<int>", HostCopyGenericKernel<int>, dInts, oInts, t => HostCopyGenericExpected(t, ints, iters), expectCopy: true);
         await Run<double>("generic<double>", HostCopyGenericKernel<double>, dDoubles, oDoubles, t => HostCopyGenericExpected(t, doubles, iters), expectCopy: true);
         await Run<int>("switch", HostCopySwitchKernel, dInts, oInts, t => HostCopySwitchExpected(t, ints, iters), expectCopy: true);
-        bool saved = velocity.OptimizedHostKernels;
         velocity.OptimizedHostKernels = false;
         try
         {
