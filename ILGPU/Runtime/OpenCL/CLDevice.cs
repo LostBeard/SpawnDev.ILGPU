@@ -248,6 +248,14 @@ namespace ILGPU.Runtime.OpenCL
         }
 
         /// <summary>
+        /// True when the device divides and takes the square root of fp32 values correctly rounded on request
+        /// (CL_FP_CORRECTLY_ROUNDED_DIVIDE_SQRT in CL_DEVICE_SINGLE_FP_CONFIG): ILGPU then builds its programs with
+        /// -cl-fp32-correctly-rounded-divide-sqrt (see CLKernel.LoadKernel). Without it OpenCL C allows 2.5 ulp for
+        /// fp32 `/` and 3 ulp for sqrt: AMD's RX 590 gave 24f / 48 = 0.49999997 (Lore, 2026-11-14).
+        /// </summary>
+        public bool SupportsCorrectlyRoundedDivideSqrt { get; private set; }
+
+        /// <summary>
         /// Init general device information.
         /// </summary>
         private void InitDeviceInfo()
@@ -266,6 +274,11 @@ namespace ILGPU.Runtime.OpenCL
                 out var deviceVersion)
                 ? deviceVersion
                 : CLDeviceVersion.CL10;
+
+            // CL_FP_CORRECTLY_ROUNDED_DIVIDE_SQRT (1 << 7) in CL_DEVICE_SINGLE_FP_CONFIG
+            SupportsCorrectlyRoundedDivideSqrt = (CurrentAPI.GetDeviceInfo<long>(
+                DeviceId,
+                CLDeviceInfoType.CL_DEVICE_SINGLE_FP_CONFIG) & (1L << 7)) != 0;
 
             // Resolve clock rate
             ClockRate = CurrentAPI.GetDeviceInfo<int>(

@@ -29,6 +29,19 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   (`StructuredControlFlow_IrreducibleGoto_MatchesHost`). Such a kernel is now a state machine
   (`loop { switch (current_block) }`, entry block at function scope); with barriers it throws a
   `NotSupportedException` naming the kernel instead. No other suite kernel takes that path.
+- **FIX (OpenCL; silent wrong results): fp32 division and square root are correctly rounded, as .NET computes
+  them.** OpenCL C allows 2.5 ulp for `/` and 3 ulp for sqrt unless a program is built with
+  `-cl-fp32-correctly-rounded-divide-sqrt`, and drivers use that: AMD RX 590 gave 24f / 48 = 0.49999997, which put
+  13,110 of 27,648 entries of SpawnDev.ILGPU.ML's nearest-upsample table on the wrong source row (FLUX.2 VAE decode
+  0.27 relRMS wrong; found by Lore and Tuvok), and NVIDIA's OpenCL (RTX 4070) differed from .NET in 7,808 of 16,384
+  quotients / roots of the new test. Programs are now built with that option when the device reports
+  `CL_FP_CORRECTLY_ROUNDED_DIVIDE_SQRT` (`CLDevice.SupportsCorrectlyRoundedDivideSqrt`; the RX 590 and the RTX 4070
+  both do), except under `MathMode.Fast` (as on PTX, which already emits `div.rn` / `sqrt.rn`). Switch
+  `CLAccelerator.CorrectlyRoundedFp32DivideSqrt` (default true).
+  - Tests: `FloatDivision_AndSqrt_CorrectlyRounded_MatchHost` (every backend, bit-exact against .NET: integer ratios
+    such as 24 / 48, random normal operands, sqrt, floor(i * a / b)) and
+    `OpenCLTests.OpenCL_CorrectlyRoundedDivideSqrt_OnAndOff` (every OpenCL device; RTX 4070: 7,808 mismatches with the
+    option off, 0 with it on).
 - **PERF (Velocity host path, CPU accelerator): kernels run optimized code from their first launch.** Velocity runs
   small launches (up to `HostLaunchMaxThreads`) and adaptively chosen wide ones through the IL backend, which called
   the kernel's own method. The runtime compiles that at tier 0 and replaces it after about 30 calls or by on-stack

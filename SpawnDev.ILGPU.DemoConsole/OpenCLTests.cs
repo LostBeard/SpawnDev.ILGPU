@@ -24,6 +24,46 @@ public class OpenCLTests : BackendTestBase
         return Task.FromResult<(Context, Accelerator)>((context, accelerator));
     }
 
+    /// <summary>
+    /// fp32 division and sqrt with and without -cl-fp32-correctly-rounded-divide-sqrt on every OpenCL device: with it
+    /// (the default) the results must be bit-exact with .NET; without it the mismatch count is reported (0 on NVIDIA,
+    /// which rounds correctly anyway; AMD RX 590 gave 24f / 48 = 0.49999997). The red-check of the option on a device
+    /// that uses the slack: the "off" line must show mismatches there.
+    /// </summary>
+    [TestMethod]
+    public async Task OpenCL_CorrectlyRoundedDivideSqrt_OnAndOff()
+    {
+        bool saved = CLAccelerator.CorrectlyRoundedFp32DivideSqrt;
+        try
+        {
+            using var probe = Context.Create(builder => builder.OpenCL());
+            int devices = probe.GetCLDevices().Count;
+            if (devices == 0)
+                throw new UnsupportedTestException("No OpenCL devices found");
+            var failures = new List<string>();
+            for (int d = 0; d < devices; d++)
+            {
+                foreach (bool on in new[] { false, true })
+                {
+                    CLAccelerator.CorrectlyRoundedFp32DivideSqrt = on;
+                    using var context = Context.Create(builder => builder.OpenCL());
+                    var device = context.GetCLDevices()[d];
+                    using var accelerator = device.CreateAccelerator(context);
+                    var (bad, detail) = await FloatDivisionCheckAsync(accelerator);
+                    Console.WriteLine($"[report] OpenCL {device.Name}: correctly rounded divide/sqrt option {(on ? "on" : "off")} (device supports it: {device.SupportsCorrectlyRoundedDivideSqrt}): {bad} mismatches");
+                    if (on && bad > 0 && device.SupportsCorrectlyRoundedDivideSqrt)
+                        failures.Add(detail);
+                }
+            }
+            if (failures.Count > 0)
+                throw new Exception(string.Join("\n", failures));
+        }
+        finally
+        {
+            CLAccelerator.CorrectlyRoundedFp32DivideSqrt = saved;
+        }
+    }
+
     static void HalfAbsKernel(Index1D i, ArrayView<ILGPU.Half> a, ArrayView<ILGPU.Half> o) =>
         o[i] = (ILGPU.Half)Math.Abs((float)a[i]);
 

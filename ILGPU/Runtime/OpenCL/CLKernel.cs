@@ -58,6 +58,18 @@ namespace ILGPU.Runtime.OpenCL
             // Specify the OpenCL C version.
             string options = "-cl-std=" + version.ToString();
 
+            // fp32 division and sqrt as .NET computes them (correctly rounded), as on every other backend: OpenCL C
+            // allows 2.5 ulp for `/` and 3 ulp for sqrt without this option, and AMD uses that (RX 590: 24f / 48 =
+            // 0.49999997, so floor(y * 24f / 48) picked the wrong row; SpawnDev.ILGPU.ML FLUX.2 VAE decode, Lore +
+            // Tuvok 2026-11-14). The PTX backend emits div.rn / sqrt.rn the same way. MathMode.Fast keeps the
+            // relaxed operations, as it does on PTX (div.approx).
+            if (CLAccelerator.CorrectlyRoundedFp32DivideSqrt
+                && accelerator.Device.SupportsCorrectlyRoundedDivideSqrt
+                && accelerator.Context.Properties.MathMode < MathMode.Fast)
+            {
+                options += " -cl-fp32-correctly-rounded-divide-sqrt";
+            }
+
             var buildError = CurrentAPI.BuildProgram(
                 programPtr,
                 accelerator.DeviceId,

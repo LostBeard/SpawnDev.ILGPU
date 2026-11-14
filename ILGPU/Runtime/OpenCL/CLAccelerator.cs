@@ -259,6 +259,14 @@ namespace ILGPU.Runtime.OpenCL
         public new CLDevice Device => base.Device.AsNotNullCast<CLDevice>();
 
         /// <summary>
+        /// True (the default): programs are built with -cl-fp32-correctly-rounded-divide-sqrt on a device that reports
+        /// <see cref="CLDevice.SupportsCorrectlyRoundedDivideSqrt"/>, so fp32 `/` and sqrt give what .NET gives
+        /// (OpenCL C otherwise allows 2.5 / 3 ulp; AMD RX 590: 24f / 48 = 0.49999997). False only to compare; read
+        /// when a kernel is loaded. <see cref="MathMode.Fast"/> never uses the option.
+        /// </summary>
+        public static bool CorrectlyRoundedFp32DivideSqrt { get; set; } = true;
+
+        /// <summary>
         /// Returns the native OpenCL platform id.
         /// </summary>
         public IntPtr PlatformId => Device.PlatformId;
