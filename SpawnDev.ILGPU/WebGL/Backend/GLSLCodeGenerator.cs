@@ -2893,6 +2893,18 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// </summary>
         protected string BuildConvertExpression(ConvertValue value, Variable source)
         {
+            // A Half is held in a float (no native f16 on WebGL), so a conversion INTO Half must round to fp16 itself:
+            // it was the plain float conversion, and float -> Half -> float returned the input (8,711 of 8,716 values;
+            // SpawnDev.ILGPU.ML's exact fp16 hi + lo split, Tuvok 2026-11-14). _f32_to_f16 is IEEE round to nearest even.
+            // Known limit: an emulated-double source is rounded to float first (two roundings; .NET rounds once).
+            string core = BuildConvertExpressionCore(value, source);
+            if (value.BasicValueType == BasicValueType.Float16 && value.Value.BasicValueType != BasicValueType.Float16)
+                return $"_f16_to_f32(_f32_to_f16(float({core})))";
+            return core;
+        }
+
+        private string BuildConvertExpressionCore(ConvertValue value, Variable source)
+        {
             var targetType = TypeGenerator[value.Type];
             var sourceType = TypeGenerator[value.Value.Type];
 

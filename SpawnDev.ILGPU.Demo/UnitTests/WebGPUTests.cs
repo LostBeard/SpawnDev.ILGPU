@@ -49,6 +49,32 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
         #region WebGPU-Specific Tests
 
         /// <summary>
+        /// The cost of the correctly rounded f32 division (WGSLEmulationLibrary.F32CorrectlyRoundedFunctions, 5.4.32)
+        /// against WGSL's own `/` (MathMode.Fast), same kernels as BackendTestBase.DivisionCost_CorrectlyRounded_Report:
+        /// a [report] line with both; the default must match .NET bit for bit.
+        /// </summary>
+        [TestMethod]
+        public async Task DivisionCost_DefaultAndFastMath_Report()
+        {
+            string F(double v) => v.ToString("F4", System.Globalization.CultureInfo.InvariantCulture);
+            foreach (var mode in new[] { MathMode.Default, MathMode.Fast })
+            {
+                var builder = Context.Create().Math(mode).EnableAlgorithms();
+                builder.EnableWebGPUAlgorithms();
+                await builder.WebGPU();
+                using var context = builder.ToContext();
+                var devices = context.GetWebGPUDevices();
+                if (devices.Count == 0)
+                    throw new UnsupportedTestException("No WebGPU devices found");
+                using var accelerator = await devices[0].CreateAcceleratorAsync(context, new WebGPUBackendOptions());
+                var (div, mul, bad) = await DivisionCostAsync(accelerator, checkExact: mode == MathMode.Default);
+                Console.WriteLine($"[report] WebGPU division cost, MathMode.{mode}, ns per op ({DivisionCostThreads} threads x {DivisionCostIterations}): divide {F(div)}, multiply {F(mul)}");
+                if (bad > 0)
+                    throw new Exception($"WebGPU MathMode.Default: {bad} of {DivisionCostThreads} division chains differ from .NET");
+            }
+        }
+
+        /// <summary>
         /// Test WebGPU accelerator basic initialization (uses WebGPU-specific APIs)
         /// </summary>
         // The byte kernels behind an unaligned MemSet / device copy are compiled by CreateAsync (5.4.21). Before, the first
