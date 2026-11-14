@@ -44,8 +44,9 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
     option off, 0 with it on; AMD RX 590, run by Lore at 5300733: 7,812 off, 0 on, both tests pass).
 - **FIX (OpenCL without cl_khr_fp16, Wasm, WebGL; silent wrong results): a conversion to Half rounds to fp16.** With Half emulated
   in a `float`, the conversion was `(float)(float)x`: float -> Half -> float was the identity (RTX 4070: 8,711 of 8,716
-  values came back unrounded; SpawnDev.ILGPU.ML's exact fp16 hi + lo split of fp32 VAE weights got lo = 0 for all
-  1,179,648 weights; found by Tuvok). The conversion now rounds through `vstore_half_rte` / `vload_half` (IEEE round to
+  values of the in-register round trip came back unrounded; reported by Tuvok for SpawnDev.ILGPU.ML's exact fp16 hi + lo
+  split, though his OpenCL observation itself did not reproduce on a clean 5.4.31 build: ML's split goes through an fp16
+  buffer, whose `vstore_half` store already rounded). The conversion now rounds through `vstore_half_rte` / `vload_half` (IEEE round to
   nearest even, core OpenCL; a double rounds once when the program has fp64). The Half bit-pattern helpers behind
   `Interop.FloatAsInt(Half)` (Half radix sort) use them too: the old encoder truncated and the old decoder flushed fp16
   subnormals to 0. Test: `HalfRoundTrip_FloatToHalfToFloat_RoundsAsDotNet` (every backend; bit-exact against .NET over
@@ -53,7 +54,9 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   - Wasm and WebGL had the same identity conversion (the same test failed 8,711 / 8,716 on both): Wasm now rounds
     through its IEEE f16 emitters (moved to `WasmCodeGenerator` so every function generator has them; a double source
     is demoted with round-to-odd, so the fp16 rounding is the single one), WebGL through `_f16_to_f32(_f32_to_f16(..))`.
-    WebGPU already rounded.
+    WebGPU already rounded. ML's own split kernels (`Sd_HiLoSplit_RoundsOnEveryBackend`, 3 x 4,096 values, bit-exact
+    against System.Half): 5.4.31 red on Wasm and WebGL (4,095 of 4,096 low halves wrong, worst relative error 4.7e-4),
+    5.4.32 green on all seven lanes (worst 1.19e-7).
   - Known, not changed here: double -> Half rounds twice on the CPU accelerator / host (`ILGPU.Half`'s operator is
     `(Half)(float)d`) and on WebGL / WebGPU emulated f64, once on CUDA / OpenCL / Wasm (as `System.Half`). Rare (a
     double within float precision of an fp16 midpoint); the managed operator should round once.
