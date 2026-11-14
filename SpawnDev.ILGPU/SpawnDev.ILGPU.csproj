@@ -4,12 +4,12 @@
 		<TargetFramework>net10.0</TargetFramework>
 		<ImplicitUsings>enable</ImplicitUsings>
 		<Nullable>enable</Nullable>
-		<Version>5.4.32-local.1</Version>
+		<Version>5.4.32-local.2</Version>
 		<!-- Brief current-version highlights only. Full per-version history with code samples lives in CHANGELOG.md (linked from the README). -->
 		<!-- This is the text nuget.org shows on the listing page. It MUST lead with the version being shipped:
 		     Directory.Build.targets (SDPKG001) fails the build when the leading version differs from <Version>.
 		     It sat at "v5.4.16" through 5.4.29 because nothing checked it. -->
-		<PackageReleaseNotes>v5.4.32 (forks 2.4.31) - FIX (OpenCL, WebGPU, WebGL; silent wrong results): fp32 division and square root are correctly rounded, as .NET computes them (OpenCL: -cl-fp32-correctly-rounded-divide-sqrt, AMD RX 590 and NVIDIA RTX 4070 both differed from .NET before; WebGPU / WebGL: integer-exact division and sqrt, D3D was up to 2.5 ulp off). FIX (WebGPU; silent wrong results): a kernel with irreducible control flow (a goto into a loop) lost the code after that region. FIX (Velocity): a switch leaving a loop threw. PERF (Wasm): functions without barriers use structured control flow (block / loop / if) instead of a br_table state machine: a 960-step branchy loop 25 -&gt; 2.8 ns per step. PERF (Velocity host path): kernels run optimized code from their first launch (were tier-0 .NET code: 13 -&gt; 2.3 ns per step). New tests on every backend: StructuredControlFlow_*, BranchCost_*, FloatDivision_*. See CHANGELOG.md.</PackageReleaseNotes>
+		<PackageReleaseNotes>v5.4.32 (forks 2.4.31) - FIX (OpenCL, Wasm, WebGL; silent wrong results): float -&gt; Half conversion rounds to fp16 (was the identity). FIX (OpenCL, WebGPU, WebGL; silent wrong results): fp32 division and square root are correctly rounded, as .NET computes them (OpenCL: -cl-fp32-correctly-rounded-divide-sqrt, AMD RX 590 and NVIDIA RTX 4070 both differed from .NET before; WebGPU / WebGL: integer-exact division and sqrt, D3D was up to 2.5 ulp off). FIX (WebGPU; silent wrong results): a kernel with irreducible control flow (a goto into a loop) lost the code after that region. FIX (Velocity): a switch leaving a loop threw. PERF (Wasm): functions without barriers use structured control flow (block / loop / if) instead of a br_table state machine: a 960-step branchy loop 25 -&gt; 2.8 ns per step. PERF (Velocity host path): kernels run optimized code from their first launch (were tier-0 .NET code: 13 -&gt; 2.3 ns per step). New tests on every backend: StructuredControlFlow_*, BranchCost_*, FloatDivision_*. See CHANGELOG.md.</PackageReleaseNotes>
 		<GeneratePackageOnBuild>True</GeneratePackageOnBuild>
 		<GenerateDocumentationFile>true</GenerateDocumentationFile>
 		<EmbedAllSources>true</EmbedAllSources>
@@ -71,8 +71,8 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 	</ItemGroup>
 	<ItemGroup Condition="!Exists('$(MSBuildThisFileDirectory)..\ILGPU\ILGPU.csproj')">
-		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.4.31-local.1" />
-		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.4.31-local.1" />
+		<PackageReference Include="SpawnDev.ILGPU.Fork" Version="2.4.31-local.2" />
+		<PackageReference Include="SpawnDev.ILGPU.Algorithms.Fork" Version="2.4.31-local.2" />
 	</ItemGroup>
 
 	<ItemGroup>
