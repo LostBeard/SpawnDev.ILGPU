@@ -1,7 +1,14 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## Unreleased (5.4.32 candidate) - Wasm: structured control flow; WebGPU: irreducible control flow; Velocity: a switch that leaves a loop
+## 5.4.32 (forks 2.4.31) - 2026-11-14 - silent wrong-result fixes (fp32 division / sqrt on OpenCL, WebGPU, WebGL; float -> Half on OpenCL, Wasm, WebGL; WebGPU irreducible control flow); Wasm structured control flow; Velocity host-path speed
+
+Release sweep (full default, code 889d890): 9,301 cases, 8,571 passed, 0 failed, 730 skipped, 56 min (RTX 4070, Chrome).
+Verified outside this repo: SpawnDev.ILGPU.ML (Tuvok) on 5.4.32-local.1 / .2: Wasm lane 1,094 / 0 with structured control
+flow on and off (counter-proven), fp32 -> fp16 hi + lo split bit-exact on all seven lanes; SpawnDev.Codecs (Geordi) on
+local.1 - .3: CUDA / OpenCL / WebGPU / Wasm / CPU / Velocity gates green, encoded bytes identical, VP9 Velocity 512x512
+inter frame ~785 -> 252-259 ms, key ~170 -> 103-122 ms, CUDA unchanged, CPU accelerator key frame +4%.
+
 
 - **PERF (Wasm): a function without barriers is emitted with wasm's own `block` / `loop` / `if` and direct `br`.**
   Until now every multi-block function went through a `loop` + `br_table` state machine over all of its blocks
