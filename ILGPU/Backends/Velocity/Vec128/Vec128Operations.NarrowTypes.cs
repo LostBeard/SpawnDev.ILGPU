@@ -73,6 +73,37 @@ namespace ILGPU.Backends.Velocity.Vec128
         internal static Vector128<int> MaskNibble(Vector128<int> warp) =>
             warp & Vector128.Create(0xF);
 
+        /// <summary>The 29 bits below float precision cleared, bit 29 set when any was (see the specializer).</summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static (Vector128<long>, Vector128<long>) RoundToOddAtFloatPrecision64(
+            (Vector128<long>, Vector128<long>) warp) =>
+            (RoundToOddAtFloatPrecision(warp.Item1), RoundToOddAtFloatPrecision(warp.Item2));
+
+        /// <summary>
+        /// Float precision is 24 bits down to 2^-126 (29 low bits cleared, bit 29 sticky) and the fixed 2^-149 below
+        /// it, where |x| + 2^-97 rounds |x| to a multiple of 2^-149: a step back when that rounded up, the last bit
+        /// set when inexact, minus 2^-97 exact (ScalarOperations2.RoundToOddAtFloatPrecision; a bf16 subnormal
+        /// result rounded twice with bit 29 alone).
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private static Vector128<long> RoundToOddAtFloatPrecision(Vector128<long> bits)
+        {
+            var low = bits & Vector128.Create(0x1FFFFFFFL);
+            var sticky = ~Vector128.Equals(low, Vector128<long>.Zero) & Vector128.Create(0x20000000L);
+            var normal = (bits & Vector128.Create(~0x1FFFFFFFL)) | sticky;
+            var magBits = bits & Vector128.Create(long.MaxValue);
+            var c = Vector128.Create(Scalar.ScalarOperations2.FloatSubnormalOffsetBits).AsDouble();
+            var mag = magBits.AsDouble();
+            var y = mag + c;
+            var r = y - c;
+            var up = Vector128.GreaterThan(r, mag).AsInt64();
+            var inexact = ~Vector128.Equals(r, mag).AsInt64();
+            var yb = (y.AsInt64() + up) | (inexact & Vector128.Create(1L));
+            var tiny = (yb.AsDouble() - c).AsInt64() | (bits & Vector128.Create(long.MinValue));
+            var isTiny = Vector128.LessThan(magBits, Vector128.Create(Scalar.ScalarOperations2.FloatMinNormalBits));
+            return Vector128.ConditionalSelect(isTiny, tiny, normal);
+        }
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         internal static unsafe Vector128<int> LoadNibble(
             Vector128<int> mask,
@@ -113,6 +144,8 @@ namespace ILGPU.Backends.Velocity.Vec128
             GetMethod(nameof(SignExtendNibble));
         public static readonly MethodInfo MaskNibbleMethod =
             GetMethod(nameof(MaskNibble));
+        public static readonly MethodInfo RoundToOddAtFloatPrecision64Method =
+            GetMethod(nameof(RoundToOddAtFloatPrecision64));
         public static readonly MethodInfo LoadNibbleMethod =
             GetMethod(nameof(LoadNibble));
         public static readonly MethodInfo StoreNibbleMethod =

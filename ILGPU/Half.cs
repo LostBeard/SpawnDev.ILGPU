@@ -353,7 +353,7 @@ namespace ILGPU
         [ConvertIntrinisc]
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static explicit operator Half(double doubleValue) =>
-            (Half)(float)doubleValue;
+            (Half)LowPrecisionRounding.DemoteRoundToOdd(doubleValue);
 
 #if NET5_0_OR_GREATER
         /// <summary>

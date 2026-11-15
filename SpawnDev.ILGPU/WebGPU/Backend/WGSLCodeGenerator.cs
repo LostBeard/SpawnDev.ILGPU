@@ -2161,6 +2161,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // A conversion INTO bf16 / FP8 / FP4 (held in an f32) rounds to the type's grid; it was the plain f32
             // conversion and rounded only at a store to a buffer of the type, so float -> T -> float was the identity
             // (SpawnDev.ILGPU.ML's bf16 hi + lo split of fp16 biases got lo = 0; Tuvok 2026-11-14).
+            // From an (emulated) double: demote with round-to-odd so the rounding to the narrow type is the only one, as
+            // from a double on the host (through f64_to_f32 a double just above a midpoint of the type rounded twice)
+            if (value.Value.BasicValueType == BasicValueType.Float64 && TypeGenerator[value.Value.Type] == "emu_f64"
+                && value.BasicValueType is BasicValueType.Float16 or BasicValueType.BFloat16 or BasicValueType.Float8E4M3
+                    or BasicValueType.Float8E5M2 or BasicValueType.Float4E2M1)
+            {
+                string rto = $"f64_to_f32_rto({source})";
+                if (value.BasicValueType == BasicValueType.Float16 && Backend.HasShaderF16)
+                    return $"f16({rto})";
+                if (value.BasicValueType == BasicValueType.Float16)
+                    _kernelReferencesF16Helpers = true;
+                return string.Format(System.Globalization.CultureInfo.InvariantCulture, LowPrecisionRoundTrip(value.BasicValueType)!, rto);
+            }
             string core = BuildConvertExpressionCore(value, source);
             if (value.Value.BasicValueType != value.BasicValueType)
             {

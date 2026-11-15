@@ -375,6 +375,9 @@ namespace ILGPU.Backends.Velocity.<#= vecClass #>
         public override void MaskNibble<TILEmitter>(TILEmitter emitter) =>
             emitter.EmitCall(<#= opsClass #>.MaskNibbleMethod);
 
+        public override void RoundToOddAtFloatPrecision64<TILEmitter>(TILEmitter emitter) =>
+            emitter.EmitCall(<#= opsClass #>.RoundToOddAtFloatPrecision64Method);
+
         public override void LoadNibble<TILEmitter>(TILEmitter emitter) =>
             emitter.EmitCall(<#= opsClass #>.LoadNibbleMethod);
 

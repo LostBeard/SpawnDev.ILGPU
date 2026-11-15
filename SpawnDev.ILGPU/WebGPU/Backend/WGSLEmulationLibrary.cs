@@ -162,6 +162,25 @@ fn _f32_sqrt_rn(x: f32) -> f32 {
 ";
 
         /// <summary>
+        /// Shared by the three f64 emulation modes: <c>f64_to_f32_rto</c>, the f64 -&gt; f32 demotion with round-to-odd
+        /// used by conversions from double into the low-precision types.
+        /// </summary>
+        public const string F64RoundToOddFunctions = @"
+// emu_f64 -> f32 with round-to-odd (truncated toward zero, last bit set when inexact), from each mode's own
+// f64_to_f32 / f64_from_f32 / f64_eq / f64_gt. Rounding the result to f16 / bf16 / FP8 / FP4 equals rounding the
+// double once, as .NET does from a double (LowPrecisionRounding.DemoteRoundToOdd); through f64_to_f32 it rounded twice.
+fn f64_to_f32_rto(v: emu_f64) -> f32 {
+    let f = f64_to_f32(v);
+    let fv = f64_from_f32(f);
+    var b = bitcast<u32>(f);
+    if ((b & 0x7FFFFFFFu) > 0x7F800000u || f64_eq(v, fv)) { return f; }
+    // f rounded away from zero (above v when positive, below when negative): one step toward zero
+    if (((b >> 31u) == 0u) != f64_gt(v, fv)) { b = b - 1u; }
+    return bitcast<f32>(b | 1u);
+}
+";
+
+        /// <summary>
         /// Exact f64 &lt;-&gt; IEEE-754 bit pattern and f64 &lt;-&gt; integer conversions, shared by BOTH
         /// f64 emulation modes (appended to <see cref="F64Functions"/> and
         /// <see cref="OzakiF64Functions"/>). Everything happens in the integer domain on the IEEE bit
@@ -270,9 +289,33 @@ fn _f64_components_to_bits(c: vec4<f32>) -> vec2<u32> {
     return select(finite, special, eh == 0xFFu);
 }
 
-// 2^k * x without the f32 exponent range limiting the scale factor.
+// 2^k * x for -178 <= k <= 127, in two halves: D3D (Chrome's WebGPU on Windows) lowers ldexp(x, k) to x * exp2(k),
+// and exp2(k) below 2^-126 is a subnormal it flushes to 0, so a double below 2^-79 loaded with its low 29 bits gone
+// (bf16 from such a double rounded the wrong way on 180 of 4,096 midpoints; 2026-11-15). Each half stays >= 2^-89.
 fn _f64_scale(x: f32, k: i32) -> f32 {
-    return ldexp(x, k);
+    let h = k / 2;
+    return ldexp(ldexp(x, h), k - h);
+}
+
+// An IEEE-754 double (bits lo, hi) rounded to the nearest f32, ties to even, subnormals and overflow to infinity
+// included: what a double outside the f32 exponent range loads as. It was 1.m * 2^-126 or 1.m * 2^127 whatever the
+// exponent (1e-300 loaded as 1.6e-38, 1e300 as 2.5e38). Integer arithmetic on the bits, branch-free (FXC).
+fn _f64_bits_to_f32_rn(lo: u32, hi: u32) -> f32 {
+    let sign = hi & 0x80000000u;
+    let ef = (hi >> 20u) & 0x7FFu;
+    // 24 significand bits and 3 guard bits, the last one sticky
+    let g = 0x4000000u | ((hi & 0xFFFFFu) << 6u) | (lo >> 26u) | select(0u, 1u, (lo & 0x3FFFFFFu) != 0u);
+    let fe = i32(max(ef, 1u)) - 896;
+    let tiny = fe < 1;
+    let s = u32(clamp(1 - fe, 0, 31));
+    let mm = select(g, (g >> s) | select(0u, 1u, (g & ((1u << s) - 1u)) != 0u), tiny);
+    let fe1 = select(fe, 1, tiny);
+    let low = mm & 7u;
+    let m3 = mm >> 3u;
+    let mr = m3 + select(0u, 1u, low > 4u || (low == 4u && (m3 & 1u) == 1u));
+    let bits = (u32(fe1 - 1) << 23u) + mr;
+    let ovf = fe1 >= 255 || bits >= 0x7F800000u;
+    return bitcast<f32>(sign | select(bits, 0x7F800000u, ovf));
 }
 
 // Exact split of an IEEE-754 double (bits lo, hi) into non-overlapping f32 components:
@@ -292,7 +335,11 @@ fn _f64_bits_to_components(lo: u32, hi: u32) -> vec4<f32> {
     let s = select(1.0, -1.0, sign != 0u);
     let f0 = bitcast<f32>(sign | (fe << 23u) | (c0 & 0x7FFFFFu));
     let normal = vec4<f32>(f0, s * _f64_scale(f32(c1), e - 47), s * _f64_scale(f32(c2), e - 52), 0.0);
-    let approx = vec4<f32>(bitcast<f32>(sign | (fe << 23u) | (m_hi20 << 3u)), 0.0, 0.0, 0.0);
+    // Below the f32 range: the nearest f32 (a subnormal or zero). Above it: (FLT_MAX, 2^103), the smallest double that
+    // rounds to f32 infinity, so the value stays finite (double.IsInfinity(double.MaxValue) is false) while (float)
+    // gives infinity as .NET does. It loaded as 1.m * 2^-126 / 1.m * 2^127 whatever the exponent (1e300 as 2.5e38).
+    let big = vec4<f32>(s * bitcast<f32>(0x7F7FFFFFu), s * bitcast<f32>(0x73000000u), 0.0, 0.0);
+    let approx = select(vec4<f32>(_f64_bits_to_f32_rn(lo, hi), 0.0, 0.0, 0.0), big, f32_exp >= 255);
     let special = vec4<f32>(bitcast<f32>(sign | select(0x7F800000u, 0x7FC00000u, (m_hi20 | lo) != 0u)), 0.0, 0.0, 0.0);
     let zero = vec4<f32>(bitcast<f32>(sign), 0.0, 0.0, 0.0);
     var r = select(normal, approx, f32_exp <= 0 || f32_exp >= 255);
@@ -611,8 +658,11 @@ fn f64_from_ieee754_bits(lo: u32, hi: u32) -> emu_f64 {
     let c = _f64_bits_to_components(lo, hi);
     let l = c.y + c.z;
     let s = c.x + l;
-    // c.x alone when exact, zero, Inf or NaN (the error term of an Inf would be NaN).
-    return select(emu_f64(s, l - (s - c.x)), emu_f64(c.x, 0.0), c.y == 0.0 && c.z == 0.0);
+    // c.x alone when exact, zero, Inf or NaN (the error term of an Inf would be NaN). (c.x, l) unrenormalised when the
+    // sum overflows: a double within half an f32 ulp of 2^128 loaded as (Inf, -Inf), NaN in everything after.
+    let s_finite = (bitcast<u32>(s) & 0x7F800000u) != 0x7F800000u;
+    let pair = select(emu_f64(c.x, l), emu_f64(s, l - (s - c.x)), s_finite);
+    return select(pair, emu_f64(c.x, 0.0), c.y == 0.0 && c.z == 0.0);
 }
 
 // Store emu_f64 back to IEEE 754 bits: exact sum of hi + lo (lo of EITHER sign - the old
@@ -630,7 +680,7 @@ fn f64_to_ieee754_bits(v: emu_f64) -> vec2<u32> {
     let e = (v.x - (s - bb)) + (v.y - bb);
     let s_finite = (bitcast<u32>(s) & 0x7F800000u) != 0x7F800000u;
     let hi = select(v.x, s, s_finite);
-    let lo = select(0.0, e, s_finite);
+    let lo = select(v.y, e, s_finite); // an unrenormalised pair at the overflow edge keeps its lo
     let hb = bitcast<u32>(hi);
     let sign = hb & 0x80000000u;
     let eh = (hb >> 23u) & 0xFFu;
@@ -672,9 +722,9 @@ fn f64_from_f32(v: f32) -> emu_f64 {
     return emu_f64(v, 0.0);
 }
 
-// Convert emu_f64 back to f32 (loses precision)
+// Convert emu_f64 back to f32 (loses precision). v.x alone when lo is zero: -0 + 0 is +0, so (float)-0.0 came out +0.
 fn f64_to_f32(v: emu_f64) -> f32 {
-    return v.x + v.y;
+    return select(v.x + v.y, v.x, v.y == 0.0);
 }
 
 // Create emu_f64 from high and low components
@@ -809,7 +859,7 @@ fn f64_min(a: emu_f64, b: emu_f64) -> emu_f64 {
 fn f64_max(a: emu_f64, b: emu_f64) -> emu_f64 {
     return select(b, a, f64_gt(a, b));
 }
-" + F64ExactConversionFunctions + F64ComponentCompositeFunctions + DekkerRoundingFunctions;
+" + F64ExactConversionFunctions + F64ComponentCompositeFunctions + DekkerRoundingFunctions + F64RoundToOddFunctions;
 
         #endregion
 
@@ -1651,7 +1701,7 @@ fn f64_ceil(v: emu_f64) -> emu_f64 { return _f64_bits_round_int(v, true); }
 fn f64_trunc(v: emu_f64) -> emu_f64 { return _f64_bits_round_int(v, (v.y & 0x80000000u) != 0u); }
 fn f64_round_even(v: emu_f64) -> emu_f64 { return _f64_bits_round_nearest(v, false); }
 fn f64_round_away(v: emu_f64) -> emu_f64 { return _f64_bits_round_nearest(v, true); }
-" + F64ExactConversionFunctions;
+" + F64ExactConversionFunctions + F64RoundToOddFunctions;
 
         #endregion
 
@@ -1760,7 +1810,11 @@ fn f32_quick_renorm(c: vec4<f32>, e: f32) -> vec4<f32> {
 // and y alone, OR'ing |y| into the mantissa regardless of its sign.
 fn f64_from_ieee754_bits(lo: u32, hi: u32) -> emu_f64 {
     let c = _f64_bits_to_components(lo, hi);
-    return select(f32_quick_renorm(c, 0.0), c, c.y == 0.0 && c.z == 0.0);
+    // c itself (non-overlapping) when the renormalisation overflows: a double within half an f32 ulp of 2^128 loaded
+    // as (Inf, NaN, ...)
+    let r = f32_quick_renorm(c, 0.0);
+    let r_finite = (bitcast<u32>(r.x) & 0x7F800000u) != 0x7F800000u;
+    return select(c, r, r_finite && !(c.y == 0.0 && c.z == 0.0));
 }
 
 fn f64_to_ieee754_bits(v: emu_f64) -> vec2<u32> {
@@ -1772,8 +1826,17 @@ fn f64_from_f32(v: f32) -> emu_f64 {
     return emu_f64(v, 0.0, 0.0, 0.0);
 }
 
+// Nearest f32, ties to even: x + y rounded, and on an exact tie the bits below (z + w) decide. Left to right,
+// x + y + z + w tied to even on a double just past an f32 midpoint (wrong on 1 in 7 of the cases near one; 2026-11-15).
+// v.x alone when the rest is zero: -0 + 0 is +0.
 fn f64_to_f32(v: emu_f64) -> f32 {
-    return v.x + v.y + v.z + v.w;
+    let ts = f32_two_sum(v.x, v.y);
+    let rest = v.z + v.w;
+    let away = ts.x + 2.0 * ts.y;
+    let tie = ts.y != 0.0 && (away - ts.x) == 2.0 * ts.y;
+    let push = (ts.y > 0.0 && rest > 0.0) || (ts.y < 0.0 && rest < 0.0);
+    let r = select(ts.x, away, tie && push);
+    return select(r, v.x, v.y == 0.0 && v.z == 0.0 && v.w == 0.0);
 }
 
 fn f64_new(hi: f32, lo: f32) -> emu_f64 {
@@ -1981,7 +2044,7 @@ fn f64_min(a: emu_f64, b: emu_f64) -> emu_f64 {
 fn f64_max(a: emu_f64, b: emu_f64) -> emu_f64 {
     return select(b, a, f64_gt(a, b));
 }
-" + F64ExactConversionFunctions + F64ComponentCompositeFunctions + OzakiRoundingAndSqrtFunctions;
+" + F64ExactConversionFunctions + F64ComponentCompositeFunctions + OzakiRoundingAndSqrtFunctions + F64RoundToOddFunctions;
 
         #endregion
 

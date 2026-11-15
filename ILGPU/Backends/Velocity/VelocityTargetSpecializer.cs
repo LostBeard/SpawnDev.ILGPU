@@ -490,6 +490,16 @@ namespace ILGPU.Backends.Velocity
             where TILEmitter : struct, IILEmitter;
 
         /// <summary>
+        /// Rounds the doubles on the stack to odd at float precision (24 significand bits: the 29 bits below cleared,
+        /// bit 29 set when any of them was), so the round-to-nearest demotion to float after it is exact and the
+        /// rounding to a low precision type after that is the only one, as from a double on the host
+        /// (LowPrecisionRounding.DemoteRoundToOdd). Known limit: a result in float's subnormal range (bf16 subnormals
+        /// only; every other low precision type rounds those to zero) can still round twice.
+        /// </summary>
+        public abstract void RoundToOddAtFloatPrecision64<TILEmitter>(TILEmitter emitter)
+            where TILEmitter : struct, IILEmitter;
+
+        /// <summary>
         /// Loads the raw nibbles (mask and nibble addresses on the stack).
         /// </summary>
         public abstract void LoadNibble<TILEmitter>(TILEmitter emitter)

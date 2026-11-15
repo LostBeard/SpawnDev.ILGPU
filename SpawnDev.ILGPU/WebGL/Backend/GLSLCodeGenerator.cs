@@ -2928,9 +2928,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // A Half is held in a float (no native f16 on WebGL), so a conversion INTO Half must round to fp16 itself:
             // it was the plain float conversion, and float -> Half -> float returned the input (8,711 of 8,716 values;
             // SpawnDev.ILGPU.ML's exact fp16 hi + lo split, Tuvok 2026-11-14). _f32_to_f16 is IEEE round to nearest even.
-            // Known limit: an emulated-double source is rounded to float first (two roundings; .NET rounds once).
             // bf16 / FP8 / FP4 (also held in a float) had the same identity conversion (Tuvok, 2026-11-14).
-            string core = BuildConvertExpressionCore(value, source);
+            // An (emulated) double is demoted with round-to-odd, so the rounding to the narrow type is the only one, as
+            // from a double on the host (through f64_to_f32 a double just above a midpoint of the type rounded twice).
+            string core = value.Value.BasicValueType == BasicValueType.Float64
+                && value.BasicValueType is BasicValueType.Float16 or BasicValueType.BFloat16 or BasicValueType.Float8E4M3
+                    or BasicValueType.Float8E5M2 or BasicValueType.Float4E2M1
+                ? $"f64_to_f32_rto({source})"
+                : BuildConvertExpressionCore(value, source);
             if (value.Value.BasicValueType != value.BasicValueType)
             {
                 switch (value.BasicValueType)
@@ -3270,7 +3275,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // _f64_bits_to_components' special cases, in its order of precedence.
             if (exponent == 0u && mHi20 == 0u && lo == 0u) return One(sign);
             if (exponent == 0x7FFu) return One(sign | (((mHi20 | lo) != 0u) ? 0x7FC00000u : 0x7F800000u));
-            if (f32Exp <= 0 || f32Exp >= 255) return One(sign | (fe << 23) | (mHi20 << 3));
+            // Below the f32 exponent range: the nearest f32 (a subnormal or zero), _f64_bits_to_f32_rn. Above it: (FLT_MAX,
+            // 2^103) unrenormalised, the smallest double that rounds to f32 infinity (finite; (float) gives infinity).
+            if (f32Exp <= 0) return One(BitConverter.SingleToUInt32Bits((float)d));
+            if (f32Exp >= 255)
+            {
+                float sgn = sign != 0u ? -1f : 1f, max = sgn * float.MaxValue, half = sgn * MathF.ScaleB(1f, 103);
+                return ozaki ? new[] { max, half, 0f, 0f } : new[] { max, half };
+            }
             uint c0 = 0x800000u | (mHi20 << 3) | (lo >> 29), c1 = (lo >> 5) & 0xFFFFFFu, c2 = lo & 0x1Fu;
             float sg = sign != 0u ? -1f : 1f;
             float f0 = BitConverter.UInt32BitsToSingle(sign | (fe << 23) | (c0 & 0x7FFFFFu));
@@ -3280,7 +3292,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (!ozaki)
             {
                 float l = Single(f1 + f2), sum = Single(f0 + l);
-                return new[] { sum, Single(l - Single(sum - f0)) };
+                // unrenormalised at the overflow edge, as the shader
+                return float.IsFinite(sum) ? new[] { sum, Single(l - Single(sum - f0)) } : new[] { f0, l };
             }
             // f32_quick_renorm(vec4(f0, f1, f2, 0), 0)
             static (float S, float E) Qts(float a, float b) { float s = a + b; return (s, b - (s - a)); }
@@ -3294,7 +3307,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             (float o1, t0) = Qts(t0, s6);
             (float s8, t1) = Qts(t1, t2);
             (float o2, t0) = Qts(t0, s8);
-            return new[] { o0, o1, o2, Single(t0 + t1) };
+            // the components themselves when the renormalisation overflows, as the shader
+            return float.IsFinite(o0) ? new[] { o0, o1, o2, Single(t0 + t1) } : new[] { f0, f1, f2, 0f };
         }
 
         // Constants

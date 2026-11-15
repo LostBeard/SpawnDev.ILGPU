@@ -265,7 +265,7 @@ namespace ILGPU
         [ConvertIntrinisc]
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static explicit operator Float8E4M3(double value) =>
-            (Float8E4M3)(float)value;
+            (Float8E4M3)LowPrecisionRounding.DemoteRoundToOdd(value);
 
         #endregion
     }

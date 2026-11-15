@@ -366,7 +366,7 @@ namespace ILGPU
         [ConvertIntrinisc]
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static explicit operator BFloat16(double value) =>
-            (BFloat16)(float)value;
+            (BFloat16)LowPrecisionRounding.DemoteRoundToOdd(value);
 
         #endregion
     }

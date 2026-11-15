@@ -263,6 +263,27 @@ float _f64_scale(float x, int k) {
     return k < -126 ? lowk : normk;
 }
 
+// An IEEE-754 double (bits lo, hi) rounded to the nearest f32, ties to even, subnormals and overflow to infinity
+// included: what a double outside the f32 exponent range loads as. It was 1.m * 2^-126 or 1.m * 2^127 whatever the
+// exponent (1e-300 loaded as 1.6e-38, 1e300 as 2.5e38; 2026-11-15). Integer arithmetic on the bits.
+float _f64_bits_to_f32_rn(uint lo, uint hi) {
+    uint sign = hi & 0x80000000u;
+    uint ef = (hi >> 20u) & 0x7FFu;
+    // 24 significand bits and 3 guard bits, the last one sticky
+    uint g = 0x4000000u | ((hi & 0xFFFFFu) << 6u) | (lo >> 26u) | (((lo & 0x3FFFFFFu) != 0u) ? 1u : 0u);
+    int fe = int(max(ef, 1u)) - 896;
+    bool tiny = fe < 1;
+    uint s = uint(clamp(1 - fe, 0, 31));
+    uint mm = tiny ? ((g >> s) | (((g & ((1u << s) - 1u)) != 0u) ? 1u : 0u)) : g;
+    int fe1 = tiny ? 1 : fe;
+    uint low = mm & 7u;
+    uint m3 = mm >> 3u;
+    uint mr = m3 + ((low > 4u || (low == 4u && (m3 & 1u) == 1u)) ? 1u : 0u);
+    uint bits = (uint(fe1 - 1) << 23u) + mr;
+    bool ovf = fe1 >= 255 || bits >= 0x7F800000u;
+    return uintBitsToFloat(sign | (ovf ? 0x7F800000u : bits));
+}
+
 // Exact split of IEEE double bits into non-overlapping f32 components (24 + 24 + 5 bits).
 vec4 _f64_bits_to_components(uint lo, uint hi) {
     uint sign = hi & 0x80000000u;
@@ -279,12 +300,16 @@ vec4 _f64_bits_to_components(uint lo, uint hi) {
     float f1 = s * _f64_scale(float(c1), e - 47);
     float f2 = s * _f64_scale(float(c2), e - 52);
     vec4 normal = vec4(f0, f1, f2, 0.0);
-    vec4 approx = vec4(uintBitsToFloat(sign | (fe << 23u) | (m_hi20 << 3u)), 0.0, 0.0, 0.0);
+    // Below the f32 range: the nearest f32 (a subnormal or zero). Above it: (FLT_MAX, 2^103), the smallest double that
+    // rounds to f32 infinity, so the value stays finite (double.IsInfinity(double.MaxValue) is false) while (float)
+    // gives infinity as .NET does. It loaded as 1.m * 2^-126 / 1.m * 2^127 whatever the exponent (1e300 as 2.5e38).
+    vec4 big = vec4(s * uintBitsToFloat(0x7F7FFFFFu), s * uintBitsToFloat(0x73000000u), 0.0, 0.0);
+    vec4 approx = f32_exp >= 255 ? big : vec4(_f64_bits_to_f32_rn(lo, hi), 0.0, 0.0, 0.0);
     vec4 special = vec4(uintBitsToFloat(sign | (((m_hi20 | lo) != 0u) ? 0x7FC00000u : 0x7F800000u)), 0.0, 0.0, 0.0);
-    vec4 zero = vec4(uintBitsToFloat(sign), 0.0, 0.0, 0.0);
+    // A zero takes the approx path too (_f64_bits_to_f32_rn gives +-0 from integer bits): a separate
+    // vec4(uintBitsToFloat(sign), ...) zero lost the sign of -0.0 on WebGL (D3D), (float)-0.0 came out +0.
     vec4 r = (f32_exp <= 0 || f32_exp >= 255) ? approx : normal;
-    r = exponent == 0x7FFu ? special : r;
-    return (exponent == 0u && m_hi20 == 0u && lo == 0u) ? zero : r;
+    return exponent == 0x7FFu ? special : r;
 }
 
 // Unsigned 64-bit integer -> double bits, rounded to nearest-even at 53 bits.
@@ -380,8 +405,10 @@ vec2 f64_from_ieee754_bits(uint lo, uint hi) {
     float l = c.y + c.z;
     float s = c.x + l;
     vec2 pair = vec2(s, l - (s * u_one - c.x));
-    // c.x alone when exact, zero, Inf or NaN (the error term of an Inf would be NaN).
-    return (c.y == 0.0 && c.z == 0.0) ? vec2(c.x, 0.0) : pair;
+    // c.x alone when exact, zero, Inf or NaN (the error term of an Inf would be NaN). (c.x, l) unrenormalised when the
+    // sum overflows: a double within half an f32 ulp of 2^128 loaded as (Inf, -Inf), NaN in everything after.
+    bool s_finite = (floatBitsToUint(s) & 0x7F800000u) != 0x7F800000u;
+    return (c.y == 0.0 && c.z == 0.0) ? vec2(c.x, 0.0) : (s_finite ? pair : vec2(c.x, l));
 }
 
 // Exact IEEE-754 bits of hi + lo (lo of EITHER sign), rounded to nearest-even: the bits of hi
@@ -395,7 +422,7 @@ uvec2 f64_to_ieee754_bits(vec2 v) {
     float e = (v.x - (s - bb) * u_one) * u_one + (v.y - bb);
     bool s_finite = (floatBitsToUint(s) & 0x7F800000u) != 0x7F800000u;
     float hi = s_finite ? s : v.x;
-    float lo = s_finite ? e : 0.0;
+    float lo = s_finite ? e : v.y; // an unrenormalised pair at the overflow edge keeps its lo
     uint hb = floatBitsToUint(hi);
     uint sign = hb & 0x80000000u;
     uint eh = (hb >> 23u) & 0xFFu;
@@ -438,7 +465,11 @@ uvec2 f64_to_ieee754_bits(vec2 v) {
 
 
 vec2 f64_from_f32(float v) { return vec2(v, 0.0); }
-float f64_to_f32(vec2 v) { return v.x + v.y; }
+// -0 + 0 is +0: a zero sum takes v.x's sign, in integer bits (a float select of v.x vs v.x + v.y lost it on WebGL)
+float f64_to_f32(vec2 v) {
+    float s = v.x + v.y;
+    return uintBitsToFloat(floatBitsToUint(s) | ((s == 0.0) ? (floatBitsToUint(v.x) & 0x80000000u) : 0u));
+}
 vec2 f64_new(float hi, float lo) { return vec2(hi, lo); }
 vec2 f64_neg(vec2 a) { return vec2(-a.x, -a.y); }
 
@@ -1696,7 +1727,10 @@ vec4 f32_quick_renorm(vec4 c_in, float e) {
 vec4 f64_from_ieee754_bits(uint lo, uint hi) {
     vec4 c = _f64_bits_to_components(lo, hi);
     vec4 n = f32_quick_renorm(c, 0.0);
-    return (c.y == 0.0 && c.z == 0.0) ? c : n;
+    // c itself (non-overlapping) when the renormalisation overflows: a double within half an f32 ulp of 2^128 loaded
+    // as (Inf, NaN, ...)
+    bool n_finite = (floatBitsToUint(n.x) & 0x7F800000u) != 0x7F800000u;
+    return (c.y == 0.0 && c.z == 0.0 || !n_finite) ? c : n;
 }
 
 uvec2 f64_to_ieee754_bits(vec4 v) {
@@ -1705,7 +1739,19 @@ uvec2 f64_to_ieee754_bits(vec4 v) {
 
 
 vec4 f64_from_f32(float v) { return vec4(v, 0.0, 0.0, 0.0); }
-float f64_to_f32(vec4 v) { return v.x + v.y + v.z + v.w; }
+// Nearest f32, ties to even: x + y rounded, and on an exact tie the bits below (z + w) decide. Left to right,
+// x + y + z + w tied to even on a double just past an f32 midpoint (wrong on 1 in 7 of the cases near one; 2026-11-15).
+// v.x alone when the rest is zero: -0 + 0 is +0.
+float f64_to_f32(vec4 v) {
+    vec2 ts = f32_two_sum(v.x, v.y);
+    float rest = v.z + v.w;
+    float away = (ts.x + 2.0 * ts.y) * u_one;
+    bool tie = ts.y != 0.0 && (away - ts.x) * u_one == 2.0 * ts.y;
+    bool push = (ts.y > 0.0 && rest > 0.0) || (ts.y < 0.0 && rest < 0.0);
+    float r = (tie && push) ? away : ts.x;
+    // a zero result takes v.x's sign, in integer bits (a float select lost -0 on WebGL)
+    return uintBitsToFloat(floatBitsToUint(r) | ((r == 0.0) ? (floatBitsToUint(v.x) & 0x80000000u) : 0u));
+}
 vec4 f64_new(float hi, float lo) { return vec4(hi, lo, 0.0, 0.0); }
 vec4 f64_neg(vec4 a) { return vec4(-a.x, -a.y, -a.z, -a.w); }
 
@@ -2297,6 +2343,25 @@ uint _f32_to_e2m1(float f) {
                 includeI64, includeF16, includeBF16, includeFP8, includeFP4);
 
         /// <summary>
+        /// <c>f64_to_f32_rto</c> for one f64 emulation mode (its type: vec2 Dekker, vec4 Ozaki, emu_f64i Ieee): the f64
+        /// -&gt; float demotion with round-to-odd used by conversions from double into the low-precision types.
+        /// </summary>
+        public static string F64RoundToOddFunction(string f64Type) => @"
+// emu_f64 -> float with round-to-odd (truncated toward zero, last bit set when inexact), from the mode's own
+// f64_to_f32 / f64_from_f32 / f64_eq / f64_gt. Rounding the result to f16 / bf16 / FP8 / FP4 equals rounding the
+// double once, as .NET does from a double (LowPrecisionRounding.DemoteRoundToOdd); through f64_to_f32 it rounded twice.
+float f64_to_f32_rto(" + f64Type + @" v) {
+    float f = f64_to_f32(v);
+    " + f64Type + @" fv = f64_from_f32(f);
+    uint b = floatBitsToUint(f);
+    if ((b & 0x7FFFFFFFu) > 0x7F800000u || f64_eq(v, fv)) return f;
+    // f rounded away from zero (above v when positive, below when negative): one step toward zero
+    if (((b >> 31u) == 0u) != f64_gt(v, fv)) b = b - 1u;
+    return uintBitsToFloat(b | 1u);
+}
+";
+
+        /// <summary>
         /// The emulation library with the f64 family chosen by <paramref name="f64Mode"/> (Dekker, Ozaki or Ieee).
         /// The Ieee family's struct type is declared in the shader header (see <see cref="IeeeF64StructDeclaration"/>).
         /// </summary>
@@ -2312,6 +2377,12 @@ uint _f32_to_e2m1(float f) {
                     F64EmulationMode.Ozaki => OzakiF64Functions,
                     _ => F64Functions,
                 });
+                sb.AppendLine(F64RoundToOddFunction(f64Mode switch
+                {
+                    F64EmulationMode.Ieee => "emu_f64i",
+                    F64EmulationMode.Ozaki => "vec4",
+                    _ => "vec2",
+                }));
             }
 
             if (includeI64)

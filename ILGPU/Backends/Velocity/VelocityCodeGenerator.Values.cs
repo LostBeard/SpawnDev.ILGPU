@@ -223,6 +223,11 @@ namespace ILGPU.Backends.Velocity
             // Load source
             Load(value.Value);
 
+            // A double into a low precision float: round to odd at float precision first, so the demotion to the float
+            // lanes is exact and the rounding to the narrow type below is the only one (as from a double on the host)
+            if (value.SourceType == ArithmeticBasicValueType.Float64 && value.TargetType.IsNarrowFloat())
+                Specializer.RoundToOddAtFloatPrecision64(Emitter);
+
             // A packed signed nibble is extended first
             if (value.SourceType == ArithmeticBasicValueType.QInt4)
                 Specializer.SignExtendNibble(Emitter);

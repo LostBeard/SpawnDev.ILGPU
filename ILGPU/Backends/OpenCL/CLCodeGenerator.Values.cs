@@ -327,9 +327,21 @@ namespace ILGPU.Backends.OpenCL
                 statement.BeginArguments();
                 statement.AppendCommand(encode);
                 statement.BeginArguments();
-                statement.AppendCast(ArithmeticBasicValueType.Float32);
-                statement.AppendCast(value.SourceType);
-                statement.AppendArgument(sourceValue);
+                if (value.Value.BasicValueType == BasicValueType.Float64
+                    && TypeGenerator.Capabilities.Extensions.Contains("cl_khr_fp64"))
+                {
+                    // round-to-odd, so the rounding to the narrow type is the only one (as from a double on the host)
+                    statement.AppendCommand("_f64_to_f32_rto");
+                    statement.BeginArguments();
+                    statement.AppendArgument(sourceValue);
+                    statement.EndArguments();
+                }
+                else
+                {
+                    statement.AppendCast(ArithmeticBasicValueType.Float32);
+                    statement.AppendCast(value.SourceType);
+                    statement.AppendArgument(sourceValue);
+                }
                 statement.EndArguments();
                 statement.EndArguments();
                 return;

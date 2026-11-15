@@ -115,6 +115,40 @@ namespace ILGPU.Backends.Velocity.Scalar
                 VelocityNarrowTypes.StoreNibble(address.Item2, value.Item2);
         }
 
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static (long, long) RoundToOddAtFloatPrecision64((long, long) warp)
+        {
+            return (RoundToOddAtFloatPrecision(warp.Item1), RoundToOddAtFloatPrecision(warp.Item2));
+        }
+
+        /// <summary>
+        /// The double (bits) truncated toward zero to float precision, its last float bit set when that dropped
+        /// anything (see the specializer). Float precision is 24 bits down to 2^-126 (the 29 low bits cleared, bit
+        /// 29 the sticky one) and the fixed 2^-149 below it: there y = |x| + 2^-97 rounds |x| to a multiple of
+        /// 2^-149 (y's ulp), a step back when that rounded up, the last bit set when inexact, y - 2^-97 exact.
+        /// With bit 29 alone, a bf16 subnormal result rounded twice (10 of 4,096 midpoints; 2026-11-15).
+        /// </summary>
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        internal static long RoundToOddAtFloatPrecision(long bits)
+        {
+            if ((bits & long.MaxValue) >= FloatMinNormalBits)
+                return (bits & ~0x1FFFFFFFL) | ((bits & 0x1FFFFFFFL) != 0 ? 0x20000000L : 0L);
+            double c = BitConverter.Int64BitsToDouble(FloatSubnormalOffsetBits);
+            double mag = BitConverter.Int64BitsToDouble(bits & long.MaxValue);
+            double y = mag + c, r = y - c;
+            long yb = BitConverter.DoubleToInt64Bits(y);
+            if (r != mag)
+                yb = (r > mag ? yb - 1 : yb) | 1L;
+            return BitConverter.DoubleToInt64Bits(BitConverter.Int64BitsToDouble(yb) - c) | (bits & long.MinValue);
+        }
+
+        /// <summary>2^-126 as double bits: below it float precision is the fixed 2^-149.</summary>
+        internal const long FloatMinNormalBits = 0x3810000000000000L;
+        /// <summary>2^-97 as double bits: a double in [2^-97, 2^-96) has an ulp of 2^-149.</summary>
+        internal const long FloatSubnormalOffsetBits = 0x39E0000000000000L;
+
+        public static readonly MethodInfo RoundToOddAtFloatPrecision64Method =
+            GetMethod(nameof(RoundToOddAtFloatPrecision64));
         public static readonly MethodInfo SignExtendNibbleMethod =
             GetMethod(nameof(SignExtendNibble));
         public static readonly MethodInfo MaskNibbleMethod =

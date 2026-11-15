@@ -142,6 +142,17 @@ namespace ILGPU.Backends.OpenCL
                 extensionBuilder.AppendLine();
             }
 
+            // A double demoted with round-to-odd (truncated, last bit set when inexact): rounding that float to bf16 /
+            // FP8 / FP4 equals rounding the double once, as the host does (LowPrecisionRounding.DemoteRoundToOdd).
+            if (Capabilities.Extensions.Contains("cl_khr_fp64"))
+            {
+                extensionBuilder.AppendLine();
+                extensionBuilder.AppendLine("static inline float _f64_to_f32_rto(double d) {");
+                extensionBuilder.AppendLine("    float f = convert_float_rtz(d); uint b = as_uint(f);");
+                extensionBuilder.AppendLine("    return as_float((double)f != d ? (b | 1u) : b);");
+                extensionBuilder.AppendLine("}");
+            }
+
             // BFloat16 bit-conversion helpers - bf16 is ALWAYS emulated on OpenCL (no native bf16 type;
             // bf16 is the top 16 bits of an fp32, so conversion is pure shifting, not the f16 rebias above).
             // Matches the managed / WGSL / GLSL / Wasm bf16 paths byte-for-byte. NaN preserved (force a

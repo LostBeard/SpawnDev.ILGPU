@@ -376,6 +376,9 @@ namespace ILGPU.Backends.Velocity.Scalar
         public override void MaskNibble<TILEmitter>(TILEmitter emitter) =>
             emitter.EmitCall(ScalarOperations2.MaskNibbleMethod);
 
+        public override void RoundToOddAtFloatPrecision64<TILEmitter>(TILEmitter emitter) =>
+            emitter.EmitCall(ScalarOperations2.RoundToOddAtFloatPrecision64Method);
+
         public override void LoadNibble<TILEmitter>(TILEmitter emitter) =>
             emitter.EmitCall(ScalarOperations2.LoadNibbleMethod);
 

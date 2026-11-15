@@ -8,6 +8,10 @@ namespace SpawnDev.ILGPU
         /// <summary>
         /// Dekker double-float technique using two f32 values.
         /// ~48-53 bits of mantissa, 8 bytes per value. Good balance of precision and performance.
+        /// Both components are f32, so the range is f32's: a double below it loads as the nearest f32 (a subnormal or zero),
+        /// a double above it as 2^128 - 2^103, the smallest double that rounds to f32 infinity (it stays finite, and
+        /// <c>(float)</c> gives infinity as .NET does). The low component's bits stop at 2^-126 on GPUs that flush f32 subnormals (D3D, so Chrome on
+        /// Windows): a double below about 2^-102 keeps fewer than 48 bits. Use <see cref="Ieee"/> for the full binary64 range.
         /// </summary>
         Dekker,
 
@@ -16,6 +20,8 @@ namespace SpawnDev.ILGPU
         /// significand between operations. A value is rounded to binary64 only when it is stored to memory or converted,
         /// so a chain of operations kept in registers (<c>r -= a * b</c>) does NOT give .NET's result, where every
         /// operation rounds to binary64. Use <see cref="Ieee"/> for results bit-identical to .NET.
+        /// The components are f32, so the range is f32's (as <see cref="Dekker"/>): a double outside it loads as the nearest
+        /// f32 or 2^128 - 2^103, and on GPUs that flush f32 subnormals a double below 2^-74 no longer holds its full significand.
         /// </summary>
         Ozaki,
 

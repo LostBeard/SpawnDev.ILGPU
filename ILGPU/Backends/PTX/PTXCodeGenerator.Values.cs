@@ -422,6 +422,12 @@ namespace ILGPU.Backends.PTX
                 {
                     f32Source = EnsureHardwareRegister(LoadPrimitive(value.Value));
                 }
+                else if (sourceBasic == BasicValueType.Float64)
+                {
+                    // round-to-odd, so the rounding to the narrow type below is the only one (as from a double on the host)
+                    f32Source = AllocateRegister(BasicValueType.Float32, PTXRegisterKind.Float32);
+                    EmitF64ToF32RoundToOdd(EnsureHardwareRegister(LoadPrimitive(value.Value)), f32Source);
+                }
                 else
                 {
                     f32Source = AllocateRegister(BasicValueType.Float32, PTXRegisterKind.Float32);
@@ -938,6 +944,27 @@ namespace ILGPU.Backends.PTX
         /// (a naive truncate collapses some NaNs to Inf), byte-identical to the managed/Wasm
         /// <c>EmitF32ToBF16</c>. Replaces the native <c>cvt.rn.bf16.f32</c> (sm_80+ only).
         /// </summary>
+        /// <summary>
+        /// Demotes an f64 to an f32 with round-to-odd: truncated toward zero, last bit set when that dropped anything.
+        /// Rounding the result to bf16 / FP8 / FP4 then equals rounding the double once, as the host does
+        /// (LowPrecisionRounding.DemoteRoundToOdd); a round-to-nearest demotion first would round twice.
+        /// </summary>
+        private void EmitF64ToF32RoundToOdd(HardwareRegister srcF64, HardwareRegister dstF32)
+        {
+            var back = AllocateRegister(BasicValueType.Float64, PTXRegisterKind.Float64);
+            var bits = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var odd = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);
+            var inexact = AllocateRegister(BasicValueType.Int1, PTXRegisterKind.Predicate);
+            using (var cmd = BeginCommand("cvt.rz.f32.f64")) { cmd.AppendArgument(dstF32); cmd.AppendArgument(srcF64); }
+            using (var cmd = BeginCommand("cvt.f64.f32")) { cmd.AppendArgument(back); cmd.AppendArgument(dstF32); }
+            using (var cmd = BeginCommand("setp.neu.f64")) { cmd.AppendArgument(inexact); cmd.AppendArgument(back); cmd.AppendArgument(srcF64); }
+            using (var cmd = BeginCommand("mov.b32")) { cmd.AppendArgument(bits); cmd.AppendArgument(dstF32); }
+            using (var cmd = BeginCommand("or.b32")) { cmd.AppendArgument(odd); cmd.AppendArgument(bits); cmd.AppendConstant(1); }
+            using (var cmd = BeginCommand("selp.b32")) { cmd.AppendArgument(bits); cmd.AppendArgument(odd); cmd.AppendArgument(bits); cmd.AppendArgument(inexact); }
+            using (var cmd = BeginCommand("mov.b32")) { cmd.AppendArgument(dstF32); cmd.AppendArgument(bits); }
+            FreeRegister(back); FreeRegister(bits); FreeRegister(odd); FreeRegister(inexact);
+        }
+
         private void EmitF32ToBF16Bits(HardwareRegister srcF32, HardwareRegister dstB16)
         {
             var bits = AllocateRegister(BasicValueType.Int32, PTXRegisterKind.Int32);

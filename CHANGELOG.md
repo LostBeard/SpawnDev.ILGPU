@@ -1,6 +1,38 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.34 (forks 2.4.33) - unreleased - double -> Half / bf16 / FP8 / FP4 rounds once; WebGPU / WebGL emulated doubles load correctly at small and huge magnitudes
+
+- **FIX (wrong rounding): a double converted to Half, BFloat16, FP8 E4M3 / E5M2 or FP4 E2M1 rounded twice** (to float,
+  then to the type) on every backend except Wasm, and in the managed operators (`(Half)someDouble` on the host and the CPU
+  accelerator). A double just above a midpoint of the type became that exact midpoint in float and then tied to even, the
+  wrong way (host operators wrong on 1,739 to 1,767 of 4,096 midpoints per type). Now each demotes with round-to-odd first
+  (`LowPrecisionRounding.DemoteRoundToOdd`; PTX cvt.rz + sticky; OpenCL `_f64_to_f32_rto`; WGSL / GLSL `f64_to_f32_rto` in
+  all three f64 modes; Velocity `RoundToOddAtFloatPrecision64`, exact for float-subnormal results too), so the one rounding
+  is to the type, as `System.Half` does from a double. Test `LowPrecisionFromDouble_RoundsOnce` (every backend; WebGPU /
+  WebGL in each of Dekker, Ozaki and Ieee).
+- **FIX (silent wrong values): WebGPU / WebGL Dekker and Ozaki loaded a double outside the f32 exponent range as
+  1.m x 2^-126 or 1.m x 2^127, whatever its exponent** (1e-300 as 1.6e-38, 1e300 as 2.5e38; kernel constants the same).
+  A double below the f32 range loads as the nearest f32 (a subnormal or zero); one above it as 2^128 - 2^103, the
+  smallest double that rounds to f32 infinity, so it stays finite (`double.IsInfinity(double.MaxValue)` is false, as
+  `DoubleIsInfinityIntrinsicTest` requires) while `(float)` gives infinity as .NET does.
+- **FIX (lost precision): WebGPU Dekker and Ozaki dropped the low 29 bits of every double below 2^-79.** D3D lowers WGSL
+  `ldexp(x, k)` to `x * exp2(k)`, and `exp2(k)` below 2^-126 flushes to 0; the scale is applied in two halves now.
+- **FIX: `(float)-0.0` was +0 on WebGPU / WebGL Dekker and Ozaki** (-0 + 0 is +0; on WebGL the load's own
+  `uintBitsToFloat(sign)` zero also came out +0 under D3D, so a zero now takes the integer-built path).
+- **FIX (NaN): WebGPU / WebGL Dekker and Ozaki loaded a double within half an f32 ulp of 2^128 as (Inf, -Inf)**, NaN in
+  everything after: the renormalising sum overflowed. Such a double keeps its components unrenormalised now (and the
+  Dekker store keeps the low part), so `(float)` gives float.MaxValue or infinity as .NET does.
+- **FIX (wrong rounding): WebGPU / WebGL Ozaki `(float)someDouble` summed the four components left to right**, so a
+  double just past an f32 midpoint (by less than 2^-29 relative) tied to even the wrong way (1 in 7 of the cases near a
+  midpoint, in simulation). Now x + y is rounded with its exact remainder, and on a tie the components below decide.
+- **DOCS:** `F64EmulationMode.Dekker` / `Ozaki` state their range: f32's exponent range (above it 2^128 - 2^103), and
+  on GPUs that flush f32 subnormals (D3D) the low components stop at 2^-126. `Ieee` holds every double.
+- Test `DoubleToSingle_RoundsToNearest_AcrossTheFloatRange` (every backend; WebGPU / WebGL in each f64 mode).
+- PlaywrightMultiTest honors a test's declared `data-test-timeout` (`ProjectTest.DeclaredTimeoutMs`).
+- Tests: the two new tests on every lane (WebGPU / WebGL in Dekker, Ozaki and Ieee), each fix red-checked by disabling
+  it; regression filter Double / F64 / Float64 / Ozaki / Dekker / LowPrecisionFromDouble 503 tests, 477 passed, 0 failed.
+
 ## 5.4.33 (forks 2.4.32) - 2026-11-15 - low-precision values round like .NET: conversions into bf16 / FP8 / FP4 and every Half / bf16 / FP8 / FP4 arithmetic result
 
 Release sweep (full default, code 91cd8e9 = 5.4.33-local.1): 9,331 cases, 8,592 passed, 1 failed, 738 skipped, 68 min. The
