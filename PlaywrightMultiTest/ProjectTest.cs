@@ -16,6 +16,14 @@ public class ProjectTest
     /// <summary>True when the last browser run left its row without any result: the page's .NET runtime is presumed dead
     /// (e.g. a Mono assertion), so the lane recycles the page before the next test.</summary>
     public bool PageRuntimeDead { get; set; }
+
+    /// <summary>
+    /// The browser test's own time limit in ms from its row's data-test-timeout (TestMethodAttribute.Timeout, written by
+    /// SpawnDev.UnitTesting 2.5.8 / Browser 2.7.2 and later); 0 = not declared (older UnitTesting) or the page default.
+    /// The waits for the test are at least this long, so a test inside its own budget is not abandoned as hung (Codecs'
+    /// Vp9Decode_EveryFrame_MatchesLibvpx declares 3,600 s and ran 624 s on one run, past the fixed 660 s on another).
+    /// </summary>
+    public int DeclaredTimeoutMs { get; set; }
     public Func<IPage, Task> TestFunc { get; set; }
     public ProjectTest(TestableProject testableProject, string name)
     {
@@ -157,7 +165,7 @@ public class ProjectTest
             {
                 lock (consoleErrors) runtimeDied = consoleErrors.Any(IsRuntimeDeathMessage);
                 return runtimeDied || await runButton.IsEnabledAsync();
-            });
+            }, Math.Max(600_000, DeclaredTimeoutMs + 30_000));
 
             // Stop capturing console
             page.Console -= OnConsole;

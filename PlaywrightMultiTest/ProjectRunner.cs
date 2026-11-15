@@ -402,7 +402,8 @@ namespace PlaywrightMultiTest
                             const rows = document.querySelectorAll('table.unit-test-view tbody tr');
                             return Array.from(rows).map(r => ({
                                 typeName: r.querySelector('.test-type-name')?.textContent ?? '',
-                                methodName: r.querySelector('.test-method-name')?.textContent ?? ''
+                                methodName: r.querySelector('.test-method-name')?.textContent ?? '',
+                                timeoutMs: parseInt(r.getAttribute('data-test-timeout') || '0', 10) || 0
                             }));
                         }").ConfigureAwait(false);
 
@@ -413,6 +414,8 @@ namespace PlaywrightMultiTest
                             var typeName = row.GetProperty("typeName").GetString() ?? "";
                             var methodName = row.GetProperty("methodName").GetString() ?? "";
                             var rowTest = new ProjectTest(testableProject, typeName, methodName, testPageUrl);
+                            if (row.TryGetProperty("timeoutMs", out var declared) && declared.TryGetInt32(out var declaredMs))
+                                rowTest.DeclaredTimeoutMs = declaredMs;
 
                             // Backend scoping (PMT_LANES) - applied like the name filter, before the
                             // test is ever scheduled.
@@ -1361,10 +1364,12 @@ namespace PlaywrightMultiTest
             var hardTimeout = TimeSpan.FromSeconds(int.TryParse(Environment.GetEnvironmentVariable("PMT_BROWSER_TEST_TIMEOUT_SEC"), out var sec) && sec > 0 ? sec : 720);
             foreach (var t in tests)
             {
+                // a test that declares a longer limit of its own (data-test-timeout) gets it, plus time to report
+                var testTimeout = TimeSpan.FromMilliseconds(Math.Max(hardTimeout.TotalMilliseconds, t.DeclaredTimeoutMs + 120_000));
                 var run = ExecuteAndCaptureAsync(t, blazor.Page);
-                if (await Task.WhenAny(run, Task.Delay(hardTimeout)).ConfigureAwait(false) != run)
+                if (await Task.WhenAny(run, Task.Delay(testTimeout)).ConfigureAwait(false) != run)
                 {
-                    _outcomes[t.Name] = new ScheduledOutcome("Fail", $"Test {t.Name} failed with error: no response from the page after {hardTimeout.TotalSeconds:0}s (page hung)", hardTimeout.TotalMilliseconds);
+                    _outcomes[t.Name] = new ScheduledOutcome("Fail", $"Test {t.Name} failed with error: no response from the page after {testTimeout.TotalSeconds:0}s (page hung)", testTimeout.TotalMilliseconds);
                     t.PageRuntimeDead = true;
                 }
                 // A test that left no result killed the page's runtime (2026-10-13: a Mono AOT assertion). Without a
