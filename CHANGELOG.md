@@ -3,6 +3,12 @@
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 ## 5.4.34 (forks 2.4.33) - unreleased - double -> Half / bf16 / FP8 / FP4 rounds once; WebGPU / WebGL emulated doubles load correctly at small and huge magnitudes
 
+- **FIX (WebGPU / WebGL; inaccurate results): MathF.Sin / Cos / Tan of large arguments.** The native sin / cos, which D3D
+  evaluates without argument reduction, were 2.7e-4 off at |x| = 2000 and 3.6e-7 in [-pi, pi] (SpawnDev.ILGPU.ML's rope
+  tables, Tuvok). f32 sin / cos / tan now reduce to the nearest multiple of pi / 2 (Cody-Waite, three parts) and use
+  Cephes' polynomials: at most 1.19e-7 off in both ranges, like CUDA / OpenCL / Wasm (5.96e-8). Past |x| = 102943 the
+  native functions; MathMode.Fast keeps the native ones. Test `Trig_LargeArguments_MatchHost` (every backend, bound
+  2.5e-7; red with the native functions).
 - **FIX (wrong rounding): a double converted to Half, BFloat16, FP8 E4M3 / E5M2 or FP4 E2M1 rounded twice** (to float,
   then to the type) on every backend except Wasm, and in the managed operators (`(Half)someDouble` on the host and the CPU
   accelerator). A double just above a midpoint of the type became that exact midpoint in float and then tied to even, the

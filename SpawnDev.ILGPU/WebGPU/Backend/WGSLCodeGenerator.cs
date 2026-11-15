@@ -1676,6 +1676,15 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// </summary>
         protected bool CorrectlyRoundedF32 => Backend.Context.Properties.MathMode < MathMode.Fast;
 
+        /// <summary>The f32 sin / cos / tan to emit: the accurate one (EmulationLibrary.F32TrigFunctions) unless MathMode.Fast.</summary>
+        protected string TrigFunction(string name) => CorrectlyRoundedF32 ? "_f32_" + name : name;
+
+        /// <summary>sin / cos / tan of a value: accurate for an f32 (not for f16 or a vector) unless MathMode.Fast.</summary>
+        protected string AccurateTrig(UnaryArithmeticValue value, string name, object operand) =>
+            TypeGenerator[value.Type] == "f32" || TypeGenerator[value.Type] == "float"
+                ? $"{TrigFunction(name)}({operand})"
+                : $"{name}({operand})";
+
         /// <summary>Emits a unary arithmetic operation (delegates to <c>GenerateUnOp</c>).</summary>
         /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(UnaryArithmeticValue value)
@@ -1688,11 +1697,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// libraries have no double-precision transcendentals). Applying the builtin to the
         /// emulated vector itself works per COMPONENT: cos(0.5) came out 1.8776 (cos(hi) + cos(lo)).
         /// </summary>
-        private static string? EmulatedF64ViaF32(UnaryArithmeticKind kind, string operand) => kind switch
+        private string? EmulatedF64ViaF32(UnaryArithmeticKind kind, string operand) => kind switch
         {
-            UnaryArithmeticKind.SinF => $"f64_from_f32(sin(f64_to_f32({operand})))",
-            UnaryArithmeticKind.CosF => $"f64_from_f32(cos(f64_to_f32({operand})))",
-            UnaryArithmeticKind.TanF => $"f64_from_f32(tan(f64_to_f32({operand})))",
+            UnaryArithmeticKind.SinF => $"f64_from_f32({TrigFunction("sin")}(f64_to_f32({operand})))",
+            UnaryArithmeticKind.CosF => $"f64_from_f32({TrigFunction("cos")}(f64_to_f32({operand})))",
+            UnaryArithmeticKind.TanF => $"f64_from_f32({TrigFunction("tan")}(f64_to_f32({operand})))",
             UnaryArithmeticKind.AsinF => $"f64_from_f32(asin(f64_to_f32({operand})))",
             UnaryArithmeticKind.AcosF => $"f64_from_f32(acos(f64_to_f32({operand})))",
             UnaryArithmeticKind.AtanF => $"f64_from_f32(atan(f64_to_f32({operand})))",
@@ -1757,9 +1766,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
                 // Math Intrinsics (Float)
                 UnaryArithmeticKind.Abs => $"abs({operand})",
-                UnaryArithmeticKind.SinF => $"sin({operand})",
-                UnaryArithmeticKind.CosF => $"cos({operand})",
-                UnaryArithmeticKind.TanF => $"tan({operand})",
+                UnaryArithmeticKind.SinF => AccurateTrig(value, "sin", operand),
+                UnaryArithmeticKind.CosF => AccurateTrig(value, "cos", operand),
+                UnaryArithmeticKind.TanF => AccurateTrig(value, "tan", operand),
                 UnaryArithmeticKind.AsinF => $"asin({operand})",
                 UnaryArithmeticKind.AcosF => $"acos({operand})",
                 UnaryArithmeticKind.AtanF => $"atan({operand})",

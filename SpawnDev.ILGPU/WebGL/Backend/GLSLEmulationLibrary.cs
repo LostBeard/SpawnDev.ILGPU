@@ -40,8 +40,39 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (!glsl.Contains(F32CorrectlyRoundedPlaceholder))
                 return glsl;
             bool used = glsl.Contains("_f32_div_rn(") || glsl.Contains("_f32_sqrt_rn(");
-            return glsl.Replace(F32CorrectlyRoundedPlaceholder, used ? F32CorrectlyRoundedFunctions : "");
+            bool trig = glsl.Contains("_f32_sin(") || glsl.Contains("_f32_cos(") || glsl.Contains("_f32_tan(");
+            return glsl.Replace(F32CorrectlyRoundedPlaceholder,
+                (used ? F32CorrectlyRoundedFunctions : "") + (trig ? F32TrigFunctions : ""));
         }
+
+        /// <summary>
+        /// MathF.Sin / Cos / Tan as accurate as the other backends (about 1 ulp, CUDA / OpenCL / Wasm 5.96e-8 at most):
+        /// the native sin / cos (D3D, so Chrome on Windows) reduce no argument and were 2.7e-4 off at |x| = 2000 (3.6e-7 in
+        /// [-pi, pi]; SpawnDev.ILGPU.ML's rope tables, Tuvok 2026-11-15). Cody-Waite reduction to the nearest multiple of
+        /// pi / 2 in three parts (k * 1.5703125 exact for |k| &lt; 2^16), Cephes' sinf / cosf polynomials on [-pi/4, pi/4],
+        /// the quadrant of k. Past |x| = 102943 (|k| = 2^16) the native functions (no Payne-Hanek). Emitted when called
+        /// (see the correctly rounded placeholder); MathMode.Fast keeps the native ones.
+        /// </summary>
+        public const string F32TrigFunctions = @"
+// (sin x, cos x): see GLSLEmulationLibrary.F32TrigFunctions
+vec2 _f32_sincos(float x) {
+    float k = roundEven(x * 0.636619772367581343);
+    float r = x - k * 1.5703125;
+    r = r - k * 4.837512969970703125e-4;
+    r = r - k * 7.54978995489188216e-8;
+    r = (k == 0.0) ? x : r; // keeps -0
+    float r2 = r * r;
+    float s = r + r * r2 * (-1.6666654611e-1 + r2 * (8.3321608736e-3 + r2 * -1.9515295891e-4));
+    float c = 1.0 - 0.5 * r2 + r2 * r2 * (4.166664568298827e-2 + r2 * (-1.388731625493765e-3 + r2 * 2.443315711809948e-5));
+    int q = int(k) & 3;
+    vec2 sc = q == 0 ? vec2(s, c) : q == 1 ? vec2(c, -s) : q == 2 ? vec2(-s, -c) : vec2(-c, s);
+    return abs(x) > 102943.0 ? vec2(sin(x), cos(x)) : sc;
+}
+float _f32_sin(float x) { return _f32_sincos(x).x; }
+float _f32_cos(float x) { return _f32_sincos(x).y; }
+float _f32_tan(float x) { vec2 sc = _f32_sincos(x); return sc.x / sc.y; }
+";
+
 
         /// <summary>The functions behind <see cref="F32CorrectlyRoundedPlaceholder"/> (see the remarks above).</summary>
         public const string F32CorrectlyRoundedFunctions = @"
