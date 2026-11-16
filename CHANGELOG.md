@@ -1,15 +1,22 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.34 (forks 2.4.33) - unreleased - double -> Half / bf16 / FP8 / FP4 rounds once; WebGPU / WebGL emulated doubles load correctly at small and huge magnitudes
+## 5.4.34 (forks 2.4.33) - 2026-11-15 - double -> Half / bf16 / FP8 / FP4 rounds once; WebGPU / WebGL emulated doubles load correctly at small and huge magnitudes; WebGPU / WebGL accurate sin / cos / tan; CPU accelerator barrier-kernel launches ~10x cheaper
 
+- **Release sweep** (d41863f = 5.4.34-local.2's code, full default PMT, 60.5 min): 9,371 total / 8,624 passed /
+  0 failed / 747 skipped (5.4.33: 9,331 / 8,592 / 1 / 738). ML gate (Tuvok, SpawnDev.ILGPU.ML full default sweep on
+  5.4.34-local.2): 7,748 passed / 0 failed / 482 skipped, no Pass -> Fail against 5.4.33-local.1, every backend 3 - 6%
+  faster (CPU 0.954x, Velocity 0.939x), the in-kernel rope test green on all 7 lanes. Codecs gate (Geordi, on
+  5.4.34-local.2): CUDA / OpenCL / Velocity 767 / 0 / 3 each, CPU accelerator full class 3,396 / 0 / 9, browser
+  (WebGPU full class, Wasm encoders, WebGL MDCT / IMDCT / CELT / Vorbis / MP3) 1,344 / 0 / 2.
 - **PERF (CPU accelerator): a launch of a kernel with barriers, shuffles or shared memory cost about 15 ms of dispatch,
   whatever its size.** Every launch woke all runtime threads of every multiprocessor (12 x 64 on a 12-thread CPU)
   through one accelerator-wide monitor (PulseAll: they convoy through its lock) and passed them through a start and an
   end barrier; a trace put 96% of such launches' CPU time there and 2% in the kernel. A launch now wakes only its
   groups' threads, each on its own monitor, only on the multiprocessors that get groups, and the last thread of each
   multiprocessor reports the end. Empty barrier kernel, 64 threads per group: 17.6 -> 1.7 ms per launch (1 group),
-  18.6 -> 4.5 ms (17 groups). Execution itself is unchanged (Sequential still runs one lane at a time, Parallel all at
+  18.6 -> 4.5 ms (17 groups). SpawnDev.Codecs' VP9 loop filter, 1080p, on the CPU accelerator: 891 -> 190 ms per frame
+  (Geordi's vp9-lf-bench A/B, same Codecs commit; Velocity and CUDA unchanged). Execution itself is unchanged (Sequential still runs one lane at a time, Parallel all at
   once). Lane-independent kernels already took the lane loop (0.07 ms). Test `CpuLaunch_ChangingShapes_EveryLaneOncePerLaunch`
   (every lane once per launch and every lane at its group's barrier, over launches whose shape changes every time).
 
