@@ -3,6 +3,16 @@
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 ## 5.4.34 (forks 2.4.33) - unreleased - double -> Half / bf16 / FP8 / FP4 rounds once; WebGPU / WebGL emulated doubles load correctly at small and huge magnitudes
 
+- **PERF (CPU accelerator): a launch of a kernel with barriers, shuffles or shared memory cost about 15 ms of dispatch,
+  whatever its size.** Every launch woke all runtime threads of every multiprocessor (12 x 64 on a 12-thread CPU)
+  through one accelerator-wide monitor (PulseAll: they convoy through its lock) and passed them through a start and an
+  end barrier; a trace put 96% of such launches' CPU time there and 2% in the kernel. A launch now wakes only its
+  groups' threads, each on its own monitor, only on the multiprocessors that get groups, and the last thread of each
+  multiprocessor reports the end. Empty barrier kernel, 64 threads per group: 17.6 -> 1.7 ms per launch (1 group),
+  18.6 -> 4.5 ms (17 groups). Execution itself is unchanged (Sequential still runs one lane at a time, Parallel all at
+  once). Lane-independent kernels already took the lane loop (0.07 ms). Test `CpuLaunch_ChangingShapes_EveryLaneOncePerLaunch`
+  (every lane once per launch and every lane at its group's barrier, over launches whose shape changes every time).
+
 - **FIX (WebGPU / WebGL; inaccurate results): MathF.Sin / Cos / Tan of large arguments.** The native sin / cos, which D3D
   evaluates without argument reduction, were 2.7e-4 off at |x| = 2000 and 3.6e-7 in [-pi, pi] (SpawnDev.ILGPU.ML's rope
   tables, Tuvok). f32 sin / cos / tan now reduce to the nearest multiple of pi / 2 (Cody-Waite, three parts) and use

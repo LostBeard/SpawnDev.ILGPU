@@ -59,8 +59,39 @@ namespace ILGPU.Runtime.CPU
         // Execution threads
 
         private readonly Thread[] threads;
-        private readonly Barrier processorBarrier = new Barrier(0);
         private readonly CPURuntimeGroupContext groupContext;
+
+        /// <summary>
+        /// One launch on this multiprocessor: the task and the threads that have not finished it. A new object per
+        /// launch, so a thread compares references to know whether it has run the current launch.
+        /// </summary>
+        private sealed class LaunchSlot
+        {
+            public LaunchSlot(CPUAcceleratorTask task, int participants)
+            {
+                Task = task;
+                Remaining = participants;
+            }
+
+            public readonly CPUAcceleratorTask Task;
+            public int Remaining;
+        }
+
+        /// <summary>
+        /// The current launch (null between launches). Each runtime thread waits on its own monitor in
+        /// <see cref="wakeLocks"/> until this changes: a launch wakes exactly the threads it needs, and nothing
+        /// else. (It used to be one accelerator-wide monitor woken with PulseAll, then a start and an end barrier
+        /// across all of the multiprocessor's threads: every thread of every multiprocessor woke and convoyed
+        /// through that lock on every launch, about 15 ms per launch of a kernel with a group barrier on 12
+        /// multiprocessors x 64 threads, even for one group. Measured 2026-11-15: 99% of the CPU time of such
+        /// launches was in that wait and those barriers.)
+        /// </summary>
+        private volatile LaunchSlot? launchSlot;
+
+        /// <summary>
+        /// Per-thread monitors a launch pulses to wake its threads (see <see cref="launchSlot"/>).
+        /// </summary>
+        private readonly object[] wakeLocks;
         private readonly CPURuntimeWarpContext[] warpContexts;
 
         // General execution management
@@ -86,6 +117,9 @@ namespace ILGPU.Runtime.CPU
             groupContext = new CPURuntimeGroupContext(this);
             for (int i = 0; i < NumWarpsPerMultiprocessor; ++i)
                 warpContexts[i] = new CPURuntimeWarpContext(this, WarpSize);
+            wakeLocks = new object[MaxNumThreadsPerMultiprocessor];
+            for (int i = 0; i < wakeLocks.Length; ++i)
+                wakeLocks[i] = new object();
 
             if (skipThreadCreation)
             {
@@ -162,10 +196,6 @@ namespace ILGPU.Runtime.CPU
             if (maxNumLaunchedThreadsPerGroup >= groupSize)
                 return;
 
-            // Adjust number of threads per MP
-            processorBarrier.AddParticipants(
-                groupSize - maxNumLaunchedThreadsPerGroup);
-
             // Launch all threads that we need for processing
             for (
                 int threadIdx = maxNumLaunchedThreadsPerGroup;
@@ -229,9 +259,41 @@ namespace ILGPU.Runtime.CPU
         }
 
         /// <summary>
-        /// Finishes a kernel launch.
+        /// Starts the launch prepared by <see cref="InitLaunch"/>: wakes the group's threads (and no others).
+        /// When the last of them has finished it calls <see cref="CPUAccelerator.MultiprocessorFinished"/>.
         /// </summary>
-        public void FinishLaunch() => groupContext.TearDown();
+        /// <param name="task">The task to run.</param>
+        public void Publish(CPUAcceleratorTask task)
+        {
+            int participants = task.GroupDim.Size;
+            launchSlot = new LaunchSlot(task, participants);
+            for (int i = 0; i < participants; ++i)
+            {
+                lock (wakeLocks[i])
+                    Monitor.Pulse(wakeLocks[i]);
+            }
+        }
+
+        /// <summary>
+        /// Wakes every runtime thread so it sees that the accelerator stopped and exits.
+        /// </summary>
+        public void WakeForShutdown()
+        {
+            foreach (var wakeLock in wakeLocks)
+            {
+                lock (wakeLock)
+                    Monitor.PulseAll(wakeLock);
+            }
+        }
+
+        /// <summary>
+        /// Finishes a kernel launch (after all of its threads finished).
+        /// </summary>
+        public void FinishLaunch()
+        {
+            launchSlot = null;
+            groupContext.TearDown();
+        }
 
         /// <summary>
         /// Entry point for a single processing thread.
@@ -242,8 +304,6 @@ namespace ILGPU.Runtime.CPU
             // Get the current thread information
             int absoluteThreadIndex = (int)arg.AsNotNull();
             int threadIdx = absoluteThreadIndex % MaxNumThreadsPerMultiprocessor;
-
-            bool isMainThread = threadIdx == 0;
 
             // Setup a new thread context for this thread and initialize the lane index
             int laneIdx = threadIdx % WarpSize;
@@ -261,27 +321,36 @@ namespace ILGPU.Runtime.CPU
             // Setup the current group context as it always stays the same
             groupContext.MakeCurrent();
 
-            CPUAcceleratorTask? task = null;
+            var wakeLock = wakeLocks[threadIdx];
+            LaunchSlot? lastSlot = null;
             for (; ; )
             {
-                // Get a new task to execute (if any)
-                if (!Accelerator.WaitForTask(ref task))
+                // Wait until a launch this thread has not run is published (Publish pulses this monitor), or the
+                // accelerator stops. The check is under the monitor Publish pulses, so no wake-up is lost.
+                LaunchSlot? slot;
+                lock (wakeLock)
+                {
+                    while (((slot = launchSlot) is null || slot == lastSlot) && Accelerator.IsRunning)
+                        Monitor.Wait(wakeLock);
+                }
+                if (!Accelerator.IsRunning)
                     break;
+                lastSlot = slot;
+                var task = slot!.Task;
+
+                // Not a thread of this launch's groups (a spurious wake-up): nothing to do or to report
+                int groupSize = task.GroupDim.Size;
+                if (threadIdx >= groupSize)
+                    continue;
 
                 // Setup the current group index
                 threadContext.GroupIndex = Stride3D.DenseXY.ReconstructFromElementIndex(
                     threadIdx,
                     task.GroupDim);
-
-                // Wait for all threads of all multiprocessors to arrive here
                 Thread.MemoryBarrier();
-                processorBarrier.SignalAndWait();
 
                 try
                 {
-                    // If we are an active group thread
-                    int groupSize = task.GroupDim.Size;
-                    if (threadIdx < groupSize)
                     {
                         try
                         {
@@ -329,13 +398,11 @@ namespace ILGPU.Runtime.CPU
                 }
                 finally
                 {
-                    // Wait for all threads of all multiprocessors to arrive here
-                    processorBarrier.SignalAndWait();
-
-                    // If we reach this point and we are the main thread, notify the
-                    // parent accelerator instance
-                    if (isMainThread)
-                        Accelerator.FinishTaskProcessing();
+                    // The last thread of this multiprocessor to finish reports it; this is the thread's last touch
+                    // of the launch (the launcher tears it down after every multiprocessor reported)
+                    Thread.MemoryBarrier();
+                    if (Interlocked.Decrement(ref slot.Remaining) == 0)
+                        Accelerator.MultiprocessorFinished();
                 }
             }
         }
@@ -499,7 +566,6 @@ namespace ILGPU.Runtime.CPU
                 groupContext.Dispose();
                 foreach (var warp in warpContexts)
                     warp.Dispose();
-                processorBarrier.Dispose();
             }
             base.Dispose(disposing);
         }

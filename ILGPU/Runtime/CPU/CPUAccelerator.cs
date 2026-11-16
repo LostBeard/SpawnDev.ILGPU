@@ -68,16 +68,16 @@ namespace ILGPU.Runtime.CPU
         private readonly CPUMultiprocessor[] multiprocessors;
         private volatile bool running = true;
 
-        // Task execution
+        // Task execution: the multiprocessors of the current launch that have not finished it, and the event the
+        // launcher waits on until they have (see CPUMultiprocessor.Publish)
 
-        private readonly object taskSynchronizationObject = new object();
-        private volatile CPUAcceleratorTask? currentTask;
+        private int pendingMultiprocessors;
 
         [SuppressMessage(
             "Microsoft.Usage",
             "CA2213: Disposable fields should be disposed",
             Justification = "This is disposed in DisposeAccelerator_SyncRoot")]
-        private readonly Barrier finishedEventPerMultiprocessor;
+        private readonly ManualResetEventSlim launchFinished;
 
         [SuppressMessage(
             "Microsoft.Usage",
@@ -128,12 +128,12 @@ namespace ILGPU.Runtime.CPU
             if (IsWasm)
             {
                 // WASM: no thread synchronization needed
-                finishedEventPerMultiprocessor = null!;
+                launchFinished = null!;
                 taskConcurrencyLimit = null!;
             }
             else
             {
-                finishedEventPerMultiprocessor = new Barrier(NumMultiprocessors + 1);
+                launchFinished = new ManualResetEventSlim(false);
             }
 
             multiprocessors = new CPUMultiprocessor[NumMultiprocessors];
@@ -408,21 +408,20 @@ namespace ILGPU.Runtime.CPU
 
         #region Execution Methods
 
-        internal bool WaitForTask([NotNullWhen(true)] ref CPUAcceleratorTask? task)
-        {
-            // Get a new task to execute
-            lock (taskSynchronizationObject)
-            {
-                while ((currentTask == null | currentTask == task) & running)
-                    Monitor.Wait(taskSynchronizationObject);
-                task = currentTask;
-                return running;
-            }
-        }
+        /// <summary>
+        /// False once the accelerator is disposed: the runtime threads exit.
+        /// </summary>
+        internal bool IsRunning => running;
 
-        internal void FinishTaskProcessing() =>
-            // Wait for the result
-            finishedEventPerMultiprocessor.SignalAndWait();
+        /// <summary>
+        /// Called by the last thread of a multiprocessor to finish the current launch; the last multiprocessor
+        /// releases the launcher.
+        /// </summary>
+        internal void MultiprocessorFinished()
+        {
+            if (Interlocked.Decrement(ref pendingMultiprocessors) == 0)
+                launchFinished.Set();
+        }
 
         /// <summary>
         /// Lane-independent launches of at most this many lane invocations (grid groups x group size)
@@ -514,28 +513,31 @@ namespace ILGPU.Runtime.CPU
             taskConcurrencyLimit.Wait();
             try
             {
-                foreach (var multiprocessor in multiprocessors)
-                    multiprocessor.InitLaunch(task);
-                Interlocked.MemoryBarrier();
+                // Only the multiprocessors that get groups take part (each runs one chunk of the grid, see
+                // CPUMultiprocessor.ExecuteThread); the others are not woken
+                int linearGridDim = task.GridDim.Size;
+                if (linearGridDim <= 0)
+                    return;
+                int gridChunkSize = IntrinsicMath.DivRoundUp(linearGridDim, NumMultiprocessors);
+                int activeProcessors = Math.Min(
+                    NumMultiprocessors,
+                    IntrinsicMath.DivRoundUp(linearGridDim, gridChunkSize));
+                for (int i = 0; i < activeProcessors; ++i)
+                    multiprocessors[i].InitLaunch(task);
 
-                // Launch all processing threads
-                lock (taskSynchronizationObject)
-                {
-                    Debug.Assert(currentTask == null, "Invalid concurrent modification");
-                    currentTask = task;
-                    Monitor.PulseAll(taskSynchronizationObject);
-                }
+                // Launch: every multiprocessor wakes its group's threads
+                launchFinished.Reset();
+                Volatile.Write(ref pendingMultiprocessors, activeProcessors);
+                Interlocked.MemoryBarrier();
+                for (int i = 0; i < activeProcessors; ++i)
+                    multiprocessors[i].Publish(task);
 
                 // Wait for the result
-                FinishTaskProcessing();
+                launchFinished.Wait();
 
                 // Reset all groups
-                foreach (var multiprocessor in multiprocessors)
-                    multiprocessor.FinishLaunch();
-
-                // Reset task
-                lock (taskSynchronizationObject)
-                    currentTask = null;
+                for (int i = 0; i < activeProcessors; ++i)
+                    multiprocessors[i].FinishLaunch();
             }
             finally
             {
@@ -622,20 +624,18 @@ namespace ILGPU.Runtime.CPU
                 return;
             }
 
-            // Dispose task engine
-            lock (taskSynchronizationObject)
-            {
-                running = false;
-                currentTask = null;
-                Monitor.PulseAll(taskSynchronizationObject);
-            }
+            // Dispose task engine: every runtime thread wakes, sees it stopped and exits
+            running = false;
+            Interlocked.MemoryBarrier();
+            foreach (var multiprocessor in multiprocessors)
+                multiprocessor.WakeForShutdown();
 
             // Dispose all multiprocessors
             foreach (var multiprocessor in multiprocessors)
                 multiprocessor.Dispose();
 
-            // Dispose barriers
-            finishedEventPerMultiprocessor.Dispose();
+            // Dispose events
+            launchFinished.Dispose();
             taskConcurrencyLimit.Dispose();
         }
 
