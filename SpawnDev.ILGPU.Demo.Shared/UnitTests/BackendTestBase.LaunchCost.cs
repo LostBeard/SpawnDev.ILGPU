@@ -72,6 +72,42 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             finally { SpawnDev.ILGPU.Wasm.WasmAccelerator.NonBarrierMinItemsPerWorker = saved; }
         });
 
+        static void LaunchCostPoolTouchKernel(Index1D i, ArrayView<int> pool, int offset) => pool[offset + i] += 1;
+
+        // Wasm-only: per-launch time of a 64-thread kernel that touches 64 ints of a "pool" buffer, by pool size.
+        // SpawnDev.Codecs' VP9 wavefront launches tiny kernels over a whole frame pool (~46 per 1080p frame) and
+        // reconstruction ran 81x slower on Wasm than WebGPU (Geordi, 2026-11-17); if per-launch time grows with the
+        // pool and not with the work, the cost is the dispatch's copy of the buffer into / out of linear memory.
+        // Prints "[LaunchCost] WasmPool ..." rows with the WasmDispatchProfile split (PMT_CONSOLE_LOG=LaunchCost).
+        [TestMethod(Timeout = 600000)]
+        public async Task LaunchCost_WasmPoolSize() => await RunTest(async accelerator =>
+        {
+            if (accelerator is not SpawnDev.ILGPU.Wasm.WasmAccelerator)
+                throw new UnsupportedTestException("Wasm-only: measures the Wasm per-dispatch buffer copy");
+            var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, int>(LaunchCostPoolTouchKernel);
+            const int threads = 64, reps = 40;
+            foreach (int ints in new[] { 16 << 10, 256 << 10, 2 << 20, 8 << 20 })   // 64 KB .. 32 MB
+            {
+                using var pool = accelerator.Allocate1D<int>(ints);
+                pool.MemSetToZero();
+                int offset = ints / 2;
+                k(threads, pool.View, offset);
+                await accelerator.SynchronizeAsync();
+                SpawnDev.ILGPU.Wasm.WasmDispatchProfile.Reset();
+                SpawnDev.ILGPU.Wasm.WasmDispatchProfile.Enabled = true;
+                var sw = Stopwatch.StartNew();
+                for (int r = 0; r < reps; r++) k(threads, pool.View, offset);
+                await accelerator.SynchronizeAsync();
+                double ms = sw.Elapsed.TotalMilliseconds / reps;
+                SpawnDev.ILGPU.Wasm.WasmDispatchProfile.Enabled = false;
+                Console.WriteLine($"[LaunchCost] WasmPool {ints * 4 / 1024,6} KB: {ms:F3} ms/launch | {SpawnDev.ILGPU.Wasm.WasmDispatchProfile.Summary()}");
+                var got = await pool.CopyToHostAsync<int>();
+                for (int i = 0; i < threads; i++)
+                    if (got[offset + i] != reps + 1)
+                        throw new Exception($"pool {ints * 4} B: [{offset + i}] = {got[offset + i]}, expected {reps + 1}");
+            }
+        });
+
         [TestMethod]
         public async Task LaunchCost_TrivialKernel_SyncedAndBatched() => await RunTest(async accelerator =>
         {
