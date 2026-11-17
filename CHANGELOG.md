@@ -1,8 +1,13 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.35 (forks 2.4.33) - unreleased
+## 5.4.35 (forks 2.4.33) - 2026-11-17 - Wasm: a buffer disposed with work still queued on it no longer throws
 
+- **Release sweep** (da4739b = 5.4.35-local.1's code, full default PMT, 56.5 min): 9,381 total / 8,634 passed /
+  0 failed / 747 skipped (5.4.34: 9,371 / 8,624 / 0 / 747; +10 = the new test across its lanes). Codecs gate (Geordi,
+  WasmCodecsTests on 5.4.35-local.1): 1,223 / 0 / 2, both 5.4.34 failures gone (Mp3 GaplessLength; the Lz4 40 MB
+  out-of-memory after earlier tests, the same bug's fallout). ML gate (Tuvok, Wasm lane on 5.4.35-local.1): 1,101 /
+  0 / 62, identical to 5.4.34's lane, same wall time (1.003x), no memory-pressure timeouts.
 - **FIX (Wasm; "RangeError: offset is out of bounds"): disposing a buffer while work queued on it had not run yet.**
   Legal ILGPU (CUDA's free and WebGPU's destroy wait for queued work), but `WasmMemoryBuffer` released its
   SharedArrayBuffer at once, so a queued kernel's copy into or out of the buffer built a view over the released
