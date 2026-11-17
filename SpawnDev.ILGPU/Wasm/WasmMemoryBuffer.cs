@@ -787,14 +787,19 @@ namespace SpawnDev.ILGPU.Wasm
         {
             if (disposing)
             {
-                if (PipeId != 0) { WasmAccelerator.UnregisterPipeBuffer(PipeId); PipeId = 0; }
-                TypedArrayView?.Dispose();
-                SharedBuffer?.Dispose();
-                // Free any snapshot SABs still resident (buffer disposed with pending host-write
-                // snapshots) — otherwise their full-buffer-size JS SharedArrayBuffers leak.
-                DisposeAllSnapshots();
-                _snapshotsByHWC = null;
-                _snapshotRefCounts = null;
+                // Work queued before this Dispose may still read or write this buffer (a kernel's copy-IN /
+                // copy-OUT, a staged host write, a deferred device copy, a pipelined op): disposing a buffer
+                // with work pending is legal ILGPU (CUDA's free and WebGPU's destroy both wait for it). So
+                // the JS objects are released only after that work has finished. Releasing them at once made
+                // a queued copy build a view over a released SharedArrayBuffer reference - a zero-length
+                // array - and fail with "RangeError: offset is out of bounds" (SpawnDev.Codecs'
+                // Mp3EncoderGpu: a `using var` scratch buffer ended its scope before the final sync,
+                // 2026-11-16; test DisposeWithPendingWork_QueuedWorkCompletes).
+                var pending = (Accelerator as WasmAccelerator)?.PendingWorkForDeferredRelease();
+                if (pending == null)
+                    ReleaseJsResources();
+                else
+                    _ = ReleaseJsResourcesAfterAsync(pending);
             }
             // Decrement the resident counters exactly once (dispose may run on the finalizer path too).
             if (_liveCounted)
@@ -802,6 +807,40 @@ namespace SpawnDev.ILGPU.Wasm
                 _liveCounted = false;
                 s_liveBufferCount--;
                 s_liveBufferBytes -= _liveBytes;
+            }
+        }
+
+        /// <summary>
+        /// Releases the buffer's JS objects: its pipeline registration, views, SharedArrayBuffer and any
+        /// host-write snapshot SABs still resident (otherwise their full-buffer-size JS SharedArrayBuffers leak).
+        /// </summary>
+        private void ReleaseJsResources()
+        {
+            if (PipeId != 0) { WasmAccelerator.UnregisterPipeBuffer(PipeId); PipeId = 0; }
+            TypedArrayView?.Dispose();
+            SharedBuffer?.Dispose();
+            DisposeAllSnapshots();
+            _snapshotsByHWC = null;
+            _snapshotRefCounts = null;
+        }
+
+        /// <summary>
+        /// Releases the JS objects once the work queued before Dispose has finished, whether it succeeded or
+        /// not (a failure is reported by the caller's own SynchronizeAsync, not here).
+        /// </summary>
+        private async Task ReleaseJsResourcesAfterAsync(Task[] pending)
+        {
+            try
+            {
+                await Task.WhenAll(pending);
+            }
+            catch
+            {
+                // reported by SynchronizeAsync
+            }
+            finally
+            {
+                ReleaseJsResources();
             }
         }
     }

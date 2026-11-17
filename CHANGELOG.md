@@ -1,6 +1,18 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.35 (forks 2.4.33) - unreleased
+
+- **FIX (Wasm; "RangeError: offset is out of bounds"): disposing a buffer while work queued on it had not run yet.**
+  Legal ILGPU (CUDA's free and WebGPU's destroy wait for queued work), but `WasmMemoryBuffer` released its
+  SharedArrayBuffer at once, so a queued kernel's copy into or out of the buffer built a view over the released
+  reference (a zero-length array) and the copy threw. Found by SpawnDev.Codecs' 1.1.0 sweep (Geordi): Mp3EncoderGpu's
+  `using var` scratch buffer went out of scope before the encoder's final SynchronizeAsync; one extra sync anywhere
+  before the dispose hid it. Dispose now releases the buffer's JS objects after the work queued before it has finished.
+  Test `DisposeWithPendingWork_QueuedWorkCompletes` (every backend: a scratch buffer written by a kernel, read, written
+  by the host and read again, all queued, then disposed before the sync; red on Wasm without the fix with the same
+  RangeError).
+
 ## 5.4.34 (forks 2.4.33) - 2026-11-15 - double -> Half / bf16 / FP8 / FP4 rounds once; WebGPU / WebGL emulated doubles load correctly at small and huge magnitudes; WebGPU / WebGL accurate sin / cos / tan; CPU accelerator barrier-kernel launches ~10x cheaper
 
 - **Release sweep** (d41863f = 5.4.34-local.2's code, full default PMT, 60.5 min): 9,371 total / 8,624 passed /

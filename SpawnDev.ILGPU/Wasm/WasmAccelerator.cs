@@ -3935,6 +3935,26 @@ namespace SpawnDev.ILGPU.Wasm
         public override bool RequiresAsyncDeviceCopy => true;
 
         /// <summary>
+        /// The work queued so far that has not finished, or null if there is none: what a buffer disposed now
+        /// must outlive (<see cref="WasmMemoryBuffer"/>'s deferred release). Every later operation awaits these,
+        /// so waiting on this snapshot covers everything queued before the Dispose. Requests the pipeline ack,
+        /// as <see cref="SynchronizeAsync"/> does, so pipelined dispatches report completion.
+        /// </summary>
+        internal Task[]? PendingWorkForDeferredRelease()
+        {
+            if (_pendingWork.Count == 0)
+                return null;
+            var pending = new List<Task>(_pendingWork.Count);
+            foreach (var task in _pendingWork)
+                if (!task.IsCompleted)
+                    pending.Add(task);
+            if (pending.Count == 0)
+                return null;
+            RequestPipelineAck();
+            return pending.ToArray();
+        }
+
+        /// <summary>
         /// Asynchronously waits for all pending kernel dispatches to complete.
         /// Overrides the core no-op-on-Wasm <see cref="Accelerator.SynchronizeAsync"/>
         /// with the real worker-dispatch drain (the synchronous
