@@ -100,26 +100,56 @@ var _poisonEpoch = -1;
 // is not answered on its own - the host asks with a ping when something waits (SynchronizeAsync, a serialized
 // dispatch), and a short timer answers anyway so progress is visible and a missed ping cannot hang. A failure or
 // a skip is answered at once, and it implicitly answers every earlier dispatch too.
-var _lastDone = 0, _lastAcked = 0, _ackTimer = null, _wtAcc = 0;
+var _lastDone = 0, _lastAcked = 0, _ackTimer = null, _wtAcc = 0, _queued = 0, _lastAckAt = 0;
+// Residency (see WasmResidency on the host): the buffer ranges the previous pipelined dispatch left in the
+// linear memory, with their copy-out deferred (dirty). The next dispatch that uses a buffer at the same place
+// skips its copy-in; everything is written back before any answer reaches the host (an answer lets the host
+// read the buffers), before a host write or device copy touches the buffer, and before a dispatch that does
+// not reuse a range. Valid for one pipeline (epoch) and one memory buffer only: between pipelines other
+// dispatches overwrite the memory, so a new epoch drops it (by then it is clean: the last answer wrote it back).
+var _res = null, _resPe = -1, _resMem = null;
+function _resWrite(it) {
+  if (it.dirty) { new Uint8Array(it.sab, it.src, it.n).set(new Uint8Array(_resMem, it.off, it.n)); it.dirty = false; }
+}
+function _resFlushAll() {
+  if (_res) for (var j = 0; j < _res.length; j++) _resWrite(_res[j]);
+}
+function _resFind(id) {
+  if (_res) for (var j = 0; j < _res.length; j++) if (_res[j].id === id) return j;
+  return -1;
+}
 function _flushAck() {
   if (_ackTimer !== null) { clearTimeout(_ackTimer); _ackTimer = null; }
+  _resFlushAll();
+  _lastAckAt = performance.now();
   if (_lastDone > _lastAcked) {
     _lastAcked = _lastDone;
     var wt = _wtAcc; _wtAcc = 0;
     self.postMessage({ ack: true, s: _lastDone, wt: wt });
   }
 }
+// The progress answer: deferred while more messages are queued (each answer writes the held ranges back, which
+// is what the residency avoids), but at least every 250 ms so progress stays visible. A waiting host pings.
+function _ackTick() {
+  _ackTimer = null;
+  if (_queued > 0 && performance.now() - _lastAckAt < 250) { _ackTimer = setTimeout(_ackTick, 4); return; }
+  _flushAck();
+}
 function _answerFail(d, msg) {
   if (_ackTimer !== null) { clearTimeout(_ackTimer); _ackTimer = null; }
+  // earlier dispatches' results reach their buffers, as their immediate copy-outs did
+  try { _resFlushAll(); } catch (e2) { }
+  _res = null; _resMem = null;
   _lastDone = _lastAcked = d.sq;
   self.postMessage({ done: false, s: d.sq, error: msg });
 }
 self.onmessage = function(e) {
   var d = e.data;
+  _queued++;
   // The catch keeps the chain alive: a rejected link would silently drop every later message.
   _chain = _chain.then(function() { return _handle(d); }).catch(function(ex) {
     self.postMessage({ done: false, error: (ex && ex.message) ? ex.message : String(ex) });
-  });
+  }).then(function() { _queued--; });
 };
 
 // A pipelined dispatch carries its own memory work so the host never waits between dispatches:
@@ -136,10 +166,16 @@ async function _handle(d) {
   // Pipelined host write (pw: staged bytes -> buffer) or device copy (pc: buffer -> buffer), in queue order.
   if (d.pw || d.pc) {
     try {
+      if (_res && _resPe === d.pe) {
+        // the source's held bytes reach its buffer first; the target's are written back and forgotten
+        var j;
+        if (d.pc && (j = _resFind(d.srcId)) >= 0) _resWrite(_res[j]);
+        if ((j = _resFind(d.dstId)) >= 0) { _resWrite(_res[j]); _res.splice(j, 1); }
+      }
       if (d.pw) new Uint8Array(d.dst).set(d.b, d.off);
       else new Uint8Array(d.dst, d.doff, d.n).set(new Uint8Array(d.src, d.soff, d.n));
       _lastDone = d.sq;
-      if (_ackTimer === null) _ackTimer = setTimeout(_flushAck, 4);
+      if (_ackTimer === null) _ackTimer = setTimeout(_ackTick, 4);
     } catch (ex) {
       _poisonEpoch = d.pe;
       _answerFail(d, (ex && ex.message) ? ex.message : String(ex));
@@ -217,13 +253,49 @@ async function _handle(d) {
     d._instance = instance;
     var fn = _fnByScript.get(d.script);
     if (!fn) { fn = new AsyncFunction('d', d.script); _fnByScript.set(d.script, fn); }
-    if (!d.pl) { await fn(d); return; }
+    // A serialized dispatch on this worker: the memory is laid out by the host now, whatever was held is stale
+    // (and clean: the pipeline's last answer wrote it back).
+    if (!d.pl) { _res = null; _resMem = null; await fn(d); return; }
     var m8 = new Uint8Array(d.memory.buffer);
-    if (d.z > 0) m8.fill(0, 0, d.z);
-    var pb = d.pb, pi = d.pi, i, n;
+    var pb = d.pb, pi = d.pi, bid = d.bid, i, n, j;
+    // Valid for one pipeline only. NOT keyed on the memory object: every message deserializes a new
+    // WebAssembly.Memory whose .buffer is a new object for the same memory, so that test dropped the held ranges
+    // on every dispatch, unwritten (the previous dispatch's results were lost when the next one arrived before its
+    // answer). Within one pipeline the memory cannot be replaced (a grow takes the serialized path, a new epoch).
+    if (_res && _resPe !== d.pe) { _res = null; _resMem = null; }
+    if (_res) _resMem = d.memory.buffer;
+    var inPlace = null;
+    if (bid && _res) {
+      inPlace = new Uint8Array(pb.length);
+      for (j = 0; j < _res.length; j++) {
+        var it = _res[j], found = -1;
+        for (i = 0; i < pb.length; i++) {
+          if (bid[i] !== it.id) continue;
+          if (pi[3 * i] === it.src && pi[3 * i + 1] === it.off && pi[3 * i + 2] === it.n) found = i;
+          break;
+        }
+        if (found >= 0) inPlace[found] = 1;
+        else _resWrite(it);
+      }
+    }
+    if (d.z > 0) {
+      if (bid) {
+        // zero everything but the buffer ranges: each is in place or about to be copied in
+        var rs = [];
+        for (i = 0; i < pb.length; i++) if (pi[3 * i + 2] > 0) rs.push(i);
+        rs.sort(function (a, b) { return pi[3 * a + 1] - pi[3 * b + 1]; });
+        var from = 0;
+        for (j = 0; j < rs.length && from < d.z; j++) {
+          var off = pi[3 * rs[j] + 1];
+          if (off > from) m8.fill(0, from, Math.min(off, d.z));
+          from = Math.max(from, off + pi[3 * rs[j] + 2]);
+        }
+        if (from < d.z) m8.fill(0, from, d.z);
+      } else m8.fill(0, 0, d.z);
+    }
     for (i = 0; i < pb.length; i++) {
       n = pi[3 * i + 2];
-      if (n > 0) m8.set(new Uint8Array(pb[i], pi[3 * i], n), pi[3 * i + 1]);
+      if (n > 0 && !(inPlace && inPlace[i])) m8.set(new Uint8Array(pb[i], pi[3 * i], n), pi[3 * i + 1]);
     }
     if (d.swb) {
       var swb = d.swb instanceof Uint8Array ? d.swb : new Uint8Array(d.swb);
@@ -232,13 +304,22 @@ async function _handle(d) {
     }
     d.deferDone = true;
     await fn(d);
-    for (i = 0; i < pb.length; i++) {
-      n = pi[3 * i + 2];
-      if (n > 0) new Uint8Array(pb[i], pi[3 * i], n).set(new Uint8Array(d.memory.buffer, pi[3 * i + 1], n));
+    if (bid) {
+      // copy-out deferred: this dispatch's ranges are what the memory holds now
+      _res = []; _resPe = d.pe; _resMem = d.memory.buffer;
+      for (i = 0; i < pb.length; i++) {
+        n = pi[3 * i + 2];
+        if (n > 0) _res.push({ id: bid[i], sab: pb[i], src: pi[3 * i], off: pi[3 * i + 1], n: n, dirty: true });
+      }
+    } else {
+      for (i = 0; i < pb.length; i++) {
+        n = pi[3 * i + 2];
+        if (n > 0) new Uint8Array(pb[i], pi[3 * i], n).set(new Uint8Array(d.memory.buffer, pi[3 * i + 1], n));
+      }
     }
     _lastDone = d.sq;
     _wtAcc += performance.now() - t0;
-    if (_ackTimer === null) _ackTimer = setTimeout(_flushAck, 4);
+    if (_ackTimer === null) _ackTimer = setTimeout(_ackTick, 4);
   } catch(ex) {
     var msg = (ex && ex.message) ? ex.message : String(ex);
     if (d.pl) { _poisonEpoch = d.pe; _answerFail(d, msg); }

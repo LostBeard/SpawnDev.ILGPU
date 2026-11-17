@@ -31,6 +31,22 @@ namespace SpawnDev.ILGPU.Wasm
         /// </summary>
         public SharedArrayBuffer SharedBuffer { get; private set; }
 
+        /// <summary>
+        /// The linear memory that still holds this buffer's bytes from the last serialized dispatch, or null
+        /// (<see cref="WasmResidency"/>). While set, <see cref="SharedBuffer"/> may be behind: every host read
+        /// or write goes through <see cref="SyncForHostRead"/> / <see cref="SyncForHostWrite"/> first.
+        /// </summary>
+        internal WasmResidency? Residency;
+
+        /// <summary>True once the buffer's JS objects are released (see <see cref="DisposeAcceleratorObject"/>).</summary>
+        internal bool IsReleased { get; private set; }
+
+        /// <summary>Brings <see cref="SharedBuffer"/> up to date before the host reads it (the held range stays, clean).</summary>
+        internal void SyncForHostRead() => Residency?.Flush(this, drop: false);
+
+        /// <summary>Brings <see cref="SharedBuffer"/> up to date and forgets the held range: the host is about to change it.</summary>
+        internal void SyncForHostWrite() => Residency?.Flush(this, drop: true);
+
         /// <summary>This buffer's id in the pipelined-dispatch helper (0 = never used by one). See
         /// WasmAccelerator.PostPipelined.</summary>
         internal int PipeId;
@@ -76,6 +92,8 @@ namespace SpawnDev.ILGPU.Wasm
         /// </summary>
         internal void PrepareHostWrite()
         {
+            // every immediate host write path comes through here: the deferred copy-out lands first
+            SyncForHostWrite();
             if (_pendingSnapshotIntents <= 0)
                 return;
 
@@ -367,6 +385,7 @@ namespace SpawnDev.ILGPU.Wasm
         {
             if (TypedArrayView == null)
                 throw new ObjectDisposedException(nameof(WasmMemoryBuffer));
+            SyncForHostWrite();
             TypedArrayView.Set(staged, targetByteOffset);
             NotifyHostWrite();
         }
@@ -417,6 +436,7 @@ namespace SpawnDev.ILGPU.Wasm
         public T[] CopyToHost<T>(long length) where T : unmanaged
         {
             GuardHostBufferRace(nameof(CopyToHost));
+            SyncForHostRead();
             return TypedArrayView.Read<T>(0, length);
         }
 
@@ -452,6 +472,7 @@ namespace SpawnDev.ILGPU.Wasm
                 await wasmAccel.SynchronizeAsync();
             if (lengthInBytes == 0)
                 return System.Array.Empty<byte>();
+            SyncForHostRead();
             using var u8 = new Uint8Array(
                 SharedBuffer, (int)sourceOffsetInBytes, (int)lengthInBytes);
             return u8.ReadBytes();
@@ -521,6 +542,7 @@ namespace SpawnDev.ILGPU.Wasm
             // Implicit sync before readback - match desktop behavior
             if (Accelerator is WasmAccelerator wasmAccel)
                 await wasmAccel.SynchronizeAsync();
+            SyncForHostRead();
             long bufferSize = SharedBuffer.ByteLength;
             long actualCopyBytes = copyBytes ?? (bufferSize - sourceByteOffset);
             if (sourceByteOffset < 0 || sourceByteOffset > bufferSize)
@@ -616,6 +638,7 @@ namespace SpawnDev.ILGPU.Wasm
             }
 
             GuardHostBufferRace(nameof(CopyTo));
+            SyncForHostRead();
             using var srcUint8 = new Uint8Array(SharedBuffer, srcOffset, length);
             byte[] data = srcUint8.ReadBytes();
 
@@ -722,6 +745,8 @@ namespace SpawnDev.ILGPU.Wasm
             if (sourceBuffer is WasmMemoryBuffer wasmSource)
             {
                 ValidateBufferCopyBounds(wasmSource, sourceOffsetInBytes, targetOffsetInBytes, lengthInBytes);
+                wasmSource.SyncForHostRead();
+                SyncForHostWrite();
 
                 // Wasm-to-Wasm: copy between SharedArrayBuffers via JS TypedArray
                 using var srcView = new Uint8Array(
@@ -816,6 +841,8 @@ namespace SpawnDev.ILGPU.Wasm
         /// </summary>
         private void ReleaseJsResources()
         {
+            Residency?.Forget(this);
+            IsReleased = true;
             if (PipeId != 0) { WasmAccelerator.UnregisterPipeBuffer(PipeId); PipeId = 0; }
             TypedArrayView?.Dispose();
             SharedBuffer?.Dispose();

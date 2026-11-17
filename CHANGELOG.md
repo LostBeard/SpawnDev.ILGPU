@@ -1,6 +1,27 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.36 (forks 2.4.33) - unreleased
+
+- **PERF (Wasm): a dispatch no longer copies every argument buffer into the linear memory and back out.** Each dispatch
+  zeroed its memory region, copied each argument buffer in (the whole buffer: a kernel's touched range is unknown),
+  ran, and copied it back out, so a small launch over a big buffer paid three passes over it: a 64-thread kernel over
+  a 32 MB buffer took 12.6 ms per launch, and SpawnDev.Codecs' VP9 wavefront stages (about 46 tiny launches per 1080p
+  frame over the frame pool) ran 81x (reconstruction) and 221x (loop filter) slower than on WebGPU (Geordi). Now the
+  buffers stay in the linear memory after a dispatch: the next dispatch that uses a buffer at the same place skips its
+  copy-in, and the bytes go back to the buffer's SharedArrayBuffer only when something needs them there (a host read
+  or write, a memset, a device copy, a dispatch with a different layout, the pipeline starting, SynchronizeAsync, a
+  pipelined answer). Both paths: the serialized one (`WasmResidency`) and the pipeline worker (`WorkerPool.cs`). And
+  the zeroing skips the buffer ranges (each is in place or overwritten by its copy-in). Switch:
+  `WasmAccelerator.EnableBufferResidency` (default true). Diagnostics: `BufferResidencyHits`, `BufferResidencyWriteBacks`.
+- Test `BufferResidency_EveryHostAccessSeesKernelResults` (every backend, CPU model: host reads, host writes while work
+  is pending, memset, device copies both ways, alternating layouts, and on Wasm a direct SharedArrayBuffer read after
+  SynchronizeAsync; asserts the serialized path skipped copy-ins). Red-checked: without the worker's write-back before
+  an answer a pipelined launch's result is lost; without the host's write-back before an ordered host write the
+  launch's result is lost outside the written range. Measured (`LaunchCost_WasmPoolSize`, quiet machine, residency
+  on / off): 32 MB pool 0.25 / 12.46 ms per launch, 8 MB 0.18 / 2.25, 64 KB 0.38 / 0.65; the Wasm RadixSort tests are
+  unchanged (4M 27.8 / 28.4 s). WasmTests 938 / 0 / 57.
+
 ## 5.4.35 (forks 2.4.33) - 2026-11-17 - Wasm: a buffer disposed with work still queued on it no longer throws
 
 - **Release sweep** (da4739b = 5.4.35-local.1's code, full default PMT, 56.5 min): 9,381 total / 8,634 passed /

@@ -259,6 +259,8 @@ namespace SpawnDev.ILGPU.Wasm
             // concurrently-alive same-max accelerators (overlapping region-[0..) writes would corrupt).
             // Uncontended/zero-cost in the sequential PMT/production case.
             public readonly SemaphoreSlim Gate = new(1, 1);
+            // Buffer ranges this memory still holds after a serialized dispatch (WasmResidency).
+            public WasmResidency? Residency;
         }
         private static readonly Dictionary<int, SharedMemEntry> s_sharedByMaxPages = new();
         private static readonly object s_sharedMemoryLock = new();
@@ -308,6 +310,8 @@ namespace SpawnDev.ILGPU.Wasm
             {
                 foreach (var e in s_sharedByMaxPages.Values)
                 {
+                    // the held buffer ranges go back to their buffers before the memory goes away
+                    e.Residency?.FlushAll(drop: true);
                     e.Buffer?.Dispose(); e.Buffer = null;
                     e.Memory?.Dispose(); e.Memory = null;
                     e.Pages = 0;
@@ -516,6 +520,40 @@ namespace SpawnDev.ILGPU.Wasm
             get => UsesSharedMemory ? SharedEntry.Pages : _cachedWasmPages;
             set { if (UsesSharedMemory) SharedEntry.Pages = value; else _cachedWasmPages = value; }
         }
+
+        /// <summary>
+        /// The buffer ranges the active linear memory still holds after a serialized dispatch: one set per
+        /// memory, so a dispatch by any accelerator sharing it writes back the ranges it does not reuse.
+        /// </summary>
+        private WasmResidency Residency
+        {
+            get
+            {
+                if (UsesSharedMemory)
+                {
+                    var entry = SharedEntry;
+                    return entry.Residency ??= new WasmResidency(() => entry.Buffer);
+                }
+                return _privateResidency ??= new WasmResidency(() => _cachedMemoryBuffer);
+            }
+        }
+        private WasmResidency? _privateResidency;
+
+        /// <summary>
+        /// Keep a serialized dispatch's buffer ranges in the linear memory after it (default on): the next
+        /// dispatch that uses a buffer at the same place skips its copy-in and the previous copy-out, and the
+        /// bytes go back to the buffer only when something needs them there (a host read or write, a device copy,
+        /// a different layout, the pipeline starting, SynchronizeAsync). A 64-thread kernel over a 32 MB buffer
+        /// paid a zero, a copy-in and a copy-out of all 32 MB per launch (12.6 ms). The pipeline worker keeps the
+        /// same for its dispatches (WorkerPool.cs). Set false to copy in and out every dispatch (A/B, red-checks).
+        /// </summary>
+        public static bool EnableBufferResidency { get; set; } = true;
+
+        /// <summary>Serialized-path copy-ins skipped because the buffer was still in place (diagnostic, process-wide).</summary>
+        public static long BufferResidencyHits => WasmResidency.Hits;
+
+        /// <summary>Deferred serialized-path copy-outs performed (diagnostic, process-wide).</summary>
+        public static long BufferResidencyWriteBacks => WasmResidency.WriteBacks;
 
         /// <summary>
         /// Counts how many RunKernelAsync dispatches are currently active.
@@ -1625,15 +1663,60 @@ namespace SpawnDev.ILGPU.Wasm
                     memoryBuffer = CachedMemoryBuffer!;
                 }
 
-                // Zero out entire dispatch region including buffer area.
-                // Previous dispatches with different buffer layouts leave stale data in
-                // the buffer region [0..scratchBase). If a kernel reads from offsets that
-                // weren't fully overwritten by Copy-In, it gets garbage or OOB.
+                // Each buffer's range in the linear memory: (source offset in the buffer, memory offset, length).
+                var memRanges = new (int Source, int Offset, int Length)[bufferInfos.Count];
+                var memBuffers = new WasmMemoryBuffer[bufferInfos.Count];
+                for (int i = 0; i < bufferInfos.Count; i++)
+                {
+                    var (rMin, rMax) = bufferRanges[i];
+                    if (rMin == int.MaxValue) { rMin = 0; rMax = (int)bufferInfos[i].buffer.LengthInBytes; }
+                    memBuffers[i] = bufferInfos[i].buffer;
+                    memRanges[i] = (rMin, bufferOffsets[i], rMax - rMin);
+                }
+
+                // Serialized path: ranges a previous dispatch left in place at the same offsets are not copied in
+                // again (WasmResidency); every other held range is written back to its buffer first.
+                bool[]? inPlace = null;
+                if (!pipelined)
+                {
+                    if (EnableBufferResidency)
+                    {
+                        HashSet<int>? fromSnapshot = null;
+                        if (argDispatchIntents != null)
+                            for (int i = 0; i < memBuffers.Length; i++)
+                                if (argDispatchIntents.TryGetValue(memBuffers[i], out var q)
+                                    && memBuffers[i].GetSnapshotForDispatch(q) != null)
+                                    (fromSnapshot ??= new HashSet<int>()).Add(i);
+                        inPlace = Residency.BeginDispatch(memBuffers, memRanges, fromSnapshot);
+                    }
+                    else
+                        Residency.FlushAll(drop: true);
+                }
+
+                // Zero the dispatch region, except the buffer ranges: a range is either still in place or about
+                // to be overwritten by its copy-in, and zeroing it first was a third pass over every argument
+                // buffer per dispatch. Everything else (gaps, scratch, struct, shared, barrier regions) is zeroed
+                // as before: a kernel reading where nothing was copied must not see a previous dispatch's bytes.
                 int zeroEnd = totalWithBarriers;
                 if (zeroEnd > 0 && !pipelined) // a pipelined dispatch zeroes in the worker
                 {
-                    using var zeroView = new Uint8Array(memoryBuffer, 0, zeroEnd);
-                    zeroView.JSRef!.CallVoid("fill", 0);
+                    int from = 0;
+                    foreach (var r in memRanges.OrderBy(r => r.Offset))
+                    {
+                        if (r.Length <= 0) continue;
+                        if (r.Offset > from)
+                        {
+                            using var gap = new Uint8Array(memoryBuffer, from, Math.Min(r.Offset, zeroEnd) - from);
+                            gap.JSRef!.CallVoid("fill", 0);
+                        }
+                        from = Math.Max(from, r.Offset + r.Length);
+                        if (from >= zeroEnd) break;
+                    }
+                    if (from < zeroEnd)
+                    {
+                        using var rest = new Uint8Array(memoryBuffer, from, zeroEnd - from);
+                        rest.JSRef!.CallVoid("fill", 0);
+                    }
                 }
 
                 // Copy buffer data into the Wasm linear memory at computed offsets.
@@ -1676,6 +1759,12 @@ namespace SpawnDev.ILGPU.Wasm
                     var (rangeMin, rangeMax) = bufferRanges[i];
                     if (rangeMin == int.MaxValue) { rangeMin = 0; rangeMax = (int)buf.LengthInBytes; }
                     int rangeSize = rangeMax - rangeMin;
+                    if (inPlace != null && inPlace[i])
+                    {
+                        // still in place from the previous dispatch (its bytes are newer than SharedBuffer's)
+                        hostWriteSnapshot[i] = buf.HostWriteCounter;
+                        continue;
+                    }
 
                     // Read from the lazy-materialized snapshot iff a host write fired
                     // between this dispatch's queue time and now (i.e. the buffer's
@@ -2440,6 +2529,9 @@ namespace SpawnDev.ILGPU.Wasm
             _pipelinePool = pool;
             _activePool = pool;
             _pipelineGate = gate;
+            // The pipeline worker reads the buffers' SharedArrayBuffers and overwrites the linear memory: the
+            // ranges a serialized dispatch left here go back to their buffers first (under the gate just taken).
+            Residency.FlushAll(drop: true);
             _pipelineEpoch = Interlocked.Increment(ref s_pipelineEpochCounter);
             _pipelineLastProgress = System.Diagnostics.Stopwatch.GetTimestamp();
             if (WasmDispatchWatchdogSeconds > 0)
@@ -2519,7 +2611,7 @@ namespace SpawnDev.ILGPU.Wasm
             try
             {
                 pipeJs.JSRef!.CallVoid("post", worker, wasmMemory, headBytes, string.Join(",", flatArgs),
-                    firstTimeOnWorker ? wasmBytes : null);
+                    firstTimeOnWorker ? wasmBytes : null, EnableBufferResidency);
             }
             catch
             {
@@ -2577,15 +2669,15 @@ namespace SpawnDev.ILGPU.Wasm
       return sab;
     },
     write: function (worker, pe, hi, lo, dstId, off, staged) {
-      worker.postMessage({ pl: true, pw: true, pe: pe, sq: hi * 4294967296 + (lo >>> 0), dst: this.sab(dstId), off: off, b: staged },
+      worker.postMessage({ pl: true, pw: true, pe: pe, sq: hi * 4294967296 + (lo >>> 0), dst: this.sab(dstId), dstId: dstId, off: off, b: staged },
         [staged.buffer]);
     },
     copy: function (worker, pe, hi, lo, dstId, doff, srcId, soff, n) {
-      worker.postMessage({ pl: true, pc: true, pe: pe, sq: hi * 4294967296 + (lo >>> 0), dst: this.sab(dstId), doff: doff,
-        src: this.sab(srcId), soff: soff, n: n });
+      worker.postMessage({ pl: true, pc: true, pe: pe, sq: hi * 4294967296 + (lo >>> 0), dst: this.sab(dstId), dstId: dstId, doff: doff,
+        src: this.sab(srcId), srcId: srcId, soff: soff, n: n });
     },
     err: function (e) { const d = e.data; return (d && d.error) ? String(d.error) : 'Unknown worker error'; },
-    post: function (worker, memory, head, args, wasmBytes) {
+    post: function (worker, memory, head, args, wasmBytes, res) {
       if (head.byteOffset & 3) head = head.slice();
       const h = new Int32Array(head.buffer, head.byteOffset, head.byteLength >> 2);
       let k = 0;
@@ -2593,12 +2685,13 @@ namespace SpawnDev.ILGPU.Wasm
       const np = h[k++];
       const p = Array.from(h.subarray(k, k + np)); k += np;
       const nb = h[k++];
-      const pb = new Array(nb), pi = new Int32Array(nb * 3);
+      const pb = new Array(nb), pi = new Int32Array(nb * 3), bid = res ? new Int32Array(nb) : null;
       for (let i = 0; i < nb; i++) {
         const id = h[k++];
         const ref = bufs.get(id);
         const sab = ref ? ref.deref() : undefined;
         if (!sab) throw new Error('pipelined dispatch: buffer ' + id + ' is not registered (disposed?)');
+        if (bid) bid[i] = id;
         pb[i] = sab; pi[3 * i] = h[k++]; pi[3 * i + 1] = h[k++]; pi[3 * i + 2] = h[k++];
       }
       const ns = h[k++];
@@ -2607,7 +2700,7 @@ namespace SpawnDev.ILGPU.Wasm
       worker.postMessage({
         pl: true, pe: pe, sq: sq, script: scripts[sid], wasmBytes: wasmBytes, kernelId: kid, memory: memory,
         startIdx: startIdx, endIdx: endIdx, myScratch: myScratch, p: p,
-        a: args.length ? args.split(',') : [], z: z, pb: pb, pi: pi, swb: swb, swo: swo
+        a: args.length ? args.split(',') : [], z: z, pb: pb, pi: pi, bid: bid, swb: swb, swo: swo
       });
     }
   };
@@ -3154,6 +3247,34 @@ namespace SpawnDev.ILGPU.Wasm
             // RadixSort multi-pass + barrier kernels. The host-write counter is
             // bumped on every host-side write path on `WasmMemoryBuffer`, so any
             // intervening write is detected without per-kernel write tracking.
+            if (EnableBufferResidency)
+            {
+                // Deferred copy-out (WasmResidency): the ranges stay in the linear memory, dirty, until something
+                // needs them in their buffers; the next dispatch using them at the same place skips its copy-in.
+                // The same buffers the immediate copy-out skipped are not held: a host write during the dispatch
+                // (HostWriteCounter advanced) or a copy-in from a host-write snapshot.
+                int count = bufferInfos.Count;
+                var heldBuffers = new WasmMemoryBuffer[count];
+                var heldRanges = new (int Source, int Offset, int Length)[count];
+                var heldHwc = new int[count];
+                var notHeld = new HashSet<int>();
+                for (int i = 0; i < count; i++)
+                {
+                    var (buf, _) = bufferInfos[i];
+                    var (rangeMin, rangeMax) = bufferRanges[i];
+                    if (rangeMin == int.MaxValue) { rangeMin = 0; rangeMax = (int)buf.LengthInBytes; }
+                    heldBuffers[i] = buf;
+                    heldRanges[i] = (rangeMin, bufferOffsets[i], rangeMax - rangeMin);
+                    heldHwc[i] = i < hostWriteSnapshot.Length ? hostWriteSnapshot[i] : buf.HostWriteCounter;
+                    if ((i < hostWriteSnapshot.Length && buf.HostWriteCounter != hostWriteSnapshot[i])
+                        || bufIndicesReadFromSnapshot.Contains(i))
+                        notHeld.Add(i);
+                }
+                Residency.EndDispatch(heldBuffers, heldRanges, heldHwc, notHeld);
+                if (WasmDispatchProfile.Enabled) WasmDispatchProfile.Add(ref WasmDispatchProfile.CopyOutTicks, profT);
+                return;
+            }
+
             int copyOutCount = 0;
             int copyOutSkipped = 0;
             for (int i = 0; i < bufferInfos.Count; i++)
@@ -3978,6 +4099,27 @@ namespace SpawnDev.ILGPU.Wasm
                     _pendingWork.RemoveAll(t => t.IsCompleted);
                 }
             }
+            FlushResidencyIfIdle();
+        }
+
+        /// <summary>
+        /// After a drain, the buffer ranges still held in the linear memory are written back (and stay, clean),
+        /// so code that reads a buffer's SharedArrayBuffer directly after SynchronizeAsync sees the results.
+        /// Only when no dispatch is using the memory: for the shared memory, only if its gate is free (another
+        /// accelerator's dispatch, or a running pipeline, holds it).
+        /// </summary>
+        private void FlushResidencyIfIdle()
+        {
+            if (UsesSharedMemory)
+            {
+                var entry = SharedEntry;
+                if (entry.Residency == null || entry.Residency.Count == 0 || !entry.Gate.Wait(0))
+                    return;
+                try { entry.Residency.FlushAll(drop: false); }
+                finally { entry.Gate.Release(); }
+            }
+            else if (_activeDispatchCount == 0)
+                _privateResidency?.FlushAll(drop: false);
         }
 
         #endregion
@@ -4156,6 +4298,7 @@ namespace SpawnDev.ILGPU.Wasm
                 // reservation per tab, like s_sharedWorkerPool) and is torn down only via
                 // DisposeSharedWasmMemory(). So this is a no-op for shared accelerators and never
                 // frees the shared memory out from under the next accelerator.
+                _privateResidency?.FlushAll(drop: true);
                 _cachedMemoryBuffer?.Dispose();
                 _cachedMemoryBuffer = null;
                 _cachedWasmMemory?.Dispose();
