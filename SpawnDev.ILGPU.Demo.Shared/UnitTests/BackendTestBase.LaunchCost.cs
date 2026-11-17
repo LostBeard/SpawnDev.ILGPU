@@ -86,7 +86,10 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new UnsupportedTestException("Wasm-only: measures the Wasm per-dispatch buffer copy");
             var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, int>(LaunchCostPoolTouchKernel);
             const int threads = 64, reps = 40;
-            foreach (int ints in new[] { 16 << 10, 256 << 10, 2 << 20, 8 << 20 })   // 64 KB .. 32 MB
+            // Forward, then reversed: separates "this size is slow" from "the Nth size measured is slow" (2026-11-17:
+            // the 1 MB row, always 2nd, cost ~1.45 ms/launch vs 0.17-0.35 for the others, with the worker idle).
+            int[] sizes = { 16 << 10, 256 << 10, 2 << 20, 8 << 20 };   // 64 KB .. 32 MB
+            foreach (var (ints, pass) in sizes.Select(s => (s, "fwd")).Concat(sizes.Reverse().Select(s => (s, "rev"))))
             {
                 using var pool = accelerator.Allocate1D<int>(ints);
                 pool.MemSetToZero();
@@ -95,12 +98,24 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 await accelerator.SynchronizeAsync();
                 SpawnDev.ILGPU.Wasm.WasmDispatchProfile.Reset();
                 SpawnDev.ILGPU.Wasm.WasmDispatchProfile.Enabled = true;
+                // The launch calls themselves (k returns once the dispatch is queued) are timed one by one:
+                // a few long ones point at a timer (the worker's 4 ms ack), many even ones at per-launch work.
+                double maxCall = 0, sumCall = 0;
                 var sw = Stopwatch.StartNew();
-                for (int r = 0; r < reps; r++) k(threads, pool.View, offset);
+                for (int r = 0; r < reps; r++)
+                {
+                    long t0 = Stopwatch.GetTimestamp();
+                    k(threads, pool.View, offset);
+                    double c = Stopwatch.GetElapsedTime(t0).TotalMilliseconds;
+                    sumCall += c; if (c > maxCall) maxCall = c;
+                }
+                double launchedAt = sw.Elapsed.TotalMilliseconds;
                 await accelerator.SynchronizeAsync();
                 double ms = sw.Elapsed.TotalMilliseconds / reps;
                 SpawnDev.ILGPU.Wasm.WasmDispatchProfile.Enabled = false;
-                Console.WriteLine($"[LaunchCost] WasmPool {ints * 4 / 1024,6} KB: {ms:F3} ms/launch | {SpawnDev.ILGPU.Wasm.WasmDispatchProfile.Summary()}");
+                Console.WriteLine($"[LaunchCost] WasmPool {ints * 4 / 1024,6} KB ({pass}): {ms:F3} ms/launch " +
+                    $"(calls {sumCall / reps:F3} avg, {maxCall:F3} max; drain {(sw.Elapsed.TotalMilliseconds - launchedAt):F2} ms) | " +
+                    SpawnDev.ILGPU.Wasm.WasmDispatchProfile.Summary());
                 var got = await pool.CopyToHostAsync<int>();
                 for (int i = 0; i < threads; i++)
                     if (got[offset + i] != reps + 1)

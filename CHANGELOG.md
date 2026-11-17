@@ -10,6 +10,10 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   the worker keys its instances on it (a grow keeps the number). Safe to reuse: the generated modules declare no
   globals, so an instance's only state is the shared memory. Measured quiet, interleaved A/B (`LaunchCost_WasmPoolSize`):
   no difference beyond noise; kept because it removes per-dispatch instantiation work. WasmTests 938 / 0 / 57.
+- **TEST: `LaunchCost_WasmPoolSize` runs the sizes forward and reversed and times each launch call.** It explains the
+  5.4.36 table's odd 1 MB row (~1.5 ms/launch, residency on or off): one launch call of 53 - 56 ms when 1 MB is the
+  second size measured, the other 39 fast; measured reversed, 1 MB costs 0.15 ms/launch like the rest. A one-time stall
+  early in the run, not a cost of the size.
 
 ## 5.4.36 (forks 2.4.33) - 2026-11-17 - Wasm: buffers stay in the linear memory between dispatches
 
