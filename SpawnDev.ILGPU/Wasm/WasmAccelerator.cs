@@ -249,6 +249,7 @@ namespace SpawnDev.ILGPU.Wasm
         private sealed class SharedMemEntry
         {
             public SpawnJSObject? Memory;
+            public int MemoryId;
             public SharedArrayBuffer? Buffer;
             public int Pages;
             public int CreateCount;
@@ -481,6 +482,11 @@ namespace SpawnDev.ILGPU.Wasm
         /// so creating a new one every frame causes OOM.
         /// </summary>
         private SpawnJSObject? _cachedWasmMemory;
+        private int _cachedWasmMemoryId;
+        // Identity of each WebAssembly.Memory this process creates, sent with every dispatch. A worker keys its
+        // cached instances on it: a posted Memory deserializes to new objects (memory and .buffer) on every
+        // message, so comparing those dropped every instance and re-instantiated the kernel on every dispatch.
+        private static int s_nextWasmMemoryId;
         private SharedArrayBuffer? _cachedMemoryBuffer;
         private int _cachedWasmPages;
 
@@ -509,6 +515,11 @@ namespace SpawnDev.ILGPU.Wasm
         {
             get => UsesSharedMemory ? SharedEntry.Memory : _cachedWasmMemory;
             set { if (UsesSharedMemory) SharedEntry.Memory = value; else _cachedWasmMemory = value; }
+        }
+        private int CachedWasmMemoryId
+        {
+            get => UsesSharedMemory ? SharedEntry.MemoryId : _cachedWasmMemoryId;
+            set { if (UsesSharedMemory) SharedEntry.MemoryId = value; else _cachedWasmMemoryId = value; }
         }
         private SharedArrayBuffer? CachedMemoryBuffer
         {
@@ -1601,6 +1612,7 @@ namespace SpawnDev.ILGPU.Wasm
                             "eval",
                             $"new WebAssembly.Memory({{ initial: {initialPages}, maximum: {_maxLinearMemoryPages}, shared: true }})");
                         CachedMemoryBuffer = CachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
+                        CachedWasmMemoryId = Interlocked.Increment(ref s_nextWasmMemoryId);
                         if (UsesSharedMemory) SharedEntry.CreateCount++;
                         _initializedWorkersByKernel.Clear();
                         if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-MEM-INIT] disp={dispNum} pages={initialPages} (need={wasmPages}) bytes={initialPages * 65536} cap={_maxLinearMemoryPages} shared={UsesSharedMemory}");
@@ -1643,6 +1655,7 @@ namespace SpawnDev.ILGPU.Wasm
                             "eval",
                             $"new WebAssembly.Memory({{ initial: {initialPages}, maximum: {_maxLinearMemoryPages}, shared: true }})");
                         CachedMemoryBuffer = CachedWasmMemory.JSRef!.Get<SharedArrayBuffer>("buffer");
+                        CachedWasmMemoryId = Interlocked.Increment(ref s_nextWasmMemoryId);
                         if (UsesSharedMemory) SharedEntry.CreateCount++;
                         _initializedWorkersByKernel.Clear();
                         if (WasmBackend.VerboseLogging) WasmBackend.Log($"[Wasm-MEM-INIT-CC] disp={dispNum} pages={initialPages} (need={wasmPages}) bytes={initialPages * 65536} cap={_maxLinearMemoryPages} shared={UsesSharedMemory}");
@@ -2611,7 +2624,7 @@ namespace SpawnDev.ILGPU.Wasm
             try
             {
                 pipeJs.JSRef!.CallVoid("post", worker, wasmMemory, headBytes, string.Join(",", flatArgs),
-                    firstTimeOnWorker ? wasmBytes : null, EnableBufferResidency);
+                    firstTimeOnWorker ? wasmBytes : null, EnableBufferResidency, CachedWasmMemoryId);
             }
             catch
             {
@@ -2677,7 +2690,7 @@ namespace SpawnDev.ILGPU.Wasm
         src: this.sab(srcId), srcId: srcId, soff: soff, n: n });
     },
     err: function (e) { const d = e.data; return (d && d.error) ? String(d.error) : 'Unknown worker error'; },
-    post: function (worker, memory, head, args, wasmBytes, res) {
+    post: function (worker, memory, head, args, wasmBytes, res, mid) {
       if (head.byteOffset & 3) head = head.slice();
       const h = new Int32Array(head.buffer, head.byteOffset, head.byteLength >> 2);
       let k = 0;
@@ -2698,7 +2711,7 @@ namespace SpawnDev.ILGPU.Wasm
       let swo = null, swb = null;
       if (ns > 0) { swo = new Int32Array(h.subarray(k, k + 2 * ns)); k += 2 * ns; swb = head.slice(k * 4); }
       worker.postMessage({
-        pl: true, pe: pe, sq: sq, script: scripts[sid], wasmBytes: wasmBytes, kernelId: kid, memory: memory,
+        pl: true, pe: pe, sq: sq, script: scripts[sid], wasmBytes: wasmBytes, kernelId: kid, memory: memory, mid: mid || undefined,
         startIdx: startIdx, endIdx: endIdx, myScratch: myScratch, p: p,
         a: args.length ? args.split(',') : [], z: z, pb: pb, pi: pi, bid: bid, swb: swb, swo: swo
       });
@@ -3088,6 +3101,7 @@ namespace SpawnDev.ILGPU.Wasm
                         kernelId = kernelId,
                         clearModuleCache = clearCacheThisDispatch,
                         memory = wasmMemory,
+                        mid = CachedWasmMemoryId,
                         threadStart = threadStart,
                         threadEnd = threadEnd,
                         yieldStateAddr = yieldStateAddr,
@@ -3138,6 +3152,7 @@ namespace SpawnDev.ILGPU.Wasm
                         kernelId = kernelId,
                         clearModuleCache = clearCacheThisDispatch,
                         memory = wasmMemory,
+                        mid = CachedWasmMemoryId,
                         startIdx = startIdx,
                         endIdx = endIdx,
                         myScratch = myScratch,

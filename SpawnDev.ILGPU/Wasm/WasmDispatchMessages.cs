@@ -41,6 +41,9 @@ namespace SpawnDev.ILGPU.Wasm
         public bool clearModuleCache { get; init; }
         /// <summary>SharedArrayBuffer-backed WebAssembly.Memory shared across all workers.</summary>
         public SpawnJSObject memory { get; init; } = null!;
+        /// <summary>Host identity of <see cref="memory"/> (never 0 when sent). The worker keys its cached kernel
+        /// instances on it; a posted memory deserializes to new objects every message.</summary>
+        public int mid { get; init; }
         /// <summary>Inclusive thread range start for this worker's fiber band.</summary>
         public int threadStart { get; init; }
         /// <summary>Exclusive thread range end for this worker's fiber band.</summary>
@@ -81,6 +84,9 @@ namespace SpawnDev.ILGPU.Wasm
         public bool clearModuleCache { get; init; }
         /// <summary>SharedArrayBuffer-backed WebAssembly.Memory shared across all workers.</summary>
         public SpawnJSObject memory { get; init; } = null!;
+        /// <summary>Host identity of <see cref="memory"/> (never 0 when sent). The worker keys its cached kernel
+        /// instances on it; a posted memory deserializes to new objects every message.</summary>
+        public int mid { get; init; }
         /// <summary>Inclusive item index start for this worker's range.</summary>
         public int startIdx { get; init; }
         /// <summary>Exclusive item index end for this worker's range.</summary>

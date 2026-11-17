@@ -1,6 +1,16 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.37 (forks 2.4.33) - unreleased
+
+- **FIX (Wasm worker): kernel instances are reused across dispatches again.** The worker dropped its cached instances
+  whenever `d.memory.buffer` differed from the last message's, but a posted `WebAssembly.Memory` deserializes to new
+  objects on every message, so every dispatch re-instantiated its kernel (found with the 5.4.36 residency bug, which had
+  the same comparison). The host now numbers each memory it creates and sends the number (`mid`) with every dispatch;
+  the worker keys its instances on it (a grow keeps the number). Safe to reuse: the generated modules declare no
+  globals, so an instance's only state is the shared memory. Measured quiet, interleaved A/B (`LaunchCost_WasmPoolSize`):
+  no difference beyond noise; kept because it removes per-dispatch instantiation work. WasmTests 938 / 0 / 57.
+
 ## 5.4.36 (forks 2.4.33) - 2026-11-17 - Wasm: buffers stay in the linear memory between dispatches
 
 - **Release sweep** (4420d55 = 5.4.36-local.1's code, full default PMT, 55.8 min): 9,401 total / 8,645 passed /

@@ -219,8 +219,12 @@ async function _handle(d) {
     // memory's underlying SharedArrayBuffer). PostMessage creates a new Memory
     // wrapper but the underlying SAB is the same — compare .buffer to detect
     // genuine memory swaps (e.g. WebAssembly.Memory.grow() that allocates new SAB).
-    if (_lastMemoryBuffer !== d.memory.buffer) {
-      _lastMemoryBuffer = d.memory.buffer;
+    // Keyed on the host's memory id (d.mid): a posted Memory deserializes to NEW objects (the Memory and its
+    // .buffer) on every message, so comparing d.memory.buffer dropped every instance and re-instantiated on
+    // every dispatch. A grow keeps the id (the same shared memory; instances see the growth).
+    var memKey = d.mid ? d.mid : d.memory.buffer;
+    if (_lastMemoryBuffer !== memKey) {
+      _lastMemoryBuffer = memKey;
       _instancesById = {};
     }
     var instance = _instancesById[kid];
