@@ -1,8 +1,11 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.36 (forks 2.4.33) - unreleased
+## 5.4.36 (forks 2.4.33) - 2026-11-17 - Wasm: buffers stay in the linear memory between dispatches
 
+- **Release sweep** (4420d55 = 5.4.36-local.1's code, full default PMT, 55.8 min): 9,401 total / 8,645 passed /
+  0 failed / 756 skipped (5.4.35: 9,381 / 8,634 / 0 / 747). ML gate (Tuvok, Wasm lane on 5.4.36-local.1): 1,105 / 0 /
+  64, no Pass -> Fail, every training / backward test 1.6 - 2.05x faster (Training_StepsDoNotGrowThePool 14.0 -> 6.8 s).
 - **PERF (Wasm): a dispatch no longer copies every argument buffer into the linear memory and back out.** Each dispatch
   zeroed its memory region, copied each argument buffer in (the whole buffer: a kernel's touched range is unknown),
   ran, and copied it back out, so a small launch over a big buffer paid three passes over it: a 64-thread kernel over
@@ -20,7 +23,11 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   an answer a pipelined launch's result is lost; without the host's write-back before an ordered host write the
   launch's result is lost outside the written range. Measured (`LaunchCost_WasmPoolSize`, quiet machine, residency
   on / off): 32 MB pool 0.25 / 12.46 ms per launch, 8 MB 0.18 / 2.25, 64 KB 0.38 / 0.65; the Wasm RadixSort tests are
-  unchanged (4M 27.8 / 28.4 s). WasmTests 938 / 0 / 57.
+  unchanged (4M 27.8 / 28.4 s). WasmTests 938 / 0 / 57. SpawnDev.Codecs' VP9 every-frame part 1 on Wasm (Geordi, 1,178
+  frames, mean ms per frame, 5.4.35 -> 5.4.36-local.1): reconstruction 1,101 -> 20.7 (53x), loop filter 1,144 -> 66.8
+  (17x), parse 10.10 -> 5.41; bit-exact; the test went from ~45 min to 2 min 39 s. Codecs gate (Geordi, WasmCodecsTests
+  on 5.4.36-local.1): 1,230 / 0 / 2 in 52 min 43 s (5.4.35: 4 h 1 min); the four VP9 every-frame parts 158 / 161 / 139 /
+  182 s (were 2,426 / 3,077 / 2,273 / 3,148).
 
 ## 5.4.35 (forks 2.4.33) - 2026-11-17 - Wasm: a buffer disposed with work still queued on it no longer throws
 
