@@ -1,8 +1,14 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.37 (forks 2.4.34) - unreleased
+## 5.4.37 (forks 2.4.34) - 2026-11-18 - CUDA: page locks made off the accelerator's thread; Wasm: kernel instances reused across dispatches
 
+- **Release sweep** (d786a00 = 5.4.37-local.1's code, full default PMT, 65.7 min): 9,402 total / 8,646 passed /
+  0 failed / 756 skipped (5.4.36: 9,401 / 8,645 / 0 / 756; +1 = the new page-lock test). Phase B (Wasm) 478 s, same as
+  5.4.36; Phase A slower under two single-core AOT jobs running alongside (no CPU / Velocity code changed). ML gate
+  (Tuvok, full ML sweep on 5.4.37-local.1, ML b42c66e5): 7,812 / 0 / 495 of 8,307, zero Pass -> Fail vs 5.8.22 on
+  5.4.36; Wasm lane 1,109 / 64 identical, 1.057x. Codecs gate (WasmCodecsTests on 5.4.37-local.1, Codecs 8294dde):
+  1,226 / 0 / 2 of 1,228, every outcome identical to 5.4.36, 52.3 min (5.4.36: 52.7).
 - **FIX (CUDA): a page-locked array made off the accelerator's thread threw "invalid device context".**
   `Accelerator.CreatePageLockFromPinned` (behind `AllocatePageLocked1D`) did not bind the accelerator before
   `cuMemHostRegister`, which acts on the calling thread's current context, so it worked only where the context was
