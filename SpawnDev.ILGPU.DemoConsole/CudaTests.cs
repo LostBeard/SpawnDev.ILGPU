@@ -1082,4 +1082,50 @@ public class CudaTests : BackendTestBase
         }
         await Task.CompletedTask;
     });
+
+    /// <summary>Runs <paramref name="action"/> on a NEW thread (no CUDA context was ever made current on it) and rethrows its exception.</summary>
+    static void OnFreshThread(Action action)
+    {
+        Exception? error = null;
+        var thread = new Thread(() => { try { action(); } catch (Exception e) { error = e; } });
+        thread.Start();
+        thread.Join();
+        if (error != null) throw new Exception("on a fresh thread: " + error.Message, error);
+    }
+
+    // AllocatePageLocked1D registers the pinned array with cuMemHostRegister, which acts on the CALLING thread's current
+    // context. Accelerator.CreatePageLockFromPinned did not bind the accelerator first (AllocateRaw, CreateStream, LoadKernel
+    // and every dispose do), so a page-locked array allocated off the thread that created the accelerator threw "invalid
+    // device context" (Tuvok 2026-11-18: ML StreamedModelWeights block images rented on Task.Run threads). A thread-pool
+    // thread may already have the context current from an earlier call, which made it look intermittent, so this test uses
+    // brand-new threads for the allocation AND the dispose, and moves 64 MB (a streamed weight block) through the array.
+    [TestMethod]
+    public async Task Tests_PageLocked_AllocateAndDisposeOnAnotherThread() =>
+        await RunTest(async accelerator =>
+    {
+        var cuda = (CudaAccelerator)accelerator;
+        if (!cuda.Device.SupportsMappingHostMemory)
+            throw new UnsupportedTestException("this device cannot page-lock host memory (no cuMemHostRegister path to test)");
+        const int Length = 64 * 1024 * 1024;
+        PageLockedArray1D<byte>? pageLocked = null;
+        OnFreshThread(() =>
+        {
+            pageLocked = accelerator.AllocatePageLocked1D<byte>(Length, true);
+            var span = pageLocked.Span;
+            for (int i = 0; i < span.Length; i++) span[i] = (byte)(i * 7 + (i >> 13));
+        });
+        using var device = accelerator.Allocate1D<byte>(Length);
+        device.View.CopyFrom(pageLocked!.ArrayView);
+        device.MemSetToZero();
+        device.View.CopyFrom(pageLocked.ArrayView); // the zero fill proves the second copy, not a stale first one, is read back
+        accelerator.Synchronize();
+        var back = device.GetAsArray1D();
+        for (int i = 0; i < Length; i++)
+        {
+            if (back[i] != (byte)(i * 7 + (i >> 13)))
+                throw new Exception($"byte {i}: {back[i]} after the round trip, expected {(byte)(i * 7 + (i >> 13))}");
+        }
+        OnFreshThread(() => pageLocked.Dispose());
+        await Task.CompletedTask;
+    });
 }

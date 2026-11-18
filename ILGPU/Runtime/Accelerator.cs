@@ -1040,6 +1040,10 @@ namespace ILGPU.Runtime
                 throw new ArgumentOutOfRangeException(nameof(numElements));
 
             EnsureBlittable<T>();
+            // CUDA registers the memory with cuMemHostRegister, which acts on the CALLING thread's current context: bind
+            // first, as AllocateRaw / CreateStream / LoadKernel do, or a page lock made off the accelerator's creating
+            // thread (a Task.Run read-ahead) throws "invalid device context". Test: CudaTests.Tests_PageLocked_*.
+            Bind();
             return CreatePageLockFromPinnedInternal<T>(pinned, numElements);
         }
 

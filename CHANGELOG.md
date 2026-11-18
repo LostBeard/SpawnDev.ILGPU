@@ -1,8 +1,16 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.37 (forks 2.4.33) - unreleased
+## 5.4.37 (forks 2.4.34) - unreleased
 
+- **FIX (CUDA): a page-locked array made off the accelerator's thread threw "invalid device context".**
+  `Accelerator.CreatePageLockFromPinned` (behind `AllocatePageLocked1D`) did not bind the accelerator before
+  `cuMemHostRegister`, which acts on the calling thread's current context, so it worked only where the context was
+  already current (AllocateRaw, CreateStream, LoadKernel and every dispose bind; this one did not). Found by Tuvok:
+  SpawnDev.ILGPU.ML streamed weight blocks rented on `Task.Run` threads (intermittent: a pool thread may already have
+  the context current). It now binds first; the other backends' `OnBind` is empty. Test
+  `CudaTests.Tests_PageLocked_AllocateAndDisposeOnAnotherThread` (64 MB, allocated and disposed on brand-new threads,
+  device round trip), red-checked: without the bind it fails with that exception.
 - **FIX (Wasm worker): kernel instances are reused across dispatches again.** The worker dropped its cached instances
   whenever `d.memory.buffer` differed from the last message's, but a posted `WebAssembly.Memory` deserializes to new
   objects on every message, so every dispatch re-instantiated its kernel (found with the 5.4.36 residency bug, which had
