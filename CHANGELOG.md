@@ -11,6 +11,12 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   the context current). It now binds first; the other backends' `OnBind` is empty. Test
   `CudaTests.Tests_PageLocked_AllocateAndDisposeOnAnotherThread` (64 MB, allocated and disposed on brand-new threads,
   device round trip), red-checked: without the bind it fails with that exception.
+- **TEST INFRA (PMT): a `dotnet publish` is killed only when it goes silent, not after a flat 300 s.** A cold first
+  publish in a fresh clone (package restore) runs past 300 s while still progressing; PMT killed it and refused the whole
+  run ("NO BROWSER PAGE"). Now: killed after `PMT_DOTNET_IDLE_SECONDS` without output (default 600) or past the overall
+  limit (`PMT_PUBLISH_TIMEOUT_SEC`, else `PMT_DOTNET_MAX_SECONDS`, default 3600); an AOT publish skips the idle kill.
+  Port of Tuvok's ML 4ad4125c. Checked: idle 2 s kills both publishes; AOT with idle 2 s is killed only at its 20 s
+  overall limit; defaults green.
 - **FIX (Wasm worker): kernel instances are reused across dispatches again.** The worker dropped its cached instances
   whenever `d.memory.buffer` differed from the last message's, but a posted `WebAssembly.Memory` deserializes to new
   objects on every message, so every dispatch re-instantiated its kernel (found with the 5.4.36 residency bug, which had
