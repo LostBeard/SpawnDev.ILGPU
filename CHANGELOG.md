@@ -1,7 +1,7 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.40 (forks 2.4.36) - unreleased
+## 5.4.40 (forks 2.4.36) - 2026-11-19 - Browser: a view address read as long no longer aborts the .NET runtime (Mono interpreter bug)
 
 - **FIX (browser): a view's address read as `long` on the host could abort the page's .NET runtime, or come back with
   a garbage high word.** `LoadEffectiveAddressAsPtr` was `new IntPtr(Unsafe.AsPointer(ref ...))`. In the browser's .NET
