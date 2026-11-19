@@ -39,10 +39,13 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   are fixed per root type. The emitted IL is byte-identical: DemoConsole `launcher-il-dump` (argument-mapping IL for
   structs nested to depth 6 with view fields, every field printed with its declaring type) diffs empty against 5.4.37,
   and 50 lines with the field path reversed. Build-time measurement on the ML demo: Bones, on 5.4.38-local.1.
-- **OPEN (found while testing the above, not fixed in this release): WebGPU emits 0 for a call it cannot implement**
-  (`// Unmapped fallback` in WGSLCodeGenerator) instead of failing to compile like Velocity / Wasm / CUDA / OpenCL;
-  that is how the unremapped `MathF.Cbrt` above gave 0 instead of an error. Some IR shapes rely on the fallback
-  (WGSLFunctionGenerator notes); next: list the suite kernels that reach it, then make it throw.
+- **FIX (WebGPU / WebGL; silent wrong results): a call the generator cannot implement fails to compile.** WGSL and GLSL
+  emitted it as a zero (`// Call: X (Unmapped)`) and ran: before the remap above, `MathF.Cbrt` came out 0 on WebGPU
+  where Velocity / Wasm / CUDA / OpenCL refused the kernel. Both now throw `UnsupportedKernelFeatureException` naming
+  the call (WebGL already threw for in-kernel scan / reduce). No suite kernel reached the fallback: the new DemoConsole
+  `kernel-dump --all-browser` compiles all 829 suite kernels to WGSL and GLSL and lists every unmapped call (none; the
+  new test's kernel is found, so the scan sees them). Test `Kernel_CallingAMethodWithoutBody_FailsLoudly` (an
+  InternalCall with no body: every backend must fail to compile, launch or synchronize).
 - **NOTE (not ILGPU): the browser .NET runtime's `Math.Acosh` returns finite values for some negative inputs**
   (`Math.Acosh(-6603.9004)` = -12.696, `Math.Acosh(-2343069.94)` = 7.897; -2 gives NaN; desktop .NET: NaN). The libm
   test's reference uses the definition (NaN below 1).

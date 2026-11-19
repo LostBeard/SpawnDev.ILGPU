@@ -3890,8 +3890,14 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                         "AcceleratorRequirements to filter WebGL at selection time.");
             }
 
-            AppendLine($"// Call: {methodCall.Target.Name} (Unmapped)");
-            AppendLine($"{target} = {target.Type}(0);");
+            // Nothing implements the call: fail loudly instead of the zero this used to emit (see the WGSL generator;
+            // Data 2026-11-18). Test: Kernel_CallingAMethodWithoutBody_FailsLoudly.
+            throw new SpawnDev.ILGPU.UnsupportedKernelFeatureException(
+                feature: $"call to '{methodCall.Target.Name}'",
+                backend: global::ILGPU.Runtime.AcceleratorType.WebGL,
+                remediation: "The method has no IL body and no intrinsic or remapping implements it, so no device can run it. Use a method with "
+                        + "a body, or report the missing intrinsic / remap (System.Math / MathF members are remapped: see "
+                        + "RemappedIntrinsics). Velocity, Wasm, CUDA and OpenCL refuse such a kernel too.");
         }
 
         // Casts

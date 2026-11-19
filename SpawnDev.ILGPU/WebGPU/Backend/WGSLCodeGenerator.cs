@@ -3893,11 +3893,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
 
 
-            // Final fallback: emit a type-correct zero value to avoid WGSL type errors.
-            // The 12345.0 literal previously used caused 'abstract-float to i32' type errors.
-            AppendLine($"// Call: {methodCall.Target.Name} (Unmapped)");
-            string fallbackType = TypeGenerator[methodCall.Type];
-            AppendLine($"{target} = {fallbackType}(0); // Unmapped fallback");
+            // Nothing implements the call. This used to emit a zero ("// Call: X (Unmapped)") and run: the unremapped
+            // MathF.Cbrt came out 0 on WebGPU instead of failing to compile like on every other backend (Data
+            // 2026-11-18). No suite kernel reached it (kernel-dump --all-browser, 829 kernels). Fail loudly.
+            // Test: Kernel_CallingAMethodWithoutBody_FailsLoudly.
+            throw new SpawnDev.ILGPU.UnsupportedKernelFeatureException(
+                feature: $"call to '{methodCall.Target.Name}'",
+                backend: global::ILGPU.Runtime.AcceleratorType.WebGPU,
+                remediation: "The method has no IL body and no intrinsic or remapping implements it, so no device can run it. Use a method with "
+                        + "a body, or report the missing intrinsic / remap (System.Math / MathF members are remapped: see "
+                        + "RemappedIntrinsics). Velocity, Wasm, CUDA and OpenCL refuse such a kernel too.");
         }
 
 

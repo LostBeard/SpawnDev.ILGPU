@@ -20,6 +20,8 @@ public static class KernelDump
             Console.WriteLine("usage: kernel-dump <BackendTestBase static kernel method name> [outDir]");
             return Task.FromResult(1);
         }
+        if (args[1] == "--all-browser")
+            return Task.FromResult(DumpAllBrowser(args.Length > 2 ? args[2] : Path.Combine(Path.GetTempPath(), "kernel_dump_browser")));
         if (args[1] == "--all-wasm")
             return Task.FromResult(DumpAllWasm(args.Length > 2 ? args[2] : Path.Combine(Path.GetTempPath(), "kernel_dump_all")));
         bool ozaki = Array.IndexOf(args, "--ozaki") >= 0;
@@ -62,6 +64,62 @@ public static class KernelDump
     // types is compiled to Wasm twice, with WasmBackend.StructuredControlFlow on (<name>.scf.wasm) and off
     // (<name>.sm.wasm); methods that are not kernels fail to compile and are skipped. index.tsv lists each kernel:
     // name, structured functions in the scf compile, scf bytes, sm bytes, scf error. Then run wasm-validate on them.
+    // `kernel-dump --all-browser [outDir]`: every suite kernel through the WGSL (WebGPUFull) and GLSL (WebGL2Baseline)
+    // generators; lists each call the generator could not implement ("// Call: X (Unmapped)", emitted as a zero) with
+    // the kernels that reached it. Made 2026-11-18 to find what relies on that silent fallback before making it fail.
+    static int DumpAllBrowser(string dir)
+    {
+        Directory.CreateDirectory(dir);
+        var asm = typeof(SpawnDev.ILGPU.Demo.Shared.UnitTests.BackendTestBase).Assembly;
+        var spec = new KernelSpecialization(64, null);
+        var hits = new SortedDictionary<string, List<string>>();
+        int kernels = 0, failed = 0;
+        var seen = new HashSet<string>();
+        var unmapped = new System.Text.RegularExpressions.Regex(@"// Call: (\S+) \(Unmapped\)");
+        foreach (var type in asm.GetTypes())
+        {
+            if (type.ContainsGenericParameters) continue;
+            foreach (var m in type.GetMethods(BindingFlags.Static | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+            {
+                if (m.IsGenericMethodDefinition || m.ReturnType != typeof(void) || m.GetMethodBody() == null) continue;
+                var ps = m.GetParameters();
+                if (ps.Length == 0) continue;
+                bool ok = true;
+                foreach (var p in ps) if (!p.ParameterType.IsValueType || p.ParameterType.IsByRef) { ok = false; break; }
+                if (!ok) continue;
+                string name = $"{type.Name}.{m.Name}";
+                if (!seen.Add(name)) name += "_" + m.MetadataToken.ToString("x");
+                bool any = false;
+                foreach (var (lang, profile) in new[] { ("wgsl", CapabilityProfiles.WebGPUFull), ("glsl", CapabilityProfiles.WebGL2Baseline) })
+                {
+                    string? src = null;
+                    try
+                    {
+                        try { src = ShaderCompiler.Generate(m, profile, spec, explicitlyGrouped: false).Source; }
+                        catch (NotSupportedException) { src = ShaderCompiler.Generate(m, profile, spec, explicitlyGrouped: true).Source; }
+                    }
+                    catch { failed++; }
+                    if (src == null) continue;
+                    any = true;
+                    foreach (System.Text.RegularExpressions.Match match in unmapped.Matches(src))
+                    {
+                        string key = $"{lang} {match.Groups[1].Value}";
+                        if (!hits.TryGetValue(key, out var list)) hits[key] = list = new List<string>();
+                        if (!list.Contains(name)) list.Add(name);
+                    }
+                }
+                if (any) kernels++;
+            }
+        }
+        var report = new System.Text.StringBuilder();
+        foreach (var (key, list) in hits)
+            report.Append(key).Append('\t').Append(list.Count).Append('\t').Append(string.Join(", ", list)).Append('\n');
+        File.WriteAllText(Path.Combine(dir, "unmapped.tsv"), report.ToString());
+        Console.WriteLine($"kernels compiled {kernels} (generator exceptions {failed}); unmapped call kinds {hits.Count} -> {dir}");
+        Console.Write(report.ToString());
+        return 0;
+    }
+
     static int DumpAllWasm(string dir)
     {
         Directory.CreateDirectory(dir);
