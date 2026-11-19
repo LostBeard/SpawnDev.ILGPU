@@ -1,6 +1,23 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.40 (forks 2.4.36) - unreleased
+
+- **FIX (browser): a view's address read as `long` on the host could abort the page's .NET runtime, or come back with
+  a garbage high word.** `LoadEffectiveAddressAsPtr` was `new IntPtr(Unsafe.AsPointer(ref ...))`. In the browser's .NET
+  runtime (the Mono interpreter on wasm32) `conv.i8` of a managed pointer emits its conversion without operands and
+  leaves the value typed as a 4-byte pointer (`transform.c`, `CEE_CONV_I8` / `STACK_TYPE_MP`, .NET 10.0.14 and `main`;
+  the neighbouring `CEE_CONV_U8` case is right). Once a caller inlined the address (the interpreter inlines at tier-up,
+  after code gets hot), `(long)` of it read 8 bytes from a 4-byte value (right low word, garbage high word: the root of
+  5.4.39's sub-view copy failures), or, stored into a `long` local, aborted the runtime: `[MONO] .../interp/transform.c:1132`
+  (g_error "Store local stack type mismatch"), after which every later test in the page "never ran". The address is now
+  integer arithmetic on the buffer's native pointer (the same value), never a managed pointer, so every caller's
+  conversion of it is an ordinary one, `ToInt64()` included. Plain BCL code reproduces the runtime bug without ILGPU:
+  `(long)(IntPtr)Unsafe.AsPointer(ref Unsafe.AsRef<byte>(p))` returns `0x0000003200000000` for p = 0 in the browser.
+  Test `EffectiveAddress_WidenedToLong_HotLoop_MatchesIndex` (20,000 sub-view addresses widened to `long`, every lane):
+  with the old code it aborts the runtime on WebGPU and Wasm; with the fix it passes everywhere.
+  Reported upstream as dotnet/runtime#137923 (standalone repro: github.com/LostBeard/dotnet-wasm-aspointer-long-test).
+
 ## 5.4.39 (forks 2.4.35) - 2026-11-19 - Wasm: device copies between sub-views fixed in busy pages
 
 - **FIX (Wasm): a device copy between sub-views could throw "Target copy range [...) exceeds target buffer size" with

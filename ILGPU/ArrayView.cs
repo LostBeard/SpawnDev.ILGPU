@@ -531,9 +531,22 @@ namespace ILGPU
         /// </summary>
         /// <param name="index">The relative element index.</param>
         /// <returns>The effective address.</returns>
+        /// <remarks>
+        /// Integer arithmetic on the buffer's native pointer, the same address <see cref="LoadEffectiveAddress(long)"/>
+        /// refers to. It was <c>new IntPtr(Unsafe.AsPointer(ref LoadEffectiveAddress(index)))</c>, and in the browser's
+        /// .NET runtime (the Mono interpreter on wasm32) a caller's <c>(long)</c> of that result was WRONG once the call
+        /// was inlined: <c>Unsafe.AsPointer</c> leaves a managed-pointer value, and the interpreter's <c>conv.i8</c> of a
+        /// managed pointer on 32-bit emits its conversion without operands and without retyping the value
+        /// (transform.c, <c>CEE_CONV_I8</c> / <c>STACK_TYPE_MP</c>, .NET 10.0.14 and main). Read as 8 bytes the result
+        /// had the right low word and a garbage high word (SpawnDev.Codecs' sub-view copies, 2026-11-19); stored into a
+        /// <c>long</c> local it aborted the runtime ("transform.c:1132", store-local type mismatch). An integer address
+        /// never is a managed pointer, so every conversion of it is an ordinary one.
+        /// </remarks>
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        internal readonly unsafe IntPtr LoadEffectiveAddressAsPtr(long index) =>
-            new IntPtr(Unsafe.AsPointer(ref LoadEffectiveAddress(index)));
+        internal readonly IntPtr LoadEffectiveAddressAsPtr(long index) =>
+            Buffer.NativePtr + (nint)(BitsPerElement < 8
+                ? (Index + index) * BitsPerElement / 8
+                : (Index + index) * ElementSize);
 
         /// <summary>
         /// Loads the effective address of the current view.
