@@ -47,8 +47,10 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   new test's kernel is found, so the scan sees them). Test `Kernel_CallingAMethodWithoutBody_FailsLoudly` (an
   InternalCall with no body: every backend must fail to compile, launch or synchronize).
 - **NOTE (not ILGPU): the browser .NET runtime's `Math.Acosh` returns finite values for some negative inputs**
-  (`Math.Acosh(-6603.9004)` = -12.696, `Math.Acosh(-2343069.94)` = 7.897; -2 gives NaN; desktop .NET: NaN). The libm
-  test's reference uses the definition (NaN below 1).
+  (`Math.Acosh(-6603.9004)` = -12.696, `Math.Acosh(-2343069.94)` = 7.897; -2 gives NaN; desktop .NET: NaN). Mono calls
+  libc `acosh`, i.e. emscripten's bundled musl, whose older acosh dropped the sign bit for |x| >= 2; fixed in emscripten
+  (issue emscripten-core/emscripten#28164, closed 2026-11-04, a backport of musl's fix), not yet in the emscripten .NET 10
+  ships. The libm test's reference uses the definition (NaN below 1); ILGPU's own Acosh is the fixed musl version.
 
 ## 5.4.37 (forks 2.4.34) - 2026-11-18 - CUDA: page locks made off the accelerator's thread; Wasm: kernel instances reused across dispatches
 
