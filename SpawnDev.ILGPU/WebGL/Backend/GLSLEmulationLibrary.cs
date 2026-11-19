@@ -39,11 +39,81 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         {
             if (!glsl.Contains(F32CorrectlyRoundedPlaceholder))
                 return glsl;
-            bool used = glsl.Contains("_f32_div_rn(") || glsl.Contains("_f32_sqrt_rn(");
+            bool log = glsl.Contains("_f32_log(") || glsl.Contains("_f32_log2(") || glsl.Contains("_f32_log10(");
+            bool used = log || glsl.Contains("_f32_div_rn(") || glsl.Contains("_f32_sqrt_rn(");
             bool trig = glsl.Contains("_f32_sin(") || glsl.Contains("_f32_cos(") || glsl.Contains("_f32_tan(");
+            // GLSL declares before use: the log functions call _f32_div_rn, so they come after it
             return glsl.Replace(F32CorrectlyRoundedPlaceholder,
-                (used ? F32CorrectlyRoundedFunctions : "") + (trig ? F32TrigFunctions : ""));
+                (used ? F32CorrectlyRoundedFunctions : "") + (trig ? F32TrigFunctions : "") + (log ? F32LogFunctions : ""));
         }
+
+        /// <summary>
+        /// MathF.Log / Log2 / Log10 to about 1 ulp: the native log / log2 have an absolute error near 1 (GLSL ES allows
+        /// it; D3D, so Chrome on Windows, has it): log2(0.99999994) came out -1.18e-8 for -8.6e-8. The same functions as
+        /// WGSLEmulationLibrary.F32LogFunctions (FreeBSD msun e_logf.c / e_log2f.c / e_log10f.c; Copyright (C) 1993 by Sun
+        /// Microsystems, Inc. All rights reserved. Developed at SunPro, a Sun Microsystems, Inc. business. Permission to use,
+        /// copy, modify, and distribute this software is freely granted, provided that this notice is preserved.), which
+        /// see. MathMode.Fast keeps the native ones.
+        /// </summary>
+        public const string F32LogFunctions = @"
+// log / log2 / log10: see GLSLEmulationLibrary.F32LogFunctions
+float _f32_klog1p(float f) {
+    float s = _f32_div_rn(f, 2.0 + f);
+    float z = s * s;
+    float w = z * z;
+    float t1 = w * (0.40000972151756287 + w * 0.24279078841209412);
+    float t2 = z * (0.6666666269302368 + w * 0.2849878668785095);
+    float hfsq = 0.5 * f * f;
+    return s * (hfsq + (t2 + t1));
+}
+// (f, k, 1) with x = 2^k (1 + f), 1 + f in [sqrt(2)/2, sqrt(2)); (result, 0, 0) for zero, negative, Inf and NaN
+vec3 _f32_log_reduce(float x0) {
+    float x = x0;
+    uint hx = floatBitsToUint(x);
+    int k = 0;
+    if (hx < 0x00800000u || (hx >> 31u) != 0u) {
+        if ((hx & 0x7fffffffu) == 0u) { return vec3(uintBitsToFloat(0xFF800000u), 0.0, 0.0); }
+        if ((hx >> 31u) != 0u) { return vec3(uintBitsToFloat(0x7FC00000u), 0.0, 0.0); }
+        k = -25;
+        x = x * 33554432.0;
+        hx = floatBitsToUint(x);
+        if (hx < 0x00800000u) { return vec3(uintBitsToFloat(0xFF800000u), 0.0, 0.0); }
+    }
+    if (hx >= 0x7f800000u) { return vec3(x + x, 0.0, 0.0); }
+    k = k + int(hx >> 23u) - 127;
+    hx = hx & 0x007fffffu;
+    uint i = (hx + 0x4afb0du) & 0x800000u;
+    k = k + int(i >> 23u);
+    return vec3(uintBitsToFloat(hx | (i ^ 0x3f800000u)) - 1.0, float(k), 1.0);
+}
+float _f32_log(float x) {
+    vec3 r = _f32_log_reduce(x);
+    if (r.z == 0.0) { return r.x; }
+    float f = r.x;
+    float hfsq = 0.5 * f * f;
+    return r.y * 6.9313812256e-01 - ((hfsq - (_f32_klog1p(f) + r.y * 9.0580006145e-06)) - f);
+}
+float _f32_log2(float x) {
+    if (floatBitsToUint(x) == 0x3f800000u) { return 0.0; }
+    vec3 r = _f32_log_reduce(x);
+    if (r.z == 0.0) { return r.x; }
+    float f = r.x;
+    float hfsq = 0.5 * f * f;
+    float hi = uintBitsToFloat(floatBitsToUint(f - hfsq) & 0xfffff000u);
+    float lo = (f - hi) - hfsq + _f32_klog1p(f);
+    return (lo + hi) * -1.7605285393e-04 + lo * 1.4428710938e+00 + hi * 1.4428710938e+00 + r.y;
+}
+float _f32_log10(float x) {
+    if (floatBitsToUint(x) == 0x3f800000u) { return 0.0; }
+    vec3 r = _f32_log_reduce(x);
+    if (r.z == 0.0) { return r.x; }
+    float f = r.x;
+    float hfsq = 0.5 * f * f;
+    float hi = uintBitsToFloat(floatBitsToUint(f - hfsq) & 0xfffff000u);
+    float lo = (f - hi) - hfsq + _f32_klog1p(f);
+    return r.y * 7.9034151668e-07 + (lo + hi) * -3.1689971365e-05 + lo * 4.3432617188e-01 + hi * 4.3432617188e-01 + r.y * 3.0102920532e-01;
+}
+";
 
         /// <summary>
         /// MathF.Sin / Cos / Tan as accurate as the other backends (about 1 ulp, CUDA / OpenCL / Wasm 5.96e-8 at most):

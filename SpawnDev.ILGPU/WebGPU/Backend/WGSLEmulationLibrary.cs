@@ -70,11 +70,83 @@ fn _f32_neg_zero() -> f32 { return bitcast<f32>(0x80000000u | _ilgpu_runtime_zer
         {
             if (!wgsl.Contains(F32CorrectlyRoundedPlaceholder))
                 return wgsl;
-            bool used = wgsl.Contains("_f32_div_rn(") || wgsl.Contains("_f32_sqrt_rn(");
+            bool log = wgsl.Contains("_f32_log(") || wgsl.Contains("_f32_log2(") || wgsl.Contains("_f32_log10(");
+            bool used = log || wgsl.Contains("_f32_div_rn(") || wgsl.Contains("_f32_sqrt_rn(");
             bool trig = wgsl.Contains("_f32_sin(") || wgsl.Contains("_f32_cos(") || wgsl.Contains("_f32_tan(");
             return wgsl.Replace(F32CorrectlyRoundedPlaceholder,
-                (used ? F32CorrectlyRoundedFunctions : "") + (trig ? F32TrigFunctions : ""));
+                (used ? F32CorrectlyRoundedFunctions : "") + (trig ? F32TrigFunctions : "") + (log ? F32LogFunctions : ""));
         }
+
+        /// <summary>
+        /// MathF.Log / Log2 / Log10 to about 1 ulp. The native log / log2 (D3D, so Chrome on Windows) have an absolute
+        /// error near 1, which WGSL allows (2^-21 in [0.5, 2]): log2(0.99999994) came out -1.18e-8 for -8.6e-8, 24 million
+        /// ulp, and Log10 was log(x) / 2.302585093 on top (Data 2026-11-18, MathFunctions_WithoutILBody_*). FreeBSD msun
+        /// e_logf.c / e_log2f.c / e_log10f.c (Copyright (C) 1993 by Sun Microsystems, Inc. All rights reserved. Developed at
+        /// SunPro, a Sun Microsystems, Inc. business. Permission to use, copy, modify, and distribute this software is
+        /// freely granted, provided that this notice is preserved.): x = 2^k (1 + f), log(1 + f) by the k_log1pf
+        /// polynomial, log2 / log10 with a hi / lo split of f. Measured in C# on every non-negative float: at most 1 ulp
+        /// from the correctly rounded result. A flushed subnormal (D3D) is a zero: -Inf. Uses _f32_div_rn. Emitted when
+        /// called (see the correctly rounded placeholder); MathMode.Fast keeps the native ones.
+        /// </summary>
+        public const string F32LogFunctions = @"
+// log / log2 / log10: see WGSLEmulationLibrary.F32LogFunctions
+fn _f32_klog1p(f: f32) -> f32 {
+    let s = _f32_div_rn(f, 2.0 + f);
+    let z = s * s;
+    let w = z * z;
+    let t1 = w * (0.40000972151756287 + w * 0.24279078841209412);
+    let t2 = z * (0.6666666269302368 + w * 0.2849878668785095);
+    let hfsq = 0.5 * f * f;
+    return s * (hfsq + (t2 + t1));
+}
+// (f, k, 1) with x = 2^k (1 + f), 1 + f in [sqrt(2)/2, sqrt(2)); (result, 0, 0) for zero, negative, Inf and NaN
+fn _f32_log_reduce(x0: f32) -> vec3<f32> {
+    var x = x0;
+    var hx = bitcast<u32>(x);
+    var k = 0;
+    if (hx < 0x00800000u || (hx >> 31u) != 0u) {
+        if ((hx & 0x7fffffffu) == 0u) { return vec3<f32>(_f32_neg_inf(), 0.0, 0.0); }
+        if ((hx >> 31u) != 0u) { return vec3<f32>(_f32_qnan(), 0.0, 0.0); }
+        k = -25;
+        x = x * 33554432.0;
+        hx = bitcast<u32>(x);
+        if (hx < 0x00800000u) { return vec3<f32>(_f32_neg_inf(), 0.0, 0.0); }
+    }
+    if (hx >= 0x7f800000u) { return vec3<f32>(x + x, 0.0, 0.0); }
+    k = k + i32(hx >> 23u) - 127;
+    hx = hx & 0x007fffffu;
+    let i = (hx + 0x4afb0du) & 0x800000u;
+    k = k + i32(i >> 23u);
+    return vec3<f32>(bitcast<f32>(hx | (i ^ 0x3f800000u)) - 1.0, f32(k), 1.0);
+}
+fn _f32_log(x: f32) -> f32 {
+    let r = _f32_log_reduce(x);
+    if (r.z == 0.0) { return r.x; }
+    let f = r.x;
+    let hfsq = 0.5 * f * f;
+    return r.y * 6.9313812256e-01 - ((hfsq - (_f32_klog1p(f) + r.y * 9.0580006145e-06)) - f);
+}
+fn _f32_log2(x: f32) -> f32 {
+    if (bitcast<u32>(x) == 0x3f800000u) { return 0.0; }
+    let r = _f32_log_reduce(x);
+    if (r.z == 0.0) { return r.x; }
+    let f = r.x;
+    let hfsq = 0.5 * f * f;
+    let hi = bitcast<f32>(bitcast<u32>(f - hfsq) & 0xfffff000u);
+    let lo = (f - hi) - hfsq + _f32_klog1p(f);
+    return (lo + hi) * -1.7605285393e-04 + lo * 1.4428710938e+00 + hi * 1.4428710938e+00 + r.y;
+}
+fn _f32_log10(x: f32) -> f32 {
+    if (bitcast<u32>(x) == 0x3f800000u) { return 0.0; }
+    let r = _f32_log_reduce(x);
+    if (r.z == 0.0) { return r.x; }
+    let f = r.x;
+    let hfsq = 0.5 * f * f;
+    let hi = bitcast<f32>(bitcast<u32>(f - hfsq) & 0xfffff000u);
+    let lo = (f - hi) - hfsq + _f32_klog1p(f);
+    return r.y * 7.9034151668e-07 + (lo + hi) * -3.1689971365e-05 + lo * 4.3432617188e-01 + hi * 4.3432617188e-01 + r.y * 3.0102920532e-01;
+}
+";
 
         /// <summary>
         /// MathF.Sin / Cos / Tan as accurate as the other backends (about 1 ulp, CUDA / OpenCL / Wasm 5.96e-8 at most):

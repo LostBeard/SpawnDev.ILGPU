@@ -1,6 +1,52 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.38 (forks 2.4.35) - unreleased
+
+- **FIX (WebGPU; silent wrong results): `if (a || b) { .. } else if (c) return ..;` whose arms meet before the if ends.**
+  The short-circuit flag lowering (5.4.30) emitted the else arm first and the flagged arm after it, assuming the two
+  only meet at the if's merge. With early returns the merge is the function's exit join, and both arms can fall into a
+  common block first: the else arm took that block and everything after it, and the flagged arm emitted only its own
+  phi copies, so the result kept its default 0 (musl's log1pf has this shape: `IntrinsicMath.Log1P(-0.5f)` returned 0 on
+  WebGPU; GLSL and Wasm were right). Such CFGs now take the plain if/else walk, which duplicates the common blocks
+  into both arms. Only kernels that were miscompiled change. Test `ShortCircuit_ArmsConvergeBeforeMerge_AllEmitters`
+  (loop-aware walker, plain kernel and helper; red on both WebGPU lanes without the fix: "got 0").
+- **FIX: `Math` / `MathF.Log2`, `Cbrt`, `Asinh`, `Acosh` and `Atanh` in a kernel.** They have no IL body and were not
+  remapped, so a kernel calling one failed to compile (CUDA: `ptxas fatal: Unresolved extern function 'Log2'`, Tuvok;
+  Velocity / Wasm / OpenCL compile errors; WebGPU silently produced 0, see the open item below). An audit of every
+  `Math` / `MathF` member found exactly these five without an IL body or a remap. `Log2` now maps to the Log2F IR op;
+  the others to ports of musl's libm in the new `ILGPU/IntrinsicMath.Libm.cs` (MIT, plus the Sun notice of the
+  FreeBSD-derived files), which also adds the public `IntrinsicMath.Log1P(float / double)`. The float `Cbrt` is our own
+  (exponent split, three Newton steps in float, no double: WebGPU / WebGL emulate double, and `cbrt(1e-30f)` came out 0
+  through musl's double steps): at most 1 ulp from the correctly rounded result on every positive float (.NET's own
+  `MathF.Cbrt`: 2). `Log2F`'s host implementation is `Math.Log2` now (was `Math.Log(x, 2)`). Test
+  `MathFunctions_WithoutILBody_Float_MatchHost` / `_Double_MatchHost` (1,048,605 float bit patterns, 262,144 doubles):
+  worst error 3 ulp on every lane (limits 3 / 3); WebGPU / WebGL accept flushed subnormals, and their double lane is held
+  to the documented emulation contract (f32 range, ~48 bits, transcendentals in f32). Red without the remaps.
+- **FIX (WebGPU / WebGL; inaccurate results): `MathF.Log` / `Log2` / `Log10` / `Math.Log(a, b)` near 1.** The native
+  log / log2 have an absolute error near 1 (WGSL and GLSL ES allow it; D3D has it): `log2(0.99999994)` was -1.18e-8 for
+  -8.6e-8, 24 million ulp, and Log10 was `log(x) / 2.302585093`. f32 log / log2 / log10 now go through
+  `_f32_log` / `_f32_log2` / `_f32_log10` (WGSL + GLSL emulation libraries, emitted when called; FreeBSD msun e_logf.c /
+  e_log2f.c / e_log10f.c): at most 1 ulp from the correctly rounded result on every non-negative float (measured in
+  C#), and 1 ulp on WebGPU / WebGL. Emulated-double log uses them too. `MathMode.Fast` keeps the native functions.
+  Red with the native functions: WebGL `Log2(0.99999994)` 23,947,836 ulp.
+- **PERF (browser AOT build time): `ArgumentMapper` no longer recurses through nested generic struct types.** Mapping a
+  struct argument wrapped each nesting level in `StructureSource<StructureSource<...>>` /
+  `StructureTarget<...>`, so `MapInstance` was unbounded polymorphic recursion: mono's AOT (browser, WasmDedup) cannot
+  bound it statically and expanded every root combination to its generic depth limit (~31), and most of the dedup pass
+  (~73 of ~91 min for SpawnDev.ILGPU.ML's demo) normalised those wrapper signatures (Bones' mono-aot-cross profile).
+  New `FieldPathSource<TRoot>` / `FieldPathTarget<TRoot>` hold the field path in an array; the walk's instantiations
+  are fixed per root type. The emitted IL is byte-identical: DemoConsole `launcher-il-dump` (argument-mapping IL for
+  structs nested to depth 6 with view fields, every field printed with its declaring type) diffs empty against 5.4.37,
+  and 50 lines with the field path reversed. Build-time measurement on the ML demo: Bones, on 5.4.38-local.1.
+- **OPEN (found while testing the above, not fixed in this release): WebGPU emits 0 for a call it cannot implement**
+  (`// Unmapped fallback` in WGSLCodeGenerator) instead of failing to compile like Velocity / Wasm / CUDA / OpenCL;
+  that is how the unremapped `MathF.Cbrt` above gave 0 instead of an error. Some IR shapes rely on the fallback
+  (WGSLFunctionGenerator notes); next: list the suite kernels that reach it, then make it throw.
+- **NOTE (not ILGPU): the browser .NET runtime's `Math.Acosh` returns finite values for some negative inputs**
+  (`Math.Acosh(-6603.9004)` = -12.696, `Math.Acosh(-2343069.94)` = 7.897; -2 gives NaN; desktop .NET: NaN). The libm
+  test's reference uses the definition (NaN below 1).
+
 ## 5.4.37 (forks 2.4.34) - 2026-11-18 - CUDA: page locks made off the accelerator's thread; Wasm: kernel instances reused across dispatches
 
 - **Release sweep** (d786a00 = 5.4.37-local.1's code, full default PMT, 65.7 min): 9,402 total / 8,646 passed /

@@ -97,5 +97,68 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             if (failures.Count > 0)
                 throw new Exception($"short-circuit shared-block phi wrong ({failures.Count}): {string.Join("; ", failures.Take(12))}");
         });
+        // `if (a || b) { ..early returns..; maybe k = 0 } else if (c) return ..;` then a block BOTH arms reach, then the
+        // exit. The arms meet BEFORE the if's merge (the early returns make the merge the function's exit join), so the
+        // short-circuit flag lowering (TryEmitShortCircuitAsFlag) emitted the else arm first, which took the shared
+        // `if (k != 0)` block and the rest of the function as visited; the flagged arm then emitted only its inner phi
+        // copies and fell off the end: the result kept its default 0 (WebGPU only; musl's log1pf has exactly this
+        // shape: IntrinsicMath.Log1P(-0.5f) returned 0, Data 2026-11-18).
+        static int ScConvergeBody(int x)
+        {
+            int k = 1;
+            int f = 0;
+            if (x < 100 || x > 1000)
+            {
+                if (x < -50) return -7;
+                if (x > 5000) return x;
+                if (x < 0) { k = 0; f = x; }
+            }
+            else if (x > 500)
+                return x * 2;
+            if (k != 0) f = x * 3 + 1;
+            return f * 2 + k;
+        }
+
+        [MethodImpl(MethodImplOptions.NoInlining)]
+        static int ScConvergeHelper(int x) => ScConvergeBody(x);
+
+        static void ScConvergeNoLoopKernel(Index1D i, ArrayView<int> x, ArrayView<int> o) => o[i] = ScConvergeBody(x[i]);
+
+        static void ScConvergeLoopKernel(Index1D i, ArrayView<int> x, ArrayView<int> o)
+        {
+            int acc = 0;
+            for (int t = 0; t <= (x[i] & 7); t++) acc += t;
+            o[i] = ScConvergeBody(x[i]) * 100 + acc;
+        }
+
+        static void ScConvergeHelperKernel(Index1D i, ArrayView<int> x, ArrayView<int> o) => o[i] = ScConvergeHelper(x[i]);
+
+        [TestMethod]
+        public async Task ShortCircuit_ArmsConvergeBeforeMerge_AllEmitters() => await RunTest(async accelerator =>
+        {
+            var inputs = new List<int>();
+            for (int v = -120; v <= 6200; v += 7) inputs.Add(v);
+            inputs.AddRange(new[] { -51, -50, -1, 0, 99, 100, 500, 501, 1000, 1001, 5000, 5001 });
+            int n = inputs.Count;
+            using var dx = accelerator.Allocate1D(inputs.ToArray());
+            using var o = accelerator.Allocate1D<int>(n);
+            var failures = new List<string>();
+            async Task Check(string shape, Action<Index1D, ArrayView<int>, ArrayView<int>> kernel, Func<int, int> want)
+            {
+                var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>>(kernel);
+                k((Index1D)n, dx.View, o.View);
+                var got = await o.CopyToHostAsync<int>();
+                int bad = 0;
+                for (int j = 0; j < n; j++)
+                    if (got[j] != want(inputs[j]) && bad++ < 4)
+                        failures.Add($"{shape}: x={inputs[j]} got {got[j]} want {want(inputs[j])}");
+                if (bad > 4) failures.Add($"{shape}: {bad} of {n} wrong");
+            }
+            await Check("no-loop kernel", ScConvergeNoLoopKernel, ScConvergeBody);
+            await Check("loop kernel", ScConvergeLoopKernel, v => { int acc = 0; for (int t = 0; t <= (v & 7); t++) acc += t; return ScConvergeBody(v) * 100 + acc; });
+            await Check("helper", ScConvergeHelperKernel, ScConvergeBody);
+            if (failures.Count > 0)
+                throw new Exception($"short-circuit arms converging before the merge: {string.Join("; ", failures)}");
+        });
     }
 }

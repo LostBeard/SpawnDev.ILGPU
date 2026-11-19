@@ -289,7 +289,7 @@
         <Summary>Computes log(x) to base 2.</Summary>
         <Flags>Floats</Flags>
         <Call>IntrinsicMath.CPUOnly.Log2</Call>
-        <Implementation>{MathType}.Log({Value0}, {Const2})</Implementation>
+        <Implementation>{MathType}.Log2({Value0})</Implementation>
         <Velocity>
             <Velocity128 SoftwareEmulation="true" />
         </Velocity>

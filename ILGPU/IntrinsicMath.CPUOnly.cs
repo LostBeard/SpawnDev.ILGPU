@@ -202,7 +202,7 @@ namespace ILGPU
             /// <param name="value">The value.</param>
             [MathIntrinsic(MathIntrinsicKind.Log2F)]
             public static double Log2(double value) =>
-                Math.Log(value, 2.0);
+                Math.Log2(value);
 
             /// <summary>
             /// Computes log(x) to base 10.
@@ -465,7 +465,7 @@ namespace ILGPU
             /// <param name="value">The value.</param>
             [MathIntrinsic(MathIntrinsicKind.Log2F)]
             public static float Log2(float value) =>
-                MathF.Log(value, 2.0f);
+                MathF.Log2(value);
 
             /// <summary>
             /// Computes log(x) to base 10.

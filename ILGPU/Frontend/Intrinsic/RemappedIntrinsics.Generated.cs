@@ -137,6 +137,31 @@ namespace ILGPU.Frontend.Intrinsic
                 typeof(double));
             AddRemapping(
                 systemMathType,
+                CPUMathType,
+                "Log2",
+                typeof(double));
+            AddRemapping(
+                systemMathType,
+                MathType,
+                "Cbrt",
+                typeof(double));
+            AddRemapping(
+                systemMathType,
+                MathType,
+                "Asinh",
+                typeof(double));
+            AddRemapping(
+                systemMathType,
+                MathType,
+                "Acosh",
+                typeof(double));
+            AddRemapping(
+                systemMathType,
+                MathType,
+                "Atanh",
+                typeof(double));
+            AddRemapping(
+                systemMathType,
                 MathType,
                 "Min",
                 typeof(sbyte),
@@ -424,6 +449,31 @@ namespace ILGPU.Frontend.Intrinsic
                 systemMathFType,
                 CPUMathType,
                 "Log10",
+                typeof(float));
+                AddRemapping(
+                systemMathFType,
+                CPUMathType,
+                "Log2",
+                typeof(float));
+                AddRemapping(
+                systemMathFType,
+                MathType,
+                "Cbrt",
+                typeof(float));
+                AddRemapping(
+                systemMathFType,
+                MathType,
+                "Asinh",
+                typeof(float));
+                AddRemapping(
+                systemMathFType,
+                MathType,
+                "Acosh",
+                typeof(float));
+                AddRemapping(
+                systemMathFType,
+                MathType,
+                "Atanh",
                 typeof(float));
             AddRemapping(
                 systemMathFType,

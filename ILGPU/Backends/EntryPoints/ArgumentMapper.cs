@@ -337,6 +337,181 @@ namespace ILGPU.Backends.EntryPoints
             }
         }
 
+        // FieldPathSource / FieldPathTarget replace StructureSource<StructureSource<...>> nesting in the recursive struct
+        // walk (MapStructFields / MapPathInstance). The nested form made every level of struct nesting a new generic
+        // instantiation of MapInstance: unbounded polymorphic recursion that a browser AOT build (mono, WasmDedup) cannot
+        // bound statically, so it expanded every root combination to mono's generic depth cap (~31) and spent most of the
+        // dedup pass (~73 of ~91 min for the ML demo) normalising those wrapper signatures (Bones' mono-aot-cross profile,
+        // 2026-11-18). With the path in an array, the walk's instantiations are fixed per root source / target type. The
+        // emitted IL is the same: the root, then one ldflda / ldfld per path field, stfld on the last for a store.
+
+        /// <summary>
+        /// A field of a structure reached from a root source through a path of fields.
+        /// </summary>
+        /// <typeparam name="TRoot">The root source type.</typeparam>
+        protected readonly struct FieldPathSource<TRoot> : ISource
+            where TRoot : struct, ISource
+        {
+            private readonly FieldInfo[]? path;
+
+            /// <summary>
+            /// Constructs a source for the root itself (an empty path).
+            /// </summary>
+            /// <param name="root">The root source.</param>
+            public FieldPathSource(in TRoot root)
+            {
+                Root = root;
+                path = null;
+            }
+
+            private FieldPathSource(in TRoot root, FieldInfo[] fieldPath)
+            {
+                Root = root;
+                path = fieldPath;
+            }
+
+            /// <summary>
+            /// Returns the root source.
+            /// </summary>
+            public TRoot Root { get; }
+
+            /// <summary>
+            /// Returns the number of fields on the path.
+            /// </summary>
+            public int Depth => path?.Length ?? 0;
+
+            /// <summary cref="ISource.SourceType"/>
+            public Type SourceType => path is null ? Root.SourceType : path[path.Length - 1].FieldType;
+
+            /// <summary>
+            /// Returns a source for the given field of this source.
+            /// </summary>
+            /// <param name="field">The field.</param>
+            public FieldPathSource<TRoot> Append(FieldInfo field)
+            {
+                int depth = Depth;
+                var newPath = new FieldInfo[depth + 1];
+                if (path is not null)
+                    Array.Copy(path, newPath, depth);
+                newPath[depth] = field;
+                return new FieldPathSource<TRoot>(Root, newPath);
+            }
+
+            /// <summary>
+            /// Emits the address of the field.
+            /// </summary>
+            public readonly void EmitLoadSourceAddress<TILEmitter>(in TILEmitter emitter)
+                where TILEmitter : struct, IILEmitter
+            {
+                Root.EmitLoadSourceAddress(emitter);
+                if (path is null)
+                    return;
+                foreach (var field in path)
+                    emitter.Emit(OpCodes.Ldflda, field);
+            }
+
+            /// <summary>
+            /// Emits the value of the field.
+            /// </summary>
+            public readonly void EmitLoadSource<TILEmitter>(in TILEmitter emitter)
+                where TILEmitter : struct, IILEmitter
+            {
+                Root.EmitLoadSource(emitter);
+                if (path is null)
+                    return;
+                foreach (var field in path)
+                    emitter.Emit(OpCodes.Ldfld, field);
+            }
+        }
+
+        /// <summary>
+        /// A field of a structure reached from a root target through a path of fields.
+        /// </summary>
+        /// <typeparam name="TRoot">The root target type.</typeparam>
+        protected readonly struct FieldPathTarget<TRoot> : ITarget
+            where TRoot : struct, ITarget
+        {
+            private readonly FieldInfo[]? path;
+
+            /// <summary>
+            /// Constructs a target for the root itself (an empty path).
+            /// </summary>
+            /// <param name="root">The root target.</param>
+            public FieldPathTarget(in TRoot root)
+            {
+                Root = root;
+                path = null;
+            }
+
+            private FieldPathTarget(in TRoot root, FieldInfo[] fieldPath)
+            {
+                Root = root;
+                path = fieldPath;
+            }
+
+            /// <summary>
+            /// Returns the root target.
+            /// </summary>
+            public TRoot Root { get; }
+
+            /// <summary>
+            /// Returns the number of fields on the path.
+            /// </summary>
+            public int Depth => path?.Length ?? 0;
+
+            /// <summary cref="ITarget.TargetType"/>
+            public Type TargetType => path is null ? Root.TargetType : path[path.Length - 1].FieldType;
+
+            /// <summary>
+            /// Returns a target for the given field of this target.
+            /// </summary>
+            /// <param name="field">The field.</param>
+            public FieldPathTarget<TRoot> Append(FieldInfo field)
+            {
+                int depth = Depth;
+                var newPath = new FieldInfo[depth + 1];
+                if (path is not null)
+                    Array.Copy(path, newPath, depth);
+                newPath[depth] = field;
+                return new FieldPathTarget<TRoot>(Root, newPath);
+            }
+
+            /// <summary>
+            /// Emits the address of the field.
+            /// </summary>
+            public readonly void EmitLoadTargetAddress<TILEmitter>(in TILEmitter emitter)
+                where TILEmitter : struct, IILEmitter
+            {
+                Root.EmitLoadTargetAddress(emitter);
+                if (path is null)
+                    return;
+                foreach (var field in path)
+                    emitter.Emit(OpCodes.Ldflda, field);
+            }
+
+            /// <summary>
+            /// Emits a store of the source value into the field.
+            /// </summary>
+            public readonly void EmitStoreTarget<TILEmitter, TSource>(
+                in TILEmitter emitter,
+                in TSource source)
+                where TILEmitter : struct, IILEmitter
+                where TSource : struct, IRawValueSource
+            {
+                if (path is null)
+                {
+                    Root.EmitStoreTarget(emitter, source);
+                    return;
+                }
+                // the parent's address, the value, stfld on the last field
+                Root.EmitLoadTargetAddress(emitter);
+                for (int i = 0; i < path.Length - 1; ++i)
+                    emitter.Emit(OpCodes.Ldflda, path[i]);
+                source.EmitLoadSource(emitter);
+                emitter.Emit(OpCodes.Stfld, path[path.Length - 1]);
+            }
+        }
+
         /// <summary>
         /// A view-parameter source.
         /// </summary>
@@ -725,7 +900,30 @@ namespace ILGPU.Backends.EntryPoints
             in TTarget target)
             where TILEmitter : struct, IILEmitter
             where TSource : struct, ISource
-            where TTarget : struct, ITarget
+            where TTarget : struct, ITarget =>
+            // The root enters the path types once; the walk below never wraps them again, so its instantiations are
+            // fixed per root type (see FieldPathSource).
+            MapStructFields(
+                emitter,
+                new FieldPathSource<TSource>(source),
+                new FieldPathTarget<TTarget>(target));
+
+        /// <summary>
+        /// Maps every field of a structure reached through a field path.
+        /// </summary>
+        /// <typeparam name="TILEmitter">The emitter type.</typeparam>
+        /// <typeparam name="TRootSource">The root source type.</typeparam>
+        /// <typeparam name="TRootTarget">The root target type.</typeparam>
+        /// <param name="emitter">The current emitter.</param>
+        /// <param name="source">The structure source.</param>
+        /// <param name="target">The structure target.</param>
+        private void MapStructFields<TILEmitter, TRootSource, TRootTarget>(
+            in TILEmitter emitter,
+            in FieldPathSource<TRootSource> source,
+            in FieldPathTarget<TRootTarget> target)
+            where TILEmitter : struct, IILEmitter
+            where TRootSource : struct, ISource
+            where TRootTarget : struct, ITarget
         {
             // Resolve type info of source and target types
             var sourceInfo = TypeContext.GetTypeInfo(source.SourceType);
@@ -737,13 +935,39 @@ namespace ILGPU.Backends.EntryPoints
             // Map all field entries
             for (int i = 0, e = sourceInfo.NumFields; i < e; ++i)
             {
-                var fieldSource = new StructureSource<TSource>(
-                    source,
-                    sourceInfo.Fields[i]);
-                var fieldTarget = new StructureTarget<TTarget>(
-                    target,
-                    targetInfo.Fields[i]);
-                MapInstance(emitter, fieldSource, fieldTarget);
+                MapPathInstance(
+                    emitter,
+                    source.Append(sourceInfo.Fields[i]),
+                    target.Append(targetInfo.Fields[i]));
+            }
+        }
+
+        /// <summary>
+        /// Maps a value instance reached through a field path (the same cases as
+        /// <see cref="MapInstance{TILEmitter, TSource, TTarget}(in TILEmitter, in TSource, in TTarget)"/>).
+        /// </summary>
+        private void MapPathInstance<TILEmitter, TRootSource, TRootTarget>(
+            in TILEmitter emitter,
+            in FieldPathSource<TRootSource> source,
+            in FieldPathTarget<TRootTarget> target)
+            where TILEmitter : struct, IILEmitter
+            where TRootSource : struct, ISource
+            where TRootTarget : struct, ITarget
+        {
+            var sourceType = source.SourceType;
+            if (sourceType == target.TargetType ||
+                sourceType.IsEnum)
+            {
+                // Copy object from source to target
+                target.EmitStoreTarget(emitter, source);
+            }
+            else if (sourceType.IsArrayViewType(out Type? elementType))
+            {
+                MapViewInstance(emitter, elementType, source, target);
+            }
+            else
+            {
+                MapStructFields(emitter, source, target);
             }
         }
 

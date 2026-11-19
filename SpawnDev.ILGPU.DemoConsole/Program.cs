@@ -16,6 +16,8 @@ try
         return await FmaContractionBench.Run(args);
 
     // Offline PTX of BackendTestBase.NestedLoopDoWhileKernel (no CUDA device used): `ptx-dump [O0|O1|O2] [out.ptx]`.
+    if (args.Length > 0 && args[0] == "launcher-il-dump")
+        return await LauncherIlDump.Run(args);
     if (args.Length > 0 && args[0] == "ptx-dump")
         return await PtxDump.Run(args);
     // NVVM / libdevice probe (CPU only): `nvvm-probe`.

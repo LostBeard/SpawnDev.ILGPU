@@ -1593,7 +1593,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             }
             else if (op == "binarylog_func")
             {
-                AppendLine($"{target} = log({left}) / log({right});");
+                AppendLine($"{target} = {BinaryLogExpression(value, left.ToString(), right.ToString())};");
             }
             else if (op == "copysign_func")
             {
@@ -1685,6 +1685,24 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 ? $"{TrigFunction(name)}({operand})"
                 : $"{name}({operand})";
 
+        /// <summary>
+        /// log / log2 of a value: the accurate f32 one (EmulationLibrary.F32LogFunctions) for an f32 unless MathMode.Fast.
+        /// The native log / log2 have an absolute error near 1 (log2(0.99999994): 24 million ulp on D3D).
+        /// </summary>
+        protected string AccurateLog(UnaryArithmeticValue value, string name, object operand) => AccurateTrig(value, name, operand);
+
+        /// <summary>log10: the accurate f32 one unless MathMode.Fast, else log(x) / ln(10).</summary>
+        protected string AccurateLog10(UnaryArithmeticValue value, object operand, string fallback) =>
+            CorrectlyRoundedF32 && (TypeGenerator[value.Type] == "f32" || TypeGenerator[value.Type] == "float")
+                ? $"_f32_log10({operand})"
+                : fallback;
+
+        /// <summary>Math.Log(a, b) = log(a) / log(b): accurate logs and a correctly rounded division for f32 unless MathMode.Fast.</summary>
+        protected string BinaryLogExpression(Value value, string left, string right) =>
+            CorrectlyRoundedF32 && (TypeGenerator[value.Type] == "f32" || TypeGenerator[value.Type] == "float")
+                ? $"_f32_div_rn(_f32_log({left}), _f32_log({right}))"
+                : $"log({left}) / log({right})";
+
         /// <summary>Emits a unary arithmetic operation (delegates to <c>GenerateUnOp</c>).</summary>
         /// <param name="value">The IR value.</param>
         public virtual void GenerateCode(UnaryArithmeticValue value)
@@ -1710,9 +1728,11 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             UnaryArithmeticKind.TanhF => $"f64_from_f32(tanh(f64_to_f32({operand})))",
             UnaryArithmeticKind.ExpF => $"f64_from_f32(exp(f64_to_f32({operand})))",
             UnaryArithmeticKind.Exp2F => $"f64_from_f32(exp2(f64_to_f32({operand})))",
-            UnaryArithmeticKind.LogF => $"f64_from_f32(log(f64_to_f32({operand})))",
-            UnaryArithmeticKind.Log2F => $"f64_from_f32(log2(f64_to_f32({operand})))",
-            UnaryArithmeticKind.Log10F => $"f64_from_f32(log(f64_to_f32({operand})) / 2.302585093)",
+            UnaryArithmeticKind.LogF => $"f64_from_f32({TrigFunction("log")}(f64_to_f32({operand})))",
+            UnaryArithmeticKind.Log2F => $"f64_from_f32({TrigFunction("log2")}(f64_to_f32({operand})))",
+            UnaryArithmeticKind.Log10F => CorrectlyRoundedF32
+                ? $"f64_from_f32(_f32_log10(f64_to_f32({operand})))"
+                : $"f64_from_f32(log(f64_to_f32({operand})) / 2.302585093)",
             _ => null
         };
 
@@ -1777,14 +1797,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 UnaryArithmeticKind.TanhF => $"tanh({operand})",
                 UnaryArithmeticKind.ExpF => $"exp({operand})",
                 UnaryArithmeticKind.Exp2F => $"exp2({operand})",
-                UnaryArithmeticKind.LogF => $"log({operand})",
-                UnaryArithmeticKind.Log2F => $"log2({operand})",
+                UnaryArithmeticKind.LogF => AccurateLog(value, "log", operand),
+                UnaryArithmeticKind.Log2F => AccurateLog(value, "log2", operand),
                 UnaryArithmeticKind.SqrtF => operandType == "f32" && CorrectlyRoundedF32 ? $"_f32_sqrt_rn({operand})" : $"sqrt({operand})",
                 UnaryArithmeticKind.RsqrtF => $"1.0 / sqrt({operand})", // Manual inverseSqrt
                 UnaryArithmeticKind.RcpF => $"1.0 / {operand}",
                 UnaryArithmeticKind.FloorF => $"floor({operand})",
                 UnaryArithmeticKind.CeilingF => $"ceil({operand})",
-                UnaryArithmeticKind.Log10F => $"(log({operand}) / 2.302585093)",
+                UnaryArithmeticKind.Log10F => AccurateLog10(value, operand, $"(log({operand}) / 2.302585093)"),
                 // Bit-level NaN/Inf detection for f32 — GPU shader compilers may
                 // optimize away `val != val` or flush NaN in comparisons.
                 // f32 NaN: exponent=0xFF, mantissa!=0. f32 Inf: exponent=0xFF, mantissa==0.

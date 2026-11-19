@@ -7749,7 +7749,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // BinaryLogF: log(left) / log(right)
             if (value.Kind == BinaryArithmeticKind.BinaryLogF)
             {
-                AppendLine($"{prefix}{target} = log({left}) / log({right});");
+                AppendLine($"{prefix}{target} = {BinaryLogExpression(value, left.ToString(), right.ToString())};");
                 return;
             }
 
@@ -9731,6 +9731,31 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 t.Terminator is global::ILGPU.IR.Values.UnconditionalBranch ub && t.Predecessors.Length == 1
                 && !HasNonPhiInstructions(t) && IsArmBlock(t) ? ub.Target : t;
 
+            // the arm blocks reachable from `start` without passing the merge, a block emitted before this if, or the
+            // current loop's header
+            HashSet<BasicBlock> ArmReach(BasicBlock start)
+            {
+                var reached = new HashSet<BasicBlock>(new BasicBlock.Comparer());
+                var work = new Stack<BasicBlock>();
+                work.Push(start);
+                while (work.Count > 0)
+                {
+                    var b = work.Pop();
+                    if (!IsArmBlock(b) || !reached.Add(b)) continue;
+                    foreach (var s in b.Successors)
+                        work.Push(s);
+                }
+                return reached;
+            }
+
+            bool ArmsMeetBeforeMerge(BasicBlock sharedArm, BasicBlock otherArm)
+            {
+                var fromShared = ArmReach(sharedArm);
+                foreach (var b in ArmReach(otherArm))
+                    if (fromShared.Contains(b)) return true;
+                return false;
+            }
+
             for (int side = 0; side < 2; side++)
             {
                 var shared = Through(side == 0 ? branch.TrueTarget : branch.FalseTarget);
@@ -9770,6 +9795,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     { sharedOnlyFromChain = false; break; }
                 }
                 if (!sharedOnlyFromChain) continue;
+
+                // The flag form emits `other` inside the chain and `shared` after it, each once, so the two must not meet
+                // before the merge. They can: with early returns inside `shared` the if's merge is the function's exit
+                // join, and both arms may fall into a common block first (musl's log1pf: `if (a || b) { ..; k = 0 }
+                // else if (c) return x;` then `if (k) {..}`). `other`, emitted first, took that block and everything
+                // after it as visited; `shared` then emitted only its own phi copies and fell off the end, leaving the
+                // result at its default 0 (Data 2026-11-18). Such a CFG goes to the plain if/else walk, which duplicates
+                // the common blocks into both arms (UnvisitSharedTargets). Test: ShortCircuit_ArmsConvergeBeforeMerge_AllEmitters.
+                if (other != mergeNode && ArmsMeetBeforeMerge(shared, other))
+                    continue;
 
                 // the moves of the edge from -> target, and of the pass-through block's own edge when it has one
                 void TakeEdge(BasicBlock target, BasicBlock from)

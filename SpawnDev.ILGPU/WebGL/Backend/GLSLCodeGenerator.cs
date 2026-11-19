@@ -2250,7 +2250,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             if (value.Kind == BinaryArithmeticKind.BinaryLogF)
             {
                 // log_base(x) = log(x) / log(base)
-                AppendLine($"{target} = log({left}) / log({right});");
+                AppendLine($"{target} = {BinaryLogExpression(value, left.ToString(), right.ToString())};");
                 return;
             }
 
@@ -2406,6 +2406,24 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 ? $"{TrigFunction(name)}({operand})"
                 : $"{name}({operand})";
 
+        /// <summary>
+        /// log / log2 of a value: the accurate f32 one (EmulationLibrary.F32LogFunctions) for an f32 unless MathMode.Fast.
+        /// The native log / log2 have an absolute error near 1 (log2(0.99999994): 24 million ulp on D3D).
+        /// </summary>
+        protected string AccurateLog(UnaryArithmeticValue value, string name, object operand) => AccurateTrig(value, name, operand);
+
+        /// <summary>log10: the accurate f32 one unless MathMode.Fast, else log(x) / ln(10).</summary>
+        protected string AccurateLog10(UnaryArithmeticValue value, object operand, string fallback) =>
+            CorrectlyRoundedF32 && (TypeGenerator[value.Type] == "f32" || TypeGenerator[value.Type] == "float")
+                ? $"_f32_log10({operand})"
+                : fallback;
+
+        /// <summary>Math.Log(a, b) = log(a) / log(b): accurate logs and a correctly rounded division for f32 unless MathMode.Fast.</summary>
+        protected string BinaryLogExpression(Value value, string left, string right) =>
+            CorrectlyRoundedF32 && (TypeGenerator[value.Type] == "f32" || TypeGenerator[value.Type] == "float")
+                ? $"_f32_div_rn(_f32_log({left}), _f32_log({right}))"
+                : $"log({left}) / log({right})";
+
         /// <summary>True when <paramref name="value"/> is an integer constant zero.</summary>
         protected static bool IsConstantZero(Value value) =>
             value.Resolve() is PrimitiveValue pv && pv.BasicValueType is BasicValueType.Int8 or BasicValueType.Int16
@@ -2433,9 +2451,11 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             UnaryArithmeticKind.TanhF => $"f64_from_f32(tanh(f64_to_f32({operand})))",
             UnaryArithmeticKind.ExpF => $"f64_from_f32(exp(f64_to_f32({operand})))",
             UnaryArithmeticKind.Exp2F => $"f64_from_f32(exp2(f64_to_f32({operand})))",
-            UnaryArithmeticKind.LogF => $"f64_from_f32(log(f64_to_f32({operand})))",
-            UnaryArithmeticKind.Log2F => $"f64_from_f32(log2(f64_to_f32({operand})))",
-            UnaryArithmeticKind.Log10F => $"f64_from_f32(log(f64_to_f32({operand})) / 2.302585093)",
+            UnaryArithmeticKind.LogF => $"f64_from_f32({TrigFunction("log")}(f64_to_f32({operand})))",
+            UnaryArithmeticKind.Log2F => $"f64_from_f32({TrigFunction("log2")}(f64_to_f32({operand})))",
+            UnaryArithmeticKind.Log10F => CorrectlyRoundedF32
+                ? $"f64_from_f32(_f32_log10(f64_to_f32({operand})))"
+                : $"f64_from_f32(log(f64_to_f32({operand})) / 2.302585093)",
             _ => null
         };
 
@@ -2528,8 +2548,8 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 UnaryArithmeticKind.TanhF => $"tanh({operand})",
                 UnaryArithmeticKind.ExpF => $"exp({operand})",
                 UnaryArithmeticKind.Exp2F => $"exp2({operand})",
-                UnaryArithmeticKind.LogF => $"log({operand})",
-                UnaryArithmeticKind.Log2F => $"log2({operand})",
+                UnaryArithmeticKind.LogF => AccurateLog(value, "log", operand),
+                UnaryArithmeticKind.Log2F => AccurateLog(value, "log2", operand),
                 UnaryArithmeticKind.SqrtF => TypeGenerator[value.Value.Type] == "float" && CorrectlyRoundedF32 ? $"_f32_sqrt_rn({operand})" : $"sqrt({operand})",
                 UnaryArithmeticKind.RsqrtF => $"inversesqrt({operand})",
                 UnaryArithmeticKind.RcpF => $"1.0 / {operand}",
@@ -2538,7 +2558,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 UnaryArithmeticKind.IsNaNF => $"(isnan({operand}) ? 1 : 0)",
                 UnaryArithmeticKind.IsInfF => $"(isinf({operand}) ? 1 : 0)",
                 UnaryArithmeticKind.IsFinF => $"((!isnan({operand}) && !isinf({operand})) ? 1 : 0)",
-                UnaryArithmeticKind.Log10F => $"(log({operand}) / log(10.0))",
+                UnaryArithmeticKind.Log10F => AccurateLog10(value, operand, $"(log({operand}) / log(10.0))"),
                 // PopC: Hamming weight via Kernighan's algorithm — not available in all WebGL2 vertex shader implementations
                 UnaryArithmeticKind.PopC => EmitPopC(target, operand),
                 // CLZ: count leading zeros via binary search

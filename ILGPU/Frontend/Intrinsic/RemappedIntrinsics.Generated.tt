@@ -39,7 +39,14 @@ var unaryMathFunctions = new (string, TypeInformation, TypeInformation, string)[
         ("Floor",   FloatTypes[1], FloatTypes[2],     "CPUMathType"),
         ("Ceiling", FloatTypes[1], FloatTypes[2],     "CPUMathType"),
         ("Log",     FloatTypes[1], FloatTypes[2],     "CPUMathType"),
-        ("Log10",   FloatTypes[1], FloatTypes[2],     "CPUMathType")
+        ("Log10",   FloatTypes[1], FloatTypes[2],     "CPUMathType"),
+        // No IL body in System.Math / MathF either (audit 2026-11-18, Tuvok: MathF.Log2 = ptxas "Unresolved extern
+        // function"): Log2 has an IR op (CPUOnly.Log2); the others are ported from musl (IntrinsicMath.Libm.cs).
+        ("Log2",    FloatTypes[1], FloatTypes[2],     "CPUMathType"),
+        ("Cbrt",    FloatTypes[1], FloatTypes[2],     "MathType"),
+        ("Asinh",   FloatTypes[1], FloatTypes[2],     "MathType"),
+        ("Acosh",   FloatTypes[1], FloatTypes[2],     "MathType"),
+        ("Atanh",   FloatTypes[1], FloatTypes[2],     "MathType")
     };
 
 var binaryMathFunctions = new (string, TypeInformation, TypeInformation, string)[]
