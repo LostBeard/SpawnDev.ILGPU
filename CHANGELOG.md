@@ -16,7 +16,8 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   `(long)(IntPtr)Unsafe.AsPointer(ref Unsafe.AsRef<byte>(p))` returns `0x0000003200000000` for p = 0 in the browser.
   Test `EffectiveAddress_WidenedToLong_HotLoop_MatchesIndex` (20,000 sub-view addresses widened to `long`, every lane):
   with the old code it aborts the runtime on WebGPU and Wasm; with the fix it passes everywhere.
-  Reported upstream as dotnet/runtime#137923 (standalone repro: github.com/LostBeard/dotnet-wasm-aspointer-long-test).
+  Reported upstream as dotnet/runtime#137923 (standalone repro: github.com/LostBeard/dotnet-wasm-aspointer-long-test);
+  tracked here as #11.
 
 ## 5.4.39 (forks 2.4.35) - 2026-11-19 - Wasm: device copies between sub-views fixed in busy pages
 
