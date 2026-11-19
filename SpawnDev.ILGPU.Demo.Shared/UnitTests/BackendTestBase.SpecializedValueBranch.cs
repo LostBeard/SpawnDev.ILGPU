@@ -42,6 +42,13 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             for (int i = 0; i < n; i++) input[i] = i * 37 - 5000;
             using var x = accelerator.Allocate1D(input);
             using var y = accelerator.Allocate1D<int>(n);
+            // The suite caps the shader cache (TestShaderCacheCap = 64): at the cap each new shader evicts one and the count
+            // cannot rise (the 5.4.39 gate read "0 shaders for 4 values" on both WebGPU lanes). Unlimited while this test
+            // counts, as KernelLoadAsync_LauncherMatchesCpu does.
+            var savedCap = SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.MaxCachedShaders;
+            SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.MaxCachedShaders = 0;
+            try
+            {
             int shadersBefore = (accelerator as SpawnDev.ILGPU.WebGPU.WebGPUAccelerator)?.CachedShaderCount ?? -1;
             var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, SpecializedValue<int>, ArrayView<int>, ArrayView<int>>(SpecializedBranchKernel);
             // every value twice, interleaved, so a launch reusing the previous value's compiled kernel would show
@@ -57,6 +64,8 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             // which can count its shaders, 4 distinct values = 4 shaders (measured 2026-11-19), so each holds only its own branch.
             if (accelerator is SpawnDev.ILGPU.WebGPU.WebGPUAccelerator webgpu && webgpu.CachedShaderCount - shadersBefore != 4)
                 throw new Exception($"WebGPU compiled {webgpu.CachedShaderCount - shadersBefore} shaders for 4 specialized values; expected 4 (one per value)");
+            }
+            finally { SpawnDev.ILGPU.WebGPU.Backend.WebGPUBackend.MaxCachedShaders = savedCap; }
         });
     }
 }

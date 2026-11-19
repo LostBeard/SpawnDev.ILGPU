@@ -1,7 +1,7 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.39 (forks 2.4.35) - unreleased
+## 5.4.39 (forks 2.4.35) - 2026-11-19 - Wasm: device copies between sub-views fixed in busy pages
 
 - **FIX (Wasm): a device copy between sub-views could throw "Target copy range [...) exceeds target buffer size" with
   a garbage target offset in a busy page.** `WasmMemoryBuffer.CopyTo` widened the target view's 32-bit address straight
@@ -11,12 +11,14 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   offset now goes through `(int)` like the source offset, which was always right (buffers are 32-bit offsets in the
   linear memory). Test `DeviceCopy_SubViewsAtOffsets_BothDirections` (offset sub-views both directions, CopyTo and
   CopyFrom, 600 hot copies; all 10 lanes) covers the copy paths; the failure itself needs a busier page than one test
-  makes, so the red / green proof is Geordi's Codecs recipe on 5.4.38 vs 5.4.39-local.1.
+  makes, so the red / green proof is Geordi's Codecs recipe: on 5.4.38 8 Wasm failures (two runs), on 5.4.39-local.1
+  24/24 passed (two runs).
 - **TEST: `SpecializedValue_SelectsItsBranch_EveryValue`.** A `SpecializedValue<int>` parameter selecting one of four code
   paths, every value launched twice interleaved, on every lane. The only other SpecializedValue test needs shared memory,
   so WebGL had never run a specialized kernel; it does (all 10 lanes pass). On WebGPU, which counts its shaders, 4 distinct
   values compile exactly 4 shaders (one per value, the other branches folded away): asserted. For SpawnDev.Codecs' 9-op Celt
-  test kernel, whose cold WebGL compile takes ~28 s.
+  test kernel, whose cold WebGL compile takes ~28 s. The shader count is taken with the suite's 64-shader cache cap lifted (at the cap each new shader
+  evicts one, so the full gate first read "0 shaders for 4 values").
 
 ## 5.4.38 (forks 2.4.35) - 2026-11-19 - Math / MathF Log2, Cbrt, Asinh, Acosh, Atanh in kernels; accurate WebGPU / WebGL log; two silent-zero fixes; browser AOT builds
 
