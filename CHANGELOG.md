@@ -1,6 +1,14 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.39 (forks 2.4.35) - unreleased
+
+- **TEST: `SpecializedValue_SelectsItsBranch_EveryValue`.** A `SpecializedValue<int>` parameter selecting one of four code
+  paths, every value launched twice interleaved, on every lane. The only other SpecializedValue test needs shared memory,
+  so WebGL had never run a specialized kernel; it does (all 10 lanes pass). On WebGPU, which counts its shaders, 4 distinct
+  values compile exactly 4 shaders (one per value, the other branches folded away): asserted. For SpawnDev.Codecs' 9-op Celt
+  test kernel, whose cold WebGL compile takes ~28 s.
+
 ## 5.4.38 (forks 2.4.35) - 2026-11-19 - Math / MathF Log2, Cbrt, Asinh, Acosh, Atanh in kernels; accurate WebGPU / WebGL log; two silent-zero fixes; browser AOT builds
 
 - **Release sweep** (bea6186 = 5.4.38-local.2's code, full default PMT, 58.3 min, exclusive): 9,442 total / 8,686 passed /
