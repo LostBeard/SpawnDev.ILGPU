@@ -3,6 +3,15 @@
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 ## 5.4.39 (forks 2.4.35) - unreleased
 
+- **FIX (Wasm): a device copy between sub-views could throw "Target copy range [...) exceeds target buffer size" with
+  a garbage target offset in a busy page.** `WasmMemoryBuffer.CopyTo` widened the target view's 32-bit address straight
+  to `long`; once the path was hot (after many earlier copies in the page) the browser runtime produced it with garbage
+  high bits, low word right (`[30064771072, ...)` = 7 * 2^32, `[412316860744, ...)` = 96 * 2^32 + 328; Geordi,
+  SpawnDev.Codecs WebP / AV1 ALPH, 2026-11-19), the same "wrong once hot" class as dotnet/runtime#136688. The target
+  offset now goes through `(int)` like the source offset, which was always right (buffers are 32-bit offsets in the
+  linear memory). Test `DeviceCopy_SubViewsAtOffsets_BothDirections` (offset sub-views both directions, CopyTo and
+  CopyFrom, 600 hot copies; all 10 lanes) covers the copy paths; the failure itself needs a busier page than one test
+  makes, so the red / green proof is Geordi's Codecs recipe on 5.4.38 vs 5.4.39-local.1.
 - **TEST: `SpecializedValue_SelectsItsBranch_EveryValue`.** A `SpecializedValue<int>` parameter selecting one of four code
   paths, every value launched twice interleaved, on every lane. The only other SpecializedValue test needs shared memory,
   so WebGL had never run a specialized kernel; it does (all 10 lanes pass). On WebGPU, which counts its shaders, 4 distinct

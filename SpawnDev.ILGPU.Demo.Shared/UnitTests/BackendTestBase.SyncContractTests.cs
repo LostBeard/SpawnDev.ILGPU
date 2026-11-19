@@ -218,5 +218,68 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 if (r2[i] != i * 2)
                     throw new Exception($"2D flat view CopyTo 1D wrong at {i}: expected {i * 2}, got {r2[i]}");
         });
+
+        // Device copies between SUB-VIEWS at non-zero offsets, both directions and both entry points. Wasm threw in
+        // WasmMemoryBuffer.ValidateBufferCopyBounds with a garbage target offset ("Target copy range [30064771072, ...)
+        // exceeds target buffer size 82944", 7 * 2^32) for a.View.SubView(2n, 3n).CopyTo(b.View.SubView(0, 3n)) with int
+        // views, but only after many earlier copies in the page (Geordi, SpawnDev.Codecs WebP, 2026-11-19): the target
+        // offset was widened from a 32-bit native int straight to long, which the browser runtime got wrong once hot. The
+        // copies run hot here (600 of them). Results are compared with Span.SequenceEqual, not hand-written loops: a plain
+        // int[] check loop in this test stopped advancing in the browser once hot (it never reached i = 4096 in 60 s; same
+        // runtime class), which hid the result behind a timeout. Sizes from Geordi's call (b = 82,944 bytes, n = 6,912).
+        [TestMethod(Timeout = 120000)]
+        public async Task DeviceCopy_SubViewsAtOffsets_BothDirections() => await RunTest(async accelerator =>
+        {
+            const int n = 6912;
+            var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(SyncContract_FillKernel);
+            using var a = accelerator.Allocate1D<int>(5 * n);
+            using var b = accelerator.Allocate1D<int>(3 * n);
+            using var c = accelerator.Allocate1D<int>(5 * n);
+            kernel((Index1D)(5 * n), a.View);   // a[i] = i * 2
+            await accelerator.SynchronizeAsync();
+            var aHost = await a.CopyToHostAsync<int>();
+
+            static void Check(string what, ReadOnlySpan<int> got, ReadOnlySpan<int> want, AcceleratorType type)
+            {
+                if (got.SequenceEqual(want))
+                    return;
+                int i = 0;
+                while (i < got.Length && got[i] == want[i]) i++;
+                throw new Exception($"{type}: {what} wrong at {i}: expected {want[i]}, got {got[i]}");
+            }
+
+            // 1) source sub-view at an offset -> target sub-view at 0 (Geordi's call), through CopyTo
+            a.View.SubView(2 * n, 3 * n).CopyTo(b.View.SubView(0, 3 * n));
+            await accelerator.SynchronizeAsync();
+            var rb = await b.CopyToHostAsync<int>();
+            Check("a[2n..5n).CopyTo(b[0..3n))", rb, aHost.AsSpan(2 * n, 3 * n), accelerator.AcceleratorType);
+
+            // 2) target sub-view at an offset, through CopyFrom: c[n .. 4n) = b[0 .. 3n)
+            await c.View.MemSetToZeroAsync(accelerator.DefaultStream);
+            c.View.SubView(n, 3 * n).CopyFrom(b.View.SubView(0, 3 * n));
+            await accelerator.SynchronizeAsync();
+            var rc = await c.CopyToHostAsync<int>();
+            var wantC = new int[5 * n];
+            aHost.AsSpan(2 * n, 3 * n).CopyTo(wantC.AsSpan(n, 3 * n));
+            Check("c[n..4n).CopyFrom(b[0..3n))", rc, wantC, accelerator.AcceleratorType);
+
+            // 3) HOT: 600 small copies between sub-views at varying offsets (both sides), c[off + n ..) = a[off ..)
+            for (int k = 0; k < 600; k++)
+            {
+                int off = (k * 37) % (2 * n);
+                a.View.SubView(off, 16).CopyTo(c.View.SubView(off + n, 16));
+                aHost.AsSpan(off, 16).CopyTo(wantC.AsSpan(off + n, 16));
+            }
+            await accelerator.SynchronizeAsync();
+            var rc2 = await c.CopyToHostAsync<int>();
+            Check("600 hot sub-view copies", rc2, wantC, accelerator.AcceleratorType);
+
+            // 4) and Geordi's call once more after them, now hot
+            await b.View.MemSetToZeroAsync(accelerator.DefaultStream);
+            a.View.SubView(2 * n, 3 * n).CopyTo(b.View.SubView(0, 3 * n));
+            await accelerator.SynchronizeAsync();
+            var rb2 = await b.CopyToHostAsync<int>();
+            Check("a[2n..5n).CopyTo(b[0..3n)) after the hot copies", rb2, aHost.AsSpan(2 * n, 3 * n), accelerator.AcceleratorType);
+        });
 }
 }

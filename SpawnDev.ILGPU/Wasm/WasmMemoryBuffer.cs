@@ -633,7 +633,15 @@ namespace SpawnDev.ILGPU.Wasm
             // copy still runs after any kernel producing this buffer.
             if (((IContiguousArrayView)targetView).Buffer is WasmMemoryBuffer wasmTarget)
             {
-                wasmTarget.CopyFromBufferOrdered(stream, this, srcOffset, (long)targetView.LoadEffectiveAddressAsPtr(), length);
+                // The target offset goes through (int) like srcOffset above. It was `(long)targetView.LoadEffectiveAddressAsPtr()`:
+                // widening the 32-bit native int straight to long came out with GARBAGE HIGH BITS in the browser once the
+                // path was hot (low word right: "Target copy range [30064771072, ...)" = 7 * 2^32, [412316860744, ...) =
+                // 96 * 2^32 + 328; Geordi, SpawnDev.Codecs, 2026-11-19; only after many earlier copies in the page, the same
+                // "wrong once hot" class as dotnet/runtime#136688), while the (int) source offset was always right. Every other
+                // offset in this file is an int (buffers are 32-bit offsets in the linear memory).
+                // Test: DeviceCopy_SubViewsAtOffsets_BothDirections.
+                int dstOffset = (int)targetView.LoadEffectiveAddressAsPtr();
+                wasmTarget.CopyFromBufferOrdered(stream, this, srcOffset, dstOffset, length);
                 return;
             }
 
