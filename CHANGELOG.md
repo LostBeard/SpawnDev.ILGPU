@@ -1,8 +1,16 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.38 (forks 2.4.35) - unreleased
+## 5.4.38 (forks 2.4.35) - 2026-11-19 - Math / MathF Log2, Cbrt, Asinh, Acosh, Atanh in kernels; accurate WebGPU / WebGL log; two silent-zero fixes; browser AOT builds
 
+- **Release sweep** (bea6186 = 5.4.38-local.2's code, full default PMT, 58.3 min, exclusive): 9,442 total / 8,686 passed /
+  0 failed / 756 skipped (5.4.37: 9,402 / 8,646 / 0 / 756; +40 = the 4 new tests x 10 lanes); +4.4% wall time on the
+  last quiet sweep (5.4.36), Phase B (Wasm) 476 s (478). ML gate (Tuvok, full ML sweep on 5.4.38-local.2, ML 74c81faa):
+  7,812 / 0 / 495 of 8,307, ZERO outcome changes vs 5.4.37 (WebGPU, WebGL and Wasm identical), no
+  UnsupportedKernelFeatureException anywhere, all lanes 0.95 - 0.99x. Codecs gate (Geordi, on 5.4.38-local.2): VP9 WGSL
+  size budget passes with all 12 kernels char-identical to 5.4.37; WebGPUCodecsTests 1,226 / 0 / 2 (as 5.4.37);
+  WebGLCodecsTests 404 / 1 / 1, the 1 a cold-compile timeout of a test kernel whose GLSL is identical under 5.4.37 and
+  5.4.38 (449,460 chars each), limit raised in Codecs.
 - **FIX (WebGPU; silent wrong results): `if (a || b) { .. } else if (c) return ..;` whose arms meet before the if ends.**
   The short-circuit flag lowering (5.4.30) emitted the else arm first and the flagged arm after it, assuming the two
   only meet at the if's merge. With early returns the merge is the function's exit join, and both arms can fall into a
@@ -38,7 +46,9 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   New `FieldPathSource<TRoot>` / `FieldPathTarget<TRoot>` hold the field path in an array; the walk's instantiations
   are fixed per root type. The emitted IL is byte-identical: DemoConsole `launcher-il-dump` (argument-mapping IL for
   structs nested to depth 6 with view fields, every field printed with its declaring type) diffs empty against 5.4.37,
-  and 50 lines with the field path reversed. Build-time measurement on the ML demo: Bones, on 5.4.38-local.1.
+  and 50 lines with the field path reversed. Standalone repro without ILGPU (Bones, github.com/LostBeard/mono-wasm-aot-gsharedvt-recursion, .NET 10.0.14):
+  the MonoAOTCompiler task took 8,050 s with the old recursive shape and 5.15 s with the field-path shape (210 more
+  instances, ~1,560x the time); the ML demo measurement on 5.4.38 follows in a later entry.
 - **FIX (WebGPU / WebGL; silent wrong results): a call the generator cannot implement fails to compile.** WGSL and GLSL
   emitted it as a zero (`// Call: X (Unmapped)`) and ran: before the remap above, `MathF.Cbrt` came out 0 on WebGPU
   where Velocity / Wasm / CUDA / OpenCL refused the kernel. Both now throw `UnsupportedKernelFeatureException` naming
