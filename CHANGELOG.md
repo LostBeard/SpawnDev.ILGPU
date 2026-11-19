@@ -48,7 +48,10 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   structs nested to depth 6 with view fields, every field printed with its declaring type) diffs empty against 5.4.37,
   and 50 lines with the field path reversed. Standalone repro without ILGPU (Bones, github.com/LostBeard/mono-wasm-aot-gsharedvt-recursion, .NET 10.0.14):
   the MonoAOTCompiler task took 8,050 s with the old recursive shape and 5.15 s with the field-path shape (210 more
-  instances, ~1,560x the time); the ML demo measurement on 5.4.38 follows in a later entry.
+  instances, ~1,560x the time). ML demo, measured after the release (Bones, ML c2504e33 on 5.4.38 from nuget.org,
+  browser AOT, WasmDedup on, local .NET 10.0.14): the whole MonoAOTCompiler task took 71 s; the aot-instances pass alone
+  took ~91 min before (89 min on GitHub; 54,728 instances emitted at 19.2 ms each, now 53,952 at 0.19 ms). The whole demo
+  publish went from 2 h 40 min (GitHub) to 1,004 s, part of it SpawnDev.ILGPU.ML moving its kernels to their own assembly.
 - **FIX (WebGPU / WebGL; silent wrong results): a call the generator cannot implement fails to compile.** WGSL and GLSL
   emitted it as a zero (`// Call: X (Unmapped)`) and ran: before the remap above, `MathF.Cbrt` came out 0 on WebGPU
   where Velocity / Wasm / CUDA / OpenCL refused the kernel. Both now throw `UnsupportedKernelFeatureException` naming
