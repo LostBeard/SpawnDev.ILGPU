@@ -1,6 +1,22 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.41 (forks 2.4.36) - unreleased
+
+- **NEW: `ArrayView<T>` / `ArrayView1D<T, Stride1D.Dense>.CopyToHostUint8ArrayAsync()`** copies exactly a view's bytes to a
+  new JS `Uint8Array` (browser backends: never through the .NET heap). For views an API returns without their buffer
+  (Lore, SpawnGen: SpawnDev.Codecs' `EncodeAnimationToDeviceAsync` result kept in JS).
+- **FIX: the `MemoryBuffer` readbacks (`CopyToHostAsync<T>`, `CopyToHostUint8ArrayAsync`, `CopyToHostTypeArrayAsync<T>`) threw
+  `InvalidCastException` for the native buffer behind a view** (`((IContiguousArrayView)view).Buffer`): they cast the buffer
+  to `IArrayView`, which a `MemoryBuffer1D` is and a backend buffer is not. They take either now, and `CopyToHostAsync<T>`
+  counts elements as `LengthInBytes / sizeof(T)` (a backend buffer counts its own element size).
+- **FIX: the `Uint8Array` / TypedArray readbacks return an owned copy on Wasm and WebGL.** They returned a view of the
+  buffer's `SharedArrayBuffer` (Wasm) or its CPU mirror (WebGL), so a later write to the buffer, or the next readback of
+  it, changed a result already handed out (and some browser APIs refuse shared memory). WebGPU already returned a copy.
+  Tests `ViewReadback_Uint8Array_ExactBytes_OwnedCopy` (browser lanes: byte and int sub-views, the native-buffer call,
+  results unchanged after the buffer is overwritten; the WebGL copy fix was found by it) and
+  `NativeBufferBehindView_CopyToHostAsync_CountsInT` (every lane). Red on the old readbacks: `InvalidCastException`.
+
 ## 5.4.40 (forks 2.4.36) - 2026-11-19 - Browser: a view address read as long no longer aborts the .NET runtime (Mono interpreter bug)
 
 - **FIX (browser): a view's address read as `long` on the host could abort the page's .NET runtime, or come back with

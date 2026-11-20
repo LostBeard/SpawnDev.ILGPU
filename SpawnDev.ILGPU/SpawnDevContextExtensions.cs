@@ -351,46 +351,48 @@ namespace SpawnDev.ILGPU
         public static async Task<T[]> CopyToHostAsync<T>(
             this MemoryBuffer buffer) where T : unmanaged
         {
-            var iView = (IArrayView)buffer;
+            var native = NativeBufferOf(buffer);
+            // in elements of T from the bytes: a native buffer (IContiguousArrayView.Buffer) counts its own element size
+            long count = buffer.LengthInBytes / System.Runtime.CompilerServices.Unsafe.SizeOf<T>();
 
             // Check for WebGPU buffer
-            if (iView.Buffer is WebGPUMemoryBuffer webGpuBuffer)
+            if (native is WebGPUMemoryBuffer webGpuBuffer)
             {
                 var byteData = await webGpuBuffer.NativeBuffer.CopyToHostAsync();
-                var result = new T[buffer.Length];
-                MemoryMarshal.Cast<byte, T>(byteData).CopyTo(new Span<T>(result));
+                var result = new T[count];
+                MemoryMarshal.Cast<byte, T>(byteData).Slice(0, result.Length).CopyTo(new Span<T>(result));
                 return result;
             }
 
             // Check for WebGL2 buffer — must request readback from GL worker first
-            if (iView.Buffer is WebGLMemoryBuffer webGlBuffer)
+            if (native is WebGLMemoryBuffer webGlBuffer)
             {
                 var accel = (WebGLAccelerator)buffer.Accelerator;
                 using var readback = await accel.ReadbackAndGetUint8ArrayAsync(webGlBuffer);
                 var byteData = readback.ReadBytes();
-                var result = new T[buffer.Length];
-                MemoryMarshal.Cast<byte, T>(byteData).CopyTo(new Span<T>(result));
+                var result = new T[count];
+                MemoryMarshal.Cast<byte, T>(byteData).Slice(0, result.Length).CopyTo(new Span<T>(result));
                 return result;
             }
 
 
 
             // Check for Wasm buffer
-            if (iView.Buffer is WasmMemoryBuffer wasmBuffer)
+            if (native is WasmMemoryBuffer wasmBuffer)
             {
                 // Implicit sync before readback - match desktop behavior where
                 // CopyToCPU calls stream.Synchronize() before reading
                 if (buffer.Accelerator is WasmAccelerator wasmAccel)
                     await wasmAccel.SynchronizeAsync();
                 var byteData = wasmBuffer.TypedArrayView.ReadBytes();
-                var result = new T[buffer.Length];
-                MemoryMarshal.Cast<byte, T>(byteData).CopyTo(new Span<T>(result));
+                var result = new T[count];
+                MemoryMarshal.Cast<byte, T>(byteData).Slice(0, result.Length).CopyTo(new Span<T>(result));
                 return result;
             }
 
             // CPU buffer — use standard ILGPU synchronous copy
-            var cpuResult = new T[buffer.Length];
-            buffer.AsArrayView<T>(0, buffer.Length).CopyToCPU(cpuResult);
+            var cpuResult = new T[count];
+            buffer.AsArrayView<T>(0, count).CopyToCPU(cpuResult);
             return cpuResult;
         }
 
@@ -403,36 +405,36 @@ namespace SpawnDev.ILGPU
         /// <returns></returns>
         public static async Task<Uint8Array> CopyToHostUint8ArrayAsync(this MemoryBuffer buffer,long sourceByteOffset = 0, long? copyBytes = null)
         {
-            var iView = (IArrayView)buffer;
+            var native = NativeBufferOf(buffer);
 
             // Check for WebGPU buffer
-            if (iView.Buffer is WebGPUMemoryBuffer webGpuBuffer)
+            if (native is WebGPUMemoryBuffer webGpuBuffer)
             {
                 var result = await webGpuBuffer.NativeBuffer.CopyToHostUint8ArrayAsync(sourceByteOffset, copyBytes);
                 return result;
             }
 
-            // Check for WebGL2 buffer — request readback from GL worker
-            if (iView.Buffer is WebGLMemoryBuffer webGlBuffer)
+            // Check for WebGL2 buffer — request readback from GL worker. An owned copy (Slice): the readback is a view
+            // of the buffer's CPU mirror, which the next host write or readback of the buffer changes
+            if (native is WebGLMemoryBuffer webGlBuffer)
             {
                 var accel = (WebGLAccelerator)buffer.Accelerator;
-                return await accel.ReadbackAndGetUint8ArrayAsync(webGlBuffer, sourceByteOffset, copyBytes);
+                using var window = await accel.ReadbackAndGetUint8ArrayAsync(webGlBuffer, sourceByteOffset, copyBytes);
+                return window.Slice();
             }
 
 
 
-            // Check for Wasm buffer
-            if (iView.Buffer is WasmMemoryBuffer wasmBuffer)
+            // Check for Wasm buffer: an owned copy (Slice), not a view of the buffer's SharedArrayBuffer that later
+            // writes to the buffer would change (and that some browser APIs refuse, being shared memory)
+            if (native is WasmMemoryBuffer wasmBuffer)
             {
-                // Implicit sync before readback - match desktop behavior
-                if (buffer.Accelerator is WasmAccelerator wasmAccel)
-                    await wasmAccel.SynchronizeAsync();
-                using var uint8Array = new Uint8Array(wasmBuffer.SharedBuffer);
-                return copyBytes == null ? uint8Array.SubArray(sourceByteOffset) : uint8Array.SubArray(sourceByteOffset, copyBytes.Value + sourceByteOffset);
+                using var window = await wasmBuffer.CopyToHostUint8ArrayAsync(sourceByteOffset, copyBytes);
+                return window.Slice();
             }
 
             // Check for CPU buffer
-            if (iView.Buffer is CPUMemoryBuffer)
+            if (native is CPUMemoryBuffer)
             {
                 // CPU buffer — use standard ILGPU synchronous copy
                 var cpuResult = await CopyToHostAsync<byte>(buffer);
@@ -451,38 +453,81 @@ namespace SpawnDev.ILGPU
         /// <returns></returns>
         public static async Task<T> CopyToHostTypeArrayAsync<T>(this MemoryBuffer buffer) where T : TypedArray
         {
-            var iView = (IArrayView)buffer;
+            var native = NativeBufferOf(buffer);
 
             // Check for WebGPU buffer
-            if (iView.Buffer is WebGPUMemoryBuffer webGpuBuffer)
+            if (native is WebGPUMemoryBuffer webGpuBuffer)
             {
                 var result = await webGpuBuffer.NativeBuffer.CopyToHostUint8ArrayAsync();
                 return result.ReCast<T>();
             }
 
             // Check for WebGL2 buffer — request readback from GL worker
-            if (iView.Buffer is WebGLMemoryBuffer webGlBuffer)
+            if (native is WebGLMemoryBuffer webGlBuffer)
             {
                 var accel = (WebGLAccelerator)buffer.Accelerator;
                 using var readback = await accel.ReadbackAndGetUint8ArrayAsync(webGlBuffer);
-                return readback.ReCast<T>();
+                using var copy = readback.Slice();          // an owned copy, as above
+                return copy.ReCast<T>();
             }
 
 
 
-            // Check for Wasm buffer
-            if (iView.Buffer is WasmMemoryBuffer wasmBuffer)
+            // Check for Wasm buffer: an owned copy, as above
+            if (native is WasmMemoryBuffer wasmBuffer)
             {
-                // Implicit sync before readback - match desktop behavior
-                if (buffer.Accelerator is WasmAccelerator wasmAccel)
-                    await wasmAccel.SynchronizeAsync();
-                return new Uint8Array(wasmBuffer.SharedBuffer).ReCast<T>();
+                using var window = await wasmBuffer.CopyToHostUint8ArrayAsync();
+                using var copy = window.Slice();
+                return copy.ReCast<T>();
             }
 
             // CPU buffer — use standard ILGPU synchronous copy
             var cpuResult = await CopyToHostAsync<byte>(buffer);
             return new Uint8Array(cpuResult).ReCast<T>();
         }
+
+        /// <summary>
+        /// The backend buffer behind <paramref name="buffer"/>: a <see cref="MemoryBuffer1D{T, TStride}"/> (an
+        /// <see cref="IArrayView"/>) wraps one; the buffer a view's <see cref="IContiguousArrayView.Buffer"/> returns is one.
+        /// </summary>
+        private static MemoryBuffer NativeBufferOf(MemoryBuffer buffer) =>
+            buffer is IArrayView view ? view.Buffer : buffer;
+
+        /// <summary>
+        /// Copies exactly the bytes of <paramref name="view"/> (a view into any buffer: a sub-view, or a view another API
+        /// returns without its buffer) to a new JS <see cref="Uint8Array"/>, without passing them through the .NET heap on
+        /// the browser backends. The result is an owned copy on every backend (on Wasm too: never a view of the buffer's
+        /// shared memory), so later writes to the buffer do not change it. Waits for pending work first. Dispose the result.
+        /// <code>
+        /// ArrayView1D&lt;byte, Stride1D.Dense&gt; file = await encoder.EncodeToDeviceAsync(...);
+        /// using Uint8Array bytes = await file.CopyToHostUint8ArrayAsync();
+        /// </code>
+        /// </summary>
+        /// <typeparam name="T">The element type of the view; the result holds its raw bytes.</typeparam>
+        /// <param name="view">The view to read back. Only its byte range crosses to the host.</param>
+        /// <returns>A Uint8Array of <c>view.Length * sizeof(T)</c> bytes.</returns>
+        public static async Task<Uint8Array> CopyToHostUint8ArrayAsync<T>(this ArrayView<T> view) where T : unmanaged
+        {
+            var iContig = (IContiguousArrayView)view;
+            var buffer = iContig.Buffer ?? throw new InvalidOperationException("ArrayView has no backing buffer.");
+            long byteOffset = iContig.IndexInBytes;
+            long byteCount = view.Length * ((IArrayView)view).ElementSize;
+            if (byteCount == 0) return new Uint8Array(0);
+            if (byteOffset + byteCount > buffer.LengthInBytes)
+                throw new ArgumentOutOfRangeException(nameof(view),
+                    $"View byte range [{byteOffset}, {byteOffset + byteCount}) exceeds buffer length {buffer.LengthInBytes} bytes.");
+            if (buffer is WebGPUMemoryBuffer || buffer is WebGLMemoryBuffer || buffer is WasmMemoryBuffer)
+                return await buffer.CopyToHostUint8ArrayAsync(byteOffset, byteCount);
+            // desktop (CUDA / OpenCL / CPU / Velocity): the view's own partial copy, then into a Uint8Array
+            var elements = await CopyToHostAsync<T>(view);
+            return new Uint8Array(MemoryMarshal.AsBytes(elements.AsSpan()).ToArray());
+        }
+
+        /// <summary>
+        /// <see cref="ArrayView1D{T, TStride}"/> overload of <see cref="CopyToHostUint8ArrayAsync{T}(ArrayView{T})"/>.
+        /// </summary>
+        public static Task<Uint8Array> CopyToHostUint8ArrayAsync<T>(this ArrayView1D<T, Stride1D.Dense> view) where T : unmanaged
+            => CopyToHostUint8ArrayAsync<T>(view.BaseView);
 
         #endregion
 
