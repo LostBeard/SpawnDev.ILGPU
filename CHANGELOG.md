@@ -1,7 +1,7 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.43 (forks 2.4.36) - unreleased
+## 5.4.43 (forks 2.4.36) - 2026-11-20 - WebGL: buffers tiled to the device texture limit (browsers without a GPU)
 
 - **FIX (WebGL): browsers without a usable GPU could not run kernels on buffers over 8192 texels.** WebGL keeps a buffer in a
   2D texture of fixed-width rows, and the width was a constant 16384 (`glWorker.js`). On a device whose `MAX_TEXTURE_SIZE` is
