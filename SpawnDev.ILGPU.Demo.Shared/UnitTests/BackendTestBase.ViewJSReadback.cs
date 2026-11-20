@@ -54,6 +54,12 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             using var u8n = await contiguous.Buffer.CopyToHostUint8ArrayAsync(contiguous.IndexInBytes, view.Length);
             Check("native buffer behind the view", u8n.ReadBytes(), data.AsSpan(123, 456));
 
+            // 3b) the interface method called directly on the backend buffer (what SpawnDev.Codecs' DeviceTransfer called;
+            //     on 5.4.41 it was still a view of the buffer's memory on Wasm and WebGL: Geordi, 2026-11-20)
+            var browserBuffer = (IBrowserMemoryBuffer)contiguous.Buffer;
+            using var u8direct = await browserBuffer.CopyToHostUint8ArrayAsync(contiguous.IndexInBytes, view.Length);
+            Check("IBrowserMemoryBuffer.CopyToHostUint8ArrayAsync", u8direct.ReadBytes(), data.AsSpan(123, 456));
+
             // 4) owned copies: overwrite the device buffer, the results read before stay as they were
             await buffer.View.MemSetToZeroAsync(accelerator.DefaultStream);
             await accelerator.SynchronizeAsync();
@@ -61,6 +67,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             if (zeros[200] != 0) throw new Exception("the buffer was not cleared");
             Check("view result after the buffer was overwritten", u8.ReadBytes(), data.AsSpan(123, 456));
             Check("native-buffer result after the buffer was overwritten", u8n.ReadBytes(), data.AsSpan(123, 456));
+            Check("IBrowserMemoryBuffer result after the buffer was overwritten", u8direct.ReadBytes(), data.AsSpan(123, 456));
         });
 
         [TestMethod]

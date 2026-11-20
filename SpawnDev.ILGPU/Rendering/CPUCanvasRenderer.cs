@@ -11,6 +11,14 @@ namespace SpawnDev.ILGPU.Rendering
     /// </summary>
     public sealed class CPUCanvasRenderer : ICanvasRenderer
     {
+        // The bytes go straight into _destPixels, so a view of the buffer (no copy) is enough on Wasm and WebGL.
+        private static Task<Uint8Array> ReadWindowAsync(IBrowserMemoryBuffer buffer, long bytes) => buffer switch
+        {
+            Wasm.WasmMemoryBuffer wasm => wasm.GetHostWindowAsync(0, bytes),
+            WebGL.Backend.WebGLMemoryBuffer gl => gl.GetHostWindowAsync(0, bytes),
+            _ => buffer.CopyToHostUint8ArrayAsync(0, bytes),
+        };
+
         private readonly Accelerator _accelerator;
 
         private CanvasRenderingContext2D? _ctx;
@@ -57,7 +65,7 @@ namespace SpawnDev.ILGPU.Rendering
             var internalBuffer = ((IArrayView)buffer).Buffer;
             if (internalBuffer is IBrowserMemoryBuffer browserBuf)
             {
-                using var src = await browserBuf.CopyToHostUint8ArrayAsync(0, (long)width * height * 4);
+                using var src = await ReadWindowAsync(browserBuf, (long)width * height * 4);   // copied into _destPixels at once
                 _destPixels!.Set(src);
             }
             else
@@ -87,7 +95,7 @@ namespace SpawnDev.ILGPU.Rendering
             var internalBuffer = ((IArrayView)buffer).Buffer;
             if (internalBuffer is IBrowserMemoryBuffer browserBuf)
             {
-                using var src = await browserBuf.CopyToHostUint8ArrayAsync(0, (long)width * height * 4);
+                using var src = await ReadWindowAsync(browserBuf, (long)width * height * 4);   // copied into _destPixels at once
                 _destPixels!.Set(src);
             }
             else

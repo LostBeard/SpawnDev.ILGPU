@@ -307,7 +307,7 @@ namespace SpawnDev.ILGPU
             // exactly [byteOffset, byteOffset + byteCount).
             if (buffer is WasmMemoryBuffer wasmBuffer)
             {
-                using var u8 = await wasmBuffer.CopyToHostUint8ArrayAsync(byteOffset, byteCount);
+                using var u8 = await wasmBuffer.GetHostWindowAsync(byteOffset, byteCount);   // read at once: no copy needed
                 var bytes = u8.ReadBytes();
                 var result = new T[countElems];
                 MemoryMarshal.Cast<byte, T>(bytes).CopyTo(new Span<T>(result));
@@ -428,10 +428,7 @@ namespace SpawnDev.ILGPU
             // Check for Wasm buffer: an owned copy (Slice), not a view of the buffer's SharedArrayBuffer that later
             // writes to the buffer would change (and that some browser APIs refuse, being shared memory)
             if (native is WasmMemoryBuffer wasmBuffer)
-            {
-                using var window = await wasmBuffer.CopyToHostUint8ArrayAsync(sourceByteOffset, copyBytes);
-                return window.Slice();
-            }
+                return await wasmBuffer.CopyToHostUint8ArrayAsync(sourceByteOffset, copyBytes);
 
             // Check for CPU buffer
             if (native is CPUMemoryBuffer)
@@ -476,8 +473,7 @@ namespace SpawnDev.ILGPU
             // Check for Wasm buffer: an owned copy, as above
             if (native is WasmMemoryBuffer wasmBuffer)
             {
-                using var window = await wasmBuffer.CopyToHostUint8ArrayAsync();
-                using var copy = window.Slice();
+                using var copy = await wasmBuffer.CopyToHostUint8ArrayAsync();
                 return copy.ReCast<T>();
             }
 

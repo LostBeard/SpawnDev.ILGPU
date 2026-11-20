@@ -527,16 +527,31 @@ namespace SpawnDev.ILGPU.Wasm
         }
 
         /// <summary>
-        /// Waits for the accelerator's pending dispatches (<c>SynchronizeAsync</c>), then returns a
-        /// <see cref="Uint8Array"/> over this buffer's <see cref="SharedArrayBuffer"/>. The result is a
-        /// view of the buffer's memory, not a copy: later writes to the buffer are visible through it.
-        /// Returns an empty array when the buffer has no backing store.
+        /// Waits for the accelerator's pending dispatches (<c>SynchronizeAsync</c>), then copies the range to a new
+        /// <see cref="Uint8Array"/> (its own <c>ArrayBuffer</c>, not shared memory): later writes to the buffer do not
+        /// change it. Returns an empty array when the buffer has no backing store.
         /// </summary>
-        /// <param name="sourceByteOffset">Byte offset of the first byte to expose. Default 0.</param>
-        /// <param name="copyBytes">Number of bytes to expose; null means to the end of the buffer.</param>
-        /// <returns>A byte view over the requested range.</returns>
+        /// <remarks>
+        /// Before 5.4.42 this returned a view of the buffer's <see cref="SharedArrayBuffer"/>, so a result a caller kept
+        /// changed when the buffer was written again (SpawnDev.Codecs: an encoded file kept in JS changed with the next
+        /// encode; Geordi, 2026-11-20). Library code that consumes the bytes at once uses the internal window instead.
+        /// </remarks>
+        /// <param name="sourceByteOffset">Byte offset of the first byte to copy. Default 0.</param>
+        /// <param name="copyBytes">Number of bytes to copy; null means to the end of the buffer.</param>
+        /// <returns>A new Uint8Array holding the requested range.</returns>
         /// <exception cref="ArgumentOutOfRangeException">The range lies outside the buffer.</exception>
         public async Task<Uint8Array> CopyToHostUint8ArrayAsync(long sourceByteOffset = 0, long? copyBytes = null)
+        {
+            using var window = await GetHostWindowAsync(sourceByteOffset, copyBytes);
+            return window.Slice();
+        }
+
+        /// <summary>
+        /// Waits for pending dispatches, then returns a <see cref="Uint8Array"/> VIEW over the range of this buffer's
+        /// <see cref="SharedArrayBuffer"/> (no copy; later writes to the buffer show through it). For library code that
+        /// reads the bytes at once and lets go of the view; never hand it to a caller.
+        /// </summary>
+        internal async Task<Uint8Array> GetHostWindowAsync(long sourceByteOffset = 0, long? copyBytes = null)
         {
             if (SharedBuffer == null) return new Uint8Array();
             // Implicit sync before readback - match desktop behavior

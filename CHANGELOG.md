@@ -1,6 +1,16 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.42 (forks 2.4.36) - unreleased
+
+- **FIX: `IBrowserMemoryBuffer.CopyToHostUint8ArrayAsync`, called directly on a Wasm or WebGL buffer, returns an owned copy.**
+  5.4.41 made the `ArrayView` / `MemoryBuffer` readback extensions owned, but the interface method itself still returned a view
+  of the buffer's `SharedArrayBuffer` (Wasm) or CPU mirror (WebGL), though its doc said "copies ... to a new Uint8Array". A
+  result a caller kept changed when the buffer was written again (Geordi, SpawnDev.Codecs: an encoded file kept in JS changed
+  with the next encode, lossless and lossy, on Wasm). Library code that reads the bytes at once (the typed view readback, the
+  canvas renderer) uses an internal view instead, so it copies nothing extra. Test: `ViewReadback_Uint8Array_ExactBytes_OwnedCopy`
+  now also calls the interface method directly and checks its result after the buffer is overwritten.
+
 ## 5.4.41 (forks 2.4.36) - 2026-11-20 - Read a view into a JS Uint8Array; readbacks take native buffers and return owned copies
 
 - **NEW: `ArrayView<T>` / `ArrayView1D<T, Stride1D.Dense>.CopyToHostUint8ArrayAsync()`** copies exactly a view's bytes to a

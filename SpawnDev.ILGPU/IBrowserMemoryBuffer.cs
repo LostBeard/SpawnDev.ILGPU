@@ -239,7 +239,8 @@ namespace SpawnDev.ILGPU
     public interface IBrowserMemoryBuffer
     {
         /// <summary>
-        /// Asynchronously copies a specified range of bytes from the buffer to a new Uint8Array on the host.
+        /// Asynchronously copies a specified range of bytes from the buffer to a new Uint8Array on the host. The result is
+        /// an owned copy on every backend (5.4.42+): later writes to the buffer do not change it.
         /// </summary>
         /// <remarks>Use this method to transfer data from the buffer to a host-accessible Uint8Array for
         /// further processing or interoperability with JavaScript APIs. Ensure that the specified offset and byte count

@@ -78,15 +78,25 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         }
 
         /// <summary>
-        /// Reads the buffer back from the GL worker (after pending dispatches) and returns the bytes as a JS
-        /// <see cref="Uint8Array"/>, without copying them into the .NET heap.
+        /// Reads the buffer back from the GL worker (after pending dispatches) and copies the range to a new JS
+        /// <see cref="Uint8Array"/>, without passing the bytes through the .NET heap. Later writes to the buffer do not
+        /// change it (before 5.4.42 it was a view of the buffer's CPU mirror, which they did).
         /// </summary>
         /// <param name="sourceByteOffset">Byte offset to start reading at.</param>
         /// <param name="copyBytes">Number of bytes to read, or null for the rest of the buffer.</param>
         /// <returns>A Uint8Array the caller should dispose.</returns>
-        public Task<Uint8Array> CopyToHostUint8ArrayAsync(long sourceByteOffset = 0, long? copyBytes = null)
+        public async Task<Uint8Array> CopyToHostUint8ArrayAsync(long sourceByteOffset = 0, long? copyBytes = null)
         {
-            // Request readback from the GL worker first
+            using var window = await GetHostWindowAsync(sourceByteOffset, copyBytes);
+            return window.Slice();
+        }
+
+        /// <summary>
+        /// Reads the buffer back from the GL worker and returns a VIEW of the range in the buffer's CPU mirror (no copy;
+        /// the next host write or readback of the buffer changes it). For library code that reads the bytes at once.
+        /// </summary>
+        internal Task<Uint8Array> GetHostWindowAsync(long sourceByteOffset = 0, long? copyBytes = null)
+        {
             var accel = (WebGLAccelerator)Accelerator;
             return accel.ReadbackAndGetUint8ArrayAsync(this, sourceByteOffset, copyBytes);
         }
