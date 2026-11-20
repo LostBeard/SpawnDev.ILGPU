@@ -1,6 +1,19 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.43 (forks 2.4.36) - unreleased
+
+- **FIX (WebGL): browsers without a usable GPU could not run kernels on buffers over 8192 texels.** WebGL keeps a buffer in a
+  2D texture of fixed-width rows, and the width was a constant 16384 (`glWorker.js`). On a device whose `MAX_TEXTURE_SIZE` is
+  lower, every such buffer got an illegal texture: Chrome with `--disable-gpu` runs WebGL on SwiftShader, and the kernel failed
+  with "buffer N has no valid GPU texture (INVALID_VALUE uploading its 16384xH int texture)" (Lore: SpawnGen's SD-Turbo graph
+  in a browser with no WebGPU, 2026-11-20). The row width is the device's `MAX_TEXTURE_SIZE` now (at most 16384; kernels read it
+  from the `u_paramN_tileW` uniform already), and a buffer too large even then reports that limit. Test
+  `WebGL_BufferWiderThanATextureRow_EveryElementRoundTrips` (3,000,000 ints through a kernel): on the software path it fails
+  with the old width (the same INVALID_VALUE) and passes with the new one.
+- **TEST: `PMT_SOFTWARE_GL=1`** runs the test browser as one without a usable GPU (`--disable-gpu`, WebGL on SwiftShader, no
+  `--disable-software-rasterizer`), for tests aimed at that path.
+
 ## 5.4.42 (forks 2.4.36) - 2026-11-20 - Browser buffer readbacks are owned copies everywhere
 
 - **FIX: `IBrowserMemoryBuffer.CopyToHostUint8ArrayAsync`, called directly on a Wasm or WebGL buffer, returns an owned copy.**

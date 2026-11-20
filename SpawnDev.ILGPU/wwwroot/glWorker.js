@@ -55,6 +55,7 @@ self.onmessage = function (e) {
                 for (const id in failedPrograms) delete failedPrograms[id];
                 for (const t in scatterPrograms) delete scatterPrograms[t];
                 scatterFBO = null;
+                maxTexSizeCache = 0;
                 cachedTFBuffer = null;
                 cachedTFBufferSize = 0;
                 cachedTFObject = null;
@@ -239,9 +240,22 @@ function handleScatter(msg) {
 
 // ---- Buffer Registry Operations ----
 
+// The widest texture this device takes (gl.MAX_TEXTURE_SIZE), at most 16384. It was a fixed 16384: on a device whose limit is
+// lower every buffer over that many texels got an illegal texture (INVALID_VALUE) and no kernel could read it - Chrome with
+// --disable-gpu (SwiftShader, MAX_TEXTURE_SIZE 8192), SD-Turbo in SpawnGen (Lore, 2026-11-20). Kernels take the width as the
+// u_paramN_tileW uniform, so any width works. Reset on context restore.
+let maxTexSizeCache = 0;
+function maxTextureSize() {
+    if (!maxTexSizeCache) {
+        const reported = gl ? gl.getParameter(gl.MAX_TEXTURE_SIZE) : 0;
+        maxTexSizeCache = Math.min(16384, reported > 0 ? reported : 4096);   // 4096: WebGL2's guaranteed minimum is 2048, 4096 is universal
+    }
+    return maxTexSizeCache;
+}
+
 function computeTiling(byteSize) {
     const texelCount = Math.ceil(byteSize / 4);
-    const maxTexSize = 16384;
+    const maxTexSize = maxTextureSize();
     let width, height;
     if (texelCount > maxTexSize) {
         width = maxTexSize;
@@ -301,7 +315,10 @@ function uploadTextureData(tex, entry) {
     // say so: the error flag was discarded by the next dispatch's drain and kernels read the texture as if it were the buffer
     // (DeviceVectorIndex after growth, 2026-11-01). Record it on the buffer; a dispatch that binds the buffer throws with it.
     const errs = drainGlErrors();
-    entry.glError = errs.length > 0 ? errs.join(', ') + ' uploading its ' + entry.width + 'x' + entry.height + ' ' + (entry.glslType || 'float') + ' texture' : null;
+    entry.glError = errs.length > 0 ? errs.join(', ') + ' uploading its ' + entry.width + 'x' + entry.height + ' ' + (entry.glslType || 'float') + ' texture' +
+        (entry.height > maxTextureSize()
+            ? ' (taller than the MAX_TEXTURE_SIZE of this device, ' + maxTextureSize() + ': one buffer holds at most ' + (maxTextureSize() * maxTextureSize() * 4) + ' bytes on it)'
+            : '') : null;
 }
 
 function handleAllocBuffer(msg) {

@@ -56,6 +56,16 @@ namespace PlaywrightMultiTest
                 "--disable-features=FileSystemAccessPermissionPrompt",
                 "--allow-file-access-from-files"
             };
+            // PMT_SOFTWARE_GL=1: the browser a user without a usable GPU has. No GPU process, WebGL on SwiftShader (its
+            // MAX_TEXTURE_SIZE is 8192, the 16384-wide buffer textures broke on it: Lore, SpawnGen SD-Turbo, 2026-11-20),
+            // no WebGPU adapter. Only for tests aimed at that path (PMT_FILTER=WebGLTests...); off by default.
+            if (Environment.GetEnvironmentVariable("PMT_SOFTWARE_GL") == "1")
+            {
+                args.Remove("--disable-software-rasterizer");
+                args.Add("--disable-gpu");
+                args.Add("--enable-unsafe-swiftshader");
+                LogStatus("[PMT_SOFTWARE_GL] browser without GPU: --disable-gpu, WebGL on SwiftShader");
+            }
             // Expose a TCP CDP endpoint so a run can be inspected WHILE it executes (live JS eval:
             // interop slot-table census, heap stats, console capture, screenshots).
             //
