@@ -1,7 +1,7 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.41 (forks 2.4.36) - unreleased
+## 5.4.41 (forks 2.4.36) - 2026-11-20 - Read a view into a JS Uint8Array; readbacks take native buffers and return owned copies
 
 - **NEW: `ArrayView<T>` / `ArrayView1D<T, Stride1D.Dense>.CopyToHostUint8ArrayAsync()`** copies exactly a view's bytes to a
   new JS `Uint8Array` (browser backends: never through the .NET heap). For views an API returns without their buffer
