@@ -1,7 +1,7 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.42 (forks 2.4.36) - unreleased
+## 5.4.42 (forks 2.4.36) - 2026-11-20 - Browser buffer readbacks are owned copies everywhere
 
 - **FIX: `IBrowserMemoryBuffer.CopyToHostUint8ArrayAsync`, called directly on a Wasm or WebGL buffer, returns an owned copy.**
   5.4.41 made the `ArrayView` / `MemoryBuffer` readback extensions owned, but the interface method itself still returned a view
