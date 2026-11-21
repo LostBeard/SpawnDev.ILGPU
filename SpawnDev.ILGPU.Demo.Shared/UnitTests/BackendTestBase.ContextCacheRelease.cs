@@ -11,7 +11,8 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
     // kernels) leaves +20.1 MiB on Wasm / +28.4 MiB on WebGPU, of which Context.ClearCache(ClearCacheMode.Default) frees 16.1 /
     // 19.6 MiB (ClearCacheMode.Everything frees nothing more; the launcher assembly nothing). Measured 2026-11-20.
     // This test checks the two things releasing it must not break, on every lane: kernels loaded before the release keep
-    // running, and kernels loaded after it compile (re-importing what they share with the earlier ones). It reports the load
+    // running, and kernels loaded after it compile (re-importing what they share with the earlier ones), through the public
+    // accelerator.ReleaseCompilerCaches() (5.4.44). It reports the load
     // time of a kernel after a release against one with the cache warm: that re-import is what a release costs.
     public abstract partial class BackendTestBase
     {
@@ -56,7 +57,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             double warmMs = sw.Elapsed.TotalMilliseconds;
             await Check("B (cache warm)", b, i => CacheRelease_Mix(i, 2) + 7);
 
-            accelerator.Context.ClearCache(ClearCacheMode.Default);
+            accelerator.ReleaseCompilerCaches();   // = accelerator.Context.ClearCache(ClearCacheMode.Default)
 
             // kernels loaded before the release keep running
             await Check("A after ClearCache(Default)", a, i => CacheRelease_Mix(i, 1));

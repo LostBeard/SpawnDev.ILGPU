@@ -1,6 +1,19 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.44 (forks 2.4.36) - unreleased
+
+- **NEW: `accelerator.ReleaseCompilerCaches()`** releases the compiler's cached copy of your kernel code: the IR and type
+  information a `Context` keeps for every method it has compiled from your assemblies, for its whole life. Call it after a
+  batch of kernel loads. In a browser page, where the context lives as long as the page, that cache is what filled the .NET
+  heap: SpawnDev.Codecs' lossy WebP encoder (about 20 kernels) adds 20.1 MiB on Wasm and 28.4 MiB on WebGPU, of which this
+  frees 16.1 and 19.6 MiB (Geordi's out-of-memory reports on the Codecs Wasm lane, measured 2026-11-20; `ClearCacheMode.Everything`
+  frees nothing more, and the launcher assembly holds nothing significant). It is `Context.ClearCache(ClearCacheMode.Default)`
+  with documentation. Safe: kernels loaded before it keep running and kernels loaded after it compile (test
+  `Context_ClearCacheDefault_LoadedKernelsKeepRunning_NewOnesCompile`, every backend). Cost: the first kernel loaded after it
+  takes about 5 to 15 ms longer (it re-imports the code it shares with earlier kernels), so call it per batch, not per load.
+  Not automatic: code that loads kernels lazily between dispatches (a model's first inference) would pay that on every load.
+
 ## 5.4.43 (forks 2.4.36) - 2026-11-20 - WebGL: buffers tiled to the device texture limit (browsers without a GPU)
 
 - **FIX (WebGL): browsers without a usable GPU could not run kernels on buffers over 8192 texels.** WebGL keeps a buffer in a
