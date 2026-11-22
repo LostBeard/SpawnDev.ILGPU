@@ -57,7 +57,10 @@ namespace PlaywrightMultiTest
                 sw.Stop();
                 TestResultsWriter.RecordResult(test.Name, "Pass", null, sw.Elapsed.TotalMilliseconds);
             }
-            catch (Exception ex)
+            // NOT ResultStateException: Assert.Ignore above throws IgnoreException (one), and the skip it reports was
+            // already recorded; catching it here recorded every live-path skip a second time, as "Fail", in
+            // _ilgpudump/playwright-*.json (NUnit's own totals were right). Geordi, 2026-11-22.
+            catch (Exception ex) when (ex is not ResultStateException)
             {
                 sw.Stop();
                 TestResultsWriter.RecordResult(test.Name, "Fail", ex.Message, sw.Elapsed.TotalMilliseconds);
