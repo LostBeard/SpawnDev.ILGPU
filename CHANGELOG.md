@@ -1,7 +1,7 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.44 (forks 2.4.37) - unreleased
+## 5.4.44 (forks 2.4.37) - 2026-11-22 - ReleaseCompilerCaches: free the compiler cache after loading kernels, from any thread
 
 - **NEW: `accelerator.ReleaseCompilerCaches()`** releases the compiler's cached copy of your kernel code: the IR and type
   information a `Context` keeps for every method it has compiled from your assemblies, for its whole life. Call it after a
