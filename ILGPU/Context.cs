@@ -214,6 +214,26 @@ namespace ILGPU
         private readonly SemaphoreSlim codeGenerationSemaphore = new SemaphoreSlim(1);
 
         /// <summary>
+        /// Excludes <see cref="ClearCache(ClearCacheMode)"/> from every kernel compile of this context. A compile holds it
+        /// shared (<see cref="EnterCompilation"/>) from its IR construction to its finished backend code; ClearCache holds it
+        /// exclusive. Without it a ClearCache on one thread ran in the middle of a compile on another (Geordi, reading
+        /// 5.4.44's ReleaseCompilerCaches, 2026-11-22): codeGenerationSemaphore covers only the frontend phase, and the
+        /// backend compile (Backend.Compile(Method, ...)) runs after it, so IRContext.methods, the type unification of
+        /// TypeContext and the CPU backend's argument-mapper dictionary could be emptied under a live compile. Recursive,
+        /// because a compile nests (Backend.Compile(entry) = PreCompileKernelMethod + Compile(Method), each also taking it).
+        /// </summary>
+        private readonly ReaderWriterLockSlim compilationLock =
+            new ReaderWriterLockSlim(LockRecursionPolicy.SupportsRecursion);
+
+        /// <summary>
+        /// Enters a kernel compile of this context: <see cref="ClearCache(ClearCacheMode)"/> waits until every compile
+        /// scope is left, and a compile scope entered while a ClearCache runs waits for it. Compiles do not exclude each
+        /// other. Do not take a lock inside the scope that another compile could hold while waiting for this scope (the
+        /// accelerator's kernel-cache lock is taken BEFORE it, never inside it).
+        /// </summary>
+        internal ReadOnlyScopedLock EnterCompilation() => compilationLock.EnterReadScope();
+
+        /// <summary>
         /// An internal mapping of accelerator types to individual devices.
         /// </summary>
         private readonly Dictionary<AcceleratorType, List<Device>> deviceMapping;
@@ -539,10 +559,19 @@ namespace ILGPU
         /// </summary>
         /// <param name="mode">The clear mode.</param>
         /// <remarks>
-        /// This method is not thread-safe.
+        /// Thread-safe (5.4.44): it waits for kernel compiles running on other threads to finish, and kernels loaded
+        /// while it runs wait for it. It must not be called from inside a kernel compile on the same thread
+        /// (a backend hook): that throws <see cref="InvalidOperationException"/>.
         /// </remarks>
         public override void ClearCache(ClearCacheMode mode)
         {
+            if (compilationLock.IsReadLockHeld)
+            {
+                throw new InvalidOperationException(
+                    "Context.ClearCache was called from inside a kernel compile on the same thread; " +
+                    "call it after the kernel load returns.");
+            }
+            using var exclusive = compilationLock.EnterWriteScope();
             IRContext.ClearCache(mode);
             TypeContext.ClearCache(mode);
             DebugInformationManager.ClearCache(mode);
@@ -598,6 +627,7 @@ namespace ILGPU
                 Step("CPUAccelerator"); CPUAccelerator.Dispose();
 
                 Step("codeGenerationSemaphore"); codeGenerationSemaphore.Dispose();
+                Step("compilationLock"); compilationLock.Dispose();
                 Step("IRContext"); IRContext.Dispose();
 
                 Step("ILFrontend"); ILFrontend.Dispose();

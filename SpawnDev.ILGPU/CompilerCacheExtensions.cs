@@ -32,9 +32,11 @@ namespace SpawnDev.ILGPU
         /// </para>
         /// <para>
         /// The release applies to the whole <see cref="Context"/>, so every accelerator of that context is affected.
-        /// Like <see cref="Context.ClearCache(ClearCacheMode)"/>, it is not thread-safe: do not call it while another
-        /// thread is loading kernels on the same context (in a browser there is only one thread). It does the same as
-        /// <c>accelerator.Context.ClearCache(ClearCacheMode.Default)</c>.
+        /// <b>Thread-safe:</b> call it from any thread, also while other threads load kernels on the same context (two
+        /// warm-ups on <c>Task.Run</c>). It waits for the kernel compiles in flight to finish, and loads that start while it
+        /// runs wait for it (test <c>Context_ClearCacheDefault_WhileAnotherThreadLoadsKernels_EveryKernelCorrect</c>). Do
+        /// not call it from inside a kernel compile (a backend hook): that throws <see cref="System.InvalidOperationException"/>.
+        /// It does the same as <c>accelerator.Context.ClearCache(ClearCacheMode.Default)</c>.
         /// </para>
         /// </remarks>
         /// <param name="accelerator">Any accelerator of the context to release.</param>

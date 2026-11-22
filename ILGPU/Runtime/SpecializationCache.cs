@@ -184,18 +184,24 @@ namespace ILGPU.Runtime
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private TDelegate SpecializeKernel(in TArgs args)
         {
-            using var targetContext = KernelMethod.ExtractToContext(
-                out var oldKernelMethod);
-            var targetMethod = CreateKernelWrapper(
-                targetContext,
-                oldKernelMethod,
-                args);
-            targetContext.Optimize();
+            ILGPU.Backends.CompiledKernel compiledKernel;
+            // The IR work is a kernel compile: Context.ClearCache (ReleaseCompilerCaches) on another thread must not run
+            // inside it. LoadKernel stays OUTSIDE the scope, so no accelerator lock is ever taken while it is held.
+            using (Accelerator.Context.EnterCompilation())
+            {
+                using var targetContext = KernelMethod.ExtractToContext(
+                    out var oldKernelMethod);
+                var targetMethod = CreateKernelWrapper(
+                    targetContext,
+                    oldKernelMethod,
+                    args);
+                targetContext.Optimize();
 
-            var compiledKernel = Accelerator.Backend.Compile(
-                targetMethod,
-                Entry,
-                KernelSpecialization);
+                compiledKernel = Accelerator.Backend.Compile(
+                    targetMethod,
+                    Entry,
+                    KernelSpecialization);
+            }
             var kernel = Loader.LoadKernel(Accelerator, compiledKernel, out var _);
             return kernel.CreateLauncherDelegate<TDelegate>();
         }

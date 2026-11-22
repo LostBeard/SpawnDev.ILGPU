@@ -1,7 +1,7 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.44 (forks 2.4.36) - unreleased
+## 5.4.44 (forks 2.4.37) - unreleased
 
 - **NEW: `accelerator.ReleaseCompilerCaches()`** releases the compiler's cached copy of your kernel code: the IR and type
   information a `Context` keeps for every method it has compiled from your assemblies, for its whole life. Call it after a
@@ -13,6 +13,19 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   `Context_ClearCacheDefault_LoadedKernelsKeepRunning_NewOnesCompile`, every backend). Cost: the first kernel loaded after it
   takes about 5 to 15 ms longer (it re-imports the code it shares with earlier kernels), so call it per batch, not per load.
   Not automatic: code that loads kernels lazily between dispatches (a model's first inference) would pay that on every load.
+- **FIX: `Context.ClearCache` (and so `ReleaseCompilerCaches`) is thread-safe.** It ran with no exclusion against a kernel
+  load on another thread: the context's code-generation lock covers only the IR build, and the backend compile runs after it,
+  so the clear could empty the IR methods, the type unification and the CPU backend's argument mapper under a live compile
+  (Geordi, reading the source before SpawnDev.Codecs called it from parallel warm-ups, 2026-11-22). A context-wide compile
+  lock now spans every compile from its IR build to its finished code (compiles share it; `ClearCache` takes it alone).
+  Test `Context_ClearCacheDefault_WhileAnotherThreadLoadsKernels_EveryKernelCorrect` (16 kernel loads on one thread while
+  another releases in a loop, desktop lanes; a browser has one .NET thread): without the lock every desktop lane fails with
+  an internal compiler error after about 6 releases; with it, 16 correct kernels across 2,000 to 80,000 releases.
+- **FIX: the argument mapper's type table is locked.** One mapper serves every accelerator of its backend (all CPU
+  accelerators of a context share one), and loads on two accelerators compile in parallel, so two threads could add to its
+  dictionary at once.
+- **TEST: `Context_ClearCacheDefault_SpecializedKernelCompilesNewValuesAfter`**: a `SpecializedValue` kernel loaded before
+  a release compiles values first launched after it, on every backend.
 
 ## 5.4.43 (forks 2.4.36) - 2026-11-20 - WebGL: buffers tiled to the device texture limit (browsers without a GPU)
 

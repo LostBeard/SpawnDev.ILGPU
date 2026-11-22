@@ -698,7 +698,10 @@ namespace ILGPU.Backends.EntryPoints
         #region Instance
 
         /// <summary>
-        /// The internal type mapping (from old to new types).
+        /// The internal type mapping (from old to new types). Every access locks it: one mapper serves every accelerator
+        /// of its backend (the CPU backend's is the Context's DefaultILBackend, shared by all CPU accelerators of the
+        /// context), and loads on two accelerators compile in parallel, so two threads could Add to the dictionary at
+        /// once, and Context.ClearCache cleared it with no lock at all.
         /// </summary>
         private readonly Dictionary<Type, Type> typeMapping =
             new Dictionary<Type, Type>();
@@ -792,7 +795,12 @@ namespace ILGPU.Backends.EntryPoints
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         protected Type RegisterTypeMapping(Type type, Type mappedType)
         {
-            typeMapping.Add(type, mappedType);
+            lock (typeMapping)
+            {
+                // another thread may have mapped the same type meanwhile: every caller then uses the first mapping
+                if (!typeMapping.TryAdd(type, mappedType))
+                    return typeMapping[type];
+            }
             return mappedType;
         }
 
@@ -808,8 +816,11 @@ namespace ILGPU.Backends.EntryPoints
         protected Type MapType(Type type)
         {
             Debug.Assert(type != null, "Invalid source type");
-            if (typeMapping.TryGetValue(type, out Type? mappedType))
-                return mappedType;
+            lock (typeMapping)
+            {
+                if (typeMapping.TryGetValue(type, out Type? mappedType))
+                    return mappedType;
+            }
 
             if (type.IsByRef)
             {
@@ -1282,8 +1293,11 @@ namespace ILGPU.Backends.EntryPoints
         /// Clears internal caches.
         /// </summary>
         /// <param name="mode">The clear mode.</param>
-        public void ClearCache(ClearCacheMode mode) =>
-            typeMapping.Clear();
+        public void ClearCache(ClearCacheMode mode)
+        {
+            lock (typeMapping)
+                typeMapping.Clear();
+        }
 
         #endregion
     }

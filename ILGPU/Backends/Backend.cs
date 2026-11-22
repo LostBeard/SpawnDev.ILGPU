@@ -611,6 +611,8 @@ namespace ILGPU.Backends
         {
             entry.Validate();
 
+            // Context.ClearCache (ReleaseCompilerCaches) must not empty the IR / type caches under this compile
+            using var compilation = Context.EnterCompilation();
             Method generatedKernelMethod;
             using (var codeGenerationPhase = Context.BeginCodeGeneration())
             {
@@ -671,6 +673,9 @@ namespace ILGPU.Backends
             in KernelSpecialization specialization)
         {
             System.Threading.Interlocked.Increment(ref loadedKernelCount);
+            // one compile scope from the IR build to the finished kernel: a ClearCache between PreCompileKernelMethod and
+            // Compile(Method, ...) would leave the kernel's IR typed against a type universe that no longer exists
+            using var compilation = Context.EnterCompilation();
             return Compile(entry, specialization, new NoHook());
         }
 
@@ -689,6 +694,7 @@ namespace ILGPU.Backends
             TBackendHook backendHook)
             where TBackendHook : IBackendHook
         {
+            using var compilation = Context.EnterCompilation();
             var generatedKernelMethod = PreCompileKernelMethod(entry, backendHook);
             return Compile(
                 generatedKernelMethod,
@@ -730,6 +736,7 @@ namespace ILGPU.Backends
             where TBackendHook : IBackendHook
         {
             System.Threading.Interlocked.Increment(ref compiledKernelCount);
+            using var compilation = Context.EnterCompilation();
             // Code generators print numbers into shader / PTX / OpenCL source with the CURRENT culture ($"{x}",
             // x.ToString("G9")): under de-DE 0.5f printed as "0,5", under sv-SE (ICU) -5 printed with U+2212, and the
             // generated source did not compile. Generate under the invariant culture; the caller's is restored after.
