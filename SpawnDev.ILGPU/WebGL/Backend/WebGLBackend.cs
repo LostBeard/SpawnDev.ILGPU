@@ -521,6 +521,156 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// <summary>
         /// Creates the final compiled kernel.
         /// </summary>
+        #region Shader artifact cache
+
+        /// <summary>
+        /// Everything a <see cref="WebGLCompiledKernel"/> holds besides its GLSL, so a kernel can be rebuilt from a cached
+        /// artifact without its IR (the process-wide <see cref="ShaderArtifactCache"/>; the WebGL counterpart of WebGPU's
+        /// <c>WebGPUKernelMetadata</c>). The lists are the original compiled kernel's own (read-only after compilation).
+        /// </summary>
+        public sealed record WebGLKernelMetadata
+        {
+            /// <summary>See <see cref="WebGLCompiledKernel.ParameterBindings"/>.</summary>
+            public required IReadOnlyList<KernelParameterBinding> ParameterBindings { get; init; }
+            /// <summary>See <see cref="WebGLCompiledKernel.OutputVaryings"/>.</summary>
+            public required IReadOnlyList<OutputVaryingInfo> OutputVaryings { get; init; }
+            /// <summary>See <see cref="WebGLCompiledKernel.BodyStructManifest"/>.</summary>
+            public required IReadOnlyList<BodyStructBindingEntry> BodyStructManifest { get; init; }
+            /// <summary>
+            /// The GL program id of the kernel the artifact came from. A rebuilt kernel keeps it: its GLSL is identical, so
+            /// a GL worker that already linked the program (glWorker.js programCache, which matches id AND source) reuses it
+            /// instead of compiling and linking it again.
+            /// </summary>
+            public required int ProgramId { get; init; }
+            /// <summary>The entry point's static shared memory (always 0 on WebGL), for the early (pre-IR) hook.</summary>
+            public required int SharedMemoryStaticSize { get; init; }
+            /// <summary>Whether the entry point has dynamic shared memory (early hook).</summary>
+            public required bool SharedMemoryHasDynamic { get; init; }
+        }
+
+        /// <summary>The artifact-cache profile of this backend as configured now (the key's profile segment).</summary>
+        internal CapabilityProfile ProfileForThisBackend()
+        {
+            var features = new HashSet<string>(StringComparer.Ordinal);
+            CodegenSettingsKey.AddContextSettings(Context, features);
+            return new CapabilityProfile
+            {
+                Backend = AcceleratorType.WebGL,
+                Name = "WebGL-runtime",
+                Float16Native = false,
+                Float64Native = false,
+                Float64Mode = F64Mode, // F64EmulationScope-aware: the mode this load compiles in
+                Int64Native = false,
+                SubGroups = false,
+                WarpSize = 1,
+                MaxNumThreadsPerGroup = 1, // WebGLILGPUDevice.MaxNumThreadsPerGroup (one vertex per thread)
+                MaxStorageBufferBindings = 0,
+                EnabledFeatures = features,
+            };
+        }
+
+        /// <summary>
+        /// True when this load may use the artifact cache: on, no <c>SpecializedValue</c> parameter (its value is baked into
+        /// the IR upstream, so no complete key exists here), and the default <see cref="NarrowInt64LowWordArithmetic"/>
+        /// (off is a diagnostic setting that generates a different shader for the same key, as on WebGPU).
+        /// </summary>
+        private static bool ArtifactCacheable(System.Reflection.MethodInfo? method) =>
+            method != null && ShaderArtifactCache.Enabled && NarrowInt64LowWordArithmetic
+            && !ShaderArtifactCache.UsesRuntimeValueSpecialization(method);
+
+        /// <summary>
+        /// Early (pre-IR) artifact-cache hook: a kernel whose GLSL this process already generated is rebuilt from the cached
+        /// source BEFORE ILGPU builds its IR, so a kernel loaded again (its owner was collected, or the context's compiler
+        /// caches were released with <c>ReleaseCompilerCaches</c>) skips IR construction, the IR transformations and the GLSL
+        /// generation. Anything else takes the normal path, which registers what it generates.
+        /// </summary>
+        public override CompiledKernel Compile<TBackendHook>(
+            in EntryPointDescription entry,
+            in KernelSpecialization specialization,
+            TBackendHook backendHook)
+        {
+            var method = entry.MethodSource;
+            if (ArtifactCacheable(method)
+                && ShaderArtifactCache.TryPeek(method!, ProfileForThisBackend(), specialization, out var art)
+                && art.Source is { } cachedGlsl
+                && art.CodegenMetadata is WebGLKernelMetadata meta)
+            {
+                var entryPoint = new EntryPoint(
+                    entry,
+                    new SharedMemorySpecification(meta.SharedMemoryStaticSize, meta.SharedMemoryHasDynamic),
+                    specialization);
+                // the normal path rejects this combination after building the IR; a cached kernel passed it then
+                if (!(entryPoint.IsImplicitlyGrouped && entryPoint.SharedMemory.HasSharedMemory))
+                {
+                    ShaderArtifactCache.CountIrSkippedHit();
+                    return FromCachedArtifact(entryPoint, cachedGlsl, meta);
+                }
+            }
+            return base.Compile(entry, specialization, backendHook);
+        }
+
+        /// <summary>
+        /// Late artifact-cache hook (the IR exists, the GLSL generation is skipped on a hit) and the registration of every
+        /// shader this backend generates.
+        /// </summary>
+        protected override CompiledKernel Compile(
+            EntryPoint entryPoint,
+            in BackendContext backendContext,
+            in KernelSpecialization specialization)
+        {
+            var method = entryPoint.MethodInfo;
+            bool cacheable = ArtifactCacheable(method);
+            if (cacheable
+                && ShaderArtifactCache.TryGet(method!, ProfileForThisBackend(), specialization, out var art)
+                && art.Source is { } cachedGlsl
+                && art.CodegenMetadata is WebGLKernelMetadata cachedMeta)
+            {
+                return FromCachedArtifact(entryPoint, cachedGlsl, cachedMeta);
+            }
+
+            var kernel = base.Compile(entryPoint, backendContext, specialization);
+
+            if (cacheable && kernel is WebGLCompiledKernel gk)
+            {
+                var profile = ProfileForThisBackend();
+                ShaderArtifactCache.Register(method!, profile, specialization, new ShaderArtifact
+                {
+                    Backend = AcceleratorType.WebGL,
+                    ProfileCacheKey = profile.ToCacheKeyString(),
+                    Source = gk.GLSLSource,
+                    CodegenMetadata = new WebGLKernelMetadata
+                    {
+                        ParameterBindings = gk.ParameterBindings,
+                        OutputVaryings = gk.OutputVaryings,
+                        BodyStructManifest = gk.BodyStructManifest,
+                        ProgramId = gk.ProgramId,
+                        SharedMemoryStaticSize = entryPoint.SharedMemory.StaticSize,
+                        SharedMemoryHasDynamic = entryPoint.SharedMemory.HasDynamicMemory,
+                    },
+                });
+            }
+            return kernel;
+        }
+
+        /// <summary>
+        /// A compiled kernel rebuilt from cached GLSL + its metadata (both hooks), keeping the original program id.
+        /// <see cref="LastGeneratedGLSL"/> is set as a compile sets it (tests read it after a load).
+        /// </summary>
+        private WebGLCompiledKernel FromCachedArtifact(EntryPoint entryPoint, string glsl, WebGLKernelMetadata meta)
+        {
+            LastGeneratedGLSL = glsl;
+            return new WebGLCompiledKernel(
+                Context,
+                entryPoint,
+                glsl,
+                parameterBindings: meta.ParameterBindings,
+                outputVaryings: meta.OutputVaryings,
+                bodyStructManifest: meta.BodyStructManifest,
+                programId: meta.ProgramId);
+        }
+
+        #endregion
+
         protected override CompiledKernel CreateKernel(
             EntryPoint entryPoint,
             CompiledKernel.KernelInfo? kernelInfo,
@@ -609,7 +759,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// of this compiled kernel and unique across distinct kernels. Replaces the old
         /// <c>GLSLSource.GetHashCode()</c> id, which could collide and run the wrong cached program.
         /// </summary>
-        public int ProgramId { get; } = System.Threading.Interlocked.Increment(ref _nextProgramId);
+        public int ProgramId { get; }
 
         /// <summary>
         /// The generated GLSL ES 3.0 vertex shader source.
@@ -646,9 +796,12 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             string glslSource,
             IReadOnlyList<KernelParameterBinding>? parameterBindings = null,
             IReadOnlyList<OutputVaryingInfo>? outputVaryings = null,
-            IReadOnlyList<BodyStructBindingEntry>? bodyStructManifest = null)
+            IReadOnlyList<BodyStructBindingEntry>? bodyStructManifest = null,
+            int programId = 0)
             : base(context, entryPoint, null)
         {
+            // a kernel rebuilt from the shader-artifact cache passes the id of the kernel its (identical) GLSL came from
+            ProgramId = programId > 0 ? programId : System.Threading.Interlocked.Increment(ref _nextProgramId);
             GLSLSource = glslSource;
             ParameterBindings = parameterBindings ?? Array.Empty<KernelParameterBinding>();
             OutputVaryings = outputVaryings ?? Array.Empty<OutputVaryingInfo>();

@@ -190,5 +190,86 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
             Console.WriteLine($"[report] {accelerator.AcceleratorType} ReleaseCompilerCaches concurrent: {loaders.Length} loads overlapped {releases} releases, all correct");
         });
+
+        // KERNEL LIFETIME + the shader-artifact cache (5.4.45). ILGPU's kernel cache is weak by design: a kernel lives as long
+        // as its owner holds its launcher, and the next GC after that frees it. A kernel loaded again after that is rebuilt; on
+        // the browser backends, where generating it costs the most, the process-wide shader-artifact cache rebuilds it from the
+        // generated code it kept (no IR, no code generation), also after ReleaseCompilerCaches dropped the context's IR.
+        // Measured 2026-11-22 before this: WebGPU's shader-resolve cache held every dispatched compiled kernel strongly
+        // (a dropped kernel was never collected there, unlike every other backend), and Wasm / WebGL had no artifact cache
+        // (a Codecs VP9 decoder re-created after a GC recompiled 3 kernels in 1.9 s on Wasm with the release on).
+        public struct CacheReleaseSalt20 : ICacheReleaseSalt { public int Salt => 120; }
+        public struct CacheReleaseSalt21 : ICacheReleaseSalt { public int Salt => 121; }
+
+        // Loads and runs a kernel and checks its output; the launcher is a local of this frame, so the caller holds only the
+        // returned weak reference to it.
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        static async Task<WeakReference> CacheRelease_LoadRunAndDrop(Accelerator accelerator, Func<Action<Index1D, ArrayView<int>>> load, int salt)
+        {
+            const int n = 256;
+            using var buf = accelerator.Allocate1D<int>(n);
+            var k = load();
+            k(n, buf.View);
+            await accelerator.SynchronizeAsync();
+            var got = await buf.CopyToHostAsync();
+            for (int i = 0; i < n; i++)
+                if (got[i] != CacheRelease_Mix(i, salt) - salt)
+                    throw new Exception($"{accelerator.AcceleratorType}: salt {salt}: element {i} is {got[i]}, expected {CacheRelease_Mix(i, salt) - salt}");
+            return new WeakReference(k);
+        }
+
+        // Collects until the launcher is gone. Browser .NET scans the stack conservatively, so each round first returns to the
+        // event loop (Task.Delay), as a test boundary does; otherwise a stale stack slot can keep the launcher alive.
+        static async Task CacheRelease_CollectUntilDead(Accelerator accelerator, WeakReference launcher)
+        {
+            for (int r = 0; r < 20 && launcher.IsAlive; r++) { await Task.Delay(20); GC.Collect(); GC.WaitForPendingFinalizers(); GC.Collect(); }
+            if (launcher.IsAlive)
+                throw new Exception($"{accelerator.AcceleratorType}: the dropped kernel's launcher survived 20 full GCs; the test cannot measure its reload");
+        }
+
+        [TestMethod(Timeout = 180000)]
+        public async Task KernelLifetime_DroppedKernel_IsFreed_BrowserRebuildsFromArtifactWithoutCompiling() => await RunTest(async accelerator =>
+        {
+            bool browser = accelerator is SpawnDev.ILGPU.WebGPU.WebGPUAccelerator
+                || accelerator is SpawnDev.ILGPU.Wasm.WasmAccelerator
+                || accelerator is SpawnDev.ILGPU.WebGL.WebGLAccelerator;
+            if (browser && !ShaderArtifactCache.Enabled)
+                throw new Exception("ShaderArtifactCache.Enabled is false in this lane; this test needs the default (true)");
+            var report = new List<string>();
+            foreach (bool release in new[] { false, true })
+            {
+                int salt = release ? 121 : 120;
+                Func<Action<Index1D, ArrayView<int>>> load = release
+                    ? () => accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(CacheRelease_SaltKernel<CacheReleaseSalt21>)
+                    : () => accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(CacheRelease_SaltKernel<CacheReleaseSalt20>);
+
+                var launcher = await CacheRelease_LoadRunAndDrop(accelerator, load, salt);
+                if (release) accelerator.ReleaseCompilerCaches();
+                await CacheRelease_CollectUntilDead(accelerator, launcher);
+
+                long loaded0 = accelerator.LoadedKernelCount, compiled0 = accelerator.CompiledKernelCount;
+                long irSkipped0 = ShaderArtifactCache.IrSkippedHits;
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                await CacheRelease_LoadRunAndDrop(accelerator, load, salt); // checks the output again
+                double ms = sw.Elapsed.TotalMilliseconds;
+                long loaded = accelerator.LoadedKernelCount - loaded0, compiled = accelerator.CompiledKernelCount - compiled0;
+                long irSkipped = ShaderArtifactCache.IrSkippedHits - irSkipped0;
+                string mode = release ? "after ReleaseCompilerCaches" : "without a release";
+
+                // weak lifetime on EVERY backend: the accelerator no longer held the kernel, so the reload went to the backend
+                if (loaded != 1)
+                    throw new Exception($"{accelerator.AcceleratorType} ({mode}): the kernel outlived its owner - the reload was served by the accelerator's own cache (backend loads {loaded}, expected 1)");
+                if (browser)
+                {
+                    // rebuilt from the artifact before any IR was built: no compile at all
+                    if (compiled != 0 || irSkipped != 1)
+                        throw new Exception($"{accelerator.AcceleratorType} ({mode}): expected a pre-IR artifact rebuild (compiled 0, IR-skipped hits 1), got compiled {compiled}, IR-skipped hits {irSkipped}");
+                }
+                else if (compiled != 1)
+                    throw new Exception($"{accelerator.AcceleratorType} ({mode}): expected the reload to compile once, compiled {compiled}");
+                report.Add($"{mode}: loads {loaded}, compiles {compiled}, IR-skipped {irSkipped}, {ms:F1} ms");
+            }
+            Console.WriteLine($"[report] {accelerator.AcceleratorType} dropped kernel reloaded after GC: " + string.Join("; ", report));
+        });
     }
 }

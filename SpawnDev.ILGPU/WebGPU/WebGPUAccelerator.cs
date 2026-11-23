@@ -523,7 +523,15 @@ namespace SpawnDev.ILGPU.WebGPU
         // shader the resolve would have produced — complete by construction, no wrong-shader risk. The cache
         // holds REFERENCES to shaders owned by the native accelerator's _shaderCache, so it adds no GPU
         // resources and needs no eviction. Per-accelerator (shaders are device-specific).
-        private readonly Dictionary<ShaderResolveKey, WebGPUComputeShader> _shaderResolveCache = new();
+        //
+        // WEAK in the compiled kernel (5.4.45): keyed by the compiled kernel through a ConditionalWeakTable, so this
+        // speed cache never decides how long a kernel lives. It was a Dictionary keyed by the compiled kernel object,
+        // which held every kernel ever dispatched for the accelerator's whole life: on WebGPU a kernel outlived its
+        // owner, unlike every other backend (ILGPU's kernel cache is weak by design), and a kernel that came back
+        // through a path outside the accelerator's compiled-kernel cache (a SpecializedValue kernel after its owner
+        // was collected) was compiled again while the old copy stayed held - one more dead kernel per reload
+        // (measured 2026-11-22, the kernel-lifetime diagnostic; ML saw 18 of an LLM's 44 kernels survive a GC).
+        private readonly System.Runtime.CompilerServices.ConditionalWeakTable<WebGPUCompiledKernel, Dictionary<ShaderResolveKey, WebGPUComputeShader>> _shaderResolveCache = new();
         private long _shaderResolveCacheHits;
         private long _shaderResolveCacheMisses;
 
@@ -533,33 +541,30 @@ namespace SpawnDev.ILGPU.WebGPU
         /// <summary>Number of dispatches that resolved + cached a shader (first sight of a (kernel, config)).</summary>
         public long ShaderResolveCacheMisses => _shaderResolveCacheMisses;
 
-        // Identity of a shader resolution. Captures the compiled kernel (which fixes the WGSL, entry point,
-        // dynamic-shared overrides, and IsExplicitlyGrouped) plus the dispatch-config inputs that change the
-        // resolved shader: the explicit GroupDim (drives the
-        // @workgroup_size patch), and the dynamic-shared-memory element count/size. Equality is reference
-        // identity on the kernel (RuntimeHelpers hash) + value equality on the config fields.
+        // Identity of a shader resolution WITHIN one compiled kernel (the outer table is keyed by the kernel, which
+        // fixes the WGSL, entry point, dynamic-shared overrides and IsExplicitlyGrouped): the dispatch-config inputs
+        // that change the resolved shader - the explicit GroupDim (drives the @workgroup_size patch) and the
+        // dynamic-shared-memory element count/size. Value equality on the config fields.
         private readonly struct ShaderResolveKey : IEquatable<ShaderResolveKey>
         {
-            public readonly object Kernel;
             public readonly uint UserDim;
             public readonly int GroupX, GroupY, GroupZ, SmNumElements, SmElementSize;
 
-            public ShaderResolveKey(object kernel, uint userDim, int gx, int gy, int gz, int smNum, int smElem)
+            public ShaderResolveKey(uint userDim, int gx, int gy, int gz, int smNum, int smElem)
             {
-                Kernel = kernel; UserDim = userDim;
+                UserDim = userDim;
                 GroupX = gx; GroupY = gy; GroupZ = gz;
                 SmNumElements = smNum; SmElementSize = smElem;
             }
 
             public bool Equals(ShaderResolveKey o) =>
-                ReferenceEquals(Kernel, o.Kernel) && UserDim == o.UserDim &&
+                UserDim == o.UserDim &&
                 GroupX == o.GroupX && GroupY == o.GroupY && GroupZ == o.GroupZ &&
                 SmNumElements == o.SmNumElements && SmElementSize == o.SmElementSize;
 
             public override bool Equals(object? obj) => obj is ShaderResolveKey k && Equals(k);
 
             public override int GetHashCode() => System.HashCode.Combine(
-                System.Runtime.CompilerServices.RuntimeHelpers.GetHashCode(Kernel),
                 UserDim, GroupX, GroupY, GroupZ, SmNumElements, SmElementSize);
         }
 
@@ -584,7 +589,7 @@ namespace SpawnDev.ILGPU.WebGPU
                     smElem = smc.ElementSize;
                 }
             }
-            return new ShaderResolveKey(ck, userDim, gx, gy, gz, smNum, smElem);
+            return new ShaderResolveKey(userDim, gx, gy, gz, smNum, smElem);
         }
 
         /// <summary>
@@ -618,12 +623,16 @@ namespace SpawnDev.ILGPU.WebGPU
             // Dispose that follows this callback cannot release a pipeline a recorded dispatch still needs.
             if (DefaultStream is WebGPUStream evictStream && evictStream.HasBatch) evictStream.FlushPending();
             List<ShaderResolveKey>? stale = null;
-            foreach (var kv in _shaderResolveCache)
+            foreach (var perKernel in _shaderResolveCache)
             {
-                if (ReferenceEquals(kv.Value, shader)) (stale ??= new()).Add(kv.Key);
+                stale?.Clear();
+                foreach (var kv in perKernel.Value)
+                {
+                    if (ReferenceEquals(kv.Value, shader)) (stale ??= new()).Add(kv.Key);
+                }
+                if (stale != null)
+                    foreach (var key in stale) perKernel.Value.Remove(key);
             }
-            if (stale != null)
-                foreach (var key in stale) _shaderResolveCache.Remove(key);
 
             if (_bindGroupCache.Count > 0) ClearBindGroupCache();
         }
@@ -1748,7 +1757,8 @@ namespace SpawnDev.ILGPU.WebGPU
             if (WebGPUBackend.EnableShaderResolveCache)
             {
                 var resolveKey = BuildShaderResolveKey(compiledKernel, dimension);
-                if (webGpuAccel._shaderResolveCache.TryGetValue(resolveKey, out var cachedShader))
+                var resolvedForKernel = webGpuAccel._shaderResolveCache.GetValue(compiledKernel, static _ => new());
+                if (resolvedForKernel.TryGetValue(resolveKey, out var cachedShader))
                 {
                     shader = cachedShader;
                     webGpuAccel._shaderResolveCacheHits++;
@@ -1757,7 +1767,7 @@ namespace SpawnDev.ILGPU.WebGPU
                 {
                     shader = nativeAccel.GetOrCreateComputeShader(ResolveSource(), "main", overrideConstants,
                         compiledKernel.EntryPoint?.Name);
-                    webGpuAccel._shaderResolveCache[resolveKey] = shader;
+                    resolvedForKernel[resolveKey] = shader;
                     webGpuAccel._shaderResolveCacheMisses++;
                 }
             }

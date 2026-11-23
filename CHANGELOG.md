@@ -1,6 +1,37 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.45 (forks 2.4.37) - unreleased
+
+Kernel lifetime in the browser: kernels are freed with their owner on every backend, and a kernel loaded again is rebuilt
+from the code this page already generated. Weak kernel lifetime + `ReleaseCompilerCaches` + the shader-artifact cache on
+every browser backend (TJ's decision, 2026-11-22, after Codecs / ML / ILGPU measured model and codec switches).
+
+- **FIX (WebGPU): a dropped kernel is freed.** The dispatch path's shader-resolve cache was keyed by the compiled kernel
+  object in a plain dictionary, so every kernel ever dispatched lived as long as the accelerator, unlike every other
+  backend (ILGPU's kernel cache is weak by design). A kernel that came back through a path outside the accelerator's
+  compiled-kernel cache (a `SpecializedValue` kernel after its owner was collected) was compiled again while the old copy
+  stayed held: one more dead kernel per reload. The cache is keyed weakly now (`ConditionalWeakTable`).
+- **NEW (Wasm, WebGL): the shader-artifact cache.** Every generated Wasm module / GLSL shader is kept in the process-wide
+  `ShaderArtifactCache` with what its compiled kernel needs, so a kernel loaded again after its owner was collected, or
+  after `ReleaseCompilerCaches` dropped the context's IR, is rebuilt BEFORE ILGPU builds its IR: no IR, no code
+  generation (WebGPU has done this since 5.3.2). A rebuilt WebGL kernel keeps its GL program id, so the GL worker reuses the
+  program it already linked; a rebuilt Wasm kernel uses the same module bytes, so the workers reuse their compiled module.
+  Before: a Codecs VP9 decoder re-created after a GC recompiled its 3 kernels in 1.9 s on Wasm with the release on
+  (0.2 s without it); an ML depth model reloaded in ~0.95 s on Wasm and ~3.9 s on WebGL after a release.
+  Cross-session export (`ShaderArtifactSerializer.ExportCache`) stays WebGPU-only.
+- **FIX (artifact cache key): the context's code-generation settings are part of it.** The cache is process-wide, but
+  its key ignored the context properties that change the generated code (optimization level, math mode, inlining,
+  floating-point contraction, static field / array modes, debug symbols, assertions, IO), so two contexts with different
+  settings in one page could be served each other's shader. Non-default values now enter the profile's feature set
+  (default contexts keep their keys, so precompiled manifests still match). Wasm's own switches (SIMD, barrier style,
+  local compaction, structured control flow, yield escape, memory maximum) and WebGL's f64 mode are in its key too.
+- **TEST: `KernelLifetime_DroppedKernel_IsFreed_BrowserRebuildsFromArtifactWithoutCompiling`** (every lane, with and
+  without a release): the dropped kernel's launcher is collected, the reload goes to the backend (the accelerator no
+  longer held it), and on WebGPU / Wasm / WebGL it compiles nothing and skips the IR. Red-checked: with the old
+  WebGPU resolve cache "the kernel outlived its owner"; without the Wasm / WebGL hooks "compiled 1, IR-skipped 0".
+  `PrecompiledShaders_ProfileBuilders_ProduceIdenticalKeyStrings` covers Wasm and WebGL too.
+
 ## 5.4.44 (forks 2.4.37) - 2026-11-22 - ReleaseCompilerCaches: free the compiler cache after loading kernels, from any thread
 
 - **NEW: `accelerator.ReleaseCompilerCaches()`** releases the compiler's cached copy of your kernel code: the IR and type

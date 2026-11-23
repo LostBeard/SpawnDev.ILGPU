@@ -277,12 +277,25 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         public async Task PrecompiledShaders_ProfileBuilders_ProduceIdenticalKeyStrings() =>
             await RunTest(async accelerator =>
         {
-            if (accelerator is not WebGPUAccelerator webgpu)
-                throw new UnsupportedTestException("WebGPU-only (the runtime cache hook is WebGPU).");
-
-            var lookupKey = webgpu.Backend.ProfileForThisBackend().ToCacheKeyString();
-            var registrationKey =
-                CapabilityProfiles.FromAccelerator(webgpu, webgpu.EnabledFeatures).ToCacheKeyString();
+            // the three browser backends carry the runtime cache hooks (Wasm and WebGL since 5.4.45)
+            string lookupKey, registrationKey;
+            if (accelerator is WebGPUAccelerator webgpu)
+            {
+                lookupKey = webgpu.Backend.ProfileForThisBackend().ToCacheKeyString();
+                registrationKey = CapabilityProfiles.FromAccelerator(webgpu, webgpu.EnabledFeatures).ToCacheKeyString();
+            }
+            else if (accelerator is SpawnDev.ILGPU.Wasm.WasmAccelerator wasm)
+            {
+                lookupKey = wasm.Backend.ProfileForThisBackend().ToCacheKeyString();
+                registrationKey = CapabilityProfiles.FromAccelerator(wasm).ToCacheKeyString();
+            }
+            else if (accelerator is SpawnDev.ILGPU.WebGL.WebGLAccelerator webgl)
+            {
+                lookupKey = webgl.Backend.ProfileForThisBackend().ToCacheKeyString();
+                registrationKey = CapabilityProfiles.FromAccelerator(webgl).ToCacheKeyString();
+            }
+            else
+                throw new UnsupportedTestException("browser backends only (the runtime shader-artifact cache hooks)");
             if (lookupKey != registrationKey)
                 throw new Exception(
                     "Profile-key DRIFT: ProfileForThisBackend (cache lookup) and FromAccelerator " +

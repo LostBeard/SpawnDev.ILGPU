@@ -1473,6 +1473,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (HasShaderF16) features.Add("shader-f16");
             if (HasSubgroups) features.Add("subgroups");
             if (HasPackedInt8Dot) features.Add(PackedInt8DotLanguageFeature);
+            CodegenSettingsKey.AddContextSettings(Context, features);
             return new CapabilityProfile
             {
                 Backend = AcceleratorType.WebGPU,

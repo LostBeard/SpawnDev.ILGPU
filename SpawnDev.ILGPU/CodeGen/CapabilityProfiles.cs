@@ -225,7 +225,15 @@ public static class CapabilityProfiles
             };
             subGroups = accelerator.WarpSize > 1;
             foreach (var f in features) effectiveFeatures.Add(f);
+            // the browser backends' own generated-code switches (the same entries their runtime profile carries)
+            if (accelerator is Wasm.WasmAccelerator wasm)
+            {
+                f64Mode = F64EmulationMode.Disabled; // native f64 (as CapabilityProfiles.WasmDefault)
+                wasm.Backend.AddCodegenSettings(effectiveFeatures);
+            }
+            else if (accelerator is WebGL.WebGLAccelerator webgl) f64Mode = webgl.Backend.F64Mode;
         }
+        CodegenSettingsKey.AddContextSettings(accelerator.Context, effectiveFeatures);
 
         return new CapabilityProfile
         {

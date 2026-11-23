@@ -820,6 +820,206 @@ namespace SpawnDev.ILGPU.Wasm.Backend
         /// <param name="builder">The text builder from <c>CreateKernelBuilder</c> (holds only a header comment).</param>
         /// <param name="data">The generator arguments shared by all code generators of this kernel.</param>
         /// <returns>A <see cref="WasmCompiledKernel"/> holding the module binary and dispatch metadata.</returns>
+        #region Shader artifact cache
+
+        /// <summary>
+        /// Everything a <see cref="WasmCompiledKernel"/> holds besides its module bytes, so a kernel can be rebuilt from a
+        /// cached artifact without its IR (the process-wide <see cref="ShaderArtifactCache"/>; the Wasm counterpart of
+        /// WebGPU's <c>WebGPUKernelMetadata</c>). The collections are the original compiled kernel's own: nothing changes
+        /// them after compilation, so the rebuilt kernel shares them.
+        /// </summary>
+        public sealed record WasmKernelMetadata
+        {
+            /// <summary>See <see cref="WasmCompiledKernel.BindingCount"/>.</summary>
+            public required int BindingCount { get; init; }
+            /// <summary>See <see cref="WasmCompiledKernel.ParamInfos"/>.</summary>
+            public required List<WasmParamInfo> ParamInfos { get; init; }
+            /// <summary>See <see cref="WasmCompiledKernel.SharedMemorySize"/>.</summary>
+            public required int SharedMemorySize { get; init; }
+            /// <summary>See <see cref="WasmCompiledKernel.BarrierCount"/>.</summary>
+            public required int BarrierCount { get; init; }
+            /// <summary>See <see cref="WasmCompiledKernel.HasBarriers"/>.</summary>
+            public required bool HasBarriers { get; init; }
+            /// <summary>See <see cref="WasmCompiledKernel.DynamicSharedElementSize"/>.</summary>
+            public required int DynamicSharedElementSize { get; init; }
+            /// <summary>See <see cref="WasmCompiledKernel.ScratchPerThread"/>.</summary>
+            public required int ScratchPerThread { get; init; }
+            /// <summary>See <see cref="WasmCompiledKernel.PhaseCount"/>.</summary>
+            public required int PhaseCount { get; init; }
+            /// <summary>See <see cref="WasmCompiledKernel.WrittenParamIndices"/>.</summary>
+            public required HashSet<int> WrittenParamIndices { get; init; }
+            /// <summary>See <see cref="WasmCompiledKernel.StoreTargetTrace"/>.</summary>
+            public required List<string> StoreTargetTrace { get; init; }
+            /// <summary>See <see cref="WasmCompiledKernel.IrUserParamIndexOffset"/>.</summary>
+            public required int IrUserParamIndexOffset { get; init; }
+            /// <summary>See <see cref="WasmCompiledKernel.HasSimdKernel"/>.</summary>
+            public required bool HasSimdKernel { get; init; }
+            /// <summary>The entry point's static shared memory, so the early (pre-IR) hook can build the entry point.</summary>
+            public required int SharedMemoryStaticSize { get; init; }
+            /// <summary>Whether the entry point has dynamic shared memory (early hook).</summary>
+            public required bool SharedMemoryHasDynamic { get; init; }
+            /// <summary>The codegen's SIMD analysis of this kernel (default when it ran none), restored to <see cref="LastSimdAnalysis"/> on a hit.</summary>
+            public WasmSimdAnalysisResult SimdAnalysis { get; init; }
+        }
+
+        /// <summary>
+        /// Adds this backend's generated-code switches to a profile's feature set (also used by
+        /// <see cref="CapabilityProfiles.FromAccelerator"/>, so both build the same key). Each one changes the module bytes:
+        /// SIMD (the kernel_simd function), the barrier style, local compaction, structured control flow, the yield escape,
+        /// and the memory import's declared maximum.
+        /// </summary>
+        internal void AddCodegenSettings(ISet<string> features)
+        {
+            if (EffectiveWasmSimd) features.Add("wasm:simd");
+            if (UseWaitNotifyBarriers) features.Add("wasm:waitnotify");
+            if (!CompactLocals) features.Add("wasm:nocompactlocals");
+            if (!StructuredControlFlow) features.Add("wasm:unstructured");
+            if (Options.EnableYieldEscape ?? false) features.Add("wasm:yieldescape");
+            features.Add("wasm:maxpages=" + Options.MaxLinearMemoryPages);
+        }
+
+        /// <summary>The artifact-cache profile of this backend as configured now (the key's profile segment).</summary>
+        internal CapabilityProfile ProfileForThisBackend()
+        {
+            var features = new HashSet<string>(StringComparer.Ordinal);
+            AddCodegenSettings(features);
+            CodegenSettingsKey.AddContextSettings(Context, features);
+            return new CapabilityProfile
+            {
+                Backend = AcceleratorType.Wasm,
+                Name = "Wasm-runtime",
+                Float16Native = false,
+                Float64Native = true,
+                Float64Mode = F64EmulationMode.Disabled,
+                Int64Native = true,
+                SubGroups = true,
+                WarpSize = WasmWarpSize,
+                MaxNumThreadsPerGroup = 256, // WasmILGPUDevice.MaxNumThreadsPerGroup
+                MaxStorageBufferBindings = 0,
+                EnabledFeatures = features,
+            };
+        }
+
+        /// <summary>
+        /// Early (pre-IR) artifact-cache hook: a kernel whose module this process already generated is rebuilt from the
+        /// cached bytes BEFORE ILGPU builds its IR, so a kernel loaded again (its owner was collected, or the context's
+        /// compiler caches were released with <c>ReleaseCompilerCaches</c>) skips IR construction, the IR transformations and
+        /// the Wasm generation. Anything else takes the normal path, which registers what it generates.
+        /// </summary>
+        public override CompiledKernel Compile<TBackendHook>(
+            in EntryPointDescription entry,
+            in KernelSpecialization specialization,
+            TBackendHook backendHook)
+        {
+            var method = entry.MethodSource;
+            if (method != null && ShaderArtifactCache.Enabled
+                && !ShaderArtifactCache.UsesRuntimeValueSpecialization(method)
+                && ShaderArtifactCache.TryPeek(method, ProfileForThisBackend(), specialization, out var art)
+                && art.Binary is { } cachedModule
+                && art.CodegenMetadata is WasmKernelMetadata meta)
+            {
+                var entryPoint = new EntryPoint(
+                    entry,
+                    new SharedMemorySpecification(meta.SharedMemoryStaticSize, meta.SharedMemoryHasDynamic),
+                    specialization);
+                // the normal path rejects this combination after building the IR; a cached kernel passed it then
+                if (!(entryPoint.IsImplicitlyGrouped && entryPoint.SharedMemory.HasSharedMemory))
+                {
+                    ShaderArtifactCache.CountIrSkippedHit();
+                    return FromCachedArtifact(entryPoint, cachedModule, meta);
+                }
+            }
+            return base.Compile(entry, specialization, backendHook);
+        }
+
+        /// <summary>
+        /// Late artifact-cache hook (the IR exists, the Wasm generation is skipped on a hit) and the registration of every
+        /// module this backend generates. Kernels with <c>SpecializedValue</c> parameters are not cacheable here: the value
+        /// is baked into the IR upstream (SpecializationCache), so no complete key exists.
+        /// </summary>
+        protected override CompiledKernel Compile(
+            EntryPoint entryPoint,
+            in BackendContext backendContext,
+            in KernelSpecialization specialization)
+        {
+            var method = entryPoint.MethodInfo;
+            bool cacheable = method != null && ShaderArtifactCache.Enabled
+                && !ShaderArtifactCache.UsesRuntimeValueSpecialization(method);
+            if (cacheable
+                && ShaderArtifactCache.TryGet(method!, ProfileForThisBackend(), specialization, out var art)
+                && art.Binary is { } cachedModule
+                && art.CodegenMetadata is WasmKernelMetadata cachedMeta)
+            {
+                return FromCachedArtifact(entryPoint, cachedModule, cachedMeta);
+            }
+
+            // the codegen records its SIMD analysis only for kernels with an index parameter: clear it first, so a kernel
+            // without one registers "none" instead of the previous kernel's analysis
+            LastSimdAnalysis = default;
+            var kernel = base.Compile(entryPoint, backendContext, specialization);
+
+            if (cacheable && kernel is WasmCompiledKernel wk)
+            {
+                var profile = ProfileForThisBackend();
+                ShaderArtifactCache.Register(method!, profile, specialization, new ShaderArtifact
+                {
+                    Backend = AcceleratorType.Wasm,
+                    ProfileCacheKey = profile.ToCacheKeyString(),
+                    Binary = wk.WasmBinary,
+                    CodegenMetadata = new WasmKernelMetadata
+                    {
+                        BindingCount = wk.BindingCount,
+                        ParamInfos = wk.ParamInfos,
+                        SharedMemorySize = wk.SharedMemorySize,
+                        BarrierCount = wk.BarrierCount,
+                        HasBarriers = wk.HasBarriers,
+                        DynamicSharedElementSize = wk.DynamicSharedElementSize,
+                        ScratchPerThread = wk.ScratchPerThread,
+                        PhaseCount = wk.PhaseCount,
+                        WrittenParamIndices = wk.WrittenParamIndices,
+                        StoreTargetTrace = wk.StoreTargetTrace,
+                        IrUserParamIndexOffset = wk.IrUserParamIndexOffset,
+                        HasSimdKernel = wk.HasSimdKernel,
+                        SharedMemoryStaticSize = entryPoint.SharedMemory.StaticSize,
+                        SharedMemoryHasDynamic = entryPoint.SharedMemory.HasDynamicMemory,
+                        SimdAnalysis = LastSimdAnalysis,
+                    },
+                });
+            }
+            return kernel;
+        }
+
+        /// <summary>
+        /// A compiled kernel rebuilt from a cached module + its metadata (both hooks). The SAME byte array as the original,
+        /// so the accelerator's per-module worker bookkeeping (keyed by the array) finds the module its workers already
+        /// compiled. The "last kernel" diagnostics are set as a compile would set them (tests read them after a load).
+        /// </summary>
+        private WasmCompiledKernel FromCachedArtifact(EntryPoint entryPoint, byte[] module, WasmKernelMetadata meta)
+        {
+            LastWasmBinary = module;
+            LastWrittenParamIndices = new HashSet<int>(meta.WrittenParamIndices);
+            LastStoreTargetTrace = new List<string>(meta.StoreTargetTrace);
+            LastSimdAnalysis = meta.SimdAnalysis;
+            return new WasmCompiledKernel(
+                Context,
+                entryPoint,
+                module,
+                meta.BindingCount,
+                meta.ParamInfos,
+                meta.SharedMemorySize,
+                meta.BarrierCount,
+                meta.HasBarriers,
+                meta.DynamicSharedElementSize,
+                meta.ScratchPerThread,
+                meta.PhaseCount,
+                meta.WrittenParamIndices,
+                meta.StoreTargetTrace,
+                meta.IrUserParamIndexOffset,
+                meta.HasSimdKernel);
+        }
+
+        #endregion
+
         protected override CompiledKernel CreateKernel(
             EntryPoint entryPoint,
             CompiledKernel.KernelInfo? kernelInfo,
