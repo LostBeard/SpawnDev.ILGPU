@@ -161,11 +161,29 @@ public class ProjectTest
             // wait for test to finish (button will become enabled again). A dead .NET runtime never re-enables it, so
             // stop as soon as the console says the runtime died instead of waiting out the 10-minute timeout.
             var runtimeDied = false;
-            await page.WaitForConditionAsync(async () =>
+            // PMT_BROWSER_DONE_TIMEOUT_SEC: an explicit limit for this wait (for checking the overrun path below with a short one)
+            var doneTimeoutMs = int.TryParse(Environment.GetEnvironmentVariable("PMT_BROWSER_DONE_TIMEOUT_SEC"), out var doneSec) && doneSec > 0
+                ? doneSec * 1000
+                : Math.Max(600_000, DeclaredTimeoutMs + 30_000);
+            try
             {
-                lock (consoleErrors) runtimeDied = consoleErrors.Any(IsRuntimeDeathMessage);
-                return runtimeDied || await runButton.IsEnabledAsync();
-            }, Math.Max(600_000, DeclaredTimeoutMs + 30_000));
+                await page.WaitForConditionAsync(async () =>
+                {
+                    lock (consoleErrors) runtimeDied = consoleErrors.Any(IsRuntimeDeathMessage);
+                    return runtimeDied || await runButton.IsEnabledAsync();
+                }, doneTimeoutMs);
+            }
+            catch (TimeoutException)
+            {
+                // The test is STILL RUNNING in the page. Without a new page the next test would start beside it, and the
+                // overrun test could change shared state under it (ML 2026-11-23: a test held up by a model download
+                // restored a static setting in the middle of the next test). Recycling the page closes it, which ends the
+                // overrun test; the lane loop does that when PageRuntimeDead is set.
+                page.Console -= OnConsole;
+                Result = TestResult.Error;
+                PageRuntimeDead = true;
+                throw new TimeoutException($"The test did not finish within {doneTimeoutMs / 1000} s; its page is replaced so it cannot keep running under the next test.");
+            }
 
             // Stop capturing console
             page.Console -= OnConsole;

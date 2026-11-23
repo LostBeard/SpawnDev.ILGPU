@@ -1437,7 +1437,7 @@ namespace PlaywrightMultiTest
         /// and recoverably through ExecuteAndCaptureAsync's own try/catch, same as before this
         /// method existed.
         /// </summary>
-        private async Task RecyclePageAsync(TestableBlazorWasm blazor)
+        internal async Task RecyclePageAsync(TestableBlazorWasm blazor)
         {
             try
             {
