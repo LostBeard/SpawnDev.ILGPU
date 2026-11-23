@@ -75,6 +75,10 @@ try
     if (args.Length > 0 && args[0] == "int-op-cost")
         return await IntOpCostProbe.Run(args);
 
+    // Does Context.ClearCache(Default) change the WGSL of kernels compiled after it? Offline, no GPU (ClearCacheWgslProbe.cs).
+    if (args.Length > 0 && args[0] == "clearcache-wgsl")
+        return ClearCacheWgslProbe.Run(args);
+
     // Offline WGSL/GLSL/Wasm dump of any BackendTestBase kernel method (KernelDump.cs).
     if (args.Length > 0 && args[0] == "kernel-dump")
         return await KernelDump.Run(args);
