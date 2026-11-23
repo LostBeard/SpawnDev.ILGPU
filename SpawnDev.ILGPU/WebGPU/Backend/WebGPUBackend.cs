@@ -1686,6 +1686,19 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 wgslSource = wgslSource.Replace(OpaqueZeroInit,
                     data.OpaqueZero[1] >= 0 ? $"_ilgpu_oz = i32(_scalar_params[{data.OpaqueZero[1]}]);" : "");
 
+            // Deterministic names (5.4.46): the same kernel compiled again must give byte-identical WGSL, because the text keys
+            // the compiled-shader cache (and the browser's pipeline cache). See WGSLCanonicalNames. The host-side names are
+            // renamed with the same map: dynamic shared-memory overrides, coalesce bindings, struct types in the packing manifest.
+            wgslSource = WGSLCanonicalNames.Canonicalize(wgslSource, out var canonicalNames);
+            for (int o = 0; o < data.DynamicSharedOverrides.Count; o++)
+            {
+                var ov = data.DynamicSharedOverrides[o];
+                data.DynamicSharedOverrides[o] = new DynamicSharedOverrideInfo(
+                    canonicalNames.Rename(ov.ConstantName), canonicalNames.Rename(ov.VariableName), ov.AllocaIndex, ov.ElementSize);
+            }
+            foreach (var group in data.CoalesceManifest) group.BindingName = canonicalNames.Rename(group.BindingName);
+            foreach (var entry in data.ScalarPackingManifest) entry.WgslType = canonicalNames.Rename(entry.WgslType);
+
             // Prepend kernel method name as a comment for identification
             var methodName = entryPoint.MethodInfo?.Name ?? "unknown";
             wgslSource = $"// Kernel: {methodName}\n" + wgslSource;

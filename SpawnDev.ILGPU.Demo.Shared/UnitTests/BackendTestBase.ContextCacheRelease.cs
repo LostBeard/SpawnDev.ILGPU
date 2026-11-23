@@ -271,5 +271,54 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
             Console.WriteLine($"[report] {accelerator.AcceleratorType} dropped kernel reloaded after GC: " + string.Join("; ", report));
         });
+
+        // The same kernel compiled again must give byte-identical WGSL (5.4.46). The text keys the accelerator's compiled-shader
+        // cache (and the browser's pipeline cache): names built from IR node ids (helper functions Name_{id}, labels, structs
+        // struct_{id}, ids in comments) made the text depend on what the context compiled before, so a kernel compiled again
+        // after its owner was collected missed the cache, kept a duplicate pipeline and paid a D3D compile (Tuvok 2026-11-23: an
+        // LLM reload took the cache from 57 to 75 shaders). And the IR itself: a kernel optimized in one pass with a helper new to
+        // the context inlined the helper's RAW IR, a kernel compiled after another caller inlined its OPTIMIZED IR, so the code
+        // differed too (IRContext.Optimize now goes callees first). Here: A from an empty IR cache, then B alone (it shares A's
+        // helper), then A again, through the accelerator's own backend with the artifact cache off so both A's really compile.
+        [TestMethod(Timeout = 180000)]
+        public async Task WebGPU_SameKernelCompiledAgain_ByteIdenticalWgsl() => await RunTest(async accelerator =>
+        {
+            if (accelerator is not SpawnDev.ILGPU.WebGPU.WebGPUAccelerator webgpu)
+                throw new UnsupportedTestException("WebGPU-only (the WGSL text keys its compiled-shader cache)");
+            bool savedCache = ShaderArtifactCache.Enabled;
+            ShaderArtifactCache.Enabled = false;
+            try
+            {
+                string Wgsl(Delegate kernel) => ((SpawnDev.ILGPU.WebGPU.Backend.WebGPUCompiledKernel)webgpu.Backend.Compile(
+                    global::ILGPU.Backends.EntryPoints.EntryPointDescription.FromImplicitlyGroupedKernel(kernel.Method),
+                    KernelSpecialization.Empty)).WGSLSource;
+                var a = (Action<Index1D, ArrayView<int>>)CacheRelease_KernelA;
+                var b = (Action<Index1D, ArrayView<int>>)CacheRelease_KernelB;
+                // 1st A: A and its helper CacheRelease_Mix new to the context (optimized in one pass before 5.4.46);
+                // then B alone, so the helper is optimized with B; then A again, inlining the already-optimized helper.
+                accelerator.ReleaseCompilerCaches();
+                var first = Wgsl(a);
+                accelerator.ReleaseCompilerCaches();
+                Wgsl(b);
+                var again = Wgsl(a);
+                if (first != again)
+                {
+                    int d = 0;
+                    while (d < Math.Min(first.Length, again.Length) && first[d] == again[d]) d++;
+                    int from = Math.Max(0, d - 80);
+                    throw new Exception($"recompiled WGSL differs at {d}: first >>>{first.Substring(from, Math.Min(200, first.Length - from))}<<< again >>>{again.Substring(from, Math.Min(200, again.Length - from))}<<<");
+                }
+                // and it still runs: the canonical names are consistent in the text the GPU compiles
+                const int n = 1024;
+                using var buf = accelerator.Allocate1D<int>(n);
+                var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(CacheRelease_KernelA);
+                k(n, buf.View);
+                var got = await buf.CopyToHostAsync();
+                for (int i = 0; i < n; i++)
+                    if (got[i] != CacheRelease_Mix(i, 1)) throw new Exception($"element {i} is {got[i]}, expected {CacheRelease_Mix(i, 1)}");
+                Console.WriteLine($"[report] WebGPU same kernel compiled again: {first.Length} chars, byte-identical");
+            }
+            finally { ShaderArtifactCache.Enabled = savedCache; }
+        });
     }
 }

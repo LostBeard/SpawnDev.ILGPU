@@ -57,9 +57,92 @@ static class ClearCacheWgslProbe
     static string Wgsl(WebGPUBackend backend, Delegate kernel) =>
         ((WebGPUCompiledKernel)backend.Compile(EntryPointDescription.FromImplicitlyGroupedKernel(kernel.Method), KernelSpecialization.Empty)).WGSLSource;
 
+    // `clearcache-wgsl --all`: DETERMINISM scan of every suite kernel. One context + backend (as in a page): every kernel
+    // compiled once, then every kernel compiled again (the IR node ids have moved on by then), RAW WGSL compared. Different
+    // text for the same kernel = a compiled-shader cache miss and a duplicate pipeline (WGSLCanonicalNames, 5.4.46).
+    static int RunAll()
+    {
+        var asm = typeof(SpawnDev.ILGPU.Demo.Shared.UnitTests.BackendTestBase).Assembly;
+        var spec = new KernelSpecialization(64, null);
+        var kernels = new List<(string Name, System.Reflection.MethodInfo M)>();
+        var seen = new HashSet<string>();
+        foreach (var type in asm.GetTypes())
+        {
+            if (type.ContainsGenericParameters) continue;
+            foreach (var m in type.GetMethods(System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly))
+            {
+                if (m.IsGenericMethodDefinition || m.ReturnType != typeof(void) || m.GetMethodBody() == null) continue;
+                var ps = m.GetParameters();
+                if (ps.Length == 0) continue;
+                bool ok = true;
+                foreach (var p in ps) if (!p.ParameterType.IsValueType || p.ParameterType.IsByRef) { ok = false; break; }
+                if (!ok) continue;
+                string name = $"{type.Name}.{m.Name}";
+                if (!seen.Add(name)) name += "_" + m.MetadataToken.ToString("x");
+                kernels.Add((name, m));
+            }
+        }
+        // pass 1: each kernel in its OWN fresh context (its text when nothing was compiled before it);
+        // pass 2: all kernels once each, in REVERSE order, in ONE context (each with a different compile history).
+        // Each kernel is compiled once per context: a kernel that fails part-way (an unsupported feature) can leave a
+        // context in which a RE-compile of another kernel crashes in IfConversion (seen 2026-11-23; tracked separately).
+        string? Compile(WebGPUBackend backend, System.Reflection.MethodInfo m)
+        {
+            try
+            {
+                EntryPointDescription entry;
+                try { entry = EntryPointDescription.FromImplicitlyGroupedKernel(m); }
+                catch (NotSupportedException) { entry = EntryPointDescription.FromExplicitlyGroupedKernel(m); }
+                return ((WebGPUCompiledKernel)backend.Compile(entry, spec)).WGSLSource;
+            }
+            catch { return null; }
+        }
+        var first = new Dictionary<string, string>();
+        var swFresh = System.Diagnostics.Stopwatch.StartNew();
+        foreach (var (name, m) in kernels)
+        {
+            var (c, b) = NewBackend();
+            using (c) using (b) { var w = Compile(b, m); if (w != null) first[name] = w; }
+        }
+        double freshMs = swFresh.Elapsed.TotalMilliseconds;
+        var swShared = System.Diagnostics.Stopwatch.StartNew();
+        int same = 0, differ = 0, shown = 0;
+        var (ctx, backend) = NewBackend();
+        using (ctx) using (backend)
+        {
+            for (int k = kernels.Count - 1; k >= 0; k--)
+            {
+                var (name, m) = kernels[k];
+                if (!first.TryGetValue(name, out var w1)) continue;
+                var w2 = Compile(backend, m);
+                if (w2 == null) continue;
+                if (w1 == w2) { same++; continue; }
+                differ++;
+                if (shown++ < 5)
+                {
+                    int d = 0;
+                    while (d < Math.Min(w1.Length, w2.Length) && w1[d] == w2[d]) d++;
+                    int from = Math.Max(0, d - 60);
+                    Console.WriteLine($"  DIFFERS {name} at {d}:");
+                    Console.WriteLine("    fresh : " + w1.Substring(from, Math.Min(160, w1.Length - from)).Replace('\n', '|'));
+                    Console.WriteLine("    shared: " + w2.Substring(from, Math.Min(160, w2.Length - from)).Replace('\n', '|'));
+                }
+            }
+        }
+        Console.WriteLine($"TIMING: fresh-context pass {freshMs:F0} ms, shared-context pass {swShared.Elapsed.TotalMilliseconds:F0} ms");
+        Console.WriteLine($"RESULT: {first.Count} kernels; in a shared context after other kernels: {same} byte-identical, {differ} different");
+        return differ;
+    }
+
     public static int Run(string[] args)
     {
         bool savedCache = ShaderArtifactCache.Enabled;
+        if (args.Length > 1 && args[1] == "--all")
+        {
+            ShaderArtifactCache.Enabled = false;
+            try { return RunAll(); }
+            finally { ShaderArtifactCache.Enabled = savedCache; }
+        }
         ShaderArtifactCache.Enabled = false;
         try
         {
@@ -84,6 +167,8 @@ static class ClearCacheWgslProbe
             {
                 // A compiled before the clear; B and C compiled for the first time after it (Geordi's case)
                 var aBefore = Normalise(Wgsl(backend, kernels[0].K));
+                try { var again = Wgsl(backend, kernels[0].K); Console.WriteLine("  same-context recompile without a clear: " + (again.Length > 0 ? "ok" : "empty") + (Normalise(again) == aBefore ? ", same text" : ", DIFFERENT text")); }
+                catch (Exception ex) { Console.WriteLine("  same-context recompile without a clear THROWS: " + (ex is AggregateException ae ? ae.InnerExceptions[0].GetType().Name + " " + ae.InnerExceptions[0].Message : ex.GetType().Name + " " + ex.Message)); }
                 ctx.ClearCache(ClearCacheMode.Default);
                 var after = new Dictionary<string, string>
                 {

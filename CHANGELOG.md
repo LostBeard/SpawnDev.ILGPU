@@ -1,6 +1,30 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.46 (forks 2.4.38) - The same kernel compiled again gives the same code
+
+- **FIX (WebGPU): byte-identical WGSL for the same kernel.** The WGSL generators named helper functions, labels, helper
+  parameters and structs after IR node ids (`Name_1063214`, `L_57_3`, `p_88`, `struct_1101153`), and comments carried IR
+  block ids. The ids come from counters shared by everything a context compiles, so the text of one kernel depended on what
+  was compiled before it. The text is the key of the accelerator's compiled-shader cache and of the browser's pipeline cache:
+  a kernel compiled again (its owner collected, a model switched back, after `ReleaseCompilerCaches`) missed both, kept a
+  duplicate pipeline and paid another D3D shader compile (ML: an LLM switched away and back took the shader cache from 57
+  to 75 shaders). The finished WGSL is now renamed canonically (`WGSLCanonicalNames`): every identifier with a numeric
+  segment is renumbered per shape in order of first appearance, and the names the host uses (dynamic shared-memory
+  override constants, coalesce bindings, struct names in the scalar-packing manifest) are renamed with the same map.
+- **FIX (all backends): a kernel's IR no longer depends on the compile history.** `IRContext.Optimize` optimized a
+  kernel and the helpers new to the context in one pass, so the kernel inlined a helper's RAW IR; a kernel compiled after
+  another caller of that helper inlined its OPTIMIZED IR. Same kernel, different code (5 of the 799 suite kernels, e.g. an
+  extra constant, a different variable order). It now optimizes in levels, every method after the methods it calls: the
+  order every kernel sharing an already-compiled helper always got. Call cycles are optimized together as before.
+  Compile time of the 799 suite kernels, each in a fresh context, interleaved A/B: about 4% more (8.47 -> 8.85 s,
+  8.71 -> 9.07 s).
+- **TEST: `WebGPU_SameKernelCompiledAgain_ByteIdenticalWgsl`**: A from an empty IR cache, then B (sharing A's helper)
+  alone, then A again; the WGSL must be byte-identical and the kernel must still compute the right values.
+  DemoConsole `clearcache-wgsl --all` compiles every suite kernel in its own fresh context and again all of them in one
+  shared context (reverse order) and compares the raw WGSL: 197 of 799 kernels differed before, 5 with the names fixed
+  alone, 0 now.
+
 ## 5.4.45 (forks 2.4.37) - 2026-11-22 - Kernel lifetime in the browser: dropped kernels freed everywhere, reloads rebuilt from generated code
 
 Kernel lifetime in the browser: kernels are freed with their owner on every backend, and a kernel loaded again is rebuilt

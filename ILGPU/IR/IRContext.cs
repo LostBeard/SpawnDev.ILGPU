@@ -465,7 +465,91 @@ namespace ILGPU.IR
         /// <summary>
         /// Applies all default optimization transformations.
         /// </summary>
-        public void Optimize() => Transform(Context.ContextTransformer);
+        /// <remarks>
+        /// SpawnDev 5.4.46: callees first. The methods still to optimize are optimized in levels, every method after all the
+        /// methods it calls. So a method's optimized IR depends only on its own code and its callees' optimized IR, never on
+        /// what the context compiled before it. Optimizing a kernel and a helper it calls IN ONE PASS inlined the helper's raw
+        /// IR, while a kernel compiled after another caller of that helper inlined the helper's optimized IR: the same kernel
+        /// gave different code depending on the compile history (seen as different WGSL for a recompiled kernel, so the WebGPU
+        /// shader cache, keyed by the text, missed). The level order is what every kernel that shares an already-compiled
+        /// helper always got. Methods in a call cycle are optimized together, as before.
+        /// </remarks>
+        public void Optimize()
+        {
+            var transformer = Context.ContextTransformer;
+            using var writeScope = irLock.EnterWriteScope();
+
+            var toTransform = GetMethodCollection_Sync(transformer.Configuration.Predicate);
+            if (toTransform.Count < 1)
+                return;
+            foreach (var level in CalleesFirstLevels(toTransform))
+                Transform_Sync(transformer, level);
+        }
+
+        /// <summary>
+        /// Splits <paramref name="methods"/> into levels: a method's level comes after the levels of every method of the set it
+        /// calls. Methods that are part of a call cycle form the last level together.
+        /// </summary>
+        private List<MethodCollection> CalleesFirstLevels(in MethodCollection methods)
+        {
+            var levels = new List<MethodCollection>();
+            if (methods.Count == 1)
+            {
+                levels.Add(methods);
+                return levels;
+            }
+            var contains = new MethodCollections.SetPredicate(methods);
+            var pendingCallees = new Dictionary<Method, int>(methods.Count);
+            var callers = new Dictionary<Method, List<Method>>(methods.Count);
+            foreach (var method in methods)
+            {
+                int count = 0;
+                foreach (var callee in References.Create(method, contains))
+                {
+                    if (callee == method) continue;
+                    count++;
+                    if (!callers.TryGetValue(callee, out var list))
+                        callers[callee] = list = new List<Method>();
+                    list.Add(method);
+                }
+                pendingCallees[method] = count;
+            }
+            var ready = new List<Method>();
+            foreach (var method in methods)
+            {
+                if (pendingCallees[method] == 0)
+                    ready.Add(method);
+            }
+            int done = 0;
+            while (ready.Count > 0)
+            {
+                levels.Add(new MethodCollection(this, ready.ToImmutableArray()));
+                done += ready.Count;
+                var next = new List<Method>();
+                foreach (var method in ready)
+                {
+                    if (!callers.TryGetValue(method, out var list)) continue;
+                    foreach (var caller in list)
+                    {
+                        if (--pendingCallees[caller] == 0)
+                            next.Add(caller);
+                    }
+                }
+                ready = next;
+            }
+            if (done < methods.Count)
+            {
+                // call cycles (recursion): optimized together
+                var rest = ImmutableArray.CreateBuilder<Method>(methods.Count - done);
+                foreach (var method in methods)
+                {
+                    if (pendingCallees[method] > 0)
+                        rest.Add(method);
+                }
+                levels.Add(new MethodCollection(this, rest.ToImmutable()));
+            }
+            return levels;
+        }
 
         /// <summary>
         /// Applies the given transformer to the current context.
@@ -482,7 +566,11 @@ namespace ILGPU.IR
             var toTransform = GetMethodCollection_Sync(configuration.Predicate);
             if (toTransform.Count < 1)
                 return;
+            Transform_Sync(transformer, toTransform);
+        }
 
+        private void Transform_Sync(in Transformer transformer, in MethodCollection toTransform)
+        {
             // Apply all transformations
             foreach (var transform in transformer.Transformations)
             {
