@@ -443,6 +443,12 @@ namespace ILGPU.Frontend
         private volatile Exception? firstException;
 
         /// <summary>
+        /// The methods this phase declared; removed from the context again when the phase fails (SpawnDev 5.4.46, see
+        /// <see cref="IRContext.RemoveMethods"/>).
+        /// </summary>
+        private readonly HashSet<Method> createdMethods = new HashSet<Method>();
+
+        /// <summary>
         /// Constructs a new generation phase.
         /// </summary>
         /// <param name="frontend">The current frontend instance.</param>
@@ -523,6 +529,11 @@ namespace ILGPU.Frontend
             try
             {
                 generatedMethod = Context.Declare(method, out bool created);
+                if (created)
+                {
+                    lock (createdMethods)
+                        createdMethods.Add(generatedMethod);
+                }
                 if (!created & isExternalRequest)
                     return;
                 location = generatedMethod;
@@ -603,6 +614,13 @@ namespace ILGPU.Frontend
             {
                 isFinished = true;
                 Frontend.FinishCodeGeneration(this);
+                // A failed phase leaves no half-built method behind: every method it declared goes (the ones that did
+                // build are only referenced by the failed ones; the next phase generates them again).
+                if (firstException != null)
+                {
+                    lock (createdMethods)
+                        Context.RemoveMethods(createdMethods);
+                }
             }
             base.Dispose(disposing);
         }

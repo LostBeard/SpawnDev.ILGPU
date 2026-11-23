@@ -285,6 +285,27 @@ namespace ILGPU.IR
         /// Converts this mapping object into an array.
         /// </summary>
         /// <returns>The array.</returns>
+        /// <summary>
+        /// Removes the given entries (SpawnDev 5.4.46: rolling back the methods of a failed code-generation phase).
+        /// </summary>
+        /// <param name="toRemove">The entries to remove.</param>
+        public void Remove(HashSet<T> toRemove)
+        {
+            if (toRemove.Count < 1)
+                return;
+            var kept = new List<T>(dataList.Count);
+            foreach (var data in dataList)
+            {
+                if (!toRemove.Contains(data))
+                    kept.Add(data);
+            }
+            dataList.Clear();
+            methods.Clear();
+            managedMethods.Clear();
+            foreach (var data in kept)
+                Register(data.Handle, data);
+        }
+
         public T[] ToArray() => dataList.ToArray();
 
         /// <summary>

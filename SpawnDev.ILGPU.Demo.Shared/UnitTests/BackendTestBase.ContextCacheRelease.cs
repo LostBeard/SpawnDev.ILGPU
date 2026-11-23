@@ -272,6 +272,49 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             Console.WriteLine($"[report] {accelerator.AcceleratorType} dropped kernel reloaded after GC: " + string.Join("; ", report));
         });
 
+        static int FailedCompile_BadHelper(int x)
+        {
+            var sb = new System.Text.StringBuilder();   // a class allocation: the IL frontend rejects it
+            sb.Append(x);
+            return sb.Length;
+        }
+        static void FailedCompile_BadKernel(Index1D i, ArrayView<int> o) { o[i] = FailedCompile_BadHelper(i); }
+        static int FailedCompile_GoodHelper(int x)
+        {
+            int h = x;
+            for (int r = 0; r < 3; r++) h = (h & 1) != 0 ? h * 3 + 1 : h >> 1;
+            return h;
+        }
+        static void FailedCompile_GoodKernel(Index1D i, ArrayView<int> o) { o[i] = FailedCompile_GoodHelper(i) + 5; }
+
+        // A kernel that fails to compile must leave the context able to compile the next one (5.4.46). The frontend left the
+        // methods of a failed compile declared with half-built bodies and never optimized, so every later compile in the
+        // context tried to optimize them too and crashed (NullReferenceException in IfConversion): after ONE failed kernel,
+        // no kernel new to the context could be loaded any more (the DemoConsole scan: 250 of 799 suite kernels failed only
+        // because an earlier one had). Both kernels here call a helper of their own, so the rollback covers callees too.
+        [TestMethod(Timeout = 180000)]
+        public async Task Context_FailedKernelCompile_NextNewKernelStillCompiles() => await RunTest(async accelerator =>
+        {
+            string failure = "no exception (this backend did not reject it)";
+            try { accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(FailedCompile_BadKernel); }
+            catch (Exception ex) { failure = ex.GetType().Name; }
+
+            const int n = 256;
+            using var buf = accelerator.Allocate1D<int>(n);
+            var good = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(FailedCompile_GoodKernel);
+            good(n, buf.View);
+            var got = await buf.CopyToHostAsync();
+            for (int i = 0; i < n; i++)
+                if (got[i] != FailedCompile_GoodHelper(i) + 5) throw new Exception($"element {i} is {got[i]}, expected {FailedCompile_GoodHelper(i) + 5}");
+
+            // and the failed kernel fails the same way again (its methods were rolled back, not left half-built)
+            string again = "no exception";
+            try { accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(FailedCompile_BadKernel); }
+            catch (Exception ex) { again = ex.GetType().Name; }
+            if (again != failure) throw new Exception($"the failed kernel failed with {failure} first and {again} the second time");
+            Console.WriteLine($"[report] {accelerator.AcceleratorType} failed kernel ({failure}), then a new kernel compiled and ran");
+        });
+
         // The same kernel compiled again must give byte-identical WGSL (5.4.46). The text keys the accelerator's compiled-shader
         // cache (and the browser's pipeline cache): names built from IR node ids (helper functions Name_{id}, labels, structs
         // struct_{id}, ids in comments) made the text depend on what the context compiled before, so a kernel compiled again

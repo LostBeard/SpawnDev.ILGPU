@@ -1,7 +1,7 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.46 (forks 2.4.38) - The same kernel compiled again gives the same code
+## 5.4.46 (forks 2.4.38) - The same kernel compiled again gives the same code; a failed kernel no longer breaks the context
 
 - **FIX (WebGPU): byte-identical WGSL for the same kernel.** The WGSL generators named helper functions, labels, helper
   parameters and structs after IR node ids (`Name_1063214`, `L_57_3`, `p_88`, `struct_1101153`), and comments carried IR
@@ -19,6 +19,15 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   order every kernel sharing an already-compiled helper always got. Call cycles are optimized together as before.
   Compile time of the 799 suite kernels, each in a fresh context, interleaved A/B: about 4% more (8.47 -> 8.85 s,
   8.71 -> 9.07 s).
+- **FIX (all backends): one kernel that fails to compile no longer breaks every later kernel load in the context.**
+  When the IL frontend rejected a kernel (a class allocation, an unresolved `DelegateSpecialization`...), the methods it
+  had declared stayed in the context with half-built bodies and never optimized, so every later compile tried to
+  optimize them too and threw a NullReferenceException in IfConversion: after one failed kernel, no kernel new to the
+  context could be loaded (a page that tried an unsupported kernel and fell back lost every kernel after it). A failed
+  code-generation phase now removes every method it declared. Found by the determinism scan: compiling every suite
+  kernel in one context, 250 of them failed only because an earlier kernel had; with the rollback 0 do, and a second
+  compile of each kernel in the same context succeeds for all of them (it failed for all 549 before). Test
+  `Context_FailedKernelCompile_NextNewKernelStillCompiles` (every lane).
 - **TEST: `WebGPU_SameKernelCompiledAgain_ByteIdenticalWgsl`**: A from an empty IR cache, then B (sharing A's helper)
   alone, then A again; the WGSL must be byte-identical and the kernel must still compute the right values.
   DemoConsole `clearcache-wgsl --all` compiles every suite kernel in its own fresh context and again all of them in one

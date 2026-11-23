@@ -137,6 +137,91 @@ static class ClearCacheWgslProbe
     public static int Run(string[] args)
     {
         bool savedCache = ShaderArtifactCache.Enabled;
+        if (args.Length > 1 && args[1] == "--recompile")
+        {
+            // every suite kernel compiled once in ONE context, then again: a second compile of the same kernel in the same
+            // context crashed in IfConversion (NullReferenceException, seen 2026-11-23)
+            ShaderArtifactCache.Enabled = false;
+            try
+            {
+                var asm = typeof(SpawnDev.ILGPU.Demo.Shared.UnitTests.BackendTestBase).Assembly;
+                var spec = new KernelSpecialization(64, null);
+                var (ctx, backend) = NewBackend();
+                using (ctx) using (backend)
+                {
+                    var list = new List<System.Reflection.MethodInfo>();
+                    foreach (var type in asm.GetTypes())
+                    {
+                        if (type.ContainsGenericParameters) continue;
+                        foreach (var m in type.GetMethods(System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly))
+                        {
+                            if (m.IsGenericMethodDefinition || m.ReturnType != typeof(void) || m.GetMethodBody() == null) continue;
+                            var ps = m.GetParameters();
+                            if (ps.Length == 0) continue;
+                            bool ok = true;
+                            foreach (var p in ps) if (!p.ParameterType.IsValueType || p.ParameterType.IsByRef) { ok = false; break; }
+                            if (ok) list.Add(m);
+                        }
+                    }
+                    int pass1Fail = 0, pass2Fail = 0;
+                    var firstOk = new HashSet<System.Reflection.MethodInfo>();
+                    var crashes = new Dictionary<string, int>();
+                    string? firstCrash = null, poisoner = null;
+                    for (int pass = 1; pass <= 2; pass++)
+                    {
+                        foreach (var m in list)
+                        {
+                            try
+                            {
+                                EntryPointDescription entry;
+                                try { entry = EntryPointDescription.FromImplicitlyGroupedKernel(m); }
+                                catch (NotSupportedException) { entry = EntryPointDescription.FromExplicitlyGroupedKernel(m); }
+                                backend.Compile(entry, spec);
+                                if (pass == 1) firstOk.Add(m);
+                            }
+                            catch (Exception ex)
+                            {
+                                if (pass == 1)
+                                {
+                                    pass1Fail++;
+                                    if (poisoner == null && firstOk.Count > 0)
+                                    {
+                                        // does a kernel that compiled before still compile after this failure?
+                                        try
+                                        {
+                                            var probe = firstOk.First();
+                                            EntryPointDescription pe;
+                                            try { pe = EntryPointDescription.FromImplicitlyGroupedKernel(probe); }
+                                            catch (NotSupportedException) { pe = EntryPointDescription.FromExplicitlyGroupedKernel(probe); }
+                                            backend.Compile(pe, spec);
+                                        }
+                                        catch
+                                        {
+                                            var inner1 = ex is AggregateException ae1 ? ae1.InnerExceptions[0] : ex;
+                                            poisoner = m.DeclaringType?.Name + "." + m.Name + ": " + inner1.GetType().Name + ": " + inner1.Message;
+                                        }
+                                    }
+                                    continue;
+                                }
+                                if (!firstOk.Contains(m)) continue;
+                                pass2Fail++;
+                                var inner = ex is AggregateException ae ? ae.InnerExceptions[0] : ex;
+                                var frame = inner.StackTrace?.Split('\n').FirstOrDefault()?.Trim() ?? "";
+                                var key = inner.GetType().Name + " " + frame;
+                                crashes[key] = crashes.TryGetValue(key, out var c) ? c + 1 : 1;
+                                firstCrash ??= m.DeclaringType?.Name + "." + m.Name + ": " + inner + "\n--- outer ---\n" + ex.StackTrace;
+                            }
+                        }
+                    }
+                    Console.WriteLine($"RECOMPILE: {list.Count} kernels; pass 1 failures {pass1Fail} (unsupported features); compiled in pass 1 but failed in pass 2: {pass2Fail}");
+                    foreach (var (k, n) in crashes) Console.WriteLine($"  {n} x {k}");
+                    Console.WriteLine("POISONER (first failed compile after which a good kernel no longer compiles): " + (poisoner ?? "none"));
+                    if (firstCrash != null) Console.WriteLine("first: " + string.Join("\n", firstCrash.Split('\n').Where(l => !l.Contains("System.Threading") && !l.Contains("End of stack")).Take(30)));
+                    return pass2Fail;
+                }
+            }
+            finally { ShaderArtifactCache.Enabled = savedCache; }
+        }
         if (args.Length > 1 && args[1] == "--all")
         {
             ShaderArtifactCache.Enabled = false;

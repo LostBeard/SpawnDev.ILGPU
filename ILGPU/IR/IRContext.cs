@@ -633,6 +633,19 @@ namespace ILGPU.IR
         #region Cache
 
         /// <summary>
+        /// Removes methods from this context: the methods a FAILED code-generation phase declared (SpawnDev 5.4.46). A
+        /// method whose IL failed to compile stayed declared with a half-built body and without the Transformed flag, so
+        /// every later <see cref="Optimize"/> in the context picked it up and crashed (NullReferenceException in
+        /// IfConversion): after one kernel failed to compile, no other kernel new to the context could be compiled.
+        /// </summary>
+        /// <param name="toRemove">The methods to remove.</param>
+        internal void RemoveMethods(HashSet<Method> toRemove)
+        {
+            using var writeScope = irLock.EnterWriteScope();
+            methods.Remove(toRemove);
+        }
+
+        /// <summary>
         /// Clears cached IR nodes.
         /// </summary>
         /// <param name="mode">The clear mode.</param>
