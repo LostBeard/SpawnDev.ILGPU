@@ -1401,8 +1401,8 @@ namespace PlaywrightMultiTest
             var hardTimeout = TimeSpan.FromSeconds(int.TryParse(Environment.GetEnvironmentVariable("PMT_BROWSER_TEST_TIMEOUT_SEC"), out var sec) && sec > 0 ? sec : 720);
             foreach (var t in tests)
             {
-                // a test that declares a longer limit of its own (data-test-timeout) gets it, plus time to report
-                var testTimeout = TimeSpan.FromMilliseconds(Math.Max(hardTimeout.TotalMilliseconds, t.DeclaredTimeoutMs + 120_000));
+                // flat, not raised for a test that declares more of its own (TJ's rule, see ProjectTest.DeclaredTimeoutMs)
+                var testTimeout = hardTimeout;
                 var run = ExecuteAndCaptureAsync(t, blazor.Page);
                 if (await Task.WhenAny(run, Task.Delay(testTimeout)).ConfigureAwait(false) != run)
                 {

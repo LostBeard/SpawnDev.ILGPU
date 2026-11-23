@@ -20,8 +20,11 @@ public class ProjectTest
     /// <summary>
     /// The browser test's own time limit in ms from its row's data-test-timeout (TestMethodAttribute.Timeout, written by
     /// SpawnDev.UnitTesting 2.5.8 / Browser 2.7.2 and later); 0 = not declared (older UnitTesting) or the page default.
-    /// The waits for the test are at least this long, so a test inside its own budget is not abandoned as hung (Codecs'
-    /// Vp9Decode_EveryFrame_MatchesLibvpx declares 3,600 s and ran 624 s on one run, past the fixed 660 s on another).
+    /// REPORTED, NOT HONORED: the harness caps stay flat (done-wait 600 s, hung-page 720 s) whatever a test declares. TJ's
+    /// rule (2026-09-08, recorded in ML's PMT): "We don't increase timeouts unless we are sure the code is 100% correct and
+    /// as performant as we can make it. Timeouts are there to make sure nothing is going wrong, not to allow bad code to
+    /// pass." A test that cannot finish inside the cap is a finding. (b07012b, 2026-11-15, had made the waits at least the
+    /// declared limit; that quietly undid the rule and was reverted 2026-11-23.)
     /// </summary>
     public int DeclaredTimeoutMs { get; set; }
     public Func<IPage, Task> TestFunc { get; set; }
@@ -161,10 +164,12 @@ public class ProjectTest
             // wait for test to finish (button will become enabled again). A dead .NET runtime never re-enables it, so
             // stop as soon as the console says the runtime died instead of waiting out the 10-minute timeout.
             var runtimeDied = false;
-            // PMT_BROWSER_DONE_TIMEOUT_SEC: an explicit limit for this wait (for checking the overrun path below with a short one)
+            // A flat 600 s, not raised for a test that declares more (see DeclaredTimeoutMs). PMT_BROWSER_DONE_TIMEOUT_SEC: an
+            // explicit limit for one deliberate run (checking the overrun path below with a short one, or MEASURING how long
+            // something really takes), never to make a sweep green.
             var doneTimeoutMs = int.TryParse(Environment.GetEnvironmentVariable("PMT_BROWSER_DONE_TIMEOUT_SEC"), out var doneSec) && doneSec > 0
                 ? doneSec * 1000
-                : Math.Max(600_000, DeclaredTimeoutMs + 30_000);
+                : 600_000;
             try
             {
                 await page.WaitForConditionAsync(async () =>
@@ -182,7 +187,8 @@ public class ProjectTest
                 page.Console -= OnConsole;
                 Result = TestResult.Error;
                 PageRuntimeDead = true;
-                throw new TimeoutException($"The test did not finish within {doneTimeoutMs / 1000} s; its page is replaced so it cannot keep running under the next test.");
+                throw new TimeoutException($"The test did not finish within {doneTimeoutMs / 1000} s; its page is replaced so it cannot keep running under the next test."
+                    + (DeclaredTimeoutMs > doneTimeoutMs ? $" It declares {DeclaredTimeoutMs / 1000} s, above the harness cap: a finding, not a limit to raise." : ""));
             }
 
             // Stop capturing console
