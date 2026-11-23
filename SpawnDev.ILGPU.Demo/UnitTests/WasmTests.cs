@@ -1847,6 +1847,60 @@ namespace SpawnDev.ILGPU.Demo.UnitTests
             finally { WasmBackend.ModuleCacheFlushThreshold = savedThreshold; }
         }
 
+        // A module-cache flush while an OLDER accelerator is still alive (5.4.45 gate, 2026-11-22). The flush tells the
+        // shared workers to drop every cached module; it assumed the only live accelerator is the fresh one that triggers it.
+        // A test class keeps one accelerator for all its tests while other tests create their own, so the older accelerator
+        // still believed its workers held its kernel and did not re-send it: "Module not cached for kernelId N" (the 5.4.45
+        // gate: BFloat16 radix sorts + WasmBinaryDump_RadixSort, after the shader-artifact cache made a reloaded kernel reuse
+        // the same module bytes). Here: A dispatches, a fresh B's first dispatch flushes, A dispatches the same kernel again.
+        [TestMethod(Timeout = 120000)]
+        public async Task Wasm_ModuleCacheFlush_OlderLiveAccelerator_ResendsItsModule()
+        {
+            const int count = 2048;
+            int savedThreshold = WasmBackend.ModuleCacheFlushThreshold;
+            WasmBackend.ModuleCacheFlushThreshold = 1; // every fresh accelerator's first dispatch flushes
+            var contextA = Context.Create().Wasm().ToContext();
+            var accA = await contextA.CreateWasmAcceleratorAsync();
+            try
+            {
+                using var outA = accA.Allocate1D<int>(count);
+                var kA = accA.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>((i, o) => o[i] = i * 3 + 7);
+                async Task RunA(string when)
+                {
+                    kA((Index1D)count, outA.View);
+                    await accA.SynchronizeAsync();
+                    var r = await outA.CopyToHostAsync<int>();
+                    for (int i = 0; i < count; i++)
+                        if (r[i] != i * 3 + 7)
+                            throw new Exception($"accelerator A {when}: [{i}]={r[i]} expected {i * 3 + 7}");
+                }
+                await RunA("before the flush");
+
+                // a fresh accelerator: its first dispatch flushes every shared worker's module cache
+                var contextB = Context.Create().Wasm().ToContext();
+                var accB = await contextB.CreateWasmAcceleratorAsync();
+                try
+                {
+                    using var outB = accB.Allocate1D<int>(count);
+                    var kB = accB.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>((i, o) => o[i] = i + 11);
+                    kB((Index1D)count, outB.View);
+                    await accB.SynchronizeAsync();
+                    var rB = await outB.CopyToHostAsync<int>();
+                    for (int i = 0; i < count; i++)
+                        if (rB[i] != i + 11) throw new Exception($"accelerator B: [{i}]={rB[i]} expected {i + 11}");
+                }
+                finally { accB.Dispose(); contextB.Dispose(); }
+
+                // A is still alive and its workers' modules were dropped: it must send its module again
+                await RunA("after a fresh accelerator flushed the workers");
+            }
+            finally
+            {
+                WasmBackend.ModuleCacheFlushThreshold = savedThreshold;
+                accA.Dispose(); contextA.Dispose();
+            }
+        }
+
         // Host-write snapshot SAB leak guard (2026-06-14, Geordi). The lazy host-write snapshot
         // (WasmMemoryBuffer.PrepareHostWrite) allocates a FULL-buffer-size SharedArrayBuffer when a host
         // write lands while a dispatch is in flight on that buffer. CompleteDispatchIntent used to

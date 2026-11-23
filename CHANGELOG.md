@@ -26,6 +26,15 @@ every browser backend (TJ's decision, 2026-11-22, after Codecs / ML / ILGPU meas
   settings in one page could be served each other's shader. Non-default values now enter the profile's feature set
   (default contexts keep their keys, so precompiled manifests still match). Wasm's own switches (SIMD, barrier style,
   local compaction, structured control flow, yield escape, memory maximum) and WebGL's f64 mode are in its key too.
+- **FIX (Wasm): a module-cache flush no longer strands an older accelerator.** A fresh accelerator's first dispatch can
+  tell the shared workers to drop every cached module (`ModuleCacheFlushThreshold`); an accelerator still alive from before
+  kept believing its workers held its kernels and did not send them again: "Module not cached for kernelId N" (a test
+  class keeps one accelerator across its tests while other tests create their own). It surfaced when the same compiled
+  kernel outlived the flush; with the artifact cache a reloaded kernel reuses the same module bytes, so every reload after
+  a flush hit it (the first 5.4.45 gate: three BFloat16 radix sorts and `WasmBinaryDump_RadixSort`). A process-wide flush
+  epoch now makes every entry recorded before a flush forget its workers and send its module again. Test
+  `Wasm_ModuleCacheFlush_OlderLiveAccelerator_ResendsItsModule` (A dispatches, a fresh B flushes, A dispatches again):
+  without the fix "Module not cached for kernelId 1".
 - **TEST: `KernelLifetime_DroppedKernel_IsFreed_BrowserRebuildsFromArtifactWithoutCompiling`** (every lane, with and
   without a release): the dropped kernel's launcher is collected, the reload goes to the backend (the accelerator no
   longer held it), and on WebGPU / Wasm / WebGL it compiles nothing and skips the IR. Red-checked: with the old

@@ -395,6 +395,42 @@ namespace SpawnDev.ILGPU.Wasm
             public int KernelId;
             /// <summary>Workers that already hold this kernel's compiled module.</summary>
             public readonly HashSet<Worker> Workers = new();
+            /// <summary>The <see cref="s_moduleFlushEpoch"/> <see cref="Workers"/> was recorded in.</summary>
+            public int FlushEpoch;
+        }
+
+        /// <summary>
+        /// Counts module-cache flushes (a fresh accelerator's first dispatch telling the shared workers to drop every cached
+        /// module, see <c>clearModuleCache</c>). A <see cref="KernelCacheEntry"/> recorded before the latest flush no longer
+        /// knows which workers hold its module, so it forgets them and re-sends the bytes.
+        /// <para>
+        /// Why (5.4.45 gate, 2026-11-22): the flush assumed every accelerator alive at a flush is the fresh one, but a test
+        /// class keeps ONE accelerator across its tests while other tests create their own, so an older live accelerator's
+        /// entries said "worker 3 has kernel 82" after worker 3 had dropped it: "Module not cached for kernelId 82". It used
+        /// to surface only when the same compiled kernel survived the flush; once the shader-artifact cache rebuilt a kernel
+        /// with the SAME module bytes (this dictionary's key), every reload after a flush hit the stale entry.
+        /// </para>
+        /// </summary>
+        private static int s_moduleFlushEpoch;
+
+        /// <summary>
+        /// This accelerator's entry for a module (created on first sight; never an identity hash), with its worker set
+        /// cleared if a module-cache flush happened since it was recorded.
+        /// </summary>
+        private KernelCacheEntry GetKernelCacheEntry(byte[] wasmBytes)
+        {
+            int epoch = Volatile.Read(ref s_moduleFlushEpoch);
+            if (!_initializedWorkersByKernel.TryGetValue(wasmBytes, out var entry))
+            {
+                entry = new KernelCacheEntry { KernelId = Interlocked.Increment(ref _nextKernelId), FlushEpoch = epoch };
+                _initializedWorkersByKernel[wasmBytes] = entry;
+            }
+            else if (entry.FlushEpoch != epoch)
+            {
+                entry.Workers.Clear();
+                entry.FlushEpoch = epoch;
+            }
+            return entry;
         }
 
         /// <summary>
@@ -2571,12 +2607,8 @@ namespace SpawnDev.ILGPU.Wasm
             var worker = _pipelineWorker!;
             var state = _workerHandlers[worker];
             var wasmBytes = compiledKernel.WasmBinary;
-            if (!_initializedWorkersByKernel.TryGetValue(wasmBytes, out var kernelCacheEntry))
-            {
-                // Same monotonic id rule as DispatchToWorkers (never an identity hash).
-                kernelCacheEntry = new KernelCacheEntry { KernelId = Interlocked.Increment(ref _nextKernelId) };
-                _initializedWorkersByKernel[wasmBytes] = kernelCacheEntry;
-            }
+            // Same monotonic id rule as DispatchToWorkers (never an identity hash); forgets its workers after a flush
+            var kernelCacheEntry = GetKernelCacheEntry(wasmBytes);
             var pipeJs = PipeJs;
             int scriptId = GetPipeScriptId(compiledKernel.HasSimdKernel, flatArgs.Count);
 
@@ -3008,19 +3040,12 @@ namespace SpawnDev.ILGPU.Wasm
             // side Wasm module re-compiles (50-100ms each) when the prior single-set
             // tracker was being cleared on every kernel switch. Now each (worker, kernel)
             // pair compiles once and reuses for the lifetime of the worker.
-            if (!_initializedWorkersByKernel.TryGetValue(wasmBytes, out var kernelCacheEntry))
-            {
-                kernelCacheEntry = new KernelCacheEntry
-                {
-                    // Unique + stable per distinct kernel (keyed by wasmBytes ref). Replaces the old
-                    // RuntimeHelpers.GetHashCode(wasmBytes) id: that identity hash RECYCLES under GC and
-                    // let two live kernels collide on a single worker-side module slot, so a worker could
-                    // run a stomped/stale module -> silent large-sort corruption under full-sweep churn.
-                    // A monotonic id cannot collide; see _nextKernelId.
-                    KernelId = Interlocked.Increment(ref _nextKernelId)
-                };
-                _initializedWorkersByKernel[wasmBytes] = kernelCacheEntry;
-            }
+            // Unique + stable per distinct kernel (keyed by wasmBytes ref). Replaces the old
+            // RuntimeHelpers.GetHashCode(wasmBytes) id: that identity hash RECYCLES under GC and
+            // let two live kernels collide on a single worker-side module slot, so a worker could
+            // run a stomped/stale module -> silent large-sort corruption under full-sweep churn.
+            // A monotonic id cannot collide; see _nextKernelId.
+            var kernelCacheEntry = GetKernelCacheEntry(wasmBytes);
             int kernelId = kernelCacheEntry.KernelId;
 
             // Module-cache flush decision (bounds persistent-worker _modulesById accumulation; Tuvok
@@ -3042,12 +3067,17 @@ namespace SpawnDev.ILGPU.Wasm
                         {
                             clearCacheThisDispatch = true;
                             s_lastFlushKernelId = _nextKernelId;
+                            // every entry recorded before this flush (any accelerator) must re-send its module
+                            Interlocked.Increment(ref s_moduleFlushEpoch);
                         }
                     }
                     if (clearCacheThisDispatch && WasmBackend.VerboseLogging)
                         WasmBackend.Log($"[Wasm-MODFLUSH] disp={dispNum} clearing worker module caches at kernels={_nextKernelId} (threshold={flushThreshold})");
                 }
             }
+
+            // this dispatch's own flush (above) dropped the module on every worker it messages: re-send it
+            if (clearCacheThisDispatch) kernelCacheEntry = GetKernelCacheEntry(wasmBytes);
 
             if (WasmDispatchProfile.Enabled) profT = WasmDispatchProfile.Add(ref WasmDispatchProfile.AcquireTicks, profT);
             var tasks = new List<Task>();
