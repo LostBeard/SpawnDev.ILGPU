@@ -1,7 +1,7 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.45 (forks 2.4.37) - unreleased
+## 5.4.45 (forks 2.4.37) - 2026-11-22 - Kernel lifetime in the browser: dropped kernels freed everywhere, reloads rebuilt from generated code
 
 Kernel lifetime in the browser: kernels are freed with their owner on every backend, and a kernel loaded again is rebuilt
 from the code this page already generated. Weak kernel lifetime + `ReleaseCompilerCaches` + the shader-artifact cache on
