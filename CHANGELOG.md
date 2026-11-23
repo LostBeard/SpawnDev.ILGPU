@@ -9,9 +9,15 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   was compiled before it. The text is the key of the accelerator's compiled-shader cache and of the browser's pipeline cache:
   a kernel compiled again (its owner collected, a model switched back, after `ReleaseCompilerCaches`) missed both, kept a
   duplicate pipeline and paid another D3D shader compile (ML: an LLM switched away and back took the shader cache from 57
-  to 75 shaders). The finished WGSL is now renamed canonically (`WGSLCanonicalNames`): every identifier with a numeric
+  to 75 shaders). The finished WGSL is now renamed canonically (`ShaderCanonicalNames`): every identifier with a numeric
   segment is renumbered per shape in order of first appearance, and the names the host uses (dynamic shared-memory
   override constants, coalesce bindings, struct names in the scalar-packing manifest) are renamed with the same map.
+- **FIX (WebGL): byte-identical GLSL, and the same GL program for it.** The GLSL named structs and helper functions
+  after IR ids too (`struct_{id}`, `fn_{Name}_{id}`), and every compiled kernel got a new glWorker program id, so a
+  kernel compiled again was linked again and the worker kept both programs. The GLSL's id-based names are canonical now
+  (only those: the host builds `u_param{N}_f{M}` and struct member paths `field_{n}` from its own counters), and the
+  program id comes from the text (SHA-256 of the GLSL, never a string hash): the same GLSL gets the same program.
+  Wasm needed nothing more: with the IR fix below its module bytes were already identical (794 of 794 kernels).
 - **FIX (all backends): a kernel's IR no longer depends on the compile history.** `IRContext.Optimize` optimized a
   kernel and the helpers new to the context in one pass, so the kernel inlined a helper's RAW IR; a kernel compiled after
   another caller of that helper inlined its OPTIMIZED IR. Same kernel, different code (5 of the 799 suite kernels, e.g. an
@@ -28,11 +34,12 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   kernel in one context, 250 of them failed only because an earlier kernel had; with the rollback 0 do, and a second
   compile of each kernel in the same context succeeds for all of them (it failed for all 549 before). Test
   `Context_FailedKernelCompile_NextNewKernelStillCompiles` (every lane).
-- **TEST: `WebGPU_SameKernelCompiledAgain_ByteIdenticalWgsl`**: A from an empty IR cache, then B (sharing A's helper)
-  alone, then A again; the WGSL must be byte-identical and the kernel must still compute the right values.
-  DemoConsole `clearcache-wgsl --all` compiles every suite kernel in its own fresh context and again all of them in one
-  shared context (reverse order) and compares the raw WGSL: 197 of 799 kernels differed before, 5 with the names fixed
-  alone, 0 now.
+- **TEST: `BrowserShader_SameKernelCompiledAgain_ByteIdenticalText`** (WebGPU, WebGL): for a kernel whose helper is
+  inlined and one whose helper stays a function, A from an empty IR cache, then B (sharing A's helper) alone, then A
+  again; the WGSL / GLSL must be byte-identical (and the WebGL program id the same) and the kernels must still compute
+  the right values. DemoConsole `clearcache-wgsl --all [webgpu|webgl|wasm]` compiles every suite kernel in its own
+  fresh context and again all of them in one shared context (reverse order) and compares the raw output. WebGPU: 197 of
+  799 kernels differed before, 5 with the names fixed alone, 0 now. WebGL: 139 of 748 before, 0 now. Wasm: 0 of 794.
 
 ## 5.4.45 (forks 2.4.37) - 2026-11-22 - Kernel lifetime in the browser: dropped kernels freed everywhere, reloads rebuilt from generated code
 

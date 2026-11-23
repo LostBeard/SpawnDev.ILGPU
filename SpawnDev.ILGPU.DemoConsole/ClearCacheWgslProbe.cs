@@ -59,8 +59,37 @@ static class ClearCacheWgslProbe
 
     // `clearcache-wgsl --all`: DETERMINISM scan of every suite kernel. One context + backend (as in a page): every kernel
     // compiled once, then every kernel compiled again (the IR node ids have moved on by then), RAW WGSL compared. Different
-    // text for the same kernel = a compiled-shader cache miss and a duplicate pipeline (WGSLCanonicalNames, 5.4.46).
-    static int RunAll()
+    // text for the same kernel = a compiled-shader cache miss and a duplicate pipeline (ShaderCanonicalNames, 5.4.46).
+    // The backends the scan can drive offline: WGSL text, GLSL text, or the Wasm module bytes (the Wasm worker module
+    // cache and the WebGL program cache key on them the way the WebGPU shader cache keys on the WGSL).
+    static (IDisposable Context, global::ILGPU.Backends.Backend Backend) NewScanBackend(string which)
+    {
+        if (which == "webgpu") return NewBackend();
+        var ctx = Context.Create(b => b.Default().EnableAlgorithms());
+        global::ILGPU.Backends.Backend backend = which switch
+        {
+            "wasm" => new SpawnDev.ILGPU.Wasm.Backend.WasmBackend(ctx, new SpawnDev.ILGPU.Wasm.Backend.WasmBackendOptions()),
+            "webgl" => new SpawnDev.ILGPU.WebGL.Backend.WebGLBackend(ctx, new SpawnDev.ILGPU.WebGL.Backend.WebGLBackendOptions()),
+            _ => throw new ArgumentException("backend: webgpu | wasm | webgl"),
+        };
+        return (ctx, backend);
+    }
+
+    static string ScanOutput(string which, global::ILGPU.Backends.Backend backend, EntryPointDescription entry, KernelSpecialization spec)
+    {
+        if (which == "wasm")
+        {
+            SpawnDev.ILGPU.Wasm.Backend.WasmBackend.LastWasmBinary = null;
+            backend.Compile(entry, spec);
+            return Convert.ToHexString(SpawnDev.ILGPU.Wasm.Backend.WasmBackend.LastWasmBinary ?? Array.Empty<byte>());
+        }
+        var compiled = backend.Compile(entry, spec);
+        return which == "webgl"
+            ? ((SpawnDev.ILGPU.WebGL.Backend.WebGLCompiledKernel)compiled).GLSLSource
+            : ((WebGPUCompiledKernel)compiled).WGSLSource;
+    }
+
+    static int RunAll(string which)
     {
         var asm = typeof(SpawnDev.ILGPU.Demo.Shared.UnitTests.BackendTestBase).Assembly;
         var spec = new KernelSpecialization(64, null);
@@ -86,14 +115,14 @@ static class ClearCacheWgslProbe
         // pass 2: all kernels once each, in REVERSE order, in ONE context (each with a different compile history).
         // Each kernel is compiled once per context: a kernel that fails part-way (an unsupported feature) can leave a
         // context in which a RE-compile of another kernel crashes in IfConversion (seen 2026-11-23; tracked separately).
-        string? Compile(WebGPUBackend backend, System.Reflection.MethodInfo m)
+        string? Compile(global::ILGPU.Backends.Backend backend, System.Reflection.MethodInfo m)
         {
             try
             {
                 EntryPointDescription entry;
                 try { entry = EntryPointDescription.FromImplicitlyGroupedKernel(m); }
                 catch (NotSupportedException) { entry = EntryPointDescription.FromExplicitlyGroupedKernel(m); }
-                return ((WebGPUCompiledKernel)backend.Compile(entry, spec)).WGSLSource;
+                return ScanOutput(which, backend, entry, spec);
             }
             catch { return null; }
         }
@@ -101,13 +130,13 @@ static class ClearCacheWgslProbe
         var swFresh = System.Diagnostics.Stopwatch.StartNew();
         foreach (var (name, m) in kernels)
         {
-            var (c, b) = NewBackend();
+            var (c, b) = NewScanBackend(which);
             using (c) using (b) { var w = Compile(b, m); if (w != null) first[name] = w; }
         }
         double freshMs = swFresh.Elapsed.TotalMilliseconds;
         var swShared = System.Diagnostics.Stopwatch.StartNew();
         int same = 0, differ = 0, shown = 0;
-        var (ctx, backend) = NewBackend();
+        var (ctx, backend) = NewScanBackend(which);
         using (ctx) using (backend)
         {
             for (int k = kernels.Count - 1; k >= 0; k--)
@@ -118,6 +147,8 @@ static class ClearCacheWgslProbe
                 if (w2 == null) continue;
                 if (w1 == w2) { same++; continue; }
                 differ++;
+                var dumpDir = Environment.GetEnvironmentVariable("SCAN_DUMP");
+                if (dumpDir != null) { Directory.CreateDirectory(dumpDir); File.WriteAllText(Path.Combine(dumpDir, name + ".fresh.txt"), w1); File.WriteAllText(Path.Combine(dumpDir, name + ".shared.txt"), w2); }
                 if (shown++ < 5)
                 {
                     int d = 0;
@@ -130,7 +161,7 @@ static class ClearCacheWgslProbe
             }
         }
         Console.WriteLine($"TIMING: fresh-context pass {freshMs:F0} ms, shared-context pass {swShared.Elapsed.TotalMilliseconds:F0} ms");
-        Console.WriteLine($"RESULT: {first.Count} kernels; in a shared context after other kernels: {same} byte-identical, {differ} different");
+        Console.WriteLine($"RESULT ({which}): {first.Count} kernels; in a shared context after other kernels: {same} byte-identical, {differ} different");
         return differ;
     }
 
@@ -225,7 +256,7 @@ static class ClearCacheWgslProbe
         if (args.Length > 1 && args[1] == "--all")
         {
             ShaderArtifactCache.Enabled = false;
-            try { return RunAll(); }
+            try { return RunAll(args.Length > 2 ? args[2] : "webgpu"); }
             finally { ShaderArtifactCache.Enabled = savedCache; }
         }
         ShaderArtifactCache.Enabled = false;

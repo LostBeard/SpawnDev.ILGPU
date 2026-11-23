@@ -711,6 +711,32 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // -2147483647 which is semantically equivalent for bounds checks.
             builder.Replace("int(-2147483648)", "int(-2147483647)");
             var glslSource = GLSLEmulationLibrary.ResolveF32CorrectlyRounded(builder.ToString());
+
+            // Deterministic names (5.4.46): the same kernel compiled again must give byte-identical GLSL, because the text now
+            // picks the glWorker program id (WebGLCompiledKernel.ProgramIdFor) and the browser caches compiled shaders by text.
+            // Only the IR-id names are renamed (struct_{type id}, fn_{Name}_{method id}): the host builds uniform names such as
+            // u_param{N}_f{M} and struct member paths field_{n} from its own counters, so those stay as generated.
+            glslSource = ShaderCanonicalNames.Canonicalize(glslSource, out var canonicalNames, static shape =>
+                shape.StartsWith("struct_", StringComparison.Ordinal) || shape.StartsWith("fn_", StringComparison.Ordinal));
+            for (int b = 0; b < data.ParameterBindings.Count; b++)
+            {
+                var pb = data.ParameterBindings[b];
+                var type = canonicalNames.Rename(pb.GlslType);
+                if (!string.Equals(type, pb.GlslType, StringComparison.Ordinal))
+                    data.ParameterBindings[b] = new KernelParameterBinding(pb.ParamIndex, pb.BindingIndex, pb.Kind, type, pb.StructFieldCount);
+            }
+            foreach (var entry in data.BodyStructManifest)
+            {
+                entry.BindingName = canonicalNames.Rename(entry.BindingName);
+                entry.GlslElementType = canonicalNames.Rename(entry.GlslElementType);
+            }
+            foreach (var varying in data.OutputVaryings)
+            {
+                // the transform-feedback varyings are named by the host's own scheme; renaming one would unbind it
+                if (!string.Equals(canonicalNames.Rename(varying.VaryingName), varying.VaryingName, StringComparison.Ordinal))
+                    throw new InvalidOperationException($"WebGL: output varying '{varying.VaryingName}' has an IR-id name; it must not be renamed.");
+            }
+
             if (VerboseLogging)
             {
                 Log("--- GENERATED GLSL ---");
@@ -752,6 +778,21 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         /// output. See Wasm/CLAUDE.md "kernelId MUST be a monotonic unique id".
         /// </summary>
         private static int _nextProgramId = 0;
+
+        /// <summary>
+        /// Program ids by GLSL text (5.4.46): a kernel compiled again gives the same GLSL (ShaderCanonicalNames), so it gets the
+        /// same id and the glWorker reuses the program it already linked, instead of linking (and keeping) a duplicate. Keyed by
+        /// the SHA-256 of the text, not a string hash (see above): distinct shaders never share an id. Distinct ids stay
+        /// monotonic.
+        /// </summary>
+        private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> s_programIdsByText = new(StringComparer.Ordinal);
+
+        /// <summary>The glWorker program id for a GLSL text: the same text always gets the same id.</summary>
+        internal static int ProgramIdFor(string glslSource)
+        {
+            var key = Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(glslSource)));
+            return s_programIdsByText.GetOrAdd(key, static _ => System.Threading.Interlocked.Increment(ref _nextProgramId));
+        }
 
         /// <summary>
         /// Stable, process-unique id for this kernel's glWorker program-cache slot
@@ -801,7 +842,7 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             : base(context, entryPoint, null)
         {
             // a kernel rebuilt from the shader-artifact cache passes the id of the kernel its (identical) GLSL came from
-            ProgramId = programId > 0 ? programId : System.Threading.Interlocked.Increment(ref _nextProgramId);
+            ProgramId = programId > 0 ? programId : ProgramIdFor(glslSource);
             GLSLSource = glslSource;
             ParameterBindings = parameterBindings ?? Array.Empty<KernelParameterBinding>();
             OutputVaryings = outputVaryings ?? Array.Empty<OutputVaryingInfo>();

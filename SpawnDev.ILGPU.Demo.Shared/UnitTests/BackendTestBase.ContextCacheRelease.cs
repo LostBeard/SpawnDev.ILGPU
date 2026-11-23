@@ -315,51 +315,84 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             Console.WriteLine($"[report] {accelerator.AcceleratorType} failed kernel ({failure}), then a new kernel compiled and ran");
         });
 
-        // The same kernel compiled again must give byte-identical WGSL (5.4.46). The text keys the accelerator's compiled-shader
-        // cache (and the browser's pipeline cache): names built from IR node ids (helper functions Name_{id}, labels, structs
-        // struct_{id}, ids in comments) made the text depend on what the context compiled before, so a kernel compiled again
-        // after its owner was collected missed the cache, kept a duplicate pipeline and paid a D3D compile (Tuvok 2026-11-23: an
-        // LLM reload took the cache from 57 to 75 shaders). And the IR itself: a kernel optimized in one pass with a helper new to
-        // the context inlined the helper's RAW IR, a kernel compiled after another caller inlined its OPTIMIZED IR, so the code
-        // differed too (IRContext.Optimize now goes callees first). Here: A from an empty IR cache, then B alone (it shares A's
+        // A helper that stays a function in the shader (WGSL Name_{method id}, GLSL fn_{Name}_{method id}): its name came from
+        // the IR method id, which moves on after every compile.
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        static int SameText_Helper(int x, int salt)
+        {
+            int h = x ^ salt;
+            for (int r = 0; r < 3; r++) h = (h << 3) ^ (h >> 2) ^ r;
+            return h;
+        }
+        static void SameText_KernelA(Index1D i, ArrayView<int> o) { o[i] = SameText_Helper(i, 11); }
+        static void SameText_KernelB(Index1D i, ArrayView<int> o) { o[i] = SameText_Helper(i, 22) + 1; }
+
+        // The same kernel compiled again must give byte-identical shader text (5.4.46). WebGPU: the WGSL keys the accelerator's
+        // compiled-shader cache and the browser's pipeline cache. WebGL: the GLSL picks the glWorker program id, so the worker
+        // reuses the program it linked. Names built from IR node ids (helper functions, labels, structs, ids in comments) made
+        // the text depend on what the context compiled before, so a kernel compiled again after its owner was collected missed
+        // the cache, kept a duplicate pipeline / program and paid another browser shader compile (ML 2026-11-23: an LLM switched
+        // away and back took the WebGPU cache from 57 to 75 shaders). And the IR itself: a kernel optimized in one pass with a
+        // helper new to the context inlined the helper's RAW IR, a kernel compiled after another caller inlined its OPTIMIZED
+        // IR (IRContext.Optimize now goes callees first). Each pair: A from an empty IR cache, then B alone (sharing A's
         // helper), then A again, through the accelerator's own backend with the artifact cache off so both A's really compile.
         [TestMethod(Timeout = 180000)]
-        public async Task WebGPU_SameKernelCompiledAgain_ByteIdenticalWgsl() => await RunTest(async accelerator =>
+        public async Task BrowserShader_SameKernelCompiledAgain_ByteIdenticalText() => await RunTest(async accelerator =>
         {
-            if (accelerator is not SpawnDev.ILGPU.WebGPU.WebGPUAccelerator webgpu)
-                throw new UnsupportedTestException("WebGPU-only (the WGSL text keys its compiled-shader cache)");
+            Func<System.Reflection.MethodInfo, (string Text, int ProgramId)> compile = accelerator switch
+            {
+                SpawnDev.ILGPU.WebGPU.WebGPUAccelerator webgpu => m => (((SpawnDev.ILGPU.WebGPU.Backend.WebGPUCompiledKernel)webgpu.Backend.Compile(
+                    global::ILGPU.Backends.EntryPoints.EntryPointDescription.FromImplicitlyGroupedKernel(m), KernelSpecialization.Empty)).WGSLSource, 0),
+                SpawnDev.ILGPU.WebGL.WebGLAccelerator webgl => m =>
+                {
+                    var k = (SpawnDev.ILGPU.WebGL.Backend.WebGLCompiledKernel)webgl.Backend.Compile(
+                        global::ILGPU.Backends.EntryPoints.EntryPointDescription.FromImplicitlyGroupedKernel(m), KernelSpecialization.Empty);
+                    return (k.GLSLSource, k.ProgramId);
+                },
+                _ => throw new UnsupportedTestException("WebGPU / WebGL (their shader text keys the compiled-shader / program caches)"),
+            };
             bool savedCache = ShaderArtifactCache.Enabled;
             ShaderArtifactCache.Enabled = false;
             try
             {
-                string Wgsl(Delegate kernel) => ((SpawnDev.ILGPU.WebGPU.Backend.WebGPUCompiledKernel)webgpu.Backend.Compile(
-                    global::ILGPU.Backends.EntryPoints.EntryPointDescription.FromImplicitlyGroupedKernel(kernel.Method),
-                    KernelSpecialization.Empty)).WGSLSource;
-                var a = (Action<Index1D, ArrayView<int>>)CacheRelease_KernelA;
-                var b = (Action<Index1D, ArrayView<int>>)CacheRelease_KernelB;
-                // 1st A: A and its helper CacheRelease_Mix new to the context (optimized in one pass before 5.4.46);
-                // then B alone, so the helper is optimized with B; then A again, inlining the already-optimized helper.
-                accelerator.ReleaseCompilerCaches();
-                var first = Wgsl(a);
-                accelerator.ReleaseCompilerCaches();
-                Wgsl(b);
-                var again = Wgsl(a);
-                if (first != again)
+                var report = new List<string>();
+                foreach (var (a, b, name) in new (Delegate, Delegate, string)[]
                 {
-                    int d = 0;
-                    while (d < Math.Min(first.Length, again.Length) && first[d] == again[d]) d++;
-                    int from = Math.Max(0, d - 80);
-                    throw new Exception($"recompiled WGSL differs at {d}: first >>>{first.Substring(from, Math.Min(200, first.Length - from))}<<< again >>>{again.Substring(from, Math.Min(200, again.Length - from))}<<<");
+                    ((Action<Index1D, ArrayView<int>>)CacheRelease_KernelA, (Action<Index1D, ArrayView<int>>)CacheRelease_KernelB, "inlined helper"),
+                    ((Action<Index1D, ArrayView<int>>)SameText_KernelA, (Action<Index1D, ArrayView<int>>)SameText_KernelB, "helper function"),
+                })
+                {
+                    accelerator.ReleaseCompilerCaches();
+                    var first = compile(a.Method);
+                    accelerator.ReleaseCompilerCaches();
+                    compile(b.Method);
+                    var again = compile(a.Method);
+                    if (first.Text != again.Text)
+                    {
+                        int d = 0;
+                        while (d < Math.Min(first.Text.Length, again.Text.Length) && first.Text[d] == again.Text[d]) d++;
+                        int from = Math.Max(0, d - 80);
+                        throw new Exception($"{name}: recompiled shader differs at {d}: first >>>{first.Text.Substring(from, Math.Min(200, first.Text.Length - from))}<<< again >>>{again.Text.Substring(from, Math.Min(200, again.Text.Length - from))}<<<");
+                    }
+                    if (first.ProgramId != again.ProgramId)
+                        throw new Exception($"{name}: the same GLSL got program id {first.ProgramId} and then {again.ProgramId}");
+                    report.Add($"{name} {first.Text.Length} chars");
                 }
-                // and it still runs: the canonical names are consistent in the text the GPU compiles
+
+                // and they still run: the canonical names are consistent in the text the GPU compiles
                 const int n = 1024;
                 using var buf = accelerator.Allocate1D<int>(n);
-                var k = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(CacheRelease_KernelA);
-                k(n, buf.View);
+                var ka = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(CacheRelease_KernelA);
+                ka(n, buf.View);
                 var got = await buf.CopyToHostAsync();
                 for (int i = 0; i < n; i++)
-                    if (got[i] != CacheRelease_Mix(i, 1)) throw new Exception($"element {i} is {got[i]}, expected {CacheRelease_Mix(i, 1)}");
-                Console.WriteLine($"[report] WebGPU same kernel compiled again: {first.Length} chars, byte-identical");
+                    if (got[i] != CacheRelease_Mix(i, 1)) throw new Exception($"inlined helper: element {i} is {got[i]}, expected {CacheRelease_Mix(i, 1)}");
+                var kb = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(SameText_KernelB);
+                kb(n, buf.View);
+                got = await buf.CopyToHostAsync();
+                for (int i = 0; i < n; i++)
+                    if (got[i] != SameText_Helper(i, 22) + 1) throw new Exception($"helper function: element {i} is {got[i]}, expected {SameText_Helper(i, 22) + 1}");
+                Console.WriteLine($"[report] {accelerator.AcceleratorType} same kernel compiled again: byte-identical ({string.Join(", ", report)})");
             }
             finally { ShaderArtifactCache.Enabled = savedCache; }
         });
