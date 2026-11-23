@@ -1,7 +1,7 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.46 (forks 2.4.38) - The same kernel compiled again gives the same code; a failed kernel no longer breaks the context
+## 5.4.46 (forks 2.4.38) - 2026-11-23 - The same kernel compiled again gives the same code; a failed kernel no longer breaks the context
 
 - **FIX (WebGPU): byte-identical WGSL for the same kernel.** The WGSL generators named helper functions, labels, helper
   parameters and structs after IR node ids (`Name_1063214`, `L_57_3`, `p_88`, `struct_1101153`), and comments carried IR
