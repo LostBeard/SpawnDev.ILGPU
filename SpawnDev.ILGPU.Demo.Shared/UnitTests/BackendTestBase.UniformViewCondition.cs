@@ -82,6 +82,61 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 
         // Generated WGSL (5.4.47): one line ending (no '\r': the emulation library's CRLF literals left lone CRs, which Tint
         // counts as line breaks) and no unreachable trailing `return;`. And the kernel still computes the right values.
+        // A helper that takes a view stays a WGSL function (InlineAddressParameterCalls keepGlobalViewCalls) and is emitted in
+        // the middle of the kernel's body.
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        static int GuardThenViewHelper_Sum(ArrayView<int> v, int from, int count)
+        {
+            int sum = 0;
+            for (int k = 0; k < count; k++)
+            {
+                if ((v[from + k] & 1) == 0) sum += v[from + k];
+                else sum -= 1;
+            }
+            return sum;
+        }
+        static void GuardThenViewHelper_Kernel(Index1D i, ArrayView<int> p, ArrayView<int> data, ArrayView<int> o)
+        {
+            if (p[0] == 0) return;                                      // the guard: its condition reads a view
+            int x = p[2] + GuardThenViewHelper_Sum(data, i, p[1]);      // the helper is emitted here
+            if (x > 100) { if (p[1] == 3) return; }                     // and one nested guard after it
+            o[i] = x * 2;
+        }
+
+        // A guard clause whose condition reads a view, then a call of a view-taking helper (5.4.48): finishing the helper's
+        // own body cleared the kernel's pending guard sites, so their placeholders stayed in the WGSL and Chrome rejected the
+        // module ("unable to parse expression", 5.4.47; 17 of the 652 Codecs kernels scanned, Lore 2026-11-24). Runs the kernel
+        // on every backend that can (exact against a CPU reference), with the guard passing and with it returning.
+        [TestMethod(Timeout = 180000)]
+        public async Task GuardReadFromAView_ThenAViewHelper_CompilesAndRuns() => await RunTest(async accelerator =>
+        {
+            const int n = 40;
+            var data = Enumerable.Range(0, n + 8).Select(k => k * 37 % 211 - 60).ToArray();
+            foreach (var (active, count) in new[] { (1, 4), (1, 3), (0, 4) })
+            {
+                var p = new[] { active, count, 7 };
+                using var pBuf = accelerator.Allocate1D(p);
+                using var dataBuf = accelerator.Allocate1D(data);
+                using var outBuf = accelerator.Allocate1D<int>(n);
+                outBuf.CopyFromCPU(Enumerable.Repeat(-777, n).ToArray());
+                var kernel = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>, ArrayView<int>, ArrayView<int>>(GuardThenViewHelper_Kernel);
+                kernel(n, pBuf.View, dataBuf.View, outBuf.View);
+                var got = await outBuf.CopyToHostAsync();
+                for (int i = 0; i < n; i++)
+                {
+                    int expected = -777;
+                    if (active != 0)
+                    {
+                        int x = 7;
+                        for (int k = 0; k < count; k++) x += (data[i + k] & 1) == 0 ? data[i + k] : -1;
+                        if (!(x > 100 && count == 3)) expected = x * 2;
+                    }
+                    if (got[i] != expected)
+                        throw new Exception($"active {active}, count {count}, element {i}: {got[i]}, expected {expected}");
+                }
+            }
+        });
+
         [TestMethod(Timeout = 120000)]
         public async Task WebGPU_GeneratedWgsl_NoCarriageReturn_NoTrailingReturn() => await RunTest(async accelerator =>
         {

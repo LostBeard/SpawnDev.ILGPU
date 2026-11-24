@@ -1689,6 +1689,16 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 wgslSource = wgslSource.Replace(UniformBreakFlagPlaceholder, flagDecls.ToString());
             }
 
+            // Every placeholder of the uniform-if / uniform-break scheme is resolved by now; one left over is a generator bug
+            // and invalid WGSL (5.4.47 shipped one, found as a Tint error in a page). Fail here, with the placeholder's name.
+            int leftover = wgslSource.IndexOf("/*__UF", StringComparison.Ordinal);
+            if (leftover >= 0)
+            {
+                int leftoverEnd = wgslSource.IndexOf("*/", leftover, StringComparison.Ordinal);
+                throw new InvalidOperationException(
+                    $"WGSL generation left the placeholder {wgslSource.Substring(leftover, leftoverEnd < 0 ? Math.Min(40, wgslSource.Length - leftover) : leftoverEnd + 2 - leftover)} unresolved");
+            }
+
             // Resolve the opaque-zero initializer (WGSLCodeGenerator.FunctionArrayIndex): read the zero slot that the
             // kernel's GenerateHeader reserved, or drop the line when no body indexes a function-scope array dynamically.
             const string OpaqueZeroInit = "/*__ILGPU_OPAQUE_ZERO_INIT__*/";

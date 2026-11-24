@@ -1,6 +1,23 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.48 (forks 2.4.38) - 2026-11-24 - WebGPU: 5.4.47 left a generator placeholder in some shaders
+
+- **FIX (WebGPU, regression in 5.4.47): no generator placeholder left in the WGSL.** 5.4.47's barrier-under-a-condition change
+  puts a placeholder where the condition of an early return (a "guard clause") reads a view, and fills it in when the
+  kernel's body is done. A helper that takes a view is emitted as a WGSL function through the same routine, in the MIDDLE of
+  the kernel's body; finishing the helper looked for the kernel's placeholders in the helper's text, did not find them and
+  forgot them, so the shader was submitted with `if (/*__UFIF0__*/) {` and Chrome rejected it ("unable to parse expression"),
+  with "Invalid ComputePipeline" on every launch after. Needs a guard clause whose condition reads a view AND a later call of
+  a view-taking helper that stays a function. 28 of SpawnDev.Codecs 1.1.4's 1,057 kernels (DeflateKernels.PlanKernel,
+  WebPEncodeKernels.EmitCodeKernel, JpegKernels.ScanMarkersKernel, VP8 / VP9 stages and others), 0 of ILGPU.ML's 1,047 and 0
+  of the ILGPU suite's, which is why 5.4.47's checks passed. Lore found it in SpawnGen on an RX 590. Only the sites a body
+  adds are resolved at its end now. Test `GuardReadFromAView_ThenAViewHelper_CompilesAndRuns` (red on 5.4.47, its shader
+  keeps the placeholder).
+- **A placeholder still there after generation is a compile error** naming it, not an invalid shader (WebGPU).
+- PlaywrightMultiTest keeps the browser's console, failed requests, boot state and a screenshot when the test page never
+  shows its test table (`WGSLDumps/init_failure_*`).
+
 ## 5.4.47 (forks 2.4.38) - 2026-11-24 - WebGPU: barriers under a condition read from a view; cleaner WGSL
 
 - **FIX (WebGPU): a barrier inside `if (n < N)` with `N` read from a view compiles.** WGSL's uniformity analysis treats

@@ -9184,18 +9184,24 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         {
             var visited = new HashSet<BasicBlock>(new BasicBlock.Comparer());
 
+            // Only the sites THIS body adds are resolved at its end: a helper function (ViewHelpers) is emitted through here
+            // in the middle of the kernel, into a buffer of its own, while the kernel's own guard clauses are still pending.
+            // Resolving the whole list there did not find the kernel's lines in the helper's buffer, then cleared them, and
+            // their placeholders stayed in the WGSL ("if (/*__UFIF0__*/) {", 5.4.47; Lore, Codecs on an RX 590, 2026-11-24).
+            int firstGuardSite = _ufGuardSites.Count;
+
             GenerateStructuredCodeRecursive(block, stopBlock, pd, visited);
 
             // Returning guard clauses (BeginUniformIf): the threads that return do not reach the barriers AFTER the guard,
             // so those decide; resolved now that the whole body is emitted, innermost (latest) first so an outer guard
             // sees an inner broadcast. Located afresh: an enclosing loop's flag substitution can shift the text before it.
-            for (int i = _ufGuardSites.Count - 1; i >= 0; i--)
+            for (int i = _ufGuardSites.Count - 1; i >= firstGuardSite; i--)
             {
                 var site = _ufGuardSites[i];
                 int pos = Builder.ToString().IndexOf(site.PreLine, StringComparison.Ordinal);
                 if (pos >= 0) EndUniformIf(site with { StartPos = pos });
             }
-            _ufGuardSites.Clear();
+            _ufGuardSites.RemoveRange(firstGuardSite, _ufGuardSites.Count - firstGuardSite);
         }
 
         private void GenerateStructuredCodeRecursive(BasicBlock? block, BasicBlock? stopBlock, global::ILGPU.IR.Analyses.Dominators<global::ILGPU.IR.Analyses.ControlFlowDirection.Backwards> pd, HashSet<BasicBlock> visited, Loops<ReversePostOrder, Forwards>.Node? currentLoop = null)

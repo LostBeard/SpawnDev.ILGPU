@@ -94,17 +94,26 @@ static class ClearCacheWgslProbe
 
     static int RunAll(string which)
     {
-        var asm = typeof(SpawnDev.ILGPU.Demo.Shared.UnitTests.BackendTestBase).Assembly;
+        // SCAN_ASM=<dll>[;<dll>...]: the kernels of these assemblies instead of the suite (as in --unreachable)
+        var scanAsm = Environment.GetEnvironmentVariable("SCAN_ASM");
+        var asms = string.IsNullOrEmpty(scanAsm)
+            ? new[] { typeof(SpawnDev.ILGPU.Demo.Shared.UnitTests.BackendTestBase).Assembly }
+            : scanAsm.Split(';', StringSplitOptions.RemoveEmptyEntries).Select(System.Reflection.Assembly.LoadFrom).ToArray();
         var spec = new KernelSpecialization(64, null);
         var kernels = new List<(string Name, System.Reflection.MethodInfo M)>();
         var seen = new HashSet<string>();
-        foreach (var type in asm.GetTypes())
+        foreach (var type in asms.SelectMany(a => { try { return a.GetTypes(); } catch (System.Reflection.ReflectionTypeLoadException e) { return e.Types.Where(t => t != null).Select(t => t!).ToArray(); } }))
         {
             if (type.ContainsGenericParameters) continue;
             foreach (var m in type.GetMethods(System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly))
             {
-                if (m.IsGenericMethodDefinition || m.ReturnType != typeof(void) || m.GetMethodBody() == null) continue;
-                var ps = m.GetParameters();
+                System.Reflection.ParameterInfo[] ps;
+                try
+                {
+                    if (m.IsGenericMethodDefinition || m.ReturnType != typeof(void) || m.GetMethodBody() == null) continue;
+                    ps = m.GetParameters();
+                }
+                catch { continue; }   // a signature that needs an assembly this process does not have
                 if (ps.Length == 0) continue;
                 bool ok = true;
                 foreach (var p in ps) if (!p.ParameterType.IsValueType || p.ParameterType.IsByRef) { ok = false; break; }
@@ -113,6 +122,59 @@ static class ClearCacheWgslProbe
                 if (!seen.Add(name)) name += "_" + m.MetadataToken.ToString("x");
                 kernels.Add((name, m));
             }
+        }
+        // SCAN_TIME=1: compile every kernel once in one context, nothing else (compile time and the IR the context keeps;
+        // a warm-up context first, so the compiler itself is jitted)
+        if (Environment.GetEnvironmentVariable("SCAN_TIME") == "1")
+        {
+            string? CompileTimed(global::ILGPU.Backends.Backend be, System.Reflection.MethodInfo m)
+            {
+                try
+                {
+                    EntryPointDescription entry;
+                    try { entry = EntryPointDescription.FromImplicitlyGroupedKernel(m); }
+                    catch (NotSupportedException) { entry = EntryPointDescription.FromExplicitlyGroupedKernel(m); }
+                    return ScanOutput(which, be, entry, spec);
+                }
+                catch { return null; }
+            }
+            int limit = int.TryParse(Environment.GetEnvironmentVariable("SCAN_LIMIT"), out var lim) ? lim : kernels.Count;
+            // SCAN_OK=<file>: only kernels that compile in a context of their own (an unsupported one can fail inside the
+            // optimizer and leave its methods untransformed in a shared context, which then fails every later kernel).
+            // The file is written on the first run (one fresh context per kernel).
+            var okFile = Environment.GetEnvironmentVariable("SCAN_OK");
+            HashSet<string>? okNames = null;
+            if (okFile != null)
+            {
+                if (!File.Exists(okFile))
+                {
+                    var okList = new List<string>();
+                    foreach (var (name, m) in kernels)
+                    {
+                        var (c0, b0) = NewScanBackend(which);
+                        using (c0) using (b0) if (CompileTimed(b0, m) != null) okList.Add(name);
+                    }
+                    File.WriteAllLines(okFile, okList);
+                }
+                okNames = new HashSet<string>(File.ReadAllLines(okFile));
+            }
+            var list = kernels.Where(k => okNames == null || okNames.Contains(k.Name)).Take(limit).ToList();
+            var (wc, wb) = NewScanBackend(which);
+            using (wc) using (wb) foreach (var (_, m) in list.Take(60)) CompileTimed(wb, m);
+            GC.Collect(); GC.WaitForPendingFinalizers();
+            var (tc, tb) = NewScanBackend(which);
+            using (tc) using (tb)
+            {
+                long chars = 0; int ok = 0;
+                var sw = System.Diagnostics.Stopwatch.StartNew();
+                foreach (var (_, m) in list) { var w = CompileTimed(tb, m); if (w != null) { ok++; chars += w.Length; } }
+                sw.Stop();
+                long heapBefore = GC.GetTotalMemory(true);
+                tb.Context.ClearCache(ClearCacheMode.Default);
+                long heapAfter = GC.GetTotalMemory(true);
+                Console.WriteLine($"TIME ({which}): {ok} of {list.Count} kernels in one context: {sw.Elapsed.TotalMilliseconds:F0} ms, {chars:N0} chars, IR kept {(heapBefore - heapAfter) / 1048576.0:F1} MiB");
+            }
+            return 0;
         }
         // pass 1: each kernel in its OWN fresh context (its text when nothing was compiled before it);
         // pass 2: all kernels once each, in REVERSE order, in ONE context (each with a different compile history).
@@ -147,6 +209,8 @@ static class ClearCacheWgslProbe
                 var (name, m) = kernels[k];
                 if (!first.TryGetValue(name, out var w1)) continue;
                 var w2 = Compile(backend, m);
+                // SCAN_CLEAR=1: the context forgets its IR after every compile (what each kernel costs then, next to sharing)
+                if (Environment.GetEnvironmentVariable("SCAN_CLEAR") == "1") backend.Context.ClearCache(ClearCacheMode.Default);
                 if (w2 == null) continue;
                 if (w1 == w2) { same++; continue; }
                 differ++;
@@ -162,6 +226,13 @@ static class ClearCacheWgslProbe
                     Console.WriteLine("    shared: " + w2.Substring(from, Math.Min(160, w2.Length - from)).Replace('\n', '|'));
                 }
             }
+            swShared.Stop();
+            // the managed memory the context itself holds (its IR: the methods of every kernel, and their inline copies):
+            // the drop when its IR caches are cleared
+            long before = GC.GetTotalMemory(true);
+            backend.Context.ClearCache(ClearCacheMode.Default);
+            long after = GC.GetTotalMemory(true);
+            Console.WriteLine($"HEAP: the shared context's IR of all these kernels: {(before - after) / 1048576.0:F1} MiB");
         }
         Console.WriteLine($"TIMING: fresh-context pass {freshMs:F0} ms, shared-context pass {swShared.Elapsed.TotalMilliseconds:F0} ms");
         Console.WriteLine($"RESULT ({which}): {first.Count} kernels; in a shared context after other kernels: {same} byte-identical, {differ} different");
@@ -193,8 +264,13 @@ static class ClearCacheWgslProbe
                     if (type.ContainsGenericParameters) continue;
                     foreach (var m in type.GetMethods(System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly))
                     {
-                        if (m.IsGenericMethodDefinition || m.ReturnType != typeof(void) || m.GetMethodBody() == null) continue;
-                        var ps = m.GetParameters();
+                        System.Reflection.ParameterInfo[] ps;
+                        try
+                        {
+                            if (m.IsGenericMethodDefinition || m.ReturnType != typeof(void) || m.GetMethodBody() == null) continue;
+                            ps = m.GetParameters();
+                        }
+                        catch { continue; }   // a signature that needs an assembly this process does not have
                         if (ps.Length == 0) continue;
                         bool ok = true;
                         foreach (var p in ps) if (!p.ParameterType.IsValueType || p.ParameterType.IsByRef) { ok = false; break; }
@@ -210,6 +286,7 @@ static class ClearCacheWgslProbe
                                 catch (NotSupportedException) { entry = EntryPointDescription.FromExplicitlyGroupedKernel(m); }
                                 wgsl = ((WebGPUCompiledKernel)b.Compile(entry, spec)).WGSLSource;
                             }
+                            catch (Exception ex) when (ex.ToString().Contains("placeholder")) { Console.WriteLine($"PLACEHOLDER {type.Name}.{m.Name}: {ex.GetBaseException().Message}"); }
                             catch { }
                         }
                         if (wgsl == null) continue;

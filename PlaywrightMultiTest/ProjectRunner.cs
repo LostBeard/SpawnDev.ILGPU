@@ -344,6 +344,13 @@ namespace PlaywrightMultiTest
 
                         void HookPageConsole(Microsoft.Playwright.IPage page, string label)
                         {
+                            void LogNetwork(string line)
+                            {
+                                try { lock (wasmDumpChunks) File.AppendAllText(consoleLogPath, $"[{label}][network] {line}\n---END_MSG---\n"); } catch { }
+                            }
+                            page.RequestFailed += (_, req) => LogNetwork($"FAILED {req.Url}: {req.Failure}");
+                            page.Response += (_, resp) => { if (resp.Status >= 400) LogNetwork($"HTTP {resp.Status} {resp.Url}"); };
+                            page.PageError += (_, error) => LogNetwork($"PAGE ERROR {error}");
                             page.Console += (_, msg) =>
                             {
                                 var text = msg.Text;
@@ -479,7 +486,8 @@ namespace PlaywrightMultiTest
                         // (the bundled Chromium under --disable-software-rasterizer does) dropped EVERY
                         // browser test and the sweep still reported Passed. Found 2026-09-23 red-checking
                         // the WebGPU adapter probe in SpawnDev.VoxelEngine.
-                        buildTest.SetError($"{project.Name} failed to initialize - none of its browser tests ran: {ex.Message}");
+                        var evidence = await SaveInitFailureEvidenceAsync(testableProject.Page, Path.Combine(project.Directory, "..", "PlaywrightMultiTest", "WGSLDumps")).ConfigureAwait(false);
+                        buildTest.SetError($"{project.Name} failed to initialize - none of its browser tests ran: {ex.Message}\n{evidence}");
                     }
                 }
                 else if (project.AppProjectType == ProjectType.Exe)
@@ -1437,6 +1445,44 @@ namespace PlaywrightMultiTest
         /// and recoverably through ExecuteAndCaptureAsync's own try/catch, same as before this
         /// method existed.
         /// </summary>
+        /// <summary>
+        /// Keeps what a page that never showed its test table was doing (2026-11-24: TJ saw the page not load; the next run
+        /// had already overwritten browser_console.log): the console log, a screenshot and the boot state, in a folder of their
+        /// own that later runs do not touch.
+        /// </summary>
+        private static async Task<string> SaveInitFailureEvidenceAsync(Microsoft.Playwright.IPage? page, string wgslDumpDir)
+        {
+            try
+            {
+                var dir = Path.Combine(wgslDumpDir, "init_failure_" + DateTime.Now.ToString("yyyyMMdd_HHmmss"));
+                Directory.CreateDirectory(dir);
+                var consoleLog = Path.Combine(wgslDumpDir, "browser_console.log");
+                if (File.Exists(consoleLog)) File.Copy(consoleLog, Path.Combine(dir, "browser_console.log"), true);
+                if (page == null) return $"(evidence: {dir}; no page was created)";
+                string state = "(not read)";
+                try
+                {
+                    state = await page.EvaluateAsync<string>(@"() => JSON.stringify({
+                        url: location.href, ready: document.readyState,
+                        errorUi: getComputedStyle(document.getElementById('blazor-error-ui') ?? document.body).display,
+                        loading: document.documentElement.style.getPropertyValue('--blazor-load-percentage'),
+                        body: document.body?.innerText?.slice(0, 600),
+                        tables: document.querySelectorAll('table').length,
+                        framework: performance.getEntriesByType('resource').filter(r => r.name.includes('/_framework/'))
+                            .map(r => [r.name.split('/').pop(), Math.round(r.startTime), Math.round(r.responseEnd), r.transferSize, r.responseStatus])
+                            .sort((a, b) => b[2] - a[2]).slice(0, 25),
+                        frameworkCount: performance.getEntriesByType('resource').filter(r => r.name.includes('/_framework/')).length,
+                        now: Math.round(performance.now())
+                    }, null, 1)").WaitAsync(TimeSpan.FromSeconds(10)).ConfigureAwait(false);
+                }
+                catch (Exception ex) { state = "page did not answer: " + ex.Message; }
+                File.WriteAllText(Path.Combine(dir, "state.json"), state);
+                try { await page.ScreenshotAsync(new() { Path = Path.Combine(dir, "page.png"), Timeout = 10000 }).ConfigureAwait(false); } catch { }
+                return $"(evidence: {dir})";
+            }
+            catch (Exception ex) { return "(no evidence saved: " + ex.Message + ")"; }
+        }
+
         internal async Task RecyclePageAsync(TestableBlazorWasm blazor)
         {
             try
