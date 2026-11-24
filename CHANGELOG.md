@@ -7,8 +7,9 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   every load from read_write storage as non-uniform, and ILGPU binds views read_write (read-only views are off because
   algorithm kernels bind sub-views of one buffer to several parameters), so a barrier under a condition that reads a
   view was rejected: "'workgroupBarrier' must only be called from uniform control flow". ILGPU.ML's Q4_K GEMV (one group
-  per output column, `if (n < N)` around barriers, `N = p[2]`) has been gated off WebGPU for it since 2026-10-19, so
-  WebGPU ran the slower per-element Q4_K kernel. When an `if` condition reads memory only at group-uniform addresses
+  per output column, `if (n < N)` around barriers, `N = p[2]`) has been gated off WebGPU for it since 2026-10-19 (it
+  is not ML's default there: since 2026-10-31 single-row Q4_K takes faster kernels before that gate, so no decode speedup
+  follows from this fix alone). When an `if` condition reads memory only at group-uniform addresses
   (kernel views at indices built from parameters, group ids and constants; nothing per-thread: no thread index, shuffle,
   atomic, private memory or helper call) and an arm contains a barrier, the generator now takes the condition from
   invocation 0 through a per-`if` workgroup flag and `workgroupUniformLoad` (`BeginUniformIf`), as it already did for a
