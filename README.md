@@ -357,7 +357,7 @@ Before you edit a `.cs` file under `ILGPU/`, read [Docs/development.md](Docs/dev
 
 ## Support the project
 
-SpawnDev is built by one independent developer and a small team of AI agents. If this library saves you time, [sponsoring on GitHub](https://github.com/sponsors/LostBeard) directly funds more backends, more verified kernels and the hardware to test them on. Stars, issues and sharing what you build with it help just as much.
+SpawnDev libraries are built and maintained by the SpawnDev development team, which uses AI agents in its daily work. If this library saves you time, [sponsoring on GitHub](https://github.com/sponsors/LostBeard) directly funds more backends, more verified kernels and the hardware to test them on. Stars, issues and sharing what you build with it help just as much.
 
 ## Credits
 

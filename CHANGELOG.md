@@ -1,7 +1,7 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.47 (forks 2.4.38) - WebGPU: barriers under a condition read from a view; cleaner WGSL
+## 5.4.47 (forks 2.4.38) - 2026-11-24 - WebGPU: barriers under a condition read from a view; cleaner WGSL
 
 - **FIX (WebGPU): a barrier inside `if (n < N)` with `N` read from a view compiles.** WGSL's uniformity analysis treats
   every load from read_write storage as non-uniform, and ILGPU binds views read_write (read-only views are off because
