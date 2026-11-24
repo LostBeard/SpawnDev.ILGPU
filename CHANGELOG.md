@@ -1,6 +1,39 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.47 (forks 2.4.38) - WebGPU: barriers under a condition read from a view; cleaner WGSL
+
+- **FIX (WebGPU): a barrier inside `if (n < N)` with `N` read from a view compiles.** WGSL's uniformity analysis treats
+  every load from read_write storage as non-uniform, and ILGPU binds views read_write (read-only views are off because
+  algorithm kernels bind sub-views of one buffer to several parameters), so a barrier under a condition that reads a
+  view was rejected: "'workgroupBarrier' must only be called from uniform control flow". ILGPU.ML's Q4_K GEMV (one group
+  per output column, `if (n < N)` around barriers, `N = p[2]`) has been gated off WebGPU for it since 2026-10-19, so
+  WebGPU ran the slower per-element Q4_K kernel. When an `if` condition reads memory only at group-uniform addresses
+  (kernel views at indices built from parameters, group ids and constants; nothing per-thread: no thread index, shuffle,
+  atomic, private memory or helper call) and an arm contains a barrier, the generator now takes the condition from
+  invocation 0 through a per-`if` workgroup flag and `workgroupUniformLoad` (`BeginUniformIf`), as it already did for a
+  loop's break (`_uf_break_flag`). Returning guard clauses (`if (n >= N) return;` before barriers) too. A barrier under
+  the condition already requires it to be the same for every thread of the group on every backend, so no correct kernel
+  changes. In a loop, a barrier comes before invocation 0 rewrites its flag. Conditions that ARE per-thread are left as
+  they are (the suite's `GroupEarlyReturnKernel`, `if (t >= active) return;`, stays unsupported on WebGPU by design).
+  Checked with Tint (Dawn through Node, `@kmamal/gpu`, adapter without shader-f16/subgroups) over every ILGPU.ML kernel
+  (1,047) and the suite (802): both Q4_K GEMVs now compile, nothing new fails (the remaining failures are the CUDA-only
+  inline-PTX / shared-address kernels and two CUDA-only shuffle kernels, as before). Test
+  `Barrier_UnderConditionReadFromAView_CompilesAndRuns` (GEMV shape + guard clause, exact against a CPU reference on
+  every backend with barriers): red on WebGPU without the change (Tint rejects both kernels), green on WebGPU,
+  WebGPU-no-subgroups, Wasm, CPU, Velocity x3, CUDA, OpenCL.
+- **FIX (WebGPU): no unreachable trailing `return;`.** A function body ending in a `loop` that only leaves through
+  `return` (a C# `while (true)` with returns inside) was followed by the function's trailing `return;`; Chrome logged
+  "warning: code is unreachable" once per shader module (TRELLIS.2 `DeviceRemesher.Link` / `UnionImpl`, Lore's RX 590
+  console). A bare `return;` right before a function's closing brace is dropped (only void functions have one).
+- **FIX (WebGPU): one line ending in the generated WGSL.** The emulation library's function texts are C# literals that
+  carry the source file's CRLF; trimming only `\n` off them left lone `\r`s (67 in a small kernel), which Tint counts as
+  line breaks: its warning/error line numbers pointed past the end of the text, and the same kernel gave different text
+  built on Windows than elsewhere. The WGSL is now `\n` only. Test `WebGPU_GeneratedWgsl_NoCarriageReturn_NoTrailingReturn`
+  (red without the change: 67 CRs and a trailing return).
+- DemoConsole: `clearcache-wgsl --unreachable` dumps every kernel's WGSL (`SCAN_DUMP=<dir>`, `SCAN_ASM=<dlls>` for another
+  assembly such as ILGPU.ML, `SCAN_NO_FEATURES=1` for an adapter without shader-f16/subgroups) for a Tint pass.
+
 ## 5.4.46 (forks 2.4.38) - 2026-11-23 - The same kernel compiled again gives the same code; a failed kernel no longer breaks the context
 
 - **FIX (WebGPU): byte-identical WGSL for the same kernel.** The WGSL generators named helper functions, labels, helper

@@ -9185,6 +9185,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             var visited = new HashSet<BasicBlock>(new BasicBlock.Comparer());
 
             GenerateStructuredCodeRecursive(block, stopBlock, pd, visited);
+
+            // Returning guard clauses (BeginUniformIf): the threads that return do not reach the barriers AFTER the guard,
+            // so those decide; resolved now that the whole body is emitted, innermost (latest) first so an outer guard
+            // sees an inner broadcast. Located afresh: an enclosing loop's flag substitution can shift the text before it.
+            for (int i = _ufGuardSites.Count - 1; i >= 0; i--)
+            {
+                var site = _ufGuardSites[i];
+                int pos = Builder.ToString().IndexOf(site.PreLine, StringComparison.Ordinal);
+                if (pos >= 0) EndUniformIf(site with { StartPos = pos });
+            }
+            _ufGuardSites.Clear();
         }
 
         private void GenerateStructuredCodeRecursive(BasicBlock? block, BasicBlock? stopBlock, global::ILGPU.IR.Analyses.Dominators<global::ILGPU.IR.Analyses.ControlFlowDirection.Backwards> pd, HashSet<BasicBlock> visited, Loops<ReversePostOrder, Forwards>.Node? currentLoop = null)
@@ -9410,13 +9421,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                             {
                                 var returning = trueReaches ? falseTarget : trueTarget;
                                 var continuing = trueReaches ? trueTarget : falseTarget;
-                                AppendLine(trueReaches ? $"if (!{Load(branch.Condition)}) {{" : $"if ({Load(branch.Condition)}) {{");
+                                var ufCond = BeginUniformIf(branch.Condition, trueReaches, currentLoop, out var ufSite);
+                                AppendLine($"if ({ufCond}) {{");
                                 PushIndent();
                                 PushPhiValues(returning, block);
                                 visited.ExceptWith(_returnMerge.ReturningRegion(returning));
                                 GenerateStructuredCodeRecursive(returning, mergeNode, pd, visited, currentLoop);
                                 PopIndent();
                                 AppendLine("}");
+                                // a returning guard: the barriers that matter come AFTER it (the threads that returned do
+                                // not reach them), so the rest of the function decides; resolved when the function ends
+                                if (ufSite != null) _ufGuardSites.Add(ufSite);
                                 PushPhiValues(continuing, block);
                                 block = continuing;
                                 continue;
@@ -9543,7 +9558,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             if (falseTarget == mergeNode)
             {
-                AppendLine($"if ({Load(branch.Condition)}) {{");
+                var ufCond = BeginUniformIf(branch.Condition, false, currentLoop, out var ufSite);
+                AppendLine($"if ({ufCond}) {{");
                 PushIndent();
                 PushPhiValues(trueTarget, block);
                 GenerateStructuredCodeRecursive(trueTarget, mergeNode, pd, visited, currentLoop);
@@ -9557,10 +9573,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 PushPhiValues(mergeNode, block);
                 PopIndent();
                 AppendLine("}");
+                EndUniformIf(ufSite);
             }
             else if (trueTarget == mergeNode)
             {
-                AppendLine($"if (!{Load(branch.Condition)}) {{");
+                var ufCond = BeginUniformIf(branch.Condition, true, currentLoop, out var ufSite);
+                AppendLine($"if ({ufCond}) {{");
                 PushIndent();
                 PushPhiValues(falseTarget, block);
                 GenerateStructuredCodeRecursive(falseTarget, mergeNode, pd, visited, currentLoop);
@@ -9573,6 +9591,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                 PushPhiValues(mergeNode, block);
                 PopIndent();
                 AppendLine("}");
+                EndUniformIf(ufSite);
             }
             else if (TryEmitShortCircuitAsFlag(block, branch, mergeNode, pd, visited, currentLoop))
             {
@@ -10963,6 +10982,61 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             preSentinelLine = new string(' ', IndentLevel * 4) + pre + Environment.NewLine;
             AppendLine(pre);
             return breakSentinel;
+        }
+
+        /// <summary>An `if` whose condition may be taken from invocation 0 (see <see cref="BeginUniformIf"/>).</summary>
+        private sealed record UniformIfSite(int Id, int StartPos, string PreLine, string Sentinel, string NaturalCondition, bool InLoop);
+
+        private int _ufIfCounter;
+        private readonly List<UniformIfSite> _ufGuardSites = new();
+
+        /// <summary>
+        /// The condition text for an `if` about to be emitted. A condition that reads memory only at group-uniform
+        /// addresses (a kernel view at an index built from parameters, group ids and constants - <c>if (n &lt; N)</c> with
+        /// <c>N = p[2]</c>) is uniform in fact, but Tint treats every load from read_write storage as non-uniform, so a
+        /// barrier inside the `if` was rejected ("'workgroupBarrier' must only be called from uniform control flow";
+        /// ILGPU.ML's Q4_K GEMV, gated off WebGPU since 2026-10-19). Such a condition gets a sentinel here; after the
+        /// arms are emitted, <see cref="EndUniformIf"/> takes it from invocation 0 through workgroupUniformLoad when an arm
+        /// contains a barrier (or a nested broadcast), and puts the plain condition back otherwise. Same scheme as the loop
+        /// break flag (BeginNonUniformBreak). A barrier inside the `if` already requires the condition to be the same for
+        /// every thread of the group on every backend, so taking invocation 0's value changes no correct kernel.
+        /// </summary>
+        private string BeginUniformIf(global::ILGPU.IR.Value condition, bool negate, Loops<ReversePostOrder, Forwards>.Node? currentLoop, out UniformIfSite? site)
+        {
+            string natural = (negate ? "!" : "") + Load(condition);
+            site = null;
+            if (_emittingHelperFunction || !UniformityAnalyzer.NeedsUniformBroadcast(condition))
+                return natural;
+            int id = _ufIfCounter++;
+            string pre = $"/*__UFIFPRE{id}__*/";
+            string preLine = new string(' ', IndentLevel * 4) + pre + Environment.NewLine;
+            int start = Builder.Length;
+            AppendLine(pre);
+            site = new UniformIfSite(id, start, preLine, $"/*__UFIF{id}__*/", natural, currentLoop != null);
+            return site.Sentinel;
+        }
+
+        /// <summary>Resolves the `if` begun by <see cref="BeginUniformIf"/>, once its arms are emitted.</summary>
+        private void EndUniformIf(UniformIfSite? site)
+        {
+            if (site == null) return;
+            bool needsUniform = BuilderContainsFrom(site.StartPos, "workgroupBarrier(")
+                || BuilderContainsFrom(site.StartPos, "storageBarrier(")
+                || BuilderContainsFrom(site.StartPos, "workgroupUniformLoad(");
+            if (!needsUniform)
+            {
+                ReplaceFrom(site.StartPos, site.PreLine, "");
+                ReplaceFrom(site.StartPos, site.Sentinel, site.NaturalCondition);
+                return;
+            }
+            string indent = new string(' ', site.PreLine.Length - site.PreLine.TrimStart(' ').Length);
+            string flag = $"_uf_if_{site.Id}";
+            // In a loop the same flag is written again next iteration: a barrier first, so no thread is still reading
+            // the previous value when invocation 0 overwrites it. (Outside a loop the site runs once.)
+            string replacement = (site.InLoop ? indent + "workgroupBarrier();" + Environment.NewLine : "")
+                + indent + $"if (local_index == 0u) {{ {flag} = select(0u, 1u, {site.NaturalCondition}); }}" + Environment.NewLine;
+            ReplaceFrom(site.StartPos, site.PreLine, replacement);
+            ReplaceFrom(site.StartPos, site.Sentinel, $"workgroupUniformLoad(&{flag}) != 0u");
         }
 
         // Uniformity analysis methods extracted to UniformityAnalyzer.cs (Phase 1.3)

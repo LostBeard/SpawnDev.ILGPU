@@ -86,6 +86,10 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
         #region Pre-compiled Regex Patterns
 
+        // the per-`if` uniform flags (WGSLKernelFunctionGenerator.BeginUniformIf)
+        private static readonly System.Text.RegularExpressions.Regex s_uniformIfFlagPattern =
+            new(@"\b_uf_if_\d+\b", System.Text.RegularExpressions.RegexOptions.Compiled);
+
         // @workgroup_size(x[,y[,z]]) extraction
         private static readonly System.Text.RegularExpressions.Regex s_workgroupSizePattern =
             new(@"@workgroup_size\((\d+)(?:\s*,\s*(\d+))?(?:\s*,\s*(\d+))?\)",
@@ -1676,8 +1680,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             // actually broadcasts through it (see WGSLKernelFunctionGenerator.BeginNonUniformBreak).
             const string UniformBreakFlagPlaceholder = "/*__WGSL_UNIFORM_BREAK_FLAG_PLACEHOLDER__*/";
             if (wgslSource.Contains(UniformBreakFlagPlaceholder))
-                wgslSource = wgslSource.Replace(UniformBreakFlagPlaceholder,
-                    wgslSource.Contains("_uf_break_flag") ? "var<workgroup> _uf_break_flag : u32;" : "");
+            {
+                var flagDecls = new StringBuilder();
+                if (wgslSource.Contains("_uf_break_flag")) flagDecls.Append("var<workgroup> _uf_break_flag : u32;");
+                // the per-`if` flags of WGSLKernelFunctionGenerator.BeginUniformIf (5.4.47), one per site
+                foreach (var name in s_uniformIfFlagPattern.Matches(wgslSource).Select(m => m.Value).Distinct().OrderBy(n => n, StringComparer.Ordinal))
+                    flagDecls.Append(flagDecls.Length > 0 ? "\n" : "").Append("var<workgroup> ").Append(name).Append(" : u32;");
+                wgslSource = wgslSource.Replace(UniformBreakFlagPlaceholder, flagDecls.ToString());
+            }
 
             // Resolve the opaque-zero initializer (WGSLCodeGenerator.FunctionArrayIndex): read the zero slot that the
             // kernel's GenerateHeader reserved, or drop the line when no body indexes a function-scope array dynamically.
@@ -1685,6 +1695,21 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (wgslSource.Contains(OpaqueZeroInit))
                 wgslSource = wgslSource.Replace(OpaqueZeroInit,
                     data.OpaqueZero[1] >= 0 ? $"_ilgpu_oz = i32(_scalar_params[{data.OpaqueZero[1]}]);" : "");
+
+            // One line ending (5.4.47): AppendLine writes Environment.NewLine (CRLF on Windows, LF in the browser), and the
+            // emulation library's function texts are C# literals that carry the source file's CRLF; trimming only '\n' off
+            // them left a lone '\r' before the next line ("}\r\r\n", 46 of them in one TRELLIS kernel). Tint counts a lone CR
+            // as a line break, so its warning/error line numbers pointed past the end of the text, and the same kernel gave
+            // different text on Windows and in the browser.
+            if (wgslSource.Contains('\r')) wgslSource = wgslSource.Replace("\r", "");
+
+            // No trailing `return;` (5.4.47): a void function's body that ends in `return;` right before its closing brace
+            // returns there anyway, and after a `loop` that only exits through `return` (a C# `while (true)` with returns
+            // inside) Tint warns "code is unreachable" for it - one console line per shader module in every app (TRELLIS.2's
+            // DeviceRemesher.Link / UnionImpl, Lore's RX 590, 2026-11-24). Only a void function has a bare `return;`.
+            wgslSource = wgslSource.Replace("\n    return;\n}\n", "\n}\n");
+            if (wgslSource.EndsWith("\n    return;\n}", StringComparison.Ordinal))
+                wgslSource = wgslSource.Substring(0, wgslSource.Length - "    return;\n}".Length) + "}";
 
             // Deterministic names (5.4.46): the same kernel compiled again must give byte-identical WGSL, because the text keys
             // the compiled-shader cache (and the browser's pipeline cache). See ShaderCanonicalNames. The host-side names are

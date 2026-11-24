@@ -49,7 +49,10 @@ static class ClearCacheWgslProbe
     static (Context, WebGPUBackend) NewBackend()
     {
         var ctx = Context.Create(b => { b.Default().EnableAlgorithms(); b.EnableWebGPUAlgorithms(); });
-        var features = new HashSet<string>(StringComparer.Ordinal) { "shader-f16", "subgroups" };
+        // SCAN_NO_FEATURES=1: an adapter without shader-f16 / subgroups (emulated f16), e.g. to compile the WGSL with Node Dawn
+        var features = Environment.GetEnvironmentVariable("SCAN_NO_FEATURES") == "1"
+            ? new HashSet<string>(StringComparer.Ordinal)
+            : new HashSet<string>(StringComparer.Ordinal) { "shader-f16", "subgroups" };
         var backend = new WebGPUBackend(ctx, WebGPUBackendOptions.Default, features);
         return (ctx, backend);
     }
@@ -168,6 +171,88 @@ static class ClearCacheWgslProbe
     public static int Run(string[] args)
     {
         bool savedCache = ShaderArtifactCache.Enabled;
+        if (args.Length > 1 && args[1] == "--unreachable")
+        {
+            // `clearcache-wgsl --unreachable`: every suite kernel's WGSL scanned for a statement right after an unconditional
+            // exit (return / break / continue) in the same block. Chrome (Tint) logs "warning: code is unreachable" for it
+            // once per shader module (Lore's RX 590 console, TRELLIS.2, 2026-11-24).
+            ShaderArtifactCache.Enabled = false;
+            try
+            {
+                // SCAN_ASM=<dll>[;<dll>...]: scan the kernels of these assemblies instead of the suite (e.g. ILGPU.ML)
+                var scanAsm = Environment.GetEnvironmentVariable("SCAN_ASM");
+                var asms = string.IsNullOrEmpty(scanAsm)
+                    ? new[] { typeof(SpawnDev.ILGPU.Demo.Shared.UnitTests.BackendTestBase).Assembly }
+                    : scanAsm.Split(';', StringSplitOptions.RemoveEmptyEntries).Select(System.Reflection.Assembly.LoadFrom).ToArray();
+                var spec = new KernelSpecialization(64, null);
+                int kernels = 0, hits = 0, shown = 0;
+                var exit = new Regex(@"^\s*(return\b[^;]*;|break;|continue;)\s*(//.*)?$");
+                var shapes = new Dictionary<string, int>();
+                foreach (var type in asms.SelectMany(a => { try { return a.GetTypes(); } catch (System.Reflection.ReflectionTypeLoadException e) { return e.Types.Where(t => t != null).Select(t => t!).ToArray(); } }))
+                {
+                    if (type.ContainsGenericParameters) continue;
+                    foreach (var m in type.GetMethods(System.Reflection.BindingFlags.Static | System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.DeclaredOnly))
+                    {
+                        if (m.IsGenericMethodDefinition || m.ReturnType != typeof(void) || m.GetMethodBody() == null) continue;
+                        var ps = m.GetParameters();
+                        if (ps.Length == 0) continue;
+                        bool ok = true;
+                        foreach (var p in ps) if (!p.ParameterType.IsValueType || p.ParameterType.IsByRef) { ok = false; break; }
+                        if (!ok) continue;
+                        string? wgsl = null;
+                        var (c, b) = NewBackend();
+                        using (c) using (b)
+                        {
+                            try
+                            {
+                                EntryPointDescription entry;
+                                try { entry = EntryPointDescription.FromImplicitlyGroupedKernel(m); }
+                                catch (NotSupportedException) { entry = EntryPointDescription.FromExplicitlyGroupedKernel(m); }
+                                wgsl = ((WebGPUCompiledKernel)b.Compile(entry, spec)).WGSLSource;
+                            }
+                            catch { }
+                        }
+                        if (wgsl == null) continue;
+                        kernels++;
+                        // SCAN_DUMP=<dir>: every kernel's WGSL to a file (for a Tint pass: Dawn's getCompilationInfo)
+                        var dumpDir = Environment.GetEnvironmentVariable("SCAN_DUMP");
+                        if (dumpDir != null)
+                        {
+                            Directory.CreateDirectory(dumpDir);
+                            File.WriteAllText(Path.Combine(dumpDir, $"{type.Name}.{m.Name}_{m.MetadataToken:x}.wgsl"), wgsl);
+                        }
+                        var lines = wgsl.Split('\n');
+                        bool kernelHit = false;
+                        for (int i = 0; i + 1 < lines.Length; i++)
+                        {
+                            if (!exit.IsMatch(lines[i])) continue;
+                            // the next non-blank, non-comment line: unreachable unless it closes the block or starts a case
+                            int j = i + 1;
+                            while (j < lines.Length && (lines[j].Trim().Length == 0 || lines[j].Trim().StartsWith("//"))) j++;
+                            if (j >= lines.Length) break;
+                            var next = lines[j].Trim();
+                            if (next.StartsWith("}") || next.StartsWith("case ") || next.StartsWith("default")) continue;
+                            hits++;
+                            kernelHit = true;
+                            var shape = Regex.Replace(lines[i].Trim(), @"\b[A-Za-z_]\w*_\d+\b", "v") + " => " + Regex.Replace(next, @"\b[A-Za-z_]\w*_\d+\b", "v");
+                            if (shape.Length > 120) shape = shape.Substring(0, 120);
+                            shapes[shape] = shapes.TryGetValue(shape, out var n) ? n + 1 : 1;
+                            if (shown < 4)
+                            {
+                                shown++;
+                                Console.WriteLine($"  {type.Name}.{m.Name} line {i + 1}:");
+                                for (int k = Math.Max(0, i - 4); k <= Math.Min(lines.Length - 1, j + 1); k++) Console.WriteLine("    | " + lines[k]);
+                            }
+                        }
+                        if (kernelHit) Console.WriteLine($"HIT {type.Name}.{m.Name}");
+                    }
+                }
+                foreach (var (s, n) in shapes.OrderByDescending(x => x.Value)) Console.WriteLine($"  {n} x {s}");
+                Console.WriteLine($"UNREACHABLE: {kernels} kernels, {hits} statements after an unconditional exit");
+                return hits;
+            }
+            finally { ShaderArtifactCache.Enabled = savedCache; }
+        }
         if (args.Length > 1 && args[1] == "--recompile")
         {
             // every suite kernel compiled once in ONE context, then again: a second compile of the same kernel in the same

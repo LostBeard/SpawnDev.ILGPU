@@ -314,6 +314,49 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
 
         /// <summary>
+        /// True when an `if` on <paramref name="condition"/> should be taken from invocation 0 for Tint: the condition reads
+        /// memory (a load Tint counts as non-uniform: a read_write view, shared memory) only at group-uniform addresses and
+        /// nothing per-thread: it reaches no thread index (local id, lane), shuffle, atomic, private-memory load or helper
+        /// call (one not inlined may read the thread's index inside) - through operands AND load addresses. Every thread of
+        /// the group then reads the same value, which Tint cannot prove for read_write storage. The results of a predicate
+        /// barrier (Group.BarrierAnd / Or / PopCount) and a broadcast are uniform by construction (emitted through
+        /// workgroupUniformLoad), so the walk does not enter their per-thread operands.
+        /// </summary>
+        public static bool NeedsUniformBroadcast(Value condition)
+        {
+            var visited = new HashSet<Value>();
+            var stack = new Stack<Value>();
+            stack.Push(condition);
+            bool readsMemory = false;
+            while (stack.Count > 0)
+            {
+                var current = stack.Pop().Resolve();
+                if (!visited.Add(current)) continue;
+                if (visited.Count > 4096) return false;   // too large to prove uniform: leave it as it is
+                switch (current)
+                {
+                    case PredicateBarrier:
+                    case Broadcast:
+                        continue;
+                    case GroupIndexValue:
+                    case LaneIdxValue:
+                    case WarpShuffle:
+                    case SubWarpShuffle:
+                    case AtomicValue:
+                    case MethodCall:
+                        return false;
+                    case Load load:
+                        if (load.SourceAddressSpace == MemoryAddressSpace.Local) return false;
+                        readsMemory = true;
+                        break;
+                }
+                foreach (var node in current.Nodes)
+                    stack.Push(node.Resolve());
+            }
+            return readsMemory;
+        }
+
+        /// <summary>
         /// Checks if any block within a loop node contains a memory barrier instruction.
         /// This is used to determine if a loop needs uniformity analysis for its break condition.
         /// </summary>
