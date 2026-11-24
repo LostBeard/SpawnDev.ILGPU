@@ -38,7 +38,7 @@
 		</PackageReference>
 		<PackageReference Include="NUnit3TestAdapter" Version="6.3.0" />
 		<PackageReference Include="Microsoft.CodeAnalysis" Version="5.9.0" PrivateAssets="All" />
-		<PackageReference Include="SpawnDev.UnitTesting.Browser" Version="2.7.0" />
+		<PackageReference Include="SpawnDev.UnitTesting.Browser" Version="2.7.2" />
 		<FrameworkReference Include="Microsoft.AspNetCore.App" />
 		
 	</ItemGroup>
