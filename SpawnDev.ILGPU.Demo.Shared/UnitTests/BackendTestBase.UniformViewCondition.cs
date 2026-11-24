@@ -66,14 +66,17 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
 
         // a loop that leaves only through `return` (a C# while (true) with returns inside): the function's trailing `return;`
         // after it was unreachable, and Chrome logged "warning: code is unreachable" for it (TRELLIS.2 DeviceRemesher.Link)
+        // BOUNDED: the step count forces an exit after 40 iterations. The first version of this kernel had no bound and looped
+        // forever for most inputs (the map's cycles meet neither exit): it hung the GPU (DXGI_ERROR_DEVICE_HUNG) in a full
+        // gate, 2026-11-24.
         static void ReturnOnlyLoopKernel(Index1D i, ArrayView<int> o)
         {
-            int x = i;
+            int x = i, steps = 0;
             while (true)
             {
                 x = (x * 7 + 3) & 1023;
                 if ((x & 15) == 5) { o[i] = x; return; }
-                if (x == 0) { o[i] = -1; return; }
+                if (++steps >= 40) { o[i] = x; return; }
             }
         }
 
@@ -101,12 +104,12 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             var got = await buf.CopyToHostAsync();
             for (int i = 0; i < n; i++)
             {
-                int x = i, want;
+                int x = i, want, steps = 0;
                 while (true)
                 {
                     x = (x * 7 + 3) & 1023;
                     if ((x & 15) == 5) { want = x; break; }
-                    if (x == 0) { want = -1; break; }
+                    if (++steps >= 40) { want = x; break; }
                 }
                 if (got[i] != want) throw new Exception($"element {i} is {got[i]}, expected {want}");
             }
