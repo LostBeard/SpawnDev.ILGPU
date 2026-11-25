@@ -619,16 +619,28 @@ namespace ILGPU.Backends
                 var mainContext = codeGenerationPhase.IRContext;
 
                 Frontend.CodeGenerationResult generationResult;
+                Frontend.CodeGenerationPhase frontendCode;
                 using (var frontendPhase = codeGenerationPhase.
                     BeginFrontendCodeGeneration())
                 {
+                    frontendCode = frontendPhase;
                     generationResult = frontendPhase.GenerateCode(entry.MethodSource);
                 }
 
                 if (codeGenerationPhase.IsFaulted)
                     throw codeGenerationPhase.LastException.AsNotNull();
                 generatedKernelMethod = generationResult.Result.AsNotNull();
-                codeGenerationPhase.Optimize();
+                try
+                {
+                    codeGenerationPhase.Optimize();
+                }
+                catch
+                {
+                    // Only this compile's own methods are untransformed here: leave none of them half-transformed in the
+                    // context, or every later kernel fails in the optimizer too (5.4.49).
+                    frontendCode.RemoveCreatedMethods();
+                    throw;
+                }
 
                 backendHook.FinishedCodeGeneration(mainContext, generatedKernelMethod);
             }

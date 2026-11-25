@@ -260,8 +260,19 @@ namespace ILGPU.IR.Intrinsics
             public void Dispose()
             {
                 codeGenerationPhase.Dispose();
-                contextCodeGenerationPhase.Optimize();
-                contextCodeGenerationPhase.Dispose();
+                try
+                {
+                    contextCodeGenerationPhase.Optimize();
+                }
+                catch
+                {
+                    codeGenerationPhase.RemoveCreatedMethods();
+                    throw;
+                }
+                finally
+                {
+                    contextCodeGenerationPhase.Dispose();
+                }
 
                 foreach (var mappingEntry in mappings.Values)
                     mappingEntry.Apply();

@@ -136,7 +136,18 @@ static class ClearCacheWgslProbe
                     catch (NotSupportedException) { entry = EntryPointDescription.FromExplicitlyGroupedKernel(m); }
                     return ScanOutput(which, be, entry, spec);
                 }
-                catch { return null; }
+                catch (Exception ex)
+                {
+                    // SCAN_ERR=1: the kernels that do not compile in this context, with the innermost exception
+                    if (Environment.GetEnvironmentVariable("SCAN_ERR") == "1")
+                    {
+                        var inner = ex;
+                        while (inner.InnerException != null) inner = inner.InnerException;
+                        var at = (inner.StackTrace ?? "").Split(Environment.NewLine).FirstOrDefault(l => l.Contains("ILGPU.IR") || l.Contains("Backend"))?.Trim();
+                        if (Environment.GetEnvironmentVariable("SCAN_FULL") == m.Name) Console.WriteLine(ex.ToString()); Console.WriteLine($"FAIL {m.DeclaringType?.Name}.{m.Name}: {inner.GetType().Name}: {inner.Message.Split(Environment.NewLine)[0]} | {at}");
+                    }
+                    return null;
+                }
             }
             int limit = int.TryParse(Environment.GetEnvironmentVariable("SCAN_LIMIT"), out var lim) ? lim : kernels.Count;
             // SCAN_OK=<file>: only kernels that compile in a context of their own (an unsupported one can fail inside the

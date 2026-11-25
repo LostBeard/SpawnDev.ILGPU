@@ -301,6 +301,11 @@ namespace ILGPU.Frontend
             // current IR context.
             var result = Context.Declare(methodBase, out bool created);
 
+            // A callee is declared here but its body is generated later, from the queue: if THIS method fails first, the
+            // queue is dropped and the callee would stay declared without a body in the context (5.4.49).
+            if (created)
+                Frontend.RecordCreatedMethod(result);
+
             if (created &&
                 result.HasImplementation &&
                 !DetectedMethods.ContainsKey(methodBase))

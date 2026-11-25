@@ -329,6 +329,11 @@ namespace ILGPU.Frontend
         }
 
         /// <summary>
+        /// Records a method that the current phase declared (the rollback of a failed phase removes it).
+        /// </summary>
+        internal void RecordCreatedMethod(Method method) => codeGenerationPhase?.RecordCreatedMethod(method);
+
+        /// <summary>
         /// Starts a code-generation phase.
         /// </summary>
         /// <param name="context">The target IR context.</param>
@@ -530,10 +535,7 @@ namespace ILGPU.Frontend
             {
                 generatedMethod = Context.Declare(method, out bool created);
                 if (created)
-                {
-                    lock (createdMethods)
-                        createdMethods.Add(generatedMethod);
-                }
+                    RecordCreatedMethod(generatedMethod);
                 if (!created & isExternalRequest)
                     return;
                 location = generatedMethod;
@@ -594,6 +596,25 @@ namespace ILGPU.Frontend
         }
 
         /// <summary>
+        /// Records a method this phase declared.
+        /// </summary>
+        internal void RecordCreatedMethod(Method method)
+        {
+            lock (createdMethods)
+                createdMethods.Add(method);
+        }
+
+        /// <summary>
+        /// Removes every method this phase declared from the context: after a failure in the frontend, or in the optimizer
+        /// that runs next on the same methods (they are left half-transformed and would fail every later kernel).
+        /// </summary>
+        internal void RemoveCreatedMethods()
+        {
+            lock (createdMethods)
+                Context.RemoveMethods(createdMethods);
+        }
+
+        /// <summary>
         /// Records an exception during code-generation.
         /// </summary>
         /// <param name="exception">The exception to record.</param>
@@ -617,10 +638,7 @@ namespace ILGPU.Frontend
                 // A failed phase leaves no half-built method behind: every method it declared goes (the ones that did
                 // build are only referenced by the failed ones; the next phase generates them again).
                 if (firstException != null)
-                {
-                    lock (createdMethods)
-                        Context.RemoveMethods(createdMethods);
-                }
+                    RemoveCreatedMethods();
             }
             base.Dispose(disposing);
         }

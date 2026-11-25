@@ -1,6 +1,19 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.49 (forks 2.4.39) - 2026-11-25 - A failed kernel compile no longer breaks later kernels
+
+- **FIX (all backends): a kernel that fails to compile leaves no helper behind without a body.** 5.4.46 removed a failed
+  compile's own methods from the context, but not the helpers it CALLED: a call declares the helper and queues its body, and
+  the failure cleared the queue, so the helper stayed declared without a body. Every later kernel that called it, and every
+  kernel after that one, failed (`NullReferenceException` in DeadCodeElimination). One intentional failure (`throw` or an
+  unsupported intrinsic in a kernel an app tries and catches) was enough: of the 1,098 void static methods of SpawnDev.Codecs
+  1.1.4 compiled one after another in one context, 5.4.48 compiled 30; 5.4.49 compiles 1,057 (the other 41 do not compile
+  on their own). A failure in the optimizer, right after, removes that compile's methods too instead of leaving them
+  half-transformed. The same for intrinsic implementations. Test
+  `Context_FailedKernelCompile_HelperItCalledStillUsable` (red on 5.4.48). Generated WGSL of all 2,911 kernels of the suite,
+  ILGPU.ML and Codecs 1.1.4 is byte-identical to 5.4.48.
+
 ## 5.4.48 (forks 2.4.38) - 2026-11-24 - WebGPU: 5.4.47 left a generator placeholder in some shaders
 
 - **FIX (WebGPU, regression in 5.4.47): no generator placeholder left in the WGSL.** 5.4.47's barrier-under-a-condition change

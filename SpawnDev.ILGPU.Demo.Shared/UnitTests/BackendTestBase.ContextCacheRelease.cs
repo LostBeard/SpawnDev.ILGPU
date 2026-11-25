@@ -315,6 +315,37 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             Console.WriteLine($"[report] {accelerator.AcceleratorType} failed kernel ({failure}), then a new kernel compiled and ran");
         });
 
+        // A helper called by a kernel that fails AFTER the call (a class allocation, rejected by the IL frontend).
+        static int FailedCaller_Helper(int x) => (x * 7) ^ (x >> 1);
+        static void FailedCaller_BadKernel(Index1D i, ArrayView<int> o)
+        {
+            o[i] = FailedCaller_Helper(i);
+            o[i] += new System.Text.StringBuilder().Length;
+        }
+        static void FailedCaller_GoodKernel(Index1D i, ArrayView<int> o) { o[i] = FailedCaller_Helper(i) + 3; }
+
+        // A failed kernel must leave the helpers it CALLED usable (5.4.49): the call declared the helper, the failure cleared
+        // the queue that would have generated its body, and the context kept a declared method without a body. Every later
+        // kernel calling it crashed (NullReferenceException in DeadCodeElimination; 1,054 of 1,098 SpawnDev.Codecs kernels
+        // after one unsupported one, 2026-11-24). The helper is not one of the failed kernel's own methods, so 5.4.46's
+        // rollback missed it.
+        [TestMethod(Timeout = 180000)]
+        public async Task Context_FailedKernelCompile_HelperItCalledStillUsable() => await RunTest(async accelerator =>
+        {
+            string failure = "no exception (this backend did not reject it)";
+            try { accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(FailedCaller_BadKernel); }
+            catch (Exception ex) { failure = ex.GetType().Name; }
+
+            const int n = 128;
+            using var buf = accelerator.Allocate1D<int>(n);
+            var good = accelerator.LoadAutoGroupedStreamKernel<Index1D, ArrayView<int>>(FailedCaller_GoodKernel);
+            good(n, buf.View);
+            var got = await buf.CopyToHostAsync();
+            for (int i = 0; i < n; i++)
+                if (got[i] != FailedCaller_Helper(i) + 3) throw new Exception($"element {i} is {got[i]}, expected {FailedCaller_Helper(i) + 3}");
+            Console.WriteLine($"[report] {accelerator.AcceleratorType} failed kernel ({failure}); a kernel calling the same helper compiled and ran");
+        });
+
         // A helper that stays a function in the shader (WGSL Name_{method id}, GLSL fn_{Name}_{method id}): its name came from
         // the IR method id, which moves on after every compile.
         [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
