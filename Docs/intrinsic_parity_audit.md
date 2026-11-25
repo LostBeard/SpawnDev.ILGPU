@@ -168,7 +168,7 @@ All `GenericAtomic`/`AtomicCAS` emit `// not supported` and return 0.
 | Type | WebGPU | WebGL | Wasm | Desktop |
 |------|:------:|:-----:|:----:|:-------:|
 | f64 (Dekker default) | ✅ `vec2<f32>` ~48-bit | ✅ `vec2` ~48-bit | ✅ native | ✅ native |
-| f64 (Ozaki opt-in) | ✅ `vec4<f32>` IEEE 754 | ✅ `vec4` IEEE 754 | N/A | N/A |
+| f64 (Ozaki opt-in) | ✅ `vec4<f32>` (binary64 only on stores; not IEEE 754) | ✅ `vec4` (same) | N/A | N/A |
 | i64/u64 | ✅ `vec2<u32>` | ✅ `uvec2` | ✅ native | ✅ native |
 
 ---

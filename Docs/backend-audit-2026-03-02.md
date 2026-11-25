@@ -131,7 +131,7 @@ All three browser backends register throw-free replacements for .NET methods tha
 | Scheme | Representation | Precision | Performance |
 |--------|---------------|-----------|-------------|
 | **Dekker** (default) | `vec2<f32>` | ~48–53 bit mantissa | ⚡ Fast |
-| **Ozaki** (opt-in) | `vec4<f32>` | IEEE 754 compliant | 🐢 ~2× slower |
+| **Ozaki** (opt-in) | `vec4<f32>` | ~96-bit between operations; rounds to binary64 only on stores (not bit-identical to .NET; use Ieee) | 🐢 ~2× slower |
 | **i64** | `vec2<u32>` | Exact | Moderate overhead |
 
 > Wasm and desktop backends use native 64-bit — no emulation overhead.
