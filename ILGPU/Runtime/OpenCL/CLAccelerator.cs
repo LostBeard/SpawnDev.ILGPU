@@ -558,6 +558,27 @@ namespace ILGPU.Runtime.OpenCL
             out int minGridSize) =>
             throw new NotSupportedException();
 
+        /// <summary>
+        /// AMD OpenCL reports free device memory (<c>CL_DEVICE_GLOBAL_FREE_MEMORY_AMD</c>, in KiB: the total free and the
+        /// largest free block); the other vendors have no such query and answer from the budget, if any.
+        /// </summary>
+        public override bool TryGetFreeMemory(out long freeBytes)
+        {
+            if (!Device.HasExtension("cl_amd_device_attribute_query"))
+                return TryGetFreeBudget(out freeBytes);
+            try
+            {
+                var values = new IntPtr[2];
+                CurrentAPI.GetDeviceInfo(DeviceId, CLDeviceInfoType.CL_DEVICE_GLOBAL_FREE_MEMORY_AMD, values);
+                freeBytes = ClampFreeToBudget(values[0].ToInt64() * 1024);
+                return true;
+            }
+            catch (CLException)
+            {
+                return TryGetFreeBudget(out freeBytes);
+            }
+        }
+
         /// <summary cref="Accelerator.EstimateGroupSizeInternal(
         /// Kernel, int, int, out int)"/>
         protected override int EstimateGroupSizeInternal(

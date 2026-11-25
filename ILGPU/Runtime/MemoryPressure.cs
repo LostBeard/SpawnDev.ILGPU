@@ -104,6 +104,19 @@ namespace ILGPU.Runtime
             public long MeasuredAt;
         }
 
+        /// <summary>Forgets the last free-memory answer, e.g. when a budget is set where there was no number before.</summary>
+        internal static void ResetMeasurement(Accelerator accelerator)
+        {
+            var registry = accelerator.ReclaimRegistry;
+            if (registry == null)
+                return;
+            lock (registry.Sync)
+            {
+                registry.CanQuery = true;
+                registry.EstimatedFree = -1;
+            }
+        }
+
         /// <summary>The headroom in effect for <paramref name="accelerator"/>.</summary>
         public static long GetHeadroomBytes(Accelerator accelerator) =>
             accelerator.DeviceMemoryHeadroomBytes

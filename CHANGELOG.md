@@ -1,6 +1,23 @@
 ﻿# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.50 (forks 2.4.40) - 2026-11-25 - A device memory budget for every backend
+
+- **NEW: `Accelerator.DeviceMemoryBudgetBytes` and `Accelerator.AllocatedDeviceBytes`.** Only CUDA could report free device
+  memory, so on WebGPU, WebGL, Wasm, OpenCL and the CPU backends the memory-pressure reclaim (`MemoryPressure`, used by
+  SpawnDev.ILGPU.ML's buffer pools) had nothing to measure against and switched itself off on the first allocation. An
+  application can now set a budget (null by default: unchanged); `AllocatedDeviceBytes` counts the buffers allocated through
+  the accelerator and not disposed yet, and `TryGetFreeMemory` answers budget minus that (on CUDA the smaller of that and the
+  driver's number). Then an allocation that would pass the budget first takes back idle pooled memory, least recently used
+  first, on every backend. Setting a budget also forgets an earlier free-memory answer, so a reclaim that had switched itself
+  off runs again (without that, even CUDA kept a cached "plenty free" from before the budget). The counter cannot see other
+  pages, processes or memory a backend allocates for itself, so a budget must leave room for them. Asked for by SpawnGen
+  (Lore) for keeping models loaded while there is room; SpawnDev.ILGPU.ML's model residency (Tuvok) sets this budget.
+- **NEW: free device memory on AMD OpenCL** (`CL_DEVICE_GLOBAL_FREE_MEMORY_AMD`, when the device has
+  `cl_amd_device_attribute_query`). Other OpenCL vendors have no such query and answer from the budget.
+- Tests `MemoryBudget_AllocatedBytesFollowEveryBuffer` and `MemoryBudget_FreeMemoryAndReclaimFollowTheBudget` (the second
+  red on CPU, CUDA and OpenCL without the reset of the earlier answer).
+
 ## 5.4.49 (forks 2.4.39) - 2026-11-25 - A failed kernel compile no longer breaks later kernels
 
 - **FIX (all backends): a kernel that fails to compile leaves no helper behind without a body.** 5.4.46 removed a failed

@@ -102,6 +102,8 @@ namespace ILGPU.Runtime
         {
             if (!MarkDisposed_Unsafe())
                 return;
+            if (this is MemoryBuffer buffer)
+                buffer.UntrackDeviceBytes();
             DisposeAcceleratorObject(disposing);
         }
 

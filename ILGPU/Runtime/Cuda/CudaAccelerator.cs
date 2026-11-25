@@ -511,7 +511,7 @@ namespace ILGPU.Runtime.Cuda
         /// <summary cref="Accelerator.TryGetFreeMemory(out long)"/>
         public override bool TryGetFreeMemory(out long freeBytes)
         {
-            freeBytes = GetFreeMemory();
+            freeBytes = ClampFreeToBudget(GetFreeMemory());
             return true;
         }
 

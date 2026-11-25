@@ -32,6 +32,19 @@ namespace ILGPU.Runtime
         #region Instance
 
         /// <summary>
+        /// The bytes counted in <see cref="Accelerator.AllocatedDeviceBytes"/> for this buffer, 0 when it is not counted.
+        /// </summary>
+        internal long TrackedDeviceBytes;
+
+        /// <summary>Takes this buffer out of <see cref="Accelerator.AllocatedDeviceBytes"/> (once).</summary>
+        internal void UntrackDeviceBytes()
+        {
+            long bytes = System.Threading.Interlocked.Exchange(ref TrackedDeviceBytes, 0);
+            if (bytes != 0)
+                Accelerator?.UntrackAllocation(bytes);
+        }
+
+        /// <summary>
         /// Initializes this array view buffer.
         /// </summary>
         /// <param name="accelerator">The associated accelerator.</param>

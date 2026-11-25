@@ -475,7 +475,7 @@ namespace ILGPU.Runtime
 
             Bind();
             if (ReclaimRegistry == null)
-                return AllocateRawInternal(length, elementSize, bitsPerElement);
+                return TrackAllocation(AllocateRawInternal(length, elementSize, bitsPerElement));
 
             // Something on this accelerator holds memory it can give back: make room BEFORE allocating, since
             // a driver that spills to system RAM never fails the allocation (see MemoryPressure).
@@ -485,7 +485,7 @@ namespace ILGPU.Runtime
             MemoryPressure.BeforeAllocate(this, bytes);
             try
             {
-                return AllocateRawInternal(length, elementSize, bitsPerElement);
+                return TrackAllocation(AllocateRawInternal(length, elementSize, bitsPerElement));
             }
             catch (Exception)
             {
@@ -494,8 +494,51 @@ namespace ILGPU.Runtime
                 if (!MemoryPressure.ReclaimAfterFailure(this, bytes))
                     throw;
             }
-            return AllocateRawInternal(length, elementSize, bitsPerElement);
+            return TrackAllocation(AllocateRawInternal(length, elementSize, bitsPerElement));
         }
+
+        /// <summary>
+        /// The bytes of the buffers allocated through this accelerator and not disposed yet (SpawnDev 5.4.50): what ILGPU
+        /// itself holds on the device. Not counted: other processes or pages, buffers wrapped from elsewhere, and memory a
+        /// backend allocates for itself (staging, uniform and arena buffers).
+        /// </summary>
+        public long AllocatedDeviceBytes => System.Threading.Interlocked.Read(ref allocatedDeviceBytes);
+
+        private long allocatedDeviceBytes;
+        private long? deviceMemoryBudgetBytes;
+
+        /// <summary>
+        /// How much device memory this application may hold on this accelerator, in bytes, or null (the default) for no
+        /// budget (SpawnDev 5.4.50). Only CUDA and (on AMD) OpenCL can report free memory, so on WebGPU, WebGL, Wasm and the
+        /// other backends the memory-pressure reclaim of <see cref="MemoryPressure"/> had nothing to measure against. With a
+        /// budget set, <see cref="TryGetFreeMemory"/> answers budget minus <see cref="AllocatedDeviceBytes"/> there (and the
+        /// smaller of that and the real number where the driver reports one), and the reclaim runs as it does on CUDA. Set
+        /// it from what the application knows (a user setting on a browser); leave room for what this counter cannot see
+        /// (the desktop, other tabs, buffers this accelerator did not allocate).
+        /// </summary>
+        public long? DeviceMemoryBudgetBytes
+        {
+            get => deviceMemoryBudgetBytes;
+            set
+            {
+                if (value is < 0)
+                    throw new ArgumentOutOfRangeException(nameof(value));
+                deviceMemoryBudgetBytes = value;
+                // the free-memory query may have been refused (no number) before the budget existed
+                MemoryPressure.ResetMeasurement(this);
+            }
+        }
+
+        private MemoryBuffer TrackAllocation(MemoryBuffer buffer)
+        {
+            long bytes = buffer.LengthInBytes;
+            buffer.TrackedDeviceBytes = bytes;
+            System.Threading.Interlocked.Add(ref allocatedDeviceBytes, bytes);
+            return buffer;
+        }
+
+        internal void UntrackAllocation(long bytes) =>
+            System.Threading.Interlocked.Add(ref allocatedDeviceBytes, -bytes);
 
         /// <summary>
         /// Holders of reclaimable memory on this accelerator (see <see cref="MemoryPressure"/>); null until
@@ -517,15 +560,33 @@ namespace ILGPU.Runtime
         public long? DeviceMemoryHeadroomBytes { get; set; }
 
         /// <summary>
-        /// Reports how much device memory is free right now, on backends that can tell (CUDA). Returns false
-        /// when the backend has no such query.
+        /// Reports how much device memory is free right now: the driver's number on backends that can tell (CUDA, and AMD
+        /// OpenCL), and the rest of <see cref="DeviceMemoryBudgetBytes"/> where one is set (the smaller of the two). Returns
+        /// false when there is neither.
         /// </summary>
         /// <param name="freeBytes">The free device memory in bytes.</param>
-        public virtual bool TryGetFreeMemory(out long freeBytes)
+        public virtual bool TryGetFreeMemory(out long freeBytes) =>
+            TryGetFreeBudget(out freeBytes);
+
+        /// <summary>
+        /// The part of <see cref="DeviceMemoryBudgetBytes"/> not allocated yet; false when no budget is set.
+        /// </summary>
+        protected bool TryGetFreeBudget(out long freeBytes)
         {
+            if (deviceMemoryBudgetBytes is long budget)
+            {
+                freeBytes = Math.Max(0, budget - AllocatedDeviceBytes);
+                return true;
+            }
             freeBytes = 0;
             return false;
         }
+
+        /// <summary>
+        /// Combines a driver's free-memory number with the rest of the budget (the smaller one).
+        /// </summary>
+        protected long ClampFreeToBudget(long freeBytes) =>
+            TryGetFreeBudget(out long budgetFree) ? Math.Min(freeBytes, budgetFree) : freeBytes;
 
         /// <summary>
         /// Allocates a buffer with the specified number of elements on this accelerator.
