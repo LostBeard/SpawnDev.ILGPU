@@ -1,7 +1,6 @@
 using ILGPU;
 using ILGPU.Runtime;
 using SpawnDev.ILGPU.WebGPU;
-using SpawnDev.SpawnJS.Cryptography;
 using SpawnDev.UnitTesting;
 
 namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
@@ -12,25 +11,11 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
     /// </summary>
     public abstract partial class BackendTestBase : IDisposable
     {
-        /// <summary>Platform-appropriate crypto provider (injected via DI). All crypto goes through this.</summary>
-        protected IPortableCrypto Crypto { get; }
-
-        /// <summary>DI-configured WebTorrent client with tracker discovery.</summary>
-        protected SpawnDev.WebTorrent.WebTorrentClient WebTorrentClient { get; }
-
-        protected BackendTestBase(IPortableCrypto crypto, SpawnDev.WebTorrent.WebTorrentClient webTorrentClient)
-        {
-            Crypto = crypto;
-            WebTorrentClient = webTorrentClient;
-        }
-
-        /// <summary>Creates an Ed25519 signer with a fresh key pair from IPortableCrypto. Each call generates a new identity.</summary>
-        protected async Task<SpawnDev.WebTorrent.Ed25519Signer> CreateEd25519Signer()
-        {
-            var signer = new SpawnDev.WebTorrent.Ed25519Signer(Crypto);
-            await signer.GenerateKeyAsync();
-            return signer;
-        }
+        /// <summary>
+        /// For a host without the crypto / WebTorrent services (the headless Node host, SpawnDev.ILGPU.NodeTests). The
+        /// browser and desktop demos use the constructor in BackendTestBase.Peers.cs.
+        /// </summary>
+        protected BackendTestBase() { }
 
         /// <summary>Creates the backend-specific accelerator. Caller is responsible for disposing both.</summary>
         protected abstract Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync();

@@ -1,0 +1,8 @@
+{
+  "name": "spawndev-ilgpu-example-node-webgpu",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "webgpu": "0.6.2"
+  }
+}

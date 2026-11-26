@@ -1,0 +1,43 @@
+<Project Sdk="Microsoft.NET.Sdk">
+	<!-- SpawnDev.ILGPU's GPU test suite, headless: a .NET WebAssembly console app run by Node, with WebGPU from Google
+	     Dawn (npm `webgpu`). No browser, no Playwright. See README.md in this folder. -->
+	<PropertyGroup>
+		<Nullable>enable</Nullable>
+		<TargetFramework>net10.0</TargetFramework>
+		<RuntimeIdentifier>browser-wasm</RuntimeIdentifier>
+		<OutputType>Exe</OutputType>
+		<AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+		<WasmMainJSPath>main.mjs</WasmMainJSPath>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<IsPackable>false</IsPackable>
+		<CompressionEnabled>false</CompressionEnabled>
+		<!-- the shared test files are written for the demos; their warnings are not this host's -->
+		<NoWarn>$(NoWarn);CS1591;CS8600;CS8602;CS8603;CS8604;CS8618;CS8625;CS0162;CS0168;CS0219;CS1718;CA1416</NoWarn>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\SpawnDev.ILGPU\SpawnDev.ILGPU.csproj" />
+		<ProjectReference Include="..\ILGPU\ILGPU.csproj" />
+		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
+		<PackageReference Include="SpawnDev.UnitTesting" Version="2.5.8" />
+		<!-- direct, for the interop script main.mjs imports (a console app does not load JS initializers) -->
+		<PackageReference Include="SpawnDev.SpawnJS" Version="3.0.11" GeneratePathProperty="true" />
+	</ItemGroup>
+
+	<!-- Every shared kernel test file, linked (one source with the browser and desktop suites), except the ones that
+	     need the demos' crypto / WebTorrent services or BlazorJS. -->
+	<ItemGroup>
+		<Compile Include="..\SpawnDev.ILGPU.Demo.Shared\UnitTests\BackendTestBase.cs" Link="Shared\BackendTestBase.cs" />
+		<Compile Include="..\SpawnDev.ILGPU.Demo.Shared\UnitTests\BackendTestBase.*.cs" Link="Shared\%(Filename)%(Extension)" />
+		<Compile Include="..\SpawnDev.ILGPU.Demo.Shared\UnitTests\RadixCounterLocalizer.cs" Link="Shared\RadixCounterLocalizer.cs" />
+		<Compile Remove="..\SpawnDev.ILGPU.Demo.Shared\UnitTests\BackendTestBase.Peers.cs" />
+		<Compile Remove="..\SpawnDev.ILGPU.Demo.Shared\UnitTests\BackendTestBase.Autolykos2.cs" />
+		<Compile Remove="..\SpawnDev.ILGPU.Demo.Shared\UnitTests\BackendTestBase.StructBufferLayout.cs" />
+		<Compile Remove="..\SpawnDev.ILGPU.Demo.Shared\UnitTests\BackendTestBase.Tests1.cs" />
+	</ItemGroup>
+
+	<ItemGroup>
+		<WasmExtraFilesToDeploy Include="$(PkgSpawnDev_SpawnJS)\staticwebassets\SpawnDev.SpawnJS.*.lib.module.js" />
+		<None Include="package.json" CopyToOutputDirectory="PreserveNewest" />
+	</ItemGroup>
+</Project>

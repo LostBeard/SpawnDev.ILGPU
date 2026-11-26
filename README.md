@@ -282,6 +282,7 @@ Self-contained console projects under [`Examples/`](Examples/README.md). Each re
 | 02 | [BackendSelection](Examples/02-BackendSelection) | `CreatePreferredAccelerator`, device enumeration, capability gating with `AcceleratorRequirements` |
 | 03 | [Algorithms](Examples/03-Algorithms) | `RadixSort`, `Scan` and `Reduce`, the same call on every backend |
 | 04 | [LambdaAndDelegateSpec](Examples/04-LambdaAndDelegateSpec) | Capturing lambda kernels and `DelegateSpecialization` |
+| 08 | [NodeWebGPU](Examples/08-NodeWebGPU) | A .NET WebAssembly console app on WebGPU under Node, no browser (Google Dawn through npm `webgpu`) |
 
 ## Documentation
 

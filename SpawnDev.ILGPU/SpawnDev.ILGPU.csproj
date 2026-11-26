@@ -42,6 +42,7 @@
 	<ItemGroup>
 		<!-- The unit-test project asserts internal invariants (e.g. the cache-key drift guard). -->
 		<InternalsVisibleTo Include="SpawnDev.ILGPU.Demo.Shared" />
+		<InternalsVisibleTo Include="SpawnDev.ILGPU.NodeTests" />
 	</ItemGroup>
 
 	<!-- =====================================================================

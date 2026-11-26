@@ -18,6 +18,7 @@ WebGPU / WebGL / Wasm in the browser (Blazor WebAssembly).
 | 05 | **BlazorBasic** | Blazor WASM | WebGPU/WebGL/Wasm | The same kernel in the browser - auto-selects the best browser backend, async readback. |
 | 06 | **PrecompiledShaders** | Blazor WASM | WebGPU/WebGL/Wasm | Build-time shader precompilation (`[PrecompiledKernel]` + `<SpawnDevPrecompileShaders>`) and the runtime cache - move IL->shader transpilation off the startup path. |
 | 07 | **CanvasRendering** | Blazor WASM | WebGPU | Zero-copy GPU -> `<canvas>` rendering (a compute kernel writes pixels, blitted to the canvas). |
+| 08 | **NodeWebGPU** | .NET WASM console under Node | WebGPU | Example 01's kernel with no browser: Node supplies WebGPU from Google Dawn (npm `webgpu`). Headless GPU compute for scripts, servers and CI. |
 
 > Examples are added incrementally; this index lists the planned set. Each folder has its own README.
 
@@ -37,6 +38,15 @@ dotnet run
 ```
 WebGPU needs Chrome/Edge 113+ (or Firefox Nightly). The Wasm backend's multi-worker mode needs the
 page to be cross-origin isolated (the templates include the `coi-serviceworker.js` that handles it).
+
+**WebGPU under Node (example 08):**
+```bash
+cd Examples/08-NodeWebGPU
+npm install
+dotnet build -c Release
+node bin/Release/net10.0/browser-wasm/AppBundle/main.mjs
+```
+Needs the `wasm-tools` workload and Node 22 or later.
 
 ## Notes
 - Each example pins `SpawnDev.ILGPU` to a released version (e.g. `4.10.0`). Bump it to try a newer release.

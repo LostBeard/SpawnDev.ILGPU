@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- A .NET WebAssembly CONSOLE app (not Blazor): Node runs it, and Node gets WebGPU from Google Dawn (npm `webgpu`). -->
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RuntimeIdentifier>browser-wasm</RuntimeIdentifier>
+    <WasmMainJSPath>main.mjs</WasmMainJSPath>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>NodeWebGPU</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="SpawnDev.ILGPU" Version="5.4.51" />
+    <!-- Direct reference only for its interop script: a console app does not load JS initializers the way a Blazor app
+         does, so main.mjs imports it. -->
+    <PackageReference Include="SpawnDev.SpawnJS" Version="3.0.11" GeneratePathProperty="true" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <WasmExtraFilesToDeploy Include="$(PkgSpawnDev_SpawnJS)\staticwebassets\SpawnDev.SpawnJS.*.lib.module.js" />
+  </ItemGroup>
+
+</Project>
