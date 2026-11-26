@@ -1,4 +1,4 @@
-﻿# SpawnDev.ILGPU Changelog
+# SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
 ## 5.4.50 (forks 2.4.40) - 2026-11-25 - A device memory budget for every backend
@@ -14,7 +14,9 @@ This file tracks notable changes per release. The README's "Recent Highlights" s
   pages, processes or memory a backend allocates for itself, so a budget must leave room for them. Asked for by SpawnGen
   (Lore) for keeping models loaded while there is room; SpawnDev.ILGPU.ML's model residency (Tuvok) sets this budget.
 - **NEW: free device memory on AMD OpenCL** (`CL_DEVICE_GLOBAL_FREE_MEMORY_AMD`, when the device has
-  `cl_amd_device_attribute_query`). Other OpenCL vendors have no such query and answer from the budget.
+  `cl_amd_device_attribute_query`). Other OpenCL vendors have no such query and answer from the budget. Checked by Lore on
+  an RX 590 (8 GB) after release: 8,128 MiB free, then 7,104 / 6,080 / 5,056 after each 1 GiB buffer, 8,128 again after
+  disposing them (not checked: memory held by another process).
 - Tests `MemoryBudget_AllocatedBytesFollowEveryBuffer` and `MemoryBudget_FreeMemoryAndReclaimFollowTheBudget` (the second
   red on CPU, CUDA and OpenCL without the reset of the earlier answer).
 
