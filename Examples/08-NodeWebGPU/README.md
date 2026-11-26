@@ -14,7 +14,7 @@ dotnet build -c Release
 node bin/Release/net10.0/browser-wasm/AppBundle/main.mjs
 ```
 
-Output on an RTX 4070 (Windows, Node 24.15.0, `webgpu` 0.6.2, SpawnDev.ILGPU 5.4.51):
+Output on an RTX 4070 (Windows, Node 24.15.0, `webgpu` 0.6.2, SpawnDev.ILGPU 5.4.52):
 
 ```
 HOST: node v24.15.0, adapter: nvidia / lovelace / nvidia-geforce-rtx-4070 / D3D12 driver version 32.0.16.2114

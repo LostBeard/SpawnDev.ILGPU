@@ -12,10 +12,10 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="SpawnDev.ILGPU" Version="5.4.51" />
+    <PackageReference Include="SpawnDev.ILGPU" Version="5.4.52" />
     <!-- Direct reference only for its interop script: a console app does not load JS initializers the way a Blazor app
          does, so main.mjs imports it. -->
-    <PackageReference Include="SpawnDev.SpawnJS" Version="3.0.11" GeneratePathProperty="true" />
+    <PackageReference Include="SpawnDev.SpawnJS" Version="3.0.12" GeneratePathProperty="true" />
   </ItemGroup>
 
   <ItemGroup>
