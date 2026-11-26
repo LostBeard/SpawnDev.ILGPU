@@ -659,28 +659,22 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             accelerator.Reduce<long, global::ILGPU.Algorithms.ScanReduceOperations.MaxInt64>(
                 accelerator.DefaultStream, inputBuf.View, maxOut.View);
             await accelerator.SynchronizeAsync();
-            var maxResult = await maxOut.CopyToHostAsync<long>();
-            if (maxResult[0] != 256L)
-                throw new Exception($"Reduce<MaxInt64> expected 256, got {maxResult[0]}");
+            await CheckReduceAsync<long, global::ILGPU.Algorithms.ScanReduceOperations.MaxInt64>(accelerator, inputBuf, maxOut, 256L, "Reduce<MaxInt64>");
 
             // Min
             using var minOut = accelerator.Allocate1D<long>(1);
             accelerator.Reduce<long, global::ILGPU.Algorithms.ScanReduceOperations.MinInt64>(
                 accelerator.DefaultStream, inputBuf.View, minOut.View);
             await accelerator.SynchronizeAsync();
-            var minResult = await minOut.CopyToHostAsync<long>();
-            if (minResult[0] != 1L)
-                throw new Exception($"Reduce<MinInt64> expected 1, got {minResult[0]}");
+            await CheckReduceAsync<long, global::ILGPU.Algorithms.ScanReduceOperations.MinInt64>(accelerator, inputBuf, minOut, 1L, "Reduce<MinInt64>");
 
             // Sum
             using var sumOut = accelerator.Allocate1D<long>(1);
             accelerator.Reduce<long, global::ILGPU.Algorithms.ScanReduceOperations.AddInt64>(
                 accelerator.DefaultStream, inputBuf.View, sumOut.View);
             await accelerator.SynchronizeAsync();
-            var sumResult = await sumOut.CopyToHostAsync<long>();
             long expectedSum = count * (count + 1L) / 2; // 32896
-            if (sumResult[0] != expectedSum)
-                throw new Exception($"Reduce<AddInt64> expected {expectedSum}, got {sumResult[0]}");
+            await CheckReduceAsync<long, global::ILGPU.Algorithms.ScanReduceOperations.AddInt64>(accelerator, inputBuf, sumOut, expectedSum, "Reduce<AddInt64>");
         });
 
         // ==================== Reduce<uint> ====================
@@ -723,6 +717,26 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         });
 
         // ==================== Reduce<ulong> ====================
+        // DIAGNOSTIC for an intermittent wrong result (2026-11-26 gate, WebGL lane on the page shared with the WebGPU lanes, once:
+        // Reduce<MaxUInt64> returned 32896, the SUM 1..256 that the previous test's last step had written into its own output).
+        // Not reproducible alone (scoped 3x, whole WebGL lane 2x). On a mismatch, read the same output again with no new dispatch,
+        // then run the same reduction into a fresh buffer, and report all three: a second read that is right means a stale read;
+        // a rerun that is wrong too means the computation itself.
+        private static async Task CheckReduceAsync<T, TReduction>(Accelerator accelerator, MemoryBuffer1D<T, Stride1D.Dense> input,
+            MemoryBuffer1D<T, Stride1D.Dense> output, T expected, string name)
+            where T : unmanaged, IEquatable<T>
+            where TReduction : struct, global::ILGPU.Algorithms.ScanReduceOperations.IScanReduceOperation<T>
+        {
+            var first = (await output.CopyToHostAsync<T>())[0];
+            if (first.Equals(expected)) return;
+            var reread = (await output.CopyToHostAsync<T>())[0];
+            using var fresh = accelerator.Allocate1D<T>(1);
+            accelerator.Reduce<T, TReduction>(accelerator.DefaultStream, input.View, fresh.View);
+            await accelerator.SynchronizeAsync();
+            var rerun = (await fresh.CopyToHostAsync<T>())[0];
+            throw new Exception($"{name} expected {expected}, got {first}; the same buffer read again: {reread}; the reduction run again into a new buffer: {rerun}");
+        }
+
         [TestMethod]
         public async Task ILGPUReduceULongTest() => await RunEmulatedTest(async accelerator =>
         {
@@ -737,28 +751,22 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             accelerator.Reduce<ulong, global::ILGPU.Algorithms.ScanReduceOperations.MaxUInt64>(
                 accelerator.DefaultStream, inputBuf.View, maxOut.View);
             await accelerator.SynchronizeAsync();
-            var maxResult = await maxOut.CopyToHostAsync<ulong>();
-            if (maxResult[0] != 256UL)
-                throw new Exception($"Reduce<MaxUInt64> expected 256, got {maxResult[0]}");
+            await CheckReduceAsync<ulong, global::ILGPU.Algorithms.ScanReduceOperations.MaxUInt64>(accelerator, inputBuf, maxOut, 256UL, "Reduce<MaxUInt64>");
 
             // Min
             using var minOut = accelerator.Allocate1D<ulong>(1);
             accelerator.Reduce<ulong, global::ILGPU.Algorithms.ScanReduceOperations.MinUInt64>(
                 accelerator.DefaultStream, inputBuf.View, minOut.View);
             await accelerator.SynchronizeAsync();
-            var minResult = await minOut.CopyToHostAsync<ulong>();
-            if (minResult[0] != 1UL)
-                throw new Exception($"Reduce<MinUInt64> expected 1, got {minResult[0]}");
+            await CheckReduceAsync<ulong, global::ILGPU.Algorithms.ScanReduceOperations.MinUInt64>(accelerator, inputBuf, minOut, 1UL, "Reduce<MinUInt64>");
 
             // Sum
             using var sumOut = accelerator.Allocate1D<ulong>(1);
             accelerator.Reduce<ulong, global::ILGPU.Algorithms.ScanReduceOperations.AddUInt64>(
                 accelerator.DefaultStream, inputBuf.View, sumOut.View);
             await accelerator.SynchronizeAsync();
-            var sumResult = await sumOut.CopyToHostAsync<ulong>();
             ulong expectedSum = (ulong)(count * (count + 1) / 2); // 32896
-            if (sumResult[0] != expectedSum)
-                throw new Exception($"Reduce<AddUInt64> expected {expectedSum}, got {sumResult[0]}");
+            await CheckReduceAsync<ulong, global::ILGPU.Algorithms.ScanReduceOperations.AddUInt64>(accelerator, inputBuf, sumOut, expectedSum, "Reduce<AddUInt64>");
         });
 
         // ==================== Reduce<Half> ====================
