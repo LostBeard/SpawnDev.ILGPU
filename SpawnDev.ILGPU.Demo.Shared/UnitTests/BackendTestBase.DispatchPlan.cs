@@ -137,6 +137,17 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                         throw new Exception($"timed replay expected 3 passes: {timedJson}");
                     if (!timedJson.Contains("\"kernels\":[") || timedJson.Contains("(unlabeled)"))
                         throw new Exception($"timed replay missing kernel labels (pipeline Label plumbing broke): {timedJson}");
+                    // Per-pass rows in plan order (5.4.53): one per pass, each with its label and three positive workgroup counts.
+                    using var doc = System.Text.Json.JsonDocument.Parse(timedJson);
+                    var rows = doc.RootElement.GetProperty("dispatches");
+                    if (rows.GetArrayLength() != 3)
+                        throw new Exception($"timed replay expected 3 per-pass rows: {timedJson}");
+                    foreach (var row in rows.EnumerateArray())
+                    {
+                        var wg = row.GetProperty("wg");
+                        if (wg.GetArrayLength() != 3 || wg.EnumerateArray().Any(v => v.GetInt32() < 1) || row.GetProperty("label").GetString() == "(unlabeled)")
+                            throw new Exception($"timed replay per-pass row malformed: {row}");
+                    }
                 }
                 Console.WriteLine($"[DispatchPlan] timed replay (HasTimestampQuery={webGpu.NativeAccelerator.HasTimestampQuery}): {timedJson}");
             }

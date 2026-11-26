@@ -1,6 +1,15 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.53 (forks 2.4.41) - 2026-11-26 - Per-dispatch GPU times from a timed replay
+
+- **NEW (WebGPU): `WebGPUDispatchPlan.ReplayTimedAsync()` also returns one row per dispatch**, in plan order, with its
+  workgroup counts: `"dispatches":[{"label","ms","wg":[x,y,z]},...]` beside the per-label `"kernels"` totals. The totals
+  cannot show which SHAPE of a kernel is slow (a GEMM's late small layers launching too few workgroups to fill the GPU);
+  the rows show it in one timed replay. Asked for by SpawnDev.ILGPU.ML (Tuvok) for MobileNetV2's convolutions. The dispatch
+  helper's version is 6 (a page that already loaded version 5 takes the new copy). Per-pass times want Chrome's
+  `--enable-webgpu-developer-features` (timestamps are otherwise quantized to 100 us).
+
 ## 5.4.52 (forks 2.4.41) - 2026-11-26 - WebGPU dispatch batching and dispatch plans under Node
 
 - **FIX (WebGPU, outside a page): the dispatch helper script loads under Node** (a .NET WebAssembly console app with WebGPU

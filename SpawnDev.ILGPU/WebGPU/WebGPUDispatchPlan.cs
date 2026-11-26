@@ -424,8 +424,11 @@ public sealed class WebGPUDispatchPlan : IDisposable
     /// <summary>
     /// Replays the captured plan with per-pass GPU timestamps (WebGPU 'timestamp-query') and returns
     /// a JSON string aggregating GPU time by pipeline label (the kernel name): <c>{"supported":true,
-    /// "passes":N,"ops":N,"totalMs":x,"spanMs":x,"kernels":[{"label","ms","count","maxMs"},...]}</c>
-    /// sorted by total ms descending, or <c>{"supported":false,"reason":...}</c> when the device
+    /// "passes":N,"ops":N,"totalMs":x,"spanMs":x,"kernels":[{"label","ms","count","maxMs"},...],
+    /// "dispatches":[{"label","ms","wg":[x,y,z]},...]}</c>: <c>kernels</c> sorted by total ms descending, <c>dispatches</c> one
+    /// row per pass in plan order with its workgroup counts (5.4.53; which shape of a kernel is slow, e.g. a GEMM whose late
+    /// small layers launch few workgroups; <c>ms</c> null for a pass without a valid duration, and the last pass has no row
+    /// when the pass count is a multiple of 4096), or <c>{"supported":false,"reason":...}</c> when the device
     /// lacks the feature. Runs the SAME dispatches as <see cref="ReplayAsync"/> (same validity
     /// contract) and waits for GPU completion internally - no separate SynchronizeAsync needed.
     /// Diagnostic path: per-pass timestampWrites add overhead; do not use it for frame timing.

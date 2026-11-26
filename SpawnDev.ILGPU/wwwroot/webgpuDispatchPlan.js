@@ -369,14 +369,19 @@
             readBuf.destroy(); resolveBuf.destroy();
             for (const qs of querySets) qs.destroy();
 
-            // Aggregate pass durations by pipeline label.
+            // Aggregate pass durations by pipeline label, and keep each pass as a row in plan order with its workgroup
+            // counts (which SHAPE of a kernel is slow: e.g. a GEMM's late small layers launching too few workgroups).
             const byLabel = new Map();
+            const dispatches = [];
             let totalNs = 0;
             for (let p = 0; p < measuredPasses; p++) {
                 const durNs = Number(t[p + 1] - t[p]);
-                if (!(durNs >= 0)) continue;          // guard against wrap/invalid
+                const at = passIdx[p];
+                const label = plan[at + 1].label || '(unlabeled)';
+                const valid = durNs >= 0;              // guard against wrap/invalid
+                dispatches.push({ label, ms: valid ? +(durNs / 1e6).toFixed(4) : null, wg: [plan[at + 3], plan[at + 4], plan[at + 5]] });
+                if (!valid) continue;
                 totalNs += durNs;
-                const label = plan[passIdx[p] + 1].label || '(unlabeled)';
                 const e = byLabel.get(label) || { ms: 0, count: 0, maxMs: 0 };
                 e.ms += durNs / 1e6; e.count++; e.maxMs = Math.max(e.maxMs, durNs / 1e6);
                 byLabel.set(label, e);
@@ -388,14 +393,15 @@
                 supported: true, passes, ops: n / 7,
                 totalMs: +(totalNs / 1e6).toFixed(3),
                 spanMs: +(Number(t[measuredPasses] - t[0]) / 1e6).toFixed(3),
-                kernels
+                kernels,
+                dispatches
             });
         }
     };
     // Register - but never downgrade. A second copy of this module (another URL, an old cached file) must not
     // replace a newer one already in use: the library looks up ilgpuWebGPUPlan.submitBatch on every flush.
     // Bump HELPER_VERSION whenever the api's surface changes.
-    const HELPER_VERSION = 5;   // 2: submitBatch (plain-dispatch record batches, ordered uploads); 3: single-pass runs, setSinglePass; 4: scalar arenas, bind-group reuse; 5: submitHeader (pinned heap header)
+    const HELPER_VERSION = 6;   // 2: submitBatch (plain-dispatch record batches, ordered uploads); 3: single-pass runs, setSinglePass; 4: scalar arenas, bind-group reuse; 5: submitHeader (pinned heap header); 6: replayTimed per-pass rows (dispatches)
     api.version = HELPER_VERSION;
     const existing = globalThis.ilgpuWebGPUPlan;
     if (!existing || !(existing.version >= HELPER_VERSION)) globalThis.ilgpuWebGPUPlan = api;
