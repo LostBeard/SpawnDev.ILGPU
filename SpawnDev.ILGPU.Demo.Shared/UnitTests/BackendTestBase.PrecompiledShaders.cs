@@ -365,7 +365,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             string json = ShaderArtifactSerializer.ExportCache();
             foreach (var name in new[] { "PrecompiledShaders_ScaleKernel", "PrecompiledShaders_SharedReverseKernel" })
                 if (!json.Contains(name, StringComparison.Ordinal))
-                    throw new Exception($"Export is missing {name}. KEYS=[{ShaderArtifactCache.KeysSnapshot()}]");
+                    throw new Exception($"Export is missing {name} (stamp walk: {KernelSourceStamps.LastFailure ?? "no failure recorded"}). KEYS=[{ShaderArtifactCache.KeysSnapshot()}]");
 
             // (2) a fresh session's view: nothing cached, then the import
             ShaderArtifactCache.Clear();
@@ -387,6 +387,44 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             int foreignCount = ShaderArtifactSerializer.ImportCache(foreign);
             if (foreignCount != 0 || ShaderArtifactCache.Count != 0)
                 throw new Exception($"An export from another build was imported ({foreignCount} artifacts).");
+
+            // (4) 5.4.54: an export records the assemblies each shader was generated from (name + build id). The kernels live
+            // in this test assembly, so it must be stamped with its current build id, beside SpawnDev.ILGPU.
+            string testAssembly = typeof(BackendTestBase).Assembly.GetName().Name!;
+            string testMvid = typeof(BackendTestBase).Assembly.ManifestModule.ModuleVersionId.ToString("N");
+            if (!json.Contains(testMvid, StringComparison.Ordinal) || !json.Contains("\"" + testAssembly + "\"", StringComparison.Ordinal)
+                || !json.Contains("\"SpawnDev.ILGPU\"", StringComparison.Ordinal))
+                throw new Exception($"The export does not stamp the kernels' assembly ({testAssembly} {testMvid}) and SpawnDev.ILGPU.");
+
+            // (4b) the stream forms write and read the same thing as the string forms (5.4.54: no export-sized string)
+            using (var stream = new System.IO.MemoryStream())
+            {
+                ShaderArtifactCache.Clear();
+                if (ShaderArtifactSerializer.ImportCache(json) < 2) throw new Exception("Re-import for the stream check failed.");
+                ShaderArtifactSerializer.ExportCacheTo(stream);
+                string streamed = System.Text.Encoding.UTF8.GetString(stream.ToArray());
+                if (streamed != ShaderArtifactSerializer.ExportCache())
+                    throw new Exception("ExportCacheTo(stream) wrote something other than ExportCache().");
+                stream.Position = 0;
+                ShaderArtifactCache.Clear();
+                int fromStream = ShaderArtifactSerializer.ImportCacheFrom(stream);
+                if (fromStream < 2) throw new Exception($"ImportCacheFrom(stream) registered {fromStream}, expected at least 2.");
+            }
+
+            // (5) the same export after the kernels' assembly was rebuilt (another build id): a shader of the old code must never
+            // load. Both kernels are generated again (stale rejections, misses, no early hits) and compute correctly.
+            string rebuilt = json.Replace(testMvid, Guid.NewGuid().ToString("N"), StringComparison.Ordinal);
+            ShaderArtifactCache.Clear();
+            ShaderArtifactCache.ResetStats();
+            long staleBefore = ShaderArtifactCache.StaleRejected;
+            if (ShaderArtifactSerializer.ImportCache(rebuilt) < 2) throw new Exception("The rebuilt-assembly export imported fewer than 2 entries.");
+            accelerator.ClearCache(ClearCacheMode.Everything);
+            await RunAndCheck("STALE IMPORT");
+            long stale = ShaderArtifactCache.StaleRejected - staleBefore;
+            if (stale < 2 || ShaderArtifactCache.IrSkippedHits != 0 || ShaderArtifactCache.Misses < 2)
+                throw new Exception(
+                    $"Shaders of a rebuilt assembly must not be used: staleRejected={stale} irSkippedHits={ShaderArtifactCache.IrSkippedHits} " +
+                    $"hits={ShaderArtifactCache.Hits} misses={ShaderArtifactCache.Misses}.");
         });
 
         // A DelegateSpecialization kernel is emitted at runtime into a dynamic assembly. Its name is now a stable hash of

@@ -1,6 +1,27 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.54 (forks 2.4.41) - 2026-11-26 - A persisted shader is never used after its code changed
+
+- **FIX (WebGPU, `ShaderArtifactSerializer.ExportCache` / `ImportCache`; silent wrong results): an imported shader is used
+  only while the code it was generated from is the same build.** The cache key (kernel signature, device profile,
+  SpawnDev.ILGPU version) does not see a kernel's body, so an app that persisted its shaders and was then rebuilt with a
+  changed kernel, or a changed helper the kernel calls, without a SpawnDev.ILGPU update, loaded the OLD shader under the same
+  key and computed the old thing. Each exported entry now records the assemblies its shader was generated from (name and
+  build id): the kernel's, those of every method in its call closure walked from the IL (so inlined helpers count), those
+  of the generic arguments (a constrained call such as `TReduction.Apply` lands in the type argument's assembly), and
+  SpawnDev.ILGPU's and the ILGPU fork's (local builds can share a version). A lookup checks them against the loaded
+  assemblies; any difference drops the entry and the kernel is generated again (`ShaderArtifactCache.StaleRejected`).
+  Framework assemblies are stamped as a whole, dynamic assemblies are walked but not stamped (their build id is new every
+  emit; what they call is stamped), and a kernel whose closure cannot be walked is not exported. Found by Tuvok while
+  wiring SpawnDev.ILGPU.ML's cold start to a persisted cache (MobileNetV2 first run 279-326 ms -> 45-60 ms with it).
+  `PrecompiledShaders_ExportImport_EarlyHitSkipsIrAndDispatches` now also imports an export whose kernels' assembly
+  "was rebuilt" (another build id): both kernels are generated again and correct.
+- **NEW: `ShaderArtifactSerializer.ExportCacheTo(Stream)`, `ImportCacheFrom(Stream)`, `ImportCacheFromAsync(Stream)`**: the
+  export written as UTF-8 straight into a stream (OPFS, a file) and read back from one, without the export as a single string.
+  With many kernels that string is megabytes (4.35 MB in a page holding SpawnDev.ILGPU.ML's whole suite, about 13 MB transient
+  with its UTF-8 copy) and ran a browser page's heap out (Tuvok). The string forms stay; both forms write and read the same JSON.
+
 ## 5.4.53 (forks 2.4.41) - 2026-11-26 - Per-dispatch GPU times from a timed replay
 
 - **NEW (WebGPU): `WebGPUDispatchPlan.ReplayTimedAsync()` also returns one row per dispatch**, in plan order, with its

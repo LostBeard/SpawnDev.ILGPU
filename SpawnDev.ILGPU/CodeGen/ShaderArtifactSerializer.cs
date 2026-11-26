@@ -107,6 +107,18 @@ public sealed class ShaderCacheExportEntry
     public string Source { get; set; } = "";
     /// <summary>WebGPU dispatch metadata.</summary>
     public WebGpuKernelMetadataDto WebGpu { get; set; } = new();
+    /// <summary>The assemblies the shader was generated from (name + build id): an import uses the entry only while all of
+    /// them are still the same build (5.4.54).</summary>
+    public List<ShaderSourceAssemblyDto>? SourceAssemblies { get; set; }
+}
+
+/// <summary>One assembly a shader was generated from (<see cref="SourceAssemblyStamp"/>).</summary>
+public sealed class ShaderSourceAssemblyDto
+{
+    /// <summary>The assembly's simple name.</summary>
+    public string Name { get; set; } = "";
+    /// <summary>Its build id (manifest module MVID), 32 hex digits.</summary>
+    public string Mvid { get; set; } = "";
 }
 
 /// <summary>Compact (unindented) JSON for <see cref="ShaderCacheExport"/>: it is stored, not read by people.</summary>
@@ -278,7 +290,22 @@ public static class ShaderArtifactSerializer
     /// Exports the WebGPU artifacts this session compiled or imported, as compact JSON. Kernels emitted at runtime
     /// (their identity names a dynamic assembly, new every session) are left out: they could never hit again.
     /// </summary>
-    public static string ExportCache()
+    public static string ExportCache() =>
+        JsonSerializer.Serialize(BuildExport(), ShaderCacheExportJsonContext.Default.ShaderCacheExport);
+
+    /// <summary>
+    /// <see cref="ExportCache"/> written as UTF-8 JSON straight into <paramref name="utf8Json"/> (an OPFS / file stream), without
+    /// building the export as one string first: with many kernels that string is megabytes (4.35 MB measured in a test page with
+    /// every kernel of SpawnDev.ILGPU.ML's suite), held twice over while it is encoded to UTF-8. The shader texts are written from
+    /// the cache's own strings. The stream is not closed.
+    /// </summary>
+    public static void ExportCacheTo(System.IO.Stream utf8Json)
+    {
+        if (utf8Json is null) throw new ArgumentNullException(nameof(utf8Json));
+        JsonSerializer.Serialize(utf8Json, BuildExport(), ShaderCacheExportJsonContext.Default.ShaderCacheExport);
+    }
+
+    private static ShaderCacheExport BuildExport()
     {
         var export = new ShaderCacheExport { LibraryVersion = LibraryVersion };
         foreach (var (kernelId, profileKey, specKey, artifact) in ShaderArtifactCache.Snapshot())
@@ -286,6 +313,11 @@ public static class ShaderArtifactSerializer
             if (artifact.Backend != AcceleratorType.WebGPU || artifact.Source is null) continue;
             if (artifact.CodegenMetadata is not WebGPUBackend.WebGPUKernelMetadata meta) continue;
             if (!IsExportable(kernelId)) continue;
+            // what the shader was generated from: carried over for an imported artifact, walked from the kernel's IL for one of
+            // this session. A kernel whose code cannot be accounted for is not exported (an import could not tell it is stale).
+            var stamps = artifact.SourceAssemblies
+                ?? (artifact.SourceMethod is { } sourceMethod ? KernelSourceStamps.TryCompute(sourceMethod) : null);
+            if (stamps is null) continue;
             export.Entries.Add(new ShaderCacheExportEntry
             {
                 KernelId = kernelId,
@@ -293,10 +325,11 @@ public static class ShaderArtifactSerializer
                 SpecKey = specKey,
                 Source = artifact.Source,
                 WebGpu = ToDto(meta),
+                SourceAssemblies = stamps.Select(s => new ShaderSourceAssemblyDto { Name = s.Name, Mvid = s.Mvid.ToString("N") }).ToList(),
             });
         }
         export.Entries.Sort((a, b) => string.CompareOrdinal(a.KernelId + a.SpecKey, b.KernelId + b.SpecKey));
-        return JsonSerializer.Serialize(export, ShaderCacheExportJsonContext.Default.ShaderCacheExport);
+        return export;
     }
 
     /// <summary>
@@ -310,17 +343,51 @@ public static class ShaderArtifactSerializer
         ShaderCacheExport? export;
         try { export = JsonSerializer.Deserialize(json, ShaderCacheExportJsonContext.Default.ShaderCacheExport); }
         catch (JsonException) { return 0; }
+        return RegisterExport(export);
+    }
+
+    /// <summary><see cref="ImportCache(string)"/> from UTF-8 JSON in a stream (what <see cref="ExportCacheTo"/> wrote), without
+    /// reading it into one string first. The stream is not closed.</summary>
+    public static int ImportCacheFrom(System.IO.Stream utf8Json)
+    {
+        if (utf8Json is null) throw new ArgumentNullException(nameof(utf8Json));
+        ShaderCacheExport? export;
+        try { export = JsonSerializer.Deserialize(utf8Json, ShaderCacheExportJsonContext.Default.ShaderCacheExport); }
+        catch (JsonException) { return 0; }
+        return RegisterExport(export);
+    }
+
+    /// <summary><see cref="ImportCacheFrom"/> reading the stream asynchronously (a browser file stream that cannot be read
+    /// synchronously, such as an OPFS file opened for reading).</summary>
+    public static async System.Threading.Tasks.Task<int> ImportCacheFromAsync(System.IO.Stream utf8Json, System.Threading.CancellationToken cancellationToken = default)
+    {
+        if (utf8Json is null) throw new ArgumentNullException(nameof(utf8Json));
+        ShaderCacheExport? export;
+        try { export = await JsonSerializer.DeserializeAsync(utf8Json, ShaderCacheExportJsonContext.Default.ShaderCacheExport, cancellationToken).ConfigureAwait(false); }
+        catch (JsonException) { return 0; }
+        return RegisterExport(export);
+    }
+
+    private static int RegisterExport(ShaderCacheExport? export)
+    {
         if (export is null || export.LibraryVersion != LibraryVersion) return 0;
         int count = 0;
         foreach (var e in export.Entries)
         {
             if (string.IsNullOrEmpty(e.Source)) continue;
+            // an entry that does not say what it was generated from cannot be checked for staleness: not imported
+            if (e.SourceAssemblies is not { Count: > 0 } sources) continue;
+            var stamps = new List<SourceAssemblyStamp>(sources.Count);
+            foreach (var s in sources)
+                if (Guid.TryParseExact(s.Mvid, "N", out var mvid) && !string.IsNullOrEmpty(s.Name)) stamps.Add(new SourceAssemblyStamp(s.Name, mvid));
+            if (stamps.Count != sources.Count) continue;
             ShaderArtifactCache.Register(e.KernelId, e.ProfileCacheKey, e.SpecKey, new ShaderArtifact
             {
                 Backend = AcceleratorType.WebGPU,
                 ProfileCacheKey = e.ProfileCacheKey,
                 Source = e.Source,
                 CodegenMetadata = FromDto(e.WebGpu),
+                SourceAssemblies = stamps,
             });
             count++;
         }

@@ -245,9 +245,19 @@ int registered = ShaderArtifactSerializer.ImportCache(await LoadAsync());
 ```
 
 - An export records `ShaderArtifactSerializer.LibraryVersion` (this build's informational version). An import from any other build registers nothing (returns 0): the generator or the dispatch metadata may have changed, and a stale artifact is never trusted.
+- Each entry also records the assemblies its shader was generated from, name and build id (5.4.54): the kernel's own, those
+  of every method in its call closure (walked from the IL, so helpers that the optimizer inlined count), those of the generic
+  arguments, and SpawnDev.ILGPU's. A lookup uses an imported shader only while all of them are the same build; after a rebuild
+  of the kernel or of a helper it calls the shader is dropped and generated again (`ShaderArtifactCache.StaleRejected`).
+  The cache key alone (kernel signature, device profile, library version) does not see a kernel's body, so without this an
+  app rebuilt with a changed kernel would have loaded the old shader. Framework assemblies are stamped as a whole (a .NET
+  update regenerates); a kernel whose closure cannot be walked is not exported.
 - Entries are keyed by device profile; an entry for a different profile than the active device simply never matches, and the runtime transpiler stays the fallback.
 - Kernels whose identity changes every session are left out (`ShaderArtifactSerializer.IsExportable(kernelId)` tells which identities export: static kernels and `DelegateSpecialization` kernels).
 - MEASURED: the store for two depth models (131 kernels) is about 3 MB of WGSL.
+- With many kernels the export is megabytes: write it straight to storage with `ShaderArtifactSerializer.ExportCacheTo(stream)`
+  and read it back with `ImportCacheFrom(stream)` / `await ImportCacheFromAsync(stream)` (5.4.54), which never hold it as one
+  string (the string forms hold it twice over while encoding it).
 - The raw form is `ShaderArtifactCache.Snapshot()` / `ShaderArtifactCache.Register(kernelId, profileKey, specKey, artifact)`.
 
 ---

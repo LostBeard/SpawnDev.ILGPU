@@ -1591,6 +1591,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     Backend = AcceleratorType.WebGPU,
                     ProfileCacheKey = profile.ToCacheKeyString(),
                     Source = wk.WGSLSource,
+                    SourceMethod = method,   // ExportCache stamps what the shader was generated from
                     CodegenMetadata = new WebGPUKernelMetadata
                     {
                         DynamicSharedOverrides = wk.DynamicSharedOverrides,

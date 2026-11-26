@@ -30,6 +30,18 @@ public sealed record ShaderArtifact
     /// cross-session (Layer 2) the backend serializes this to a sidecar file alongside the shader.
     /// </summary>
     public object? CodegenMetadata { get; init; }
+
+    /// <summary>
+    /// The assemblies the shader was generated from (name + build id), for an artifact that came from another session
+    /// (<see cref="ShaderArtifactSerializer.ImportCache"/>). A lookup uses it only while every one of them is still the same
+    /// build; otherwise it is a miss (<see cref="ShaderArtifactCache.StaleRejected"/>) and the kernel is generated again.
+    /// Null for an artifact of this session or of a build-time manifest, which cannot be stale.
+    /// </summary>
+    public System.Collections.Generic.IReadOnlyList<SourceAssemblyStamp>? SourceAssemblies { get; init; }
+
+    /// <summary>The kernel a runtime-generated artifact came from: <see cref="ShaderArtifactSerializer.ExportCache"/> stamps
+    /// the export from it.</summary>
+    internal MethodBase? SourceMethod { get; init; }
 }
 
 /// <summary>
@@ -72,6 +84,9 @@ public static class ShaderArtifactCache
     private static long _hits;
     private static long _misses;
     private static long _irSkippedHits;
+    private static long _staleRejected;
+    // artifacts whose SourceAssemblies were checked against the loaded assemblies (by reference: one check per artifact)
+    private static readonly System.Runtime.CompilerServices.ConditionalWeakTable<ShaderArtifact, object> s_verified = new();
 
     /// <summary>Number of cache hits since process start / last <see cref="ResetStats"/>.</summary>
     public static long Hits => Interlocked.Read(ref _hits);
@@ -84,6 +99,26 @@ public static class ShaderArtifactCache
     /// IR construction, IR optimization and shader generation were all skipped.
     /// </summary>
     public static long IrSkippedHits => Interlocked.Read(ref _irSkippedHits);
+    /// <summary>
+    /// Imported artifacts dropped because an assembly they were generated from is a different build now (the kernel, a helper
+    /// it calls, or SpawnDev.ILGPU itself was rebuilt): each one was generated again instead of reusing a stale shader.
+    /// </summary>
+    public static long StaleRejected => Interlocked.Read(ref _staleRejected);
+
+    /// <summary>False when <paramref name="artifact"/> came from another session and an assembly it was generated from has
+    /// changed since; then it is removed from the cache.</summary>
+    private static bool IsCurrent(string key, ShaderArtifact artifact)
+    {
+        if (artifact.SourceAssemblies is not { } stamps || s_verified.TryGetValue(artifact, out _)) return true;
+        if (KernelSourceStamps.Match(stamps))
+        {
+            s_verified.AddOrUpdate(artifact, true);
+            return true;
+        }
+        Cache.TryRemove(new System.Collections.Generic.KeyValuePair<string, ShaderArtifact>(key, artifact));
+        Interlocked.Increment(ref _staleRejected);
+        return false;
+    }
 
     /// <summary>Records a hit served by a backend's early (pre-IR) hook.</summary>
     internal static void CountIrSkippedHit()
@@ -96,8 +131,8 @@ public static class ShaderArtifactCache
     public static bool TryPeek(MethodInfo method, CapabilityProfile profile, in KernelSpecialization specialization, out ShaderArtifact artifact)
     {
         if (method is null) throw new ArgumentNullException(nameof(method));
-        return Cache.TryGetValue(
-            Key(KernelId(method), profile.ToCacheKeyString(), SpecKey(specialization)), out artifact!);
+        var key = Key(KernelId(method), profile.ToCacheKeyString(), SpecKey(specialization));
+        return Cache.TryGetValue(key, out artifact!) && IsCurrent(key, artifact);
     }
 
     /// <summary>
@@ -251,8 +286,8 @@ public static class ShaderArtifactCache
             Interlocked.Increment(ref _misses);
             return false;
         }
-        bool found = Cache.TryGetValue(
-            Key(KernelId(method), profile.ToCacheKeyString(), SpecKey(specialization)), out artifact!);
+        var key = Key(KernelId(method), profile.ToCacheKeyString(), SpecKey(specialization));
+        bool found = Cache.TryGetValue(key, out artifact!) && IsCurrent(key, artifact);
         if (found) Interlocked.Increment(ref _hits);
         else Interlocked.Increment(ref _misses);
         return found;
@@ -278,6 +313,7 @@ public static class ShaderArtifactCache
         Interlocked.Exchange(ref _hits, 0);
         Interlocked.Exchange(ref _misses, 0);
         Interlocked.Exchange(ref _irSkippedHits, 0);
+        Interlocked.Exchange(ref _staleRejected, 0);
     }
 
     /// <summary>
