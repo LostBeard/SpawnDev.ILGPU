@@ -358,11 +358,39 @@ public sealed class WebGPUDispatchPlan : IDisposable
         {
             // Resolve against the app base so the import works regardless of the calling module's URL.
             var baseUri = SpawnJSRuntime.Instance.AppBaseUri;
-            var url = new Uri(new Uri(baseUri), "_content/SpawnDev.ILGPU/webgpuDispatchPlan.js?v=" + HelperContentVersion).ToString();
-            // JS.Import() routes through SpawnJSInterop.import (dynamic import()); the runtime's CallAsync
-            // would look up globalThis.import, which does not exist - import() is syntax, not a callable.
-            using var module = await SpawnJSRuntime.Instance.Import(url);
+            Exception? urlFailure = null;
+            if (!string.IsNullOrEmpty(baseUri))
+            {
+                var url = new Uri(new Uri(baseUri), "_content/SpawnDev.ILGPU/webgpuDispatchPlan.js?v=" + HelperContentVersion).ToString();
+                try
+                {
+                    // JS.Import() routes through SpawnJSInterop.import (dynamic import()); the runtime's CallAsync
+                    // would look up globalThis.import, which does not exist - import() is syntax, not a callable.
+                    using var module = await SpawnJSRuntime.Instance.Import(url);
+                    return;
+                }
+                catch (Exception ex) { urlFailure = ex; }
+            }
+            // No app base URL, or nothing served at it: a .NET WebAssembly console app under Node has no page and
+            // does not deploy packages' _content files. Import the copy embedded in this assembly instead (the same
+            // file; the helper has no imports of its own, so it runs as a data: module). Browsers take the URL above
+            // first because a page's Content-Security-Policy may refuse data: scripts. Only reached when the URL
+            // import did not run, so the global is registered once (see LoadHelperAsync's remarks).
+            if (Backend.WebGPUBackend.VerboseLogging)
+                Backend.WebGPUBackend.Log("[WebGPU] dispatch helper: loading the embedded copy ("
+                    + (urlFailure != null ? $"the _content URL failed: {urlFailure.Message}" : "no app base URL") + ")");
+            using var embedded = await SpawnJSRuntime.Instance.Import(EmbeddedHelperDataUrl());
         }
+    }
+
+    /// <summary>The embedded helper script as a <c>data:</c> module URL (the fallback when <c>_content/</c> is not served).</summary>
+    private static string EmbeddedHelperDataUrl()
+    {
+        using var s = typeof(WebGPUDispatchPlan).Assembly.GetManifestResourceStream("SpawnDev.ILGPU.webgpuDispatchPlan.js")
+            ?? throw new InvalidOperationException("SpawnDev.ILGPU.webgpuDispatchPlan.js is not embedded in SpawnDev.ILGPU");
+        using var ms = new System.IO.MemoryStream();
+        s.CopyTo(ms);
+        return "data:text/javascript;base64," + Convert.ToBase64String(ms.GetBuffer(), 0, (int)ms.Length);
     }
 
     /// <summary>

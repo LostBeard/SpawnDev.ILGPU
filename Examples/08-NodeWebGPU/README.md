@@ -38,5 +38,6 @@ Done.
 - **Why `webgpu` and not `@kmamal/gpu`.** Both are Dawn bindings. SpawnDev.ILGPU's own test suite, run under Node on
   each (2026-11-26, RTX 4070): `webgpu` 0.6.2 870 passed / 11 failed / 17 skipped in 182 s; `@kmamal/gpu` 0.2.1 845 / 35 /
   17 in 873 s, and one double-precision shader it did not compile in 20 minutes. Every test that passed on `@kmamal/gpu`
-  also passed on `webgpu`. The 11 are tests that need a browser page (canvas, video frames, a page URL).
+  also passed on `webgpu`. (Of those 11, five need a page and now skip with the reason; the other six were a library gap
+  under Node, fixed in 5.4.52: 876 passed / 0 failed / 22 skipped.)
 - The same project shape runs SpawnDev.ILGPU's whole GPU test suite under Node: see `SpawnDev.ILGPU.NodeTests`.

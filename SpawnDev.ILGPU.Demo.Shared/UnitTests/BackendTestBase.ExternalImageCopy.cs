@@ -46,6 +46,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         public async Task ExternalImageCopy_VideoFrameSource_DirectAndCanvasFallback_ExactPixelsTest() => await RunTest(async acc =>
         {
             RequireBrowserImageBackend(acc);
+            RequireJsGlobal("VideoFrame", "a VideoFrame source");
             using (var copier = ExternalImageCopier.Create(acc))
                 await ExternalImageCopyCase(acc, 67, 41, copier, seed: 4, asVideoFrame: true);
             var before = SpawnDev.ILGPU.WebGPU.Rendering.WebGPUExternalImageCopier.ForceFrameSourcesThroughCanvas;
@@ -66,6 +67,8 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         {
             if (acc.AcceleratorType is not (AcceleratorType.WebGPU or AcceleratorType.WebGL or AcceleratorType.Wasm))
                 throw new UnsupportedTestException("External image copy needs a browser image source (browser backends only)");
+            RequireJsGlobal("OffscreenCanvas", "an external image source (the test draws its frame on an OffscreenCanvas)");
+            RequireJsGlobal("ImageData", "an external image source (the test fills its frame from ImageData)");
         }
 
         static Task ExternalImageCopyCase(Accelerator acc, int width, int height) => ExternalImageCopyCaseOwned(acc, width, height);

@@ -170,7 +170,9 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
                 throw new UnsupportedTestException("Browser event-loop yield (browser backends only).");
             long atBrowserTask = -1;
             long before = accelerator.CompiledKernelCount;
-            using var window = global::SpawnDev.SpawnJS.SpawnJSRuntime.Instance.Get<global::SpawnDev.SpawnJS.JSObjects.Window>("window");
+            // globalThis, not window: the same scope in a page, and also a worker's scope or Node's (a .NET WebAssembly console app), which
+            // have an event loop and setTimeout but no window. The yield matters there too.
+            using var window = global::SpawnDev.SpawnJS.SpawnJSRuntime.Instance.Get<global::SpawnDev.SpawnJS.JSObjects.Window>("globalThis");
             window.SetTimeout(() => atBrowserTask = accelerator.CompiledKernelCount, 0);
             var sw = Stopwatch.StartNew();
             var kernel = await accelerator.LoadAutoGroupedStreamKernelAsync<Index1D,

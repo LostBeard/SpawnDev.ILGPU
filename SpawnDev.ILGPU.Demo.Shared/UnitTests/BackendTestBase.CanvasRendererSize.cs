@@ -20,6 +20,7 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
         {
             if (acc.AcceleratorType is not (AcceleratorType.WebGPU or AcceleratorType.WebGL or AcceleratorType.Wasm))
                 throw new UnsupportedTestException("presenting to an HTML canvas needs a browser backend");
+            RequireJsGlobal("document", "presenting to an HTML canvas");
             using var canvas = new HTMLCanvasElement();
             using var renderer = CanvasRendererFactory.Create(acc);
             renderer.AttachCanvas(canvas);

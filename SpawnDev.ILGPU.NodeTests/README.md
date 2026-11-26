@@ -19,8 +19,12 @@ Output lines: `HOST:` (Node version and the adapter Dawn found), `READY: <n> tes
 test, `RESULTS: Failed: f Passed: p Skipped: s Ran: n`. Run it from this folder (not from inside `AppBundle`: a shell or
 script whose working directory is there keeps the next build from replacing the folder).
 
-Last full run (2026-11-26, master, SpawnDev.ILGPU 5.4.51, SpawnJS 3.0.11, Node 24.15.0, `webgpu` 0.6.2, RTX 4070 through
-D3D12): **870 passed, 11 failed, 17 skipped of 898**, 117 s. The 17 are other backends' tests (CUDA inline PTX, Wasm,
-WebGL, CPU). The 11 need a browser page: a canvas (`document`), image / video-frame sources, the page URL that the
-dispatch-plan helper script is loaded from (4), the browser's yield before a kernel compile, and one scalar-arena check
-(open: batching reads as off here).
+Last full run (2026-11-26, SpawnDev.ILGPU 5.4.52, SpawnJS 3.0.11, Node 24.15.0, `webgpu` 0.6.2, RTX 4070 through D3D12):
+**876 passed, 0 failed, 22 skipped of 898**, 113 s. 17 of the skips are other backends' tests (CUDA inline PTX, Wasm,
+WebGL, CPU); 5 need something only a page has (a `document` for the canvas renderer, `OffscreenCanvas` / `ImageData` /
+`VideoFrame` for the external-image copies) and say so. A test that needs a page feature checks for the feature and
+skips; a failure here means something that should work under Node did not.
+
+Its first run found a real gap: under Node the library never loaded its WebGPU dispatch helper script (no page URL, and a
+console app does not deploy packages' `_content` files), so dispatch batching was off and dispatch plans threw. Fixed in
+SpawnDev.ILGPU 5.4.52 (the helper loads from a copy embedded in the assembly).

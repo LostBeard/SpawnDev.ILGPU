@@ -1,6 +1,22 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.52 (forks 2.4.41) - 2026-11-26 - WebGPU dispatch batching and dispatch plans under Node
+
+- **FIX (WebGPU, outside a page): the dispatch helper script loads under Node** (a .NET WebAssembly console app with WebGPU
+  from Dawn, see Examples/08-NodeWebGPU). The library imports `webgpuDispatchPlan.js` from the app's
+  `_content/SpawnDev.ILGPU/`; a console app has no page URL and does not deploy packages' `_content` files, so the import
+  failed, quietly. Without the helper, WebGPU dispatch batching was off (one submit per dispatch) and dispatch plans
+  (`BeginDispatchCapture`, `ReplayAsync`) threw `UriFormatException`. When the URL is missing or nothing is served there, the
+  library now imports the same script embedded in its assembly, as a `data:` module. Browsers still load it from
+  `_content/` first (a page's Content-Security-Policy may refuse `data:` scripts). Found by the new headless Node test host
+  (`SpawnDev.ILGPU.NodeTests`): the four dispatch-plan tests and `ScalarArena_ManyDispatchesOneBatch_OverflowAndReuse`
+  ("batching off") pass under Node now.
+- Tests: a test that needs something only a page has (a `document`, `OffscreenCanvas`, `ImageData`, `VideoFrame`) checks
+  for it and skips with the reason (`RequireJsGlobal`); `KernelLoadAsync_YieldsToBrowserBeforeCompile` takes `setTimeout`
+  from `globalThis`, so it also tests the yield under Node.
+- Headless Node suite (RTX 4070, Node 24.15.0, npm `webgpu` 0.6.2): 876 passed, 0 failed, 22 skipped of 898 (was 870 / 11 / 17), 113 s. The 22 skipped are other backends' tests and the 5 that need a page.
+
 ## 5.4.51 (forks 2.4.41) - 2026-11-26 - How much of the allocated memory is idle
 
 - **NEW: `accelerator.ReclaimableDeviceBytes()`** (`MemoryPressure`): the sum of `ReclaimableBytes` of the registered
