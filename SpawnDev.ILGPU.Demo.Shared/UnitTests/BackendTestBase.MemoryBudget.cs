@@ -47,6 +47,38 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             await Task.CompletedTask;
         });
 
+        // ReclaimableDeviceBytes (5.4.51): what the registered holders could give back, so an owner can tell a model's own
+        // bytes (allocated growth) from the idle pool scratch a run leaves behind (reclaimable growth). SpawnDev.ILGPU.ML's
+        // ModelResidency measured 7.3 GB of "kept models" with 4.9 GB allocated in all before it could tell them apart.
+        [TestMethod(Timeout = 60000)]
+        public async Task MemoryBudget_ReclaimableBytesSumTheHolders() => await RunTest(async accelerator =>
+        {
+            const int KB = 1024;
+            long before = accelerator.ReclaimableDeviceBytes();
+            var a = new IdleBufferReclaimer(accelerator.Allocate1D<byte>(256 * KB));
+            var b = new IdleBufferReclaimer(accelerator.Allocate1D<byte>(64 * KB));
+            accelerator.RegisterReclaimer(a);
+            accelerator.RegisterReclaimer(b);
+            try
+            {
+                if (accelerator.ReclaimableDeviceBytes() - before != 320 * KB)
+                    throw new Exception($"two holders of 256 + 64 KB: ReclaimableDeviceBytes grew by {accelerator.ReclaimableDeviceBytes() - before}, expected {320 * KB}");
+                a.Reclaim(1);
+                if (accelerator.ReclaimableDeviceBytes() - before != 64 * KB)
+                    throw new Exception($"after one gave its buffer back: {accelerator.ReclaimableDeviceBytes() - before} over the start, expected {64 * KB}");
+                accelerator.UnregisterReclaimer(b);
+                if (accelerator.ReclaimableDeviceBytes() != before)
+                    throw new Exception($"after unregistering the other: {accelerator.ReclaimableDeviceBytes() - before} over the start, expected 0");
+            }
+            finally
+            {
+                accelerator.UnregisterReclaimer(a);
+                accelerator.UnregisterReclaimer(b);
+                b.Reclaim(1);
+            }
+            await Task.CompletedTask;
+        });
+
         [TestMethod(Timeout = 60000)]
         public async Task MemoryBudget_FreeMemoryAndReclaimFollowTheBudget() => await RunTest(async accelerator =>
         {

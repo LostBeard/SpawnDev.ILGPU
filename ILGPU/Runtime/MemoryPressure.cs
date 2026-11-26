@@ -183,6 +183,32 @@ namespace ILGPU.Runtime
         }
 
         /// <summary>
+        /// The bytes the registered holders could give back right now: the sum of their
+        /// <see cref="IDeviceMemoryReclaimer.ReclaimableBytes"/> (SpawnDev 5.4.51). Part of
+        /// <see cref="Accelerator.AllocatedDeviceBytes"/>, so allocated minus this is what is held by things that are not
+        /// idle (a model's weights, live buffers). 0 when nothing is registered. Reads each holder's count without
+        /// waiting for it, so the sum can be a moment stale while a holder is in use.
+        /// </summary>
+        public static long ReclaimableDeviceBytes(this Accelerator accelerator)
+        {
+            var registry = accelerator?.ReclaimRegistry;
+            if (registry == null)
+                return 0;
+            List<IDeviceMemoryReclaimer> holders;
+            lock (registry.Sync)
+            {
+                holders = new List<IDeviceMemoryReclaimer>(registry.Items.Count);
+                foreach (var weak in registry.Items)
+                    if (weak.TryGetTarget(out var r))
+                        holders.Add(r);
+            }
+            long sum = 0;
+            foreach (var holder in holders)
+                sum += Math.Max(0, holder.ReclaimableBytes);
+            return sum;
+        }
+
+        /// <summary>
         /// Asks the registered holders to free at least <paramref name="bytesWanted"/>, least recently used
         /// first, and returns the bytes actually freed. Pending work is submitted first (and waited for on the
         /// desktop backends) so a buffer about to be freed is not still referenced by an un-submitted dispatch

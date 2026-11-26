@@ -1,6 +1,15 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.51 (forks 2.4.41) - 2026-11-26 - How much of the allocated memory is idle
+
+- **NEW: `accelerator.ReclaimableDeviceBytes()`** (`MemoryPressure`): the sum of `ReclaimableBytes` of the registered
+  `IDeviceMemoryReclaimer`s, the idle memory (returned pool buffers) they could give back now; part of
+  `AllocatedDeviceBytes`, so allocated minus this is what live things hold. SpawnDev.ILGPU.ML's model residency measures a
+  model that does not report its size as its allocated growth, which also counted the idle scratch its first run left in the
+  pools (Lore's RX 590 run: 7.3 GB of "kept models" with 4.9 GB allocated in all); with this it subtracts the reclaimable
+  growth. Reads each holder's count without waiting for it. Test `MemoryBudget_ReclaimableBytesSumTheHolders`.
+
 ## 5.4.50 (forks 2.4.40) - 2026-11-25 - A device memory budget for every backend
 
 - **NEW: `Accelerator.DeviceMemoryBudgetBytes` and `Accelerator.AllocatedDeviceBytes`.** Only CUDA could report free device
