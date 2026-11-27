@@ -12,8 +12,8 @@ import { create, globals } from 'webgpu'
 Object.assign(globalThis, globals)   // GPUBufferUsage, GPUMapMode, ... as a browser has them
 // CI on a machine without a GPU (GitHub Actions, Mesa's software Vulkan):
 //   DAWN_OPTIONS="backend=vulkan ..."  Dawn's own startup flags (space separated), passed to create()
-//   WEBGPU_FORCE_FALLBACK=1            every requestAdapter() asks for the fallback adapter: Dawn offers a CPU Vulkan device
-//                                      (lavapipe, SwiftShader) only as a fallback, so without it a GPU-less machine has none
+//   WEBGPU_FORCE_FALLBACK=1            every requestAdapter() asks for the fallback adapter. NOT needed for Mesa lavapipe on a
+//                                      GitHub runner: a plain request returns it, a forced-fallback request gets null
 const dawnOptions = (process.env.DAWN_OPTIONS || '').split(/\s+/).filter(Boolean)
 const dawn = create(dawnOptions)
 const forceFallback = process.env.WEBGPU_FORCE_FALLBACK === '1'

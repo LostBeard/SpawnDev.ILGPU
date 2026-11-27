@@ -54,9 +54,10 @@ jobs:
 
     - name: Run the suite
       working-directory: SpawnDev.ILGPU.NodeTests
+      # A plain requestAdapter() returns Mesa's llvmpipe here (it reports isFallbackAdapter = true), while one that asks for
+      # forceFallbackAdapter gets null: measured by the probe step above (2026-11-26). So no fallback request.
       env:
         DAWN_OPTIONS: backend=vulkan
-        WEBGPU_FORCE_FALLBACK: '1'
       run: |
         set +e
         node bin/Release/net10.0/browser-wasm/AppBundle/main.mjs > node-tests.log 2>&1
