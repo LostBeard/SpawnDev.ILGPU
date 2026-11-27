@@ -10,7 +10,22 @@ import { fileURLToPath } from 'node:url'
 import { create, globals } from 'webgpu'
 
 Object.assign(globalThis, globals)   // GPUBufferUsage, GPUMapMode, ... as a browser has them
-const gpu = create([])
+// CI on a machine without a GPU (GitHub Actions, Mesa's software Vulkan):
+//   DAWN_OPTIONS="backend=vulkan ..."  Dawn's own startup flags (space separated), passed to create()
+//   WEBGPU_FORCE_FALLBACK=1            every requestAdapter() asks for the fallback adapter: Dawn offers a CPU Vulkan device
+//                                      (lavapipe, SwiftShader) only as a fallback, so without it a GPU-less machine has none
+const dawnOptions = (process.env.DAWN_OPTIONS || '').split(/\s+/).filter(Boolean)
+const dawn = create(dawnOptions)
+const forceFallback = process.env.WEBGPU_FORCE_FALLBACK === '1'
+const gpu = forceFallback
+    ? new Proxy(dawn, {
+        get(target, prop) {
+            if (prop === 'requestAdapter') return (options = {}) => target.requestAdapter({ ...options, forceFallbackAdapter: true })
+            const v = Reflect.get(target, prop, target)
+            return typeof v === 'function' ? v.bind(target) : v
+        },
+    })
+    : dawn
 
 const realNav = globalThis.navigator
 const navProxy = new Proxy(realNav, {

@@ -1,0 +1,81 @@
+name: Node WebGPU tests
+
+# SpawnDev.ILGPU's shared GPU suite on the WebGPU backend, headless: a .NET WebAssembly console app under Node, with WebGPU from
+# Google Dawn (npm `webgpu`) on Mesa's software Vulkan (lavapipe), so it runs on a GitHub runner with no GPU. A fast regression
+# check, not the release gate: it covers the WebGPU backend only (Dawn's Vulkan path, not D3D12), on a CPU device. The real-GPU
+# gate (PlaywrightMultiTest: every backend, browsers + CUDA / OpenCL) stays the release gate.
+# Manual for now (2026-11-26): measuring how long it takes and what differs on a software device before it runs on every push.
+on: workflow_dispatch
+
+jobs:
+  node-webgpu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup .NET SDK
+      uses: actions/setup-dotnet@v4
+      with:
+        dotnet-version: '10.0.x'
+
+    # The image also ships SDK 11; without a global.json `dotnet` picks it, and its wasm-tools has no wasm-tools-net10
+    # (NETSDK1147, 2026-11-16). Written in CI only.
+    - name: Pin .NET SDK 10
+      run: |
+        echo '{"sdk":{"version":"10.0.100","rollForward":"latestFeature"}}' > global.json
+        dotnet --version
+
+    - name: Install .NET WASM build tools
+      run: dotnet workload install wasm-tools
+
+    - name: Setup Node
+      uses: actions/setup-node@v4
+      with:
+        node-version: '24'
+
+    - name: Software Vulkan (Mesa lavapipe)
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y mesa-vulkan-drivers libvulkan1 vulkan-tools
+        vulkaninfo --summary || true
+
+    - name: Install npm packages (Dawn)
+      working-directory: SpawnDev.ILGPU.NodeTests
+      run: npm ci
+
+    - name: Build the Node test host
+      working-directory: SpawnDev.ILGPU.NodeTests
+      run: dotnet build -c Release
+
+    - name: Run the suite
+      working-directory: SpawnDev.ILGPU.NodeTests
+      env:
+        DAWN_OPTIONS: backend=vulkan
+        WEBGPU_FORCE_FALLBACK: '1'
+      run: |
+        set +e
+        node bin/Release/net10.0/browser-wasm/AppBundle/main.mjs > node-tests.log 2>&1
+        code=$?
+        set -e
+        grep -E '^HOST:|^READY|^RESULTS' node-tests.log || true
+        {
+          echo '## Node WebGPU tests (Dawn on lavapipe)'
+          echo
+          grep -E '^HOST: node|^RESULTS' node-tests.log | sed 's/^/    /' || echo '    no RESULTS line (the host did not finish)'
+          echo
+          echo '### Failed'
+          grep '|Failed|' node-tests.log | cut -d'|' -f1,4 | cut -c1-300 | sed 's/^TEST: /- /' || echo '- none'
+        } >> "$GITHUB_STEP_SUMMARY"
+        if ! grep -q '^RESULTS' node-tests.log; then echo "the host exited ($code) without a RESULTS line"; exit 1; fi
+        # never a vacuous pass: with no WebGPU adapter every test skips and the line still says "Failed: 0"
+        if grep -q '^HOST: node.*adapter: (none)' node-tests.log; then echo "no WebGPU adapter: nothing was tested"; exit 1; fi
+        if grep -qE '^RESULTS: Failed: [0-9]+ Passed: 0 ' node-tests.log; then echo "no test passed: nothing was tested"; exit 1; fi
+        if ! grep -qE '^RESULTS: Failed: 0 ' node-tests.log; then echo "tests failed"; exit 1; fi
+
+    - name: Upload the log
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: node-tests-log
+        path: SpawnDev.ILGPU.NodeTests/node-tests.log
