@@ -44,6 +44,10 @@ jobs:
       working-directory: SpawnDev.ILGPU.NodeTests
       run: npm ci
 
+    - name: Probe WebGPU adapters
+      working-directory: SpawnDev.ILGPU.NodeTests
+      run: node ci-probe-adapters.mjs
+
     - name: Build the Node test host
       working-directory: SpawnDev.ILGPU.NodeTests
       run: dotnet build -c Release
