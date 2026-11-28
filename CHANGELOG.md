@@ -1,6 +1,14 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.55 (forks 2.4.41) - 2026-11-27 - Built on SpawnJS 3.0.12
+
+- **Depends on SpawnDev.SpawnJS 3.0.12 (was 3.0.8).** The package declared SpawnDev.SpawnJS >= 3.0.8, so an app on
+  SpawnDev.ILGPU without its own SpawnJS reference resolved 3.0.8 and got none of SpawnJS 3.0.9-3.0.12: about 650 KB
+  smaller trimmed apps and the trim-descriptor fix for derived options classes (3.0.9 / 3.0.10), no CA1416 warnings in a
+  browser app (3.0.11), `AppBaseUri` under Node (3.0.12). Found by Bones upgrading SpawnScene: `obj/project.assets.json`
+  showed SpawnJS 3.0.8 and the build gave 3,200 CA1416 warnings. No code change. The SpawnJS reference now carries a
+  comment: every SpawnJS release bumps it.
 ## 5.4.54 (forks 2.4.41) - 2026-11-26 - A persisted shader is never used after its code changed
 
 - **FIX (WebGPU, `ShaderArtifactSerializer.ExportCache` / `ImportCache`; silent wrong results): an imported shader is used

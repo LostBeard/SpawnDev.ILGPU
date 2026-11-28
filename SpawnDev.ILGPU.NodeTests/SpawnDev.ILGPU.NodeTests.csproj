@@ -21,7 +21,7 @@
 		<ProjectReference Include="..\ILGPU.Algorithms\ILGPU.Algorithms.csproj" />
 		<PackageReference Include="SpawnDev.UnitTesting" Version="2.5.8" />
 		<!-- direct, for the interop script main.mjs imports (a console app does not load JS initializers) -->
-		<PackageReference Include="SpawnDev.SpawnJS" Version="3.0.11" GeneratePathProperty="true" />
+		<PackageReference Include="SpawnDev.SpawnJS" Version="3.0.12" GeneratePathProperty="true" />
 	</ItemGroup>
 
 	<!-- Every shared kernel test file, linked (one source with the browser and desktop suites), except the ones that
