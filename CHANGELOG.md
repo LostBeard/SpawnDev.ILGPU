@@ -1,7 +1,11 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
-## 5.4.56 (forks 2.4.41) - unreleased - Emulated doubles survive a reassociating shader compiler
+## 5.4.56 (forks 2.4.41) - 2026-11-28 - Emulated doubles survive a reassociating shader compiler
+
+Release gate (full default, code a176e0f): 9,683 cases, 8,885 passed, 0 failed, 798 skipped, 64 min (RTX 4070, Chrome). Downstream:
+SpawnDev.ILGPU.ML (Tuvok) full sweep on 5.4.56-local.2: 8,090 passed, 0 failed, 658 skipped (its two WebGL tests that failed on
+5.4.55 pass). Node WebGPU suite: RTX 4070 D3D12 881 / 0 (3 of 3 runs); Mesa llvmpipe 878 / 3 (the 3: native f16, upstream).
 
 - **FIX (WebGPU Dekker and Ozaki doubles; silent wrong results on Mesa): the error terms are kept.** Both modes build a
   double from f32 error-free transforms (TwoSum, Veltkamp split, two-product), and WGSL lets an implementation
