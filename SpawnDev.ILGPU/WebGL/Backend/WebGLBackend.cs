@@ -695,6 +695,17 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             // copy), and structDefs is materialized ONCE — cutting per-compile transient string allocation
             // ~5-6×. The builder is a local consumed here (CodeGeneratorBackend returns immediately after
             // CreateKernel), so the in-place mutation is safe. Semantics are identical to the old chain.
+            // Forward declarations of every [NoInlining] helper (GeneratorArgs.HelperPrototypes), after the struct definitions
+            // their signatures use: a helper may call another one emitted after it. Sorted: the text must not depend on the
+            // order the helpers were generated in (5.4.46 deterministic GLSL).
+            if (data.HelperPrototypes.Count > 0)
+            {
+                var protos = new List<string>(data.HelperPrototypes);
+                protos.Sort(StringComparer.Ordinal);
+                structDefs.AppendLine("// [NoInlining] helper forward declarations");
+                foreach (var proto in protos) structDefs.AppendLine(proto);
+                structDefs.AppendLine();
+            }
             var structDefsStr = structDefs.ToString();
             builder.Replace("// __STRUCT_DEFS_TOP_PLACEHOLDER__\r\n", structDefsStr);
             builder.Replace("// __STRUCT_DEFS_TOP_PLACEHOLDER__\n", structDefsStr);

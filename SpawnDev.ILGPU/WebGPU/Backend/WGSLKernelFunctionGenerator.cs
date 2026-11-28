@@ -2330,7 +2330,8 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
                     emulScanBody,
                     includeBF16: needsBF16Emulation,
                     includeFP8: needsFP8Emulation,
-                    includeFP4: needsFP4Emulation));
+                    includeFP4: needsFP4Emulation,
+                    guardF64ErrorTerms: Backend.GuardF64ErrorTerms));
             }
 
             // F32 Inf/NaN literal helpers - always available because:
@@ -5183,6 +5184,14 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
 
             TypeGenerator.KernelUsesI64 = Backend.EnableI64Emulation && containsI64;
             TypeGenerator.KernelUsesF64 = Backend.EnableF64Emulation && containsF64;
+            // Dekker and Ozaki doubles are built from error-free transforms (TwoSum, Veltkamp split, two-product) whose
+            // error terms a compiler may simplify away: WGSL lets an implementation reassociate (spec 15.7.5), and Mesa's
+            // NIR (llvmpipe, and the Mesa Vulkan drivers Chrome uses on Linux) turns s = a + b; s - a into b, so every
+            // error term came out 0 (19 Node WebGPU CI failures on llvmpipe, 2026-11-27). The library passes each rounded
+            // intermediate through _f32_opq (an XOR with a zero it reads from the _scalar_params slot reserved here, which no
+            // compiler can fold), so request that slot. Ieee mode is integer arithmetic and needs none.
+            if (TypeGenerator.KernelUsesF64 == true && Backend.F64Mode != F64EmulationMode.Ieee && Backend.GuardF64ErrorTerms)
+                System.Threading.Interlocked.Exchange(ref _generatorArgs.OpaqueZero[0], 1);
         }
 
         /// <summary>

@@ -1,6 +1,71 @@
 # SpawnDev.ILGPU Changelog
 
 This file tracks notable changes per release. The README's "Recent Highlights" section links here for the full version history.
+## 5.4.56 (forks 2.4.41) - unreleased - Emulated doubles survive a reassociating shader compiler
+
+- **FIX (WebGPU Dekker and Ozaki doubles; silent wrong results on Mesa): the error terms are kept.** Both modes build a
+  double from f32 error-free transforms (TwoSum, Veltkamp split, two-product), and WGSL lets an implementation
+  reassociate floating-point operations (spec 15.7.5, "An implementation may reassociate operations"). Mesa's shader
+  compiler (NIR) does: in `s = a + b; e = b - (s - a)` it turns `s - a` into `b` although `s` was rounded, so every error
+  term came out 0 and a double kept only its f32 part (0.1 stored as 0.10000000149011612, (double)int.MaxValue as
+  2147483648, 12345678.75 truncated to 12345679). Measured on llvmpipe (Mesa 25.2.8) through Dawn's Vulkan backend, the
+  setup of the Node WebGPU CI job: 17 of its 19 failures. Chrome on Linux runs WebGPU on Vulkan, and the Mesa Vulkan
+  drivers share that compiler. Every rounded intermediate inside an error-free transform now goes through `_f32_opq`, its
+  bits XOR a zero read from `_scalar_params` (no compiler can prove it zero), so no rewrite can span two roundings. The
+  zero is read from the read-only buffer directly: through a `var<private>` the value would be possibly non-uniform and
+  a barrier under a branch on a double would stop compiling (new test
+  `F64_BarrierUnderBranchOnDouble_CompilesAndKeepsLowHalf`). The guard lives in its own constant (`F64OpaqueFunctions`),
+  appended to the Dekker and Ozaki libraries only: Ieee mode is integer arithmetic and reserves no slot. WebGL already
+  had the same protection (`u_one`). New `F64Cost_MultiplyAddChain_Report`: 262,144 chains of 1,024 dependent double
+  multiply-adds checked against .NET to 1e-10 relative, with a [report] of the first load and ns per multiply-add.
+  On llvmpipe, without the guard 10 of the 14 `F64` tests fail (both new ones included); with it 14 of 14 pass, and the
+  Node WebGPU suite there goes from 19 failures to 3 (the 3 are native `shader-f16` Half rounding, below).
+  **The guard is applied only where it is needed** (it costs time: an f64 multiply-add chain on an RTX 4070 through D3D12,
+  whose compiler keeps the error terms, ran 0.054 ns unguarded and 0.085 guarded). New option
+  `WebGPUBackendOptions.F64ErrorTermGuard` (`Auto` default, `On`, `Off`) and property `WebGPUBackend.GuardF64ErrorTerms`. With
+  `Auto`, `WebGPUAccelerator.CreateAsync` runs the library's own unguarded TwoSum, Fast2Sum and split + two-product once
+  on f32 inputs whose exact sum and product an f32 cannot hold (`WebGPUF64ReassociationProbe`: one small shader and one
+  readback, started as soon as the device exists so it overlaps the rest of the creation; the answer is kept per adapter
+  for the process) and guards only a device whose compiler breaks them: llvmpipe chose the guard on, the RTX 4070 (D3D12,
+  in Node and in Chrome 159) off, where the generated code, its cache keys and the build-time precompiled shaders are
+  those of 5.4.55 (the key entry `wgsl:f64-guarded` exists only on a guarded device; f64 multiply-add chain 0.0545 vs
+  0.0543 ns, first kernel load unchanged). A probe that fails guards (correct everywhere). What `Auto` costs at accelerator
+  creation (`F64ErrorTermGuard_AutoProbe_CreationCost_Report`): Chrome 159, warm, 53.2 ms against 44.0 with `Off`; Node +
+  Dawn D3D12, the first creation in a process, about 258 against 232 ms. `Off` skips the probe (an app that knows its
+  device does not reassociate pays nothing). The first probe took ~330 ms of shader compile (the IEEE load / store and
+  Ozaki's f64_mul in it); it now compiles the three primitives only.
+  `CreateFromExternalDevice` (synchronous) starts guarded and switches when the probe answers. Test
+  `F64_GuardF64ErrorTerms_SwitchSelectsTheLibrary` checks the WGSL both ways and that Auto never leaves a device unguarded
+  where unguarded doubles are wrong.
+- **FIX (browser backends): the async kernel loads return to the event loop behind everything already queued.**
+  `Load*KernelAsync` yielded with `Task.Delay(1)`, which rides the .NET runtime's single JS timer: when that timer had been
+  scheduled before a timer the page had just queued (other .NET timers pending, as in a long run), the load's compile came
+  due in the same tick and ran first. `KernelLoadAsync_YieldsToBrowserBeforeCompile` failed about one full Node WebGPU run
+  in three (and in browser suites on 2026-11-08). The yield is now a JS `setTimeout(0)` registered at the load, so timers
+  queued before it run first (FIFO); 3 of 3 full Node runs green after.
+- **FIX (WebGPU): `WebGPUComputeShader.SetBuffer` no longer creates a bind group with only the bindings set so far.** It
+  rebuilt the bind group on every call, so binding a shader's two buffers in two calls raised a validation error ("Number
+  of entries (1) did not match the expected number of entries (2)") that failed the next dispatch. The bind group is now
+  built once, when the shader is dispatched. Found by the reassociation probe, the first internal user of two bindings.
+- **FIX (WebGL): a `[MethodImpl(NoInlining)]` helper can divide, take `MathF.Sqrt` / `Sin` / `Cos` / `Tan` / `Log` /
+  `Log2` / `Log10`, and call a helper emitted after it.** GLSL declares before use, and helpers are emitted above the
+  kernel header that defines the correctly rounded `_f32_div_rn` / `_f32_sqrt_rn` and the accurate trig / log, so the
+  shader failed: "'_f32_div_rn' : no matching overloaded function found" (Tuvok, SpawnDev.ILGPU.ML
+  `Trellis2.KernelMath.Activate` (SiLU, GELU erf): every DiT activated Linear on WebGL). Helpers now forward-declare those
+  functions (the placeholder still emits their definitions only when something calls them), and every helper's signature
+  is declared at the top of the shader, after the struct definitions (a helper calling a later helper failed the same
+  way). New test `HelperFunction_FloatDivisionSqrtSinLog_CompileAndMatchHost` (SiLU, tanh ratio, sqrt + sin + log, a helper
+  calling a helper): 12 / 12 lanes; with the fix reversed WebGL fails. All 620 `Helper` tests pass on every lane.
+- **KNOWN (WebGPU native f16 on Mesa, not fixed here): `(float)(Half)x` can come back unrounded.** Mesa's NIR has a
+  fast-math rule `~f2f32(f2f(a)) -> f2f32(a)` that drops the f16 rounding of an f32 -> f16 -> f32 round trip; WGSL
+  requires it (15.7.6: the result "is one of those two values" of the f16 type). llvmpipe: `f32(f16(602.2358))` =
+  602.2358 (an RTX 4070 on D3D12: 602). Three tests fail on llvmpipe (`HalfRoundTrip_FloatToHalfToFloat_RoundsAsDotNet`,
+  `LowPrecisionArithmetic_HalfAndBFloat16_RoundEachResult` (Half division), `LowPrecisionFromDouble_RoundsOnce` (Half)).
+- **FIX (WebGPU): `accelerator.WarpSize` is the adapter's subgroup width.** It was 32 on every adapter while a kernel's
+  `Warp.WarpSize` is the runtime `subgroup_size`: Mesa's llvmpipe runs 8-wide subgroups, so a shuffle checked at width
+  32 came out wrong (`WarpShuffle_CapabilityMatchesWhatTheBackendRuns`). Now 32 clamped into
+  [`GPUAdapterInfo.subgroupMinSize`, `subgroupMaxSize`] (an RTX 4070 reports 32 / 32, so nothing changes there), and
+  `SupportsWarpShuffle()` / `RequiresWarpShuffle` hold only on an adapter with one fixed width.
 ## 5.4.55 (forks 2.4.41) - 2026-11-27 - Built on SpawnJS 3.0.12
 
 - **Depends on SpawnDev.SpawnJS 3.0.12 (was 3.0.8).** The package declared SpawnDev.SpawnJS >= 3.0.8, so an app on

@@ -143,9 +143,20 @@ namespace SpawnDev.ILGPU.WebGL.Backend
             Builder.AppendLine("uint _f32_to_bf16(float v);");
             // FP4 (E2M1) nibble decode - a packed FP4 view loaded inside this helper calls it.
             Builder.AppendLine("float _e2m1_to_f32(uint raw);");
+            // Correctly rounded f32 division / sqrt and the accurate trig / log (GLSLEmulationLibrary.F32CorrectlyRounded /
+            // F32Trig / F32Log): the kernel header's placeholder defines them, AFTER this helper, so a helper dividing or
+            // calling MathF.Sqrt / Sin / Log failed with "'_f32_div_rn' : no matching overloaded function found" (Tuvok
+            // 2026-11-28, SpawnDev.ILGPU.ML Trellis2.KernelMath.Activate on WebGL). ResolveF32CorrectlyRounded does not
+            // count these prototypes as calls, so a shader that never calls one still gets none of the definitions.
+            foreach (var proto in GLSLEmulationLibrary.F32HelperPrototypes)
+                Builder.AppendLine(proto);
             Builder.AppendLine();
 
+            int stubStart = Builder.Length;
             GenerateHeaderStub(Builder);
+            // the same signature as a forward declaration, written at the top of the shader (GeneratorArgs.HelperPrototypes)
+            string prototype = Builder.ToString(stubStart, Builder.Length - stubStart) + ";";
+            lock (_generatorArgs.HelperPrototypes) _generatorArgs.HelperPrototypes.Add(prototype);
             Builder.AppendLine(" {");
             IndentLevel = 1;
 

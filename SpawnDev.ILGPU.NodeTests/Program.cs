@@ -12,6 +12,11 @@ JS.Verbose = false;
 var gpuPresent = JS.Get<string?>("navigator?.gpu?.constructor?.name");
 Console.WriteLine($"HOST: navigator.gpu={gpuPresent ?? "(absent)"}");
 
+// --f64guard=auto|on|off: WebGPUBackendOptions.F64ErrorTermGuard for this run (an argument: a .NET WebAssembly app does
+// not see the Node process environment)
+if (args.FirstOrDefault(a => a.StartsWith("--f64guard=")) is { } guardArg)
+    WebGPUTests.F64GuardForThisRun = Enum.Parse<SpawnDev.ILGPU.WebGPU.Backend.F64ErrorTermGuard>(guardArg["--f64guard=".Length..], ignoreCase: true);
+
 var runner = new UnitTestRunner();
 runner.SetTestTypes(new[] { typeof(WebGPUTests) });
 // `node main.mjs <text>`: only the tests whose name contains <text>

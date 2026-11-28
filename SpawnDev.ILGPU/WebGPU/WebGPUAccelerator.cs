@@ -929,6 +929,15 @@ namespace SpawnDev.ILGPU.WebGPU
         {
             var accelerator = new WebGPUAccelerator(context, device);
             accelerator.NativeAccelerator = await device.NativeDevice.CreateAcceleratorAsync();
+            // F64ErrorTermGuard.Auto: guard the Dekker / Ozaki error-free transforms only on a device whose compiler breaks
+            // them (WebGPUF64ReassociationProbe), so a device that keeps them runs the unguarded (faster) code. Started as soon as the
+            // device exists and awaited at the end, so its shader compile overlaps the rest of the creation (the backend's
+            // .NET setup, the helper script, the byte kernels); decided before any kernel of the
+            // caller is compiled (the choice is part of every f64 kernel's code and cache key).
+            Task<bool>? f64GuardProbe = (options ?? WebGPUBackendOptions.Default).F64ErrorTermGuard == F64ErrorTermGuard.Auto
+                ? WebGPUF64ReassociationProbe.BreaksUnguardedAsync(accelerator.NativeAccelerator,
+                    $"{device.NativeDevice.Vendor}|{device.NativeDevice.Architecture}|{device.NativeDevice.Name}")
+                : null;
             accelerator.NativeAccelerator.DeviceLost += (reason, msg) => accelerator.DeviceLost?.Invoke(reason, msg);
             // Purge our references to a shader BEFORE the native accelerator disposes it (LRU eviction or an
             // explicit ClearShaderCache), so no cache can hand back a released pipeline.
@@ -962,7 +971,16 @@ namespace SpawnDev.ILGPU.WebGPU
             // keeps the load at first use.)
             await WebGPUMemoryBuffer.PreloadByteKernelsAsync(accelerator);
 
+            // F64ErrorTermGuard.Auto: the probe started above ran while the helper script and the byte kernels loaded.
+            if (f64GuardProbe != null) accelerator.Backend.GuardF64ErrorTerms = await f64GuardProbe;
+
             return accelerator;
+        }
+
+        static async Task ResolveExternalGuardAsync(WebGPUAccelerator accelerator, string adapterKey)
+        {
+            try { accelerator.Backend.GuardF64ErrorTerms = await WebGPUF64ReassociationProbe.BreaksUnguardedAsync(accelerator.NativeAccelerator, adapterKey); }
+            catch { /* the probe already falls back to guarded; an accelerator disposed meanwhile keeps the guard */ }
         }
 
         /// <summary>
@@ -989,6 +1007,18 @@ namespace SpawnDev.ILGPU.WebGPU
             accelerator.Init(accelerator.Backend);
             accelerator.DefaultStream = accelerator.CreateStreamInternal();
             accelerator.NativeAccelerator.FlushPendingCommands = () => accelerator.FlushPendingCommands();
+
+            // F64ErrorTermGuard.Auto on this synchronous path: guarded (correct everywhere) until the probe answers, then
+            // the device's answer for kernels compiled after it (an app that creates the accelerator and loads its f64
+            // kernels right away keeps them guarded; F64ErrorTermGuard.On / Off are exact).
+            if ((options ?? WebGPUBackendOptions.Default).F64ErrorTermGuard == F64ErrorTermGuard.Auto)
+            {
+                accelerator.Backend.GuardF64ErrorTerms = true;
+                string key;
+                try { using var info = externalDevice.AdapterInfo; key = $"{info?.Vendor}|{info?.Architecture}|{info?.Device}|{info?.Description}"; }
+                catch { key = "external"; }
+                _ = ResolveExternalGuardAsync(accelerator, key);
+            }
 
             // Update device capabilities from actual enabled features (Float16, Float64, Int64)
             if (ilgpuDevice.Capabilities is WebGPUCapabilityContext webCaps)

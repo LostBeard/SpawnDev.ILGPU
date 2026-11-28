@@ -744,6 +744,28 @@ fn f64_round_away(v: emu_f64) -> emu_f64 {
 ";
 
         /// <summary>
+        /// The opaque-zero primitive of the Dekker and Ozaki libraries (<c>_f32_opq</c>). Not in
+        /// <see cref="F64ExactConversionFunctions"/>: the Ieee library appends that too, emits every function, and
+        /// reserves no zero slot (integer arithmetic needs none), so a <c>_scalar_params[slot]</c> read there would not compile.
+        /// </summary>
+        public const string F64OpaqueFunctions = @"
+// A rounded f32 intermediate no compiler can see through: x itself (its bits XOR a zero), but the zero is read from
+// _scalar_params (WebGPUBackend fills in the slot index the kernel reserved), so no compiler can prove it is zero.
+// WGSL lets an implementation reassociate (spec 15.7.5) and Mesa's NIR does: s = a + b; s - a became b, so every Dekker
+// and Ozaki error term came out 0 on llvmpipe (and on the Mesa Vulkan drivers Chrome uses on Linux): 19 Node WebGPU CI
+// failures, 2026-11-27. Inside every error-free transform below, each rounded intermediate that a later operation
+// combines goes through this, so no rewrite can span two roundings. Read straight from the read-only buffer, not
+// through the var<private> _ilgpu_oz: a private variable is possibly non-uniform to WGSL's uniformity analysis, and a
+// barrier under a branch on a double would stop compiling (F64_BarrierUnderBranchOnDouble_CompilesAndKeepsLowHalf).
+fn _f32_opq(x: f32) -> f32 {
+    return bitcast<f32>(bitcast<u32>(x) ^ _scalar_params[/*__ILGPU_OZ_SLOT__*/]);
+}
+";
+
+        /// <summary><c>_f32_opq</c> as the identity: the library with <see cref="WebGPUBackend.GuardF64ErrorTerms"/> off.</summary>
+        internal const string UnguardedOpaqueFunction = "fn _f32_opq(x: f32) -> f32 { return x; } // GuardF64ErrorTerms off: unguarded (correct only where the compiler does not reassociate)";
+
+        /// <summary>
         /// WGSL type alias for Dekker emulated emu_f64 (a vec2 of f32: high + low).
         /// </summary>
         public const string F64TypeAlias = "alias emu_f64 = vec2<f32>;";
@@ -763,11 +785,11 @@ fn f64_round_away(v: emu_f64) -> emu_f64 {
 fn f64_from_ieee754_bits(lo: u32, hi: u32) -> emu_f64 {
     let c = _f64_bits_to_components(lo, hi);
     let l = c.y + c.z;
-    let s = c.x + l;
+    let s = _f32_opq(c.x + l);
     // c.x alone when exact, zero, Inf or NaN (the error term of an Inf would be NaN). (c.x, l) unrenormalised when the
     // sum overflows: a double within half an f32 ulp of 2^128 loaded as (Inf, -Inf), NaN in everything after.
     let s_finite = (bitcast<u32>(s) & 0x7F800000u) != 0x7F800000u;
-    let pair = select(emu_f64(c.x, l), emu_f64(s, l - (s - c.x)), s_finite);
+    let pair = select(emu_f64(c.x, l), emu_f64(s, l - _f32_opq(s - c.x)), s_finite);
     return select(pair, emu_f64(c.x, 0.0), c.y == 0.0 && c.z == 0.0);
 }
 
@@ -781,9 +803,9 @@ fn f64_from_ieee754_bits(lo: u32, hi: u32) -> emu_f64 {
 // NoInlining helper over 10 minutes, which the GPU watchdog kills (device lost). This: 0.69 s.
 fn f64_to_ieee754_bits(v: emu_f64) -> vec2<u32> {
     // TwoSum renormalisation: afterwards |lo| <= ulp(hi) / 2, whatever produced the pair.
-    let s = v.x + v.y;
-    let bb = s - v.x;
-    let e = (v.x - (s - bb)) + (v.y - bb);
+    let s = _f32_opq(v.x + v.y);
+    let bb = _f32_opq(s - v.x);
+    let e = _f32_opq(v.x - _f32_opq(s - bb)) + _f32_opq(v.y - bb);
     let s_finite = (bitcast<u32>(s) & 0x7F800000u) != 0x7F800000u;
     let hi = select(v.x, s, s_finite);
     let lo = select(v.y, e, s_finite); // an unrenormalised pair at the overflow edge keeps its lo
@@ -805,7 +827,8 @@ fn f64_to_ieee754_bits(v: emu_f64) -> vec2<u32> {
     let down = lo != 0.0 && ((bitcast<u32>(lo) ^ hb) & 0x80000000u) != 0u;
     let sc = select(179, 180, down && mant == 0u) - i32(eh);
     let sc1 = sc / 2;
-    let lm = abs(lo) * bitcast<f32>(u32(sc1 + 127) << 23u) * bitcast<f32>(u32(sc - sc1 + 127) << 23u);
+    // two scale steps, kept apart: one 2^sc factor can overflow f32
+    let lm = _f32_opq(abs(lo) * bitcast<f32>(u32(sc1 + 127) << 23u)) * bitcast<f32>(u32(sc - sc1 + 127) << 23u);
     let li = floor(lm);
     let frac = lm - li;
     let liu = u32(li);
@@ -846,11 +869,11 @@ fn f64_neg(a: emu_f64) -> emu_f64 {
 fn f64_add(a: emu_f64, b: emu_f64) -> emu_f64 {
     // A non-finite sum returns the IEEE result (the error terms would compute Inf - Inf = NaN).
     // select, not an early return: FXC compiles branches superlinearly (see f64_to_ieee754_bits).
-    let s = a.x + b.x;
-    let v = s - a.x;
-    let e = (a.x - (s - v)) + (b.x - v) + a.y + b.y;
-    let z_hi = s + e;
-    let z_lo = e - (z_hi - s);
+    let s = _f32_opq(a.x + b.x);
+    let v = _f32_opq(s - a.x);
+    let e = _f32_opq(_f32_opq(a.x - _f32_opq(s - v)) + _f32_opq(b.x - v)) + a.y + b.y;
+    let z_hi = _f32_opq(s + e);
+    let z_lo = e - _f32_opq(z_hi - s);
     return select(emu_f64(z_hi, z_lo), emu_f64(s, 0.0), (bitcast<u32>(s) & 0x7F800000u) == 0x7F800000u);
 }
 
@@ -861,18 +884,21 @@ fn f64_sub(a: emu_f64, b: emu_f64) -> emu_f64 {
 
 // Helper: split f32 into high and low parts for multiplication
 fn f64_split(a: f32) -> vec2<f32> {
-    let c = 4097.0 * a;  // 2^12 + 1
-    let a_hi = c - (c - a);
+    let c = _f32_opq(4097.0 * a);  // 2^12 + 1
+    let a_hi = _f32_opq(c - _f32_opq(c - a));
     let a_lo = a - a_hi;
     return vec2<f32>(a_hi, a_lo);
 }
 
 // Helper: two-product algorithm (exact a*b = p + e)
 fn f64_two_prod(a: f32, b: f32) -> emu_f64 {
-    let p = a * b;
+    let p = _f32_opq(a * b);
     let a_s = f64_split(a);
     let b_s = f64_split(b);
-    let e = ((a_s.x * b_s.x - p) + a_s.x * b_s.y + a_s.y * b_s.x) + a_s.y * b_s.y;
+    let e1 = _f32_opq(a_s.x * b_s.x - p);
+    let e2 = _f32_opq(e1 + a_s.x * b_s.y);
+    let e3 = _f32_opq(e2 + a_s.y * b_s.x);
+    let e = e3 + a_s.y * b_s.y;
     return emu_f64(p, e);
 }
 
@@ -880,8 +906,8 @@ fn f64_mul(a: emu_f64, b: emu_f64) -> emu_f64 {
     // Non-finite product: the IEEE result (see f64_add).
     let p = f64_two_prod(a.x, b.x);
     let e = a.x * b.y + a.y * b.x + p.y;
-    let z_hi = p.x + e;
-    let z_lo = e - (z_hi - p.x);
+    let z_hi = _f32_opq(p.x + e);
+    let z_lo = e - _f32_opq(z_hi - p.x);
     return select(emu_f64(z_hi, z_lo), emu_f64(p.x, 0.0), (bitcast<u32>(p.x) & 0x7F800000u) == 0x7F800000u);
 }
 
@@ -965,7 +991,7 @@ fn f64_min(a: emu_f64, b: emu_f64) -> emu_f64 {
 fn f64_max(a: emu_f64, b: emu_f64) -> emu_f64 {
     return select(b, a, f64_gt(a, b));
 }
-" + F64ExactConversionFunctions + F64ComponentCompositeFunctions + DekkerRoundingFunctions + F64RoundToOddFunctions;
+" + F64OpaqueFunctions + F64ExactConversionFunctions + F64ComponentCompositeFunctions + DekkerRoundingFunctions + F64RoundToOddFunctions;
 
         #endregion
 
@@ -1838,15 +1864,15 @@ fn _f32_is_nan_bits(v: f32) -> bool {
 }
 
 fn f32_two_sum(a: f32, b: f32) -> vec2<f32> {
-    let s = a + b;
-    let v = s - a;
-    let e = (a - (s - v)) + (b - v);
+    let s = _f32_opq(a + b);
+    let v = _f32_opq(s - a);
+    let e = _f32_opq(a - _f32_opq(s - v)) + _f32_opq(b - v);
     return vec2<f32>(s, e);
 }
 
 fn f32_quick_two_sum(a: f32, b: f32) -> vec2<f32> {
-    let s = a + b;
-    let e = b - (s - a);
+    let s = _f32_opq(a + b);
+    let e = b - _f32_opq(s - a);
     return vec2<f32>(s, e);
 }
 
@@ -1938,7 +1964,7 @@ fn f64_from_f32(v: f32) -> emu_f64 {
 fn f64_to_f32(v: emu_f64) -> f32 {
     let ts = f32_two_sum(v.x, v.y);
     let rest = v.z + v.w;
-    let away = ts.x + 2.0 * ts.y;
+    let away = _f32_opq(ts.x + 2.0 * ts.y);
     let tie = ts.y != 0.0 && (away - ts.x) == 2.0 * ts.y;
     let push = (ts.y > 0.0 && rest > 0.0) || (ts.y < 0.0 && rest < 0.0);
     let r = select(ts.x, away, tie && push);
@@ -1958,30 +1984,30 @@ fn f64_add(a: emu_f64, b: emu_f64) -> emu_f64 {
     // Inf - Inf = NaN (Inf + 1 came out NaN). Return the IEEE result directly.
     let _nf = a.x + b.x;
     let _nf_hit = (bitcast<u32>(_nf) & 0x7F800000u) == 0x7F800000u;
-    var s0 = a.x + b.x;
-    var s1 = a.y + b.y;
-    var s2 = a.z + b.z;
-    var s3 = a.w + b.w;
+    var s0 = _f32_opq(a.x + b.x);
+    var s1 = _f32_opq(a.y + b.y);
+    var s2 = _f32_opq(a.z + b.z);
+    var s3 = _f32_opq(a.w + b.w);
 
-    let v0 = s0 - a.x;
-    let v1 = s1 - a.y;
-    let v2 = s2 - a.z;
-    let v3 = s3 - a.w;
+    let v0 = _f32_opq(s0 - a.x);
+    let v1 = _f32_opq(s1 - a.y);
+    let v2 = _f32_opq(s2 - a.z);
+    let v3 = _f32_opq(s3 - a.w);
 
-    let u0 = s0 - v0;
-    let u1 = s1 - v1;
-    let u2 = s2 - v2;
-    let u3 = s3 - v3;
+    let u0 = _f32_opq(s0 - v0);
+    let u1 = _f32_opq(s1 - v1);
+    let u2 = _f32_opq(s2 - v2);
+    let u3 = _f32_opq(s3 - v3);
 
-    let w0 = a.x - u0;
-    let w1 = a.y - u1;
-    let w2 = a.z - u2;
-    let w3 = a.w - u3;
+    let w0 = _f32_opq(a.x - u0);
+    let w1 = _f32_opq(a.y - u1);
+    let w2 = _f32_opq(a.z - u2);
+    let w3 = _f32_opq(a.w - u3);
 
-    let uu0 = b.x - v0;
-    let uu1 = b.y - v1;
-    let uu2 = b.z - v2;
-    let uu3 = b.w - v3;
+    let uu0 = _f32_opq(b.x - v0);
+    let uu1 = _f32_opq(b.y - v1);
+    let uu2 = _f32_opq(b.z - v2);
+    let uu3 = _f32_opq(b.w - v3);
 
     var t0 = w0 + uu0;
     var t1 = w1 + uu1;
@@ -2007,17 +2033,20 @@ fn f64_sub(a: emu_f64, b: emu_f64) -> emu_f64 {
 }
 
 fn f64_split(a: f32) -> vec2<f32> {
-    let c = 4097.0 * a;
-    let a_hi = c - (c - a);
+    let c = _f32_opq(4097.0 * a);
+    let a_hi = _f32_opq(c - _f32_opq(c - a));
     let a_lo = a - a_hi;
     return vec2<f32>(a_hi, a_lo);
 }
 
 fn f64_two_prod(a: f32, b: f32) -> vec2<f32> {
-    let p = a * b;
+    let p = _f32_opq(a * b);
     let a_s = f64_split(a);
     let b_s = f64_split(b);
-    let e = ((a_s.x * b_s.x - p) + a_s.x * b_s.y + a_s.y * b_s.x) + a_s.y * b_s.y;
+    let e1 = _f32_opq(a_s.x * b_s.x - p);
+    let e2 = _f32_opq(e1 + a_s.x * b_s.y);
+    let e3 = _f32_opq(e2 + a_s.y * b_s.x);
+    let e = e3 + a_s.y * b_s.y;
     return vec2<f32>(p, e);
 }
 
@@ -2150,7 +2179,7 @@ fn f64_min(a: emu_f64, b: emu_f64) -> emu_f64 {
 fn f64_max(a: emu_f64, b: emu_f64) -> emu_f64 {
     return select(b, a, f64_gt(a, b));
 }
-" + F64ExactConversionFunctions + F64ComponentCompositeFunctions + OzakiRoundingAndSqrtFunctions + F64RoundToOddFunctions;
+" + F64OpaqueFunctions + F64ExactConversionFunctions + F64ComponentCompositeFunctions + OzakiRoundingAndSqrtFunctions + F64RoundToOddFunctions;
 
         #endregion
 
@@ -2569,7 +2598,7 @@ fn _f32_to_e2m1(f: f32) -> u32 {
         public static string GetMinimalEmulationLibrary(
             bool includeF64, F64EmulationMode f64Mode, bool includeI64, bool includeF16,
             string kernelBody, bool includeBF16 = false, bool includeFP8 = false,
-            bool includeFP4 = false)
+            bool includeFP4 = false, bool guardF64ErrorTerms = true)
         {
             var sb = new System.Text.StringBuilder();
 
@@ -2592,7 +2621,8 @@ fn _f32_to_e2m1(f: f32) -> u32 {
                 sb.AppendLine(f64Mode == F64EmulationMode.Ieee ? IeeeF64TypeAlias : f64Mode == F64EmulationMode.Ozaki ? OzakiF64TypeAlias : F64TypeAlias);
                 foreach (var func in funcs)
                 {
-                    sb.AppendLine(func.Code);
+                    // WebGPUBackend.GuardF64ErrorTerms off: the identity, so the transforms compile as written (no zero slot)
+                    sb.AppendLine(!guardF64ErrorTerms && func.Name == "_f32_opq" ? UnguardedOpaqueFunction : func.Code);
                     sb.AppendLine();
                 }
             }
@@ -2751,6 +2781,21 @@ fn _f32_to_e2m1(f: f32) -> u32 {
         /// transitive dependencies, and appends only the needed functions
         /// to the StringBuilder in dependency order.
         /// </summary>
+        /// <summary>
+        /// The UNGUARDED error-free transforms (<c>_f32_opq</c> the identity) that <paramref name="body"/> calls, from the
+        /// Ozaki library (its TwoSum / Fast2Sum, and the split + two-product Dekker shares text for text), with their
+        /// dependencies: what WebGPUF64ReassociationProbe runs to ask a device whether its compiler breaks them. Small on
+        /// purpose: it is compiled at every accelerator creation that uses <see cref="F64ErrorTermGuard.Auto"/>.
+        /// </summary>
+        internal static string GetUnguardedF64ProbeLibrary(string body)
+        {
+            // Ozaki's TwoSum / Fast2Sum and the (shared) split + two-product, and what they call (_f32_opq, here the identity)
+            var unguarded = _ozakiF64Funcs.ConvertAll(f => f.Name == "_f32_opq" ? new EmulationFunc(f.Name, UnguardedOpaqueFunction) : f);
+            var sb = new System.Text.StringBuilder();
+            AppendUsedFunctions(sb, unguarded, _ozakiF64Deps, body);
+            return sb.ToString();
+        }
+
         private static void AppendUsedFunctions(
             System.Text.StringBuilder sb,
             List<EmulationFunc> funcs,

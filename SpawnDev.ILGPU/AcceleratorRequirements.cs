@@ -468,7 +468,8 @@ public static class AcceleratorRequirementsExtensions
     {
         AcceleratorType.WebGL => false,
         AcceleratorType.OpenCL => device.Capabilities is CLCapabilityContext cl && cl.SubGroups && cl.SubGroupShuffle,
-        AcceleratorType.WebGPU => device is not WebGPU.WebGPUILGPUDevice webGpu || webGpu.AdapterSupportsSubgroups,
+        // a fixed subgroup width too: with a range the compiler picks the width, so there is no WarpSize to promise
+        AcceleratorType.WebGPU => device is not WebGPU.WebGPUILGPUDevice webGpu || (webGpu.AdapterSupportsSubgroups && webGpu.HasFixedSubgroupSize),
         _ => true,
     };
 

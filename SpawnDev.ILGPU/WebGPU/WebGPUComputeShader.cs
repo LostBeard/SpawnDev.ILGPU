@@ -166,7 +166,15 @@ namespace SpawnDev.ILGPU.WebGPU
         /// <summary>
         /// Returns the current bind group.
         /// </summary>
-        public GPUBindGroup? BindGroup => _bindGroup;
+        public GPUBindGroup? BindGroup
+        {
+            get
+            {
+                if (_bindGroupDirty) { RebuildBindGroup(); _bindGroupDirty = false; }
+                return _bindGroup;
+            }
+        }
+        private bool _bindGroupDirty;
 
         /// <summary>
         /// Returns the cached bind group layout (fetched once at construction).
@@ -201,8 +209,10 @@ namespace SpawnDev.ILGPU.WebGPU
             if (insertAt < 0) insertAt = ~insertAt;
             _bindings.Insert(insertAt, newBinding);
 
-            // Rebuild bind group
-            RebuildBindGroup();
+            // Built at the next BindGroup read (Dispatch), once every binding is set. Rebuilding here created a bind group
+            // with only the bindings set SO FAR: binding a shader's two buffers in two calls raised a GPU validation error
+            // ("Number of entries (1) did not match the expected number of entries (2)") that failed the next dispatch.
+            _bindGroupDirty = true;
 
             return this;
         }

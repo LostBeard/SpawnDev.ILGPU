@@ -182,6 +182,10 @@ namespace SpawnDev.ILGPU.WebGPU
                 Name = !string.IsNullOrWhiteSpace(info?.Device) ? info!.Device
                      : Vendor != "Unknown" || Architecture != "Unknown" ? $"{Vendor} {Architecture}".Trim()
                      : "WebGPU Device";
+                // The subgroup width range (Chrome 134+, Dawn). Mesa llvmpipe 8 / 8, an RTX 4070 on D3D12 32 / 32
+                // (measured 2026-11-27); 0 when the browser does not report it.
+                try { SubgroupMinSize = info?.SubgroupMinSize ?? 0; SubgroupMaxSize = info?.SubgroupMaxSize ?? 0; }
+                catch { SubgroupMinSize = 0; SubgroupMaxSize = 0; }
             }
             catch
             {
@@ -307,6 +311,12 @@ namespace SpawnDev.ILGPU.WebGPU
         /// Returns whether this is a fallback (software) adapter.
         /// </summary>
         public bool IsFallbackAdapter { get; }
+
+        /// <summary>The smallest subgroup (warp) width the adapter may run (<c>GPUAdapterInfo.subgroupMinSize</c>); 0 when not reported.</summary>
+        public int SubgroupMinSize { get; }
+
+        /// <summary>The largest subgroup (warp) width the adapter may run (<c>GPUAdapterInfo.subgroupMaxSize</c>); 0 when not reported.</summary>
+        public int SubgroupMaxSize { get; }
 
         /// <summary>
         /// Gets the maximum workgroup size in X dimension.

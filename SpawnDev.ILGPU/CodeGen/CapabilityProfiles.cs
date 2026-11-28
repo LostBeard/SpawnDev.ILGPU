@@ -214,6 +214,8 @@ public static class CapabilityProfiles
             if (subGroups) effectiveFeatures.Add("subgroups");
             // dot4I8Packed vs its expansion (WGSLCodeGenerator.GenerateDot4I8Packed); also keys the artifact cache
             if (wgpu.Backend.HasPackedInt8Dot) effectiveFeatures.Add(WebGPUBackend.PackedInt8DotLanguageFeature);
+            // guarded Dekker / Ozaki error-free transforms (WebGPUBackend.GuardF64ErrorTerms on) are different code
+            if (wgpu.Backend.GuardF64ErrorTerms) effectiveFeatures.Add(WebGPUBackend.F64GuardedFeature);
         }
         else
         {

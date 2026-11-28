@@ -663,8 +663,18 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         }
         private F64EmulationMode f64Mode;
 
-        /// <summary>The f64 mode is part of the compiled-kernel cache key: the same method compiled in two modes is two kernels.</summary>
-        public override int KernelCacheVariant => (int)F64Mode;
+        /// <summary>
+        /// True: the Dekker / Ozaki error-free transforms go through an opaque zero so a reassociating shader compiler cannot
+        /// cancel their error terms (<see cref="WebGPUBackendOptions.F64ErrorTermGuard"/>; with the default Auto the
+        /// accelerator sets this from the device when it is created). Kernels compiled after a change use the new value; it
+        /// is part of the compiled-kernel and shader-artifact cache keys (only when true, so an unguarded device keeps the
+        /// keys, and the build-time precompiled shaders, of 5.4.55).
+        /// </summary>
+        public bool GuardF64ErrorTerms { get; set; }
+
+        /// <summary>The f64 mode (and whether its error terms are guarded) is part of the compiled-kernel cache key: the same
+        /// method compiled in two modes is two kernels.</summary>
+        public override int KernelCacheVariant => (int)F64Mode | (GuardF64ErrorTerms ? 0x100 : 0);
 
         /// <summary>True if f64 emulation is enabled (Dekker or Ozaki).</summary>
         internal bool EnableF64Emulation => F64Mode != F64EmulationMode.Disabled;
@@ -706,6 +716,12 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         /// not to the device, so the accelerator adds this entry when it reads them.
         /// </summary>
         public const string PackedInt8DotLanguageFeature = "wgsl:packed_4x8_integer_dot_product";
+
+        /// <summary>
+        /// The generated-code key entry of a backend with <see cref="GuardF64ErrorTerms"/> on (guarded Dekker / Ozaki
+        /// error-free transforms). Only the guarded state adds it, so an unguarded profile is the one 5.4.55 produced.
+        /// </summary>
+        public const string F64GuardedFeature = "wgsl:f64-guarded";
 
         /// <summary>
         /// Test-only switch. While <c>true</c>, kernels compiled from then on do not use the
@@ -779,6 +795,9 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
         {
             Options = options ?? WebGPUBackendOptions.Default;
             F64Mode = Options.F64Emulation;
+            // Auto starts unguarded (offline generation and precompiled manifests are unguarded); WebGPUAccelerator.CreateAsync
+            // turns it on for a device whose compiler breaks the unguarded transforms (WebGPUF64ReassociationProbe).
+            GuardF64ErrorTerms = Options.F64ErrorTermGuard == F64ErrorTermGuard.On;
             EnabledFeatures = enabledFeatures ?? new HashSet<string>();
 
             // BEFORE InitIntrinsicProvider: the provider SNAPSHOTS the registered implementations, so anything
@@ -1477,6 +1496,7 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (HasShaderF16) features.Add("shader-f16");
             if (HasSubgroups) features.Add("subgroups");
             if (HasPackedInt8Dot) features.Add(PackedInt8DotLanguageFeature);
+            if (GuardF64ErrorTerms) features.Add(F64GuardedFeature);
             CodegenSettingsKey.AddContextSettings(Context, features);
             return new CapabilityProfile
             {
@@ -1706,6 +1726,17 @@ namespace SpawnDev.ILGPU.WebGPU.Backend
             if (wgslSource.Contains(OpaqueZeroInit))
                 wgslSource = wgslSource.Replace(OpaqueZeroInit,
                     data.OpaqueZero[1] >= 0 ? $"_ilgpu_oz = i32(_scalar_params[{data.OpaqueZero[1]}]);" : "");
+            // The f64 library's _f32_opq reads the same zero slot directly (not through _ilgpu_oz: a var<private> is
+            // possibly non-uniform to WGSL's uniformity analysis, so a barrier under a branch on an emulated double
+            // would stop compiling). SetEmulationFlags requests the slot whenever that library is in the kernel.
+            const string OpaqueZeroSlot = "/*__ILGPU_OZ_SLOT__*/";
+            if (wgslSource.Contains(OpaqueZeroSlot))
+            {
+                if (data.OpaqueZero[1] < 0)
+                    throw new InvalidOperationException(
+                        "WGSL generation: the f64 emulation library reads the opaque zero, but no _scalar_params slot was reserved for it");
+                wgslSource = wgslSource.Replace(OpaqueZeroSlot, $"{data.OpaqueZero[1]}u");
+            }
 
             // One line ending (5.4.47): AppendLine writes Environment.NewLine (CRLF on Windows, LF in the browser), and the
             // emulation library's function texts are C# literals that carry the source file's CRLF; trimming only '\n' off

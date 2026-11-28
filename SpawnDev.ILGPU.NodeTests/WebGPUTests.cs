@@ -16,6 +16,10 @@ namespace SpawnDev.ILGPU.NodeTests
     {
         protected override string BackendName => "WebGPU";
 
+        /// <summary>The F64ErrorTermGuard this run's accelerators use (Program.cs: --f64guard=auto|on|off; default Auto).</summary>
+        public static F64ErrorTermGuard F64GuardForThisRun { get; set; } = F64ErrorTermGuard.Auto;
+        static bool _firstCreationReported;
+
         protected override async Task<(Context context, Accelerator accelerator)> CreateAcceleratorAsync()
         {
             var builder = Context.Create().EnableAlgorithms();
@@ -28,8 +32,15 @@ namespace SpawnDev.ILGPU.NodeTests
             var options = new WebGPUBackendOptions
             {
                 F64Emulation = F64EmulationMode.Ozaki,
+                F64ErrorTermGuard = F64GuardForThisRun,
             };
+            var sw = System.Diagnostics.Stopwatch.StartNew();
             var accelerator = await devices[0].CreateAcceleratorAsync(context, options);
+            if (!_firstCreationReported)
+            {
+                _firstCreationReported = true;
+                Console.WriteLine($"[report] first WebGPU accelerator creation in this process: {sw.Elapsed.TotalMilliseconds:F1} ms (F64ErrorTermGuard.{F64GuardForThisRun}; probe {SpawnDev.ILGPU.WebGPU.WebGPUF64ReassociationProbe.LastProbeMilliseconds:F1} ms: {SpawnDev.ILGPU.WebGPU.WebGPUF64ReassociationProbe.LastProbeBreakdown})");
+            }
             return (context, accelerator);
         }
 

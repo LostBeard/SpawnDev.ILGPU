@@ -88,5 +88,50 @@ namespace SpawnDev.ILGPU.Demo.Shared.UnitTests
             }
             if (errors.Count > 0) throw new Exception(string.Join("; ", errors));
         });
+
+        // A group barrier under a branch on an emulated double computed from a scalar parameter. The double arithmetic
+        // passes its error terms through an opaque zero (WGSL _f32_opq, 5.4.56) so a reassociating compiler (Mesa's NIR)
+        // cannot cancel them; that zero must be read in a way WGSL's uniformity analysis still calls uniform, or this
+        // kernel stops compiling ("workgroupBarrier must only be called from uniform control flow": measured with the
+        // zero in a var<private>, 2026-11-27). Also checks the sum keeps its low half: 0.1 * k + 2.0 is not an f32.
+        static void F64BarrierUnderDoubleBranchKernel(ArrayView<double> v, ArrayView<double> outp, double threshold)
+        {
+            var sh = SharedMemory.Allocate<double>(64);
+            int t = Group.IdxX;
+            double s = threshold + 1.0;
+            sh[t] = v[t];
+            if (s > 1.5)
+            {
+                Group.Barrier();
+                outp[t] = sh[(t + 1) % 64] + s;
+            }
+            else
+            {
+                outp[t] = -1.0;
+            }
+        }
+
+        [TestMethod]
+        public async Task F64_BarrierUnderBranchOnDouble_CompilesAndKeepsLowHalf() => await RunTest(async accelerator =>
+        {
+            if (!accelerator.Device.Satisfies(new global::SpawnDev.ILGPU.AcceleratorRequirements { RequiresBarriers = true, RequiresSharedMemory = true }))
+                throw new UnsupportedTestException($"{accelerator.AcceleratorType}: the kernel uses shared memory and a group barrier");
+            const int n = 64;
+            var input = new double[n];
+            for (int k = 0; k < n; k++) input[k] = 0.1 * k;
+            using var v = accelerator.Allocate1D(input);
+            using var outp = accelerator.Allocate1D<double>(n);
+            accelerator.LoadStreamKernel<ArrayView<double>, ArrayView<double>, double>(F64BarrierUnderDoubleBranchKernel)(
+                new KernelConfig(1, n), v.View, outp.View, 1.0);
+            await accelerator.SynchronizeAsync();
+            var got = await outp.CopyToHostAsync<double>();
+            var errors = new System.Collections.Generic.List<string>();
+            for (int k = 0; k < n && errors.Count < 4; k++)
+            {
+                double want = input[(k + 1) % n] + 2.0;
+                if (!(Math.Abs(got[k] - want) <= Math.Abs(want) * 1e-12)) errors.Add($"out[{k}] = {got[k]:R}, expected {want:R}");
+            }
+            if (errors.Count > 0) throw new Exception(string.Join("; ", errors));
+        });
     }
 }

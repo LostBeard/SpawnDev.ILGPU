@@ -59,7 +59,16 @@ namespace SpawnDev.ILGPU.WebGL.Backend
                 BodyStructTypeIdsToSkip = new HashSet<long>();
                 BodyStructManifest = new List<BodyStructBindingEntry>();
                 HelperPackedViewParams = new Dictionary<(long, int), PackedViewParamInfo>();
+                HelperPrototypes = new List<string>();
             }
+
+            /// <summary>
+            /// The signature of every [NoInlining] helper (GLSLFunctionGenerator), each ending in ';'. WebGLBackend writes them
+            /// after the struct definitions at the top of the shader: helpers are emitted in an order of their own, and a
+            /// helper calling another one that came later failed with "'fn_...' : no matching overloaded function found"
+            /// (HelperFunction_FloatDivisionSqrtSinLog_CompileAndMatchHost, 2026-11-28). Lock it when adding.
+            /// </summary>
+            public List<string> HelperPrototypes { get; }
 
             /// <summary>The parent backend.</summary>
             public WebGLBackend Backend { get; }

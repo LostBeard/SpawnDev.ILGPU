@@ -32,6 +32,24 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         public const string F32CorrectlyRoundedPlaceholder = "/*__GLSL_F32_CORRECTLY_ROUNDED_PLACEHOLDER__*/";
 
         /// <summary>
+        /// Forward declarations of the functions behind <see cref="F32CorrectlyRoundedPlaceholder"/>, emitted at the top of
+        /// every [NoInlining] helper (GLSLFunctionGenerator): helpers precede the kernel header, where the placeholder sits,
+        /// and GLSL declares before use. Each starts with "float " so <see cref="ResolveF32CorrectlyRounded"/> can tell
+        /// them from calls.
+        /// </summary>
+        internal static readonly string[] F32HelperPrototypes =
+        {
+            "float _f32_div_rn(float a, float b);",
+            "float _f32_sqrt_rn(float x);",
+            "float _f32_sin(float x);",
+            "float _f32_cos(float x);",
+            "float _f32_tan(float x);",
+            "float _f32_log(float x);",
+            "float _f32_log2(float x);",
+            "float _f32_log10(float x);",
+        };
+
+        /// <summary>
         /// Replaces <see cref="F32CorrectlyRoundedPlaceholder"/> in a finished shader with
         /// <see cref="F32CorrectlyRoundedFunctions"/> when it calls _f32_div_rn or _f32_sqrt_rn, else removes it.
         /// </summary>
@@ -39,9 +57,16 @@ namespace SpawnDev.ILGPU.WebGL.Backend
         {
             if (!glsl.Contains(F32CorrectlyRoundedPlaceholder))
                 return glsl;
-            bool log = glsl.Contains("_f32_log(") || glsl.Contains("_f32_log2(") || glsl.Contains("_f32_log10(");
-            bool used = log || glsl.Contains("_f32_div_rn(") || glsl.Contains("_f32_sqrt_rn(");
-            bool trig = glsl.Contains("_f32_sin(") || glsl.Contains("_f32_cos(") || glsl.Contains("_f32_tan(");
+            // A call, not one of the F32HelperPrototypes every [NoInlining] helper declares ("float _f32_div_rn(float a, ...")
+            bool Calls(string name)
+            {
+                for (int at = glsl.IndexOf(name + "(", StringComparison.Ordinal); at >= 0; at = glsl.IndexOf(name + "(", at + 1, StringComparison.Ordinal))
+                    if (at < 6 || string.CompareOrdinal(glsl, at - 6, "float ", 0, 6) != 0) return true;
+                return false;
+            }
+            bool log = Calls("_f32_log") || Calls("_f32_log2") || Calls("_f32_log10");
+            bool used = log || Calls("_f32_div_rn") || Calls("_f32_sqrt_rn");
+            bool trig = Calls("_f32_sin") || Calls("_f32_cos") || Calls("_f32_tan");
             // GLSL declares before use: the log functions call _f32_div_rn, so they come after it
             return glsl.Replace(F32CorrectlyRoundedPlaceholder,
                 (used ? F32CorrectlyRoundedFunctions : "") + (trig ? F32TrigFunctions : "") + (log ? F32LogFunctions : ""));

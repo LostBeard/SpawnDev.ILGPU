@@ -60,6 +60,29 @@ namespace SpawnDev.ILGPU.WebGPU
 
         private readonly WebGPUDevice nativeDevice;
 
+        /// <summary>The smallest subgroup width the adapter may run (<c>GPUAdapterInfo.subgroupMinSize</c>); 0 when not reported.</summary>
+        public int SubgroupMinSize { get; }
+
+        /// <summary>The largest subgroup width the adapter may run (<c>GPUAdapterInfo.subgroupMaxSize</c>); 0 when not reported.</summary>
+        public int SubgroupMaxSize { get; }
+
+        /// <summary>
+        /// True when every subgroup on this adapter has the same width (<see cref="SubgroupMinSize"/> ==
+        /// <see cref="SubgroupMaxSize"/>), so <see cref="Device.WarpSize"/> is the width a kernel's <c>Warp.WarpSize</c>
+        /// (WGSL <c>subgroup_size</c>) reads. False when the browser does not report the range.
+        /// </summary>
+        public bool HasFixedSubgroupSize => SubgroupMinSize > 0 && SubgroupMinSize == SubgroupMaxSize;
+
+        /// <summary>
+        /// The warp size an adapter's subgroup range gives: 32 clamped into [min, max], so a fixed-width adapter gets its
+        /// width. It was 32 whatever the adapter: Mesa's llvmpipe runs 8-wide subgroups, so a kernel's <c>Warp.WarpSize</c>
+        /// (the runtime <c>subgroup_size</c>) was 8 while the accelerator said 32, and a rotate-by-one shuffle checked at
+        /// width 32 came out wrong (WarpShuffle_CapabilityMatchesWhatTheBackendRuns, Node WebGPU CI on llvmpipe,
+        /// 2026-11-27). 32 when the range is not reported.
+        /// </summary>
+        internal static int WarpSizeFor(int min, int max) =>
+            min > 0 && max >= min ? Math.Clamp(32, min, max) : 32;
+
         /// <summary>
         /// Constructs a new WebGPU ILGPU device.
         /// </summary>
@@ -69,7 +92,9 @@ namespace SpawnDev.ILGPU.WebGPU
 
             // Set device properties from native WebGPU device
             Name = device.Name;
-            WarpSize = 32; // WebGPU subgroup size is typically 32 (similar to CUDA warps)
+            SubgroupMinSize = device.SubgroupMinSize;
+            SubgroupMaxSize = device.SubgroupMaxSize;
+            WarpSize = WarpSizeFor(SubgroupMinSize, SubgroupMaxSize);
 
             // Map WebGPU workgroup limits to ILGPU concepts
             MaxGroupSize = new Index3D(
@@ -113,7 +138,14 @@ namespace SpawnDev.ILGPU.WebGPU
 
             // Read device info from the GPUDevice if available
             Name = "WebGPU Device (External)";
-            WarpSize = 32;
+            try
+            {
+                using var info = externalDevice.AdapterInfo;
+                SubgroupMinSize = info?.SubgroupMinSize ?? 0;
+                SubgroupMaxSize = info?.SubgroupMaxSize ?? 0;
+            }
+            catch { SubgroupMinSize = 0; SubgroupMaxSize = 0; }
+            WarpSize = WarpSizeFor(SubgroupMinSize, SubgroupMaxSize);
 
             // Read limits from the external device
             int maxWorkgroupSizeX = 256, maxWorkgroupSizeY = 256, maxWorkgroupSizeZ = 64;
